@@ -1,0 +1,607 @@
+"""Ogmios v6 WebSocket client for mempool monitoring and chain sync.
+
+Uses three separate WebSocket connections (Ogmios multiplexes one mini-protocol per connection):
+- Connection 1: LocalTxMonitor (mempool) — acquireMempool + nextTransaction loop
+- Connection 2: ChainSync — findIntersection + nextBlock loop
+- Connection 3: LocalStateQuery (on-demand) — queryLedgerState/utxo for input resolution
+"""
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Callable, Awaitable, Optional, Set, Dict, Any, List
+
+import websockets
+
+from app.config import settings
+from app.db import clickhouse, postgres, raw_store
+from app.ingestion.ogmios_parser import parse_ogmios_transaction
+from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
+from app.models.transaction import NormalizedTransaction, TransactionInput
+
+logger = logging.getLogger(__name__)
+
+
+class OgmiosClient:
+    """Ogmios v6 WebSocket client with mempool monitoring and chain sync."""
+
+    def __init__(self, on_lifecycle_event: Optional[Callable[[dict], Awaitable[None]]] = None):
+        self.ws_url = settings.OGMIOS_WS_URL
+        self.network = settings.CARDANO_NETWORK
+        self.on_lifecycle_event = on_lifecycle_event
+
+        # Connection state
+        self._chain_ws = None
+        self._mempool_ws = None
+        self._running = True   # set once here; disconnect() sets it False to stop loops
+        self._connected_chain = False
+        self._connected_mempool = False
+
+        # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
+        self._seen_mempool_txs: Set[str] = set()
+
+        # LocalStateQuery connection for UTxO input resolution (on-demand)
+        self._query_ws = None
+        self._query_lock = asyncio.Lock()
+
+        # Cache of resolved UTxO inputs for PENDING transactions.
+        # Populated by the mempool monitor via queryLedgerState/utxo, consumed
+        # by _handle_roll_forward when the tx is confirmed in a block.
+        # Key: tx_hash, Value: {(input_tx_hash, input_index): {address, amount, assets}}
+        self._pending_input_cache: Dict[str, Dict[tuple, dict]] = {}
+
+        # Telemetry — used by /health and pipeline_state
+        self._started_at: datetime = datetime.now(timezone.utc)
+        self._last_msg_at: Optional[datetime] = None       # any Ogmios message
+        self._last_block_at: Optional[datetime] = None     # last roll-forward
+        self._last_processed_slot: Optional[int] = None    # slot of last confirmed block
+        self._tip_slot: Optional[int] = None               # chain tip reported by Ogmios
+
+        # Resilience — separate circuit breakers so chain and mempool failures
+        # are isolated from each other
+        self._backoff_chain = ExponentialBackoff(max_delay=settings.OGMIOS_RECONNECT_MAX_DELAY)
+        self._backoff_mempool = ExponentialBackoff(max_delay=settings.OGMIOS_RECONNECT_MAX_DELAY)
+        self._circuit_breaker_chain = CircuitBreaker(
+            failure_threshold=settings.OGMIOS_CIRCUIT_BREAKER_THRESHOLD,
+            cooldown=settings.OGMIOS_CIRCUIT_BREAKER_COOLDOWN,
+        )
+        self._circuit_breaker_mempool = CircuitBreaker(
+            failure_threshold=settings.OGMIOS_CIRCUIT_BREAKER_THRESHOLD,
+            cooldown=settings.OGMIOS_CIRCUIT_BREAKER_COOLDOWN,
+        )
+
+        # JSON-RPC request counter
+        self._rpc_id = 0
+
+    # --- JSON-RPC helpers ---
+
+    def _next_id(self) -> str:
+        self._rpc_id += 1
+        return str(self._rpc_id)
+
+    def _jsonrpc(self, method: str, params: Optional[dict] = None) -> str:
+        msg = {"jsonrpc": "2.0", "method": method, "id": self._next_id()}
+        if params:
+            msg["params"] = params
+        return json.dumps(msg)
+
+    async def _send_recv(self, ws, method: str, params: Optional[dict] = None) -> dict:
+        """Send a JSON-RPC request and wait for the response."""
+        msg = self._jsonrpc(method, params)
+        await ws.send(msg)
+        raw = await ws.recv()
+        self._last_msg_at = datetime.now(timezone.utc)
+        return json.loads(raw)
+
+    # --- WebSocket connection with resilience ---
+
+    async def _connect_ws(self, label: str) -> websockets.WebSocketClientProtocol:
+        """Open a WebSocket connection to Ogmios with ping/pong keepalive."""
+        ws = await websockets.connect(
+            self.ws_url,
+            ping_interval=settings.OGMIOS_HEARTBEAT_INTERVAL,
+            ping_timeout=settings.OGMIOS_HEARTBEAT_TIMEOUT,
+            max_size=64 * 1024 * 1024,  # 64MB for large blocks
+        )
+        logger.info(f"Ogmios [{label}]: connected to {self.ws_url}")
+        return ws
+
+    # --- LocalStateQuery: UTxO input resolution ---
+
+    async def _ensure_query_ws(self):
+        """Return the persistent LocalStateQuery WebSocket, reconnecting if needed."""
+        if self._query_ws is None:
+            self._query_ws = await self._connect_ws("query")
+        return self._query_ws
+
+    async def _query_utxo(self, output_refs: List[dict]) -> List[dict]:
+        """Query the current UTxO set for specific output references.
+
+        Returns a list of UTxO objects with address and value for each reference
+        that is still unspent. References already consumed return nothing (empty
+        list or missing from results).
+        """
+        if not output_refs:
+            return []
+        async with self._query_lock:
+            try:
+                ws = await self._ensure_query_ws()
+                resp = await self._send_recv(
+                    ws, "queryLedgerState/utxo",
+                    {"outputReferences": output_refs},
+                )
+                if "error" in resp:
+                    err = resp["error"]
+                    logger.warning(
+                        f"Ogmios [query]: UTxO query returned error: "
+                        f"code={err.get('code')}, message={err.get('message')}"
+                    )
+                    return []
+                return resp.get("result", [])
+            except Exception as e:
+                logger.warning(f"Ogmios [query]: UTxO query failed: {e}")
+                # Drop the connection so the next call reconnects
+                if self._query_ws:
+                    try:
+                        await self._query_ws.close()
+                    except Exception:
+                        pass
+                self._query_ws = None
+                return []
+
+    async def _resolve_mempool_inputs(self, tx_id: str, tx_data: dict):
+        """Resolve UTxO inputs for a PENDING transaction and cache the results.
+
+        When a tx is in the mempool, its inputs are guaranteed unspent (the node
+        validated this). We query Ogmios LocalStateQuery to get each input's
+        address and lovelace value, then store the mapping in _pending_input_cache
+        for use when ChainSync confirms the tx.
+        """
+        raw_inputs = tx_data.get("inputs", [])
+        if not raw_inputs:
+            return
+
+        output_refs = []
+        for inp in raw_inputs:
+            tx_obj = inp.get("transaction", {})
+            if isinstance(tx_obj, dict) and tx_obj.get("id"):
+                output_refs.append({
+                    "transaction": {"id": tx_obj["id"]},
+                    "index": inp.get("index", 0),
+                })
+
+        if not output_refs:
+            return
+
+        utxos = await self._query_utxo(output_refs)
+        if not utxos:
+            return
+
+        cache_entry: Dict[tuple, dict] = {}
+        for utxo in utxos:
+            utxo_tx = utxo.get("transaction", {})
+            utxo_id = utxo_tx.get("id", "") if isinstance(utxo_tx, dict) else ""
+            utxo_index = utxo.get("index", 0)
+            val = utxo.get("value", {})
+            if isinstance(val, dict):
+                lovelace = val.get("lovelace", 0)
+                assets = {}
+                for k, v in val.items():
+                    if k == "lovelace":
+                        continue
+                    if isinstance(v, dict):
+                        for asset_name, qty in v.items():
+                            assets[f"{k}.{asset_name}"] = int(qty)
+                    else:
+                        assets[k] = int(v)
+            else:
+                lovelace = int(val) if val else 0
+                assets = {}
+
+            cache_entry[(utxo_id, utxo_index)] = {
+                "address": utxo.get("address", ""),
+                "amount": int(lovelace),
+                "assets": assets if assets else None,
+            }
+
+        if cache_entry:
+            self._pending_input_cache[tx_id] = cache_entry
+            logger.debug(
+                f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
+            )
+
+    # --- Lifecycle event emission ---
+
+    async def _emit(self, event: dict):
+        """Emit a lifecycle event to the callback."""
+        if self.on_lifecycle_event:
+            try:
+                await self.on_lifecycle_event(event)
+            except Exception as e:
+                logger.error(f"Error in lifecycle event callback: {e}")
+
+    # --- Chain Sync ---
+
+    async def run_chain_sync(self):
+        """Connect to Ogmios and run the ChainSync mini-protocol with resilience."""
+        while self._running:
+            if not self._circuit_breaker_chain.can_attempt():
+                logger.warning("Ogmios [chain]: circuit breaker OPEN, waiting for cooldown")
+                await asyncio.sleep(10)
+                continue
+
+            try:
+                self._chain_ws = await self._connect_ws("chain")
+                self._connected_chain = True
+                self._circuit_breaker_chain.record_success()
+                self._backoff_chain.reset()
+
+                await self._chain_sync_loop(self._chain_ws)
+
+            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
+                logger.warning(f"Ogmios [chain]: connection lost: {e}")
+                self._connected_chain = False
+                self._circuit_breaker_chain.record_failure()
+                await self._backoff_chain.wait()
+            except Exception as e:
+                logger.error(f"Ogmios [chain]: unexpected error: {e}")
+                self._connected_chain = False
+                self._circuit_breaker_chain.record_failure()
+                await self._backoff_chain.wait()
+            finally:
+                if self._chain_ws:
+                    await self._chain_ws.close()
+                    self._chain_ws = None
+
+    async def _chain_sync_loop(self, ws):
+        """ChainSync: findIntersection → nextBlock loop."""
+        sync_point = await postgres.get_sync_point(self.network)
+
+        if sync_point:
+            logger.info(f"Ogmios [chain]: resuming from slot {sync_point['slot']}")
+            resp = await self._send_recv(ws, "findIntersection", {
+                "points": [{"slot": sync_point["slot"], "id": sync_point["id"]}]
+            })
+        else:
+            logger.info("Ogmios [chain]: first run, starting from current tip")
+            resp = await self._send_recv(ws, "findIntersection", {"points": ["origin"]})
+            tip = resp.get("result", {}).get("tip", {})
+            if isinstance(tip, dict) and "slot" in tip:
+                resp = await self._send_recv(ws, "findIntersection", {
+                    "points": [{"slot": tip["slot"], "id": tip["id"]}]
+                })
+                logger.info(f"Ogmios [chain]: intersected at tip slot {tip['slot']}")
+
+        while self._running:
+            resp = await self._send_recv(ws, "nextBlock")
+            result = resp.get("result", {})
+            direction = result.get("direction")
+
+            if direction == "forward":
+                await self._handle_roll_forward(result)
+            elif direction == "backward":
+                await self._handle_roll_backward(result)
+
+    @staticmethod
+    def _apply_resolved_inputs(
+        tx: NormalizedTransaction,
+        resolved: Dict[tuple, dict],
+    ) -> NormalizedTransaction:
+        """Enrich a NormalizedTransaction with previously resolved UTxO input data."""
+        total = 0
+        new_inputs = []
+        for inp in tx.inputs:
+            if not inp.is_collateral and not inp.is_reference:
+                utxo = resolved.get((inp.tx_hash, inp.index))
+                if utxo:
+                    inp = TransactionInput(
+                        tx_hash=inp.tx_hash,
+                        index=inp.index,
+                        address=utxo["address"],
+                        amount=utxo["amount"],
+                        assets=utxo.get("assets"),
+                        is_reference=False,
+                        is_collateral=False,
+                    )
+                    total += utxo["amount"]
+            new_inputs.append(inp)
+
+        resolved_addrs = {
+            i.address for i in new_inputs
+            if i.address and not i.is_collateral and not i.is_reference
+        }
+        return tx.model_copy(update={
+            "inputs": new_inputs,
+            "total_input_value": total if total > 0 else None,
+            "addresses": list(set(tx.addresses) | resolved_addrs),
+        })
+
+    async def _handle_roll_forward(self, result: dict):
+        """Process a new block (rollForward)."""
+        block = result.get("block", {})
+        block_id = block.get("id", "")
+        block_slot = block.get("slot", 0)
+        block_height = block.get("height", 0)
+        transactions = block.get("transactions", [])
+
+        # Update telemetry: tip comes from the nextBlock result envelope
+        tip = result.get("tip", {})
+        if isinstance(tip, dict) and "slot" in tip:
+            self._tip_slot = tip["slot"]
+        now_utc = datetime.now(timezone.utc)
+        self._last_block_at = now_utc
+        self._last_processed_slot = block_slot
+
+        if not transactions:
+            await postgres.save_sync_point(self.network, block_slot, block_id)
+            return
+
+        now = datetime.now(timezone.utc)
+        normalized_txs: List[NormalizedTransaction] = []
+        confirmed_records: List[tuple] = []
+
+        for block_index, tx_data in enumerate(transactions):
+            try:
+                tx = parse_ogmios_transaction(
+                    tx_data,
+                    block_slot=block_slot,
+                    block_hash=block_id,
+                    block_height=block_height,
+                    timestamp=now,
+                    block_index=block_index,
+                )
+                tx.network = self.network
+
+                # Apply cached input resolution from mempool observation
+                resolved = self._pending_input_cache.pop(tx.tx_hash, None)
+                if resolved:
+                    tx = self._apply_resolved_inputs(tx, resolved)
+
+                normalized_txs.append(tx)
+                confirmed_records.append(
+                    (tx.tx_hash, self.network, now, block_id, block_slot, block_height)
+                )
+            except Exception as e:
+                tx_id = tx_data.get("id", "unknown")
+                logger.error(f"Error parsing transaction {tx_id}: {e}")
+
+        if normalized_txs:
+            # Batch persist to ClickHouse (non-blocking — runs in thread pool)
+            try:
+                await clickhouse.insert_transactions_batch_async(normalized_txs)
+            except Exception as e:
+                logger.error(f"Error persisting block {block_slot} to ClickHouse: {e}")
+
+            # Write full raw payloads to local filesystem store.
+            # Awaited before the checkpoint save: if a write fails and the process
+            # crashes before the checkpoint is committed, the block is replayed on
+            # restart and the write-once guard in _write_sync skips already-written files.
+            if settings.RAW_STORE_ENABLED:
+                try:
+                    await asyncio.gather(*[
+                        raw_store.write_confirmed(self.network, tx.tx_hash, tx.raw_data, now)
+                        for tx in normalized_txs
+                        if tx.raw_data
+                    ])
+                except Exception as e:
+                    logger.error(f"Error writing raw store for block {block_slot}: {e}")
+
+            # Batch upsert lifecycle CONFIRMED (single DB round-trip for whole block)
+            try:
+                await postgres.batch_upsert_lifecycle_confirmed(confirmed_records)
+            except Exception as e:
+                logger.error(f"Error updating lifecycle for block {block_slot}: {e}")
+
+            # Emit lifecycle events after DB writes so API queries are consistent
+            for tx in normalized_txs:
+                await self._emit({
+                    "eventType": "TX_CONFIRMED",
+                    "txId": tx.tx_hash,
+                    "network": self.network,
+                    "observedAt": now.isoformat(),
+                    "block": {"hash": block_id, "slot": block_slot, "height": block_height},
+                })
+
+            # Remove confirmed txs from mempool dedup set
+            for tx in normalized_txs:
+                self._seen_mempool_txs.discard(tx.tx_hash)
+
+        await postgres.save_sync_point(self.network, block_slot, block_id)
+
+        logger.info(
+            f"Block {block_height} (slot {block_slot}): "
+            f"{len(normalized_txs)} transactions confirmed"
+        )
+
+    async def _handle_roll_backward(self, result: dict):
+        """Process a chain rollback (rollBackward)."""
+        point = result.get("point", {})
+        rollback_slot = point.get("slot", 0)
+        rollback_id = point.get("id", "")
+
+        tip = result.get("tip", {})
+        if isinstance(tip, dict) and "slot" in tip:
+            self._tip_slot = tip["slot"]
+
+        logger.warning(f"Ogmios [chain]: rollback to slot {rollback_slot}")
+
+        try:
+            await postgres.mark_lifecycle_rolled_back(rollback_slot, self.network)
+        except Exception as e:
+            logger.error(f"Error marking rollback in PostgreSQL: {e}")
+
+        if rollback_id:
+            await postgres.save_sync_point(self.network, rollback_slot, rollback_id)
+
+        # Clear mempool dedup set so rolled-back txs can re-enter tracking
+        # if they re-appear in the mempool (valid in Cardano)
+        self._seen_mempool_txs.clear()
+
+        await self._emit({
+            "eventType": "TX_ROLLED_BACK",
+            "network": self.network,
+            "observedAt": datetime.now(timezone.utc).isoformat(),
+            "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
+        })
+
+    # --- Mempool Monitoring ---
+
+    async def run_mempool_monitor(self):
+        """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
+        while self._running:
+            if not self._circuit_breaker_mempool.can_attempt():
+                await asyncio.sleep(10)
+                continue
+
+            try:
+                self._mempool_ws = await self._connect_ws("mempool")
+                self._connected_mempool = True
+                self._circuit_breaker_mempool.record_success()
+                self._backoff_mempool.reset()
+
+                await self._mempool_loop(self._mempool_ws)
+
+            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
+                logger.warning(f"Ogmios [mempool]: connection lost: {e}")
+                self._connected_mempool = False
+                self._circuit_breaker_mempool.record_failure()
+                await self._backoff_mempool.wait()
+            except Exception as e:
+                logger.error(f"Ogmios [mempool]: unexpected error: {e}")
+                self._connected_mempool = False
+                self._circuit_breaker_mempool.record_failure()
+                await self._backoff_mempool.wait()
+            finally:
+                if self._mempool_ws:
+                    await self._mempool_ws.close()
+                    self._mempool_ws = None
+
+    async def _mempool_loop(self, ws):
+        """LocalTxMonitor: acquireMempool → nextTransaction loop."""
+        # Clear dedup set on (re)connect so the fresh snapshot is fully processed.
+        # The DB's ON CONFLICT DO NOTHING handles any genuine duplicates safely.
+        self._seen_mempool_txs.clear()
+
+        while self._running:
+            resp = await self._send_recv(ws, "acquireMempool")
+            snapshot_slot = resp.get("result", {}).get("slot")
+            logger.debug(f"Ogmios [mempool]: acquired snapshot at slot {snapshot_slot}")
+
+            while self._running:
+                resp = await self._send_recv(ws, "nextTransaction", {"fields": "all"})
+                tx_data = resp.get("result", {}).get("transaction")
+
+                if tx_data is None:
+                    # Snapshot exhausted, re-acquire
+                    break
+
+                tx_id = tx_data.get("id", "")
+                if not tx_id or tx_id in self._seen_mempool_txs:
+                    continue
+
+                self._seen_mempool_txs.add(tx_id)
+                now = datetime.now(timezone.utc)
+
+                # Resolve UTxO inputs while the tx is still PENDING (inputs
+                # are guaranteed unspent at this point). Results are cached
+                # for use when ChainSync confirms the tx.
+                try:
+                    await self._resolve_mempool_inputs(tx_id, tx_data)
+                except Exception as e:
+                    logger.debug(f"Input resolution failed for {tx_id}: {e}")
+
+                # Write raw mempool payload to local filesystem store (non-blocking)
+                if settings.RAW_STORE_ENABLED:
+                    asyncio.create_task(
+                        raw_store.write_mempool(self.network, tx_id, tx_data, now)
+                    )
+
+                try:
+                    await postgres.upsert_lifecycle_pending(
+                        tx_id=tx_id,
+                        network=self.network,
+                        first_seen_at=now,
+                    )
+                except Exception as e:
+                    logger.error(f"Error persisting pending tx {tx_id}: {e}")
+
+                await self._emit({
+                    "eventType": "TX_PENDING",
+                    "txId": tx_id,
+                    "network": self.network,
+                    "observedAt": now.isoformat(),
+                    "firstSeenAt": now.isoformat(),
+                })
+
+                logger.debug(f"TX_PENDING: {tx_id}")
+
+    # --- Control ---
+
+    async def disconnect(self):
+        """Gracefully disconnect all WebSocket connections."""
+        self._running = False
+        for ws, label in [
+            (self._chain_ws, "chain"),
+            (self._mempool_ws, "mempool"),
+            (self._query_ws, "query"),
+        ]:
+            if ws:
+                try:
+                    await ws.close()
+                    logger.info(f"Ogmios [{label}]: disconnected")
+                except Exception:
+                    pass
+        self._chain_ws = None
+        self._mempool_ws = None
+        self._query_ws = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected_chain or self._connected_mempool
+
+    @property
+    def pipeline_state(self) -> str:
+        """Derived health state for the chain-sync pipeline.
+
+        OK       — circuit breaker closed, block received within last 120 s
+        DEGRADED — circuit breaker half-open, or no block for 120-300 s
+        DOWN     — circuit breaker open, or no block for > 300 s, or never
+                   connected after a 60 s grace period
+        """
+        cb = self._circuit_breaker_chain.state.value
+        if cb == "OPEN":
+            return "DOWN"
+
+        if self._last_block_at is None:
+            uptime = (datetime.now(timezone.utc) - self._started_at).total_seconds()
+            return "OK" if uptime < 60 else "DEGRADED"
+
+        block_age = (datetime.now(timezone.utc) - self._last_block_at).total_seconds()
+        if block_age > 300:
+            return "DOWN"
+        if block_age > 120 or cb == "HALF_OPEN":
+            return "DEGRADED"
+        return "OK"
+
+    @property
+    def status(self) -> dict:
+        now = datetime.now(timezone.utc)
+        sync_lag = (
+            max(0, self._tip_slot - self._last_processed_slot)
+            if self._tip_slot is not None and self._last_processed_slot is not None
+            else None
+        )
+        return {
+            "pipeline_state": self.pipeline_state,
+            "chain_sync": "connected" if self._connected_chain else "disconnected",
+            "mempool_monitor": "connected" if self._connected_mempool else "disconnected",
+            "circuit_breaker_chain": self._circuit_breaker_chain.state.value,
+            "circuit_breaker_mempool": self._circuit_breaker_mempool.state.value,
+            "last_processed_slot": self._last_processed_slot,
+            "last_ogmios_msg_at": self._last_msg_at.isoformat() if self._last_msg_at else None,
+            "sync_lag_slots": sync_lag,
+            # 1 slot ≈ 1 s on Cardano (both mainnet and preprod)
+            "sync_lag_seconds": sync_lag,
+            "ws_url": self.ws_url,
+        }

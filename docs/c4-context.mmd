@@ -1,0 +1,21 @@
+C4Context
+    title System Context — Cardano Transaction Monitoring System
+
+    Person(user, "User", "Monitors, queries, and investigates Cardano transactions via dashboard and REST API")
+
+    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides mock analysis engine for risk scoring, clustering, and anomaly detection.")
+
+    Enterprise_Boundary(blockchain, "Cardano Blockchain") {
+        System_Ext(cardano_node, "Cardano Node", "Full node — source of truth for chain state, mempool, and block data")
+        System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano Node — exposes ChainSync, LocalTxMonitor, and LocalStateQuery via JSON-RPC 2.0")
+    }
+
+    Rel(user, tms, "Browse and investigate", "HTTPS")
+    Rel(tms, ogmios, "Blocks + mempool", "WebSocket :1337")
+    Rel(ogmios, cardano_node, "Chain state", "Node-to-Client IPC")
+
+    UpdateElementStyle(tms, $fontColor="white", $bgColor="#1a4d8f", $borderColor="#0d3b6e")
+    UpdateElementStyle(ogmios, $fontColor="white", $bgColor="#6b4c9a", $borderColor="#4a3570")
+    UpdateElementStyle(cardano_node, $fontColor="white", $bgColor="#6b4c9a", $borderColor="#4a3570")
+    UpdateRelStyle(tms, ogmios, $textColor="#1a4d8f", $lineColor="#1a4d8f")
+    UpdateRelStyle(ogmios, cardano_node, $textColor="#6b4c9a", $lineColor="#6b4c9a")

@@ -1,0 +1,39 @@
+# Version control
+.git/
+.gitignore
+
+# Python bytecode
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Runtime data — never bake into image
+backend/data/
+backend/data/rocksdb/
+
+# Environment files — secrets must not be baked in
+.env
+*.env
+.env.*
+!.env.example
+
+# Development tooling
+**/.venv/
+**/venv/
+**/.tox/
+**/node_modules/
+
+# Docs and test artefacts
+docs/
+**/*.md
+**/tests/
+**/test_*.py
+
+# Editor / OS
+.DS_Store
+**/.idea/
+**/.vscode/
