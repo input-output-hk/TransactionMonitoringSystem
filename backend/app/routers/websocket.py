@@ -37,6 +37,11 @@ async def websocket_endpoint(
         await websocket.close(code=4403)
         return
 
+    # Cap concurrent connections to prevent resource exhaustion
+    if len(active_connections) >= 100:
+        await websocket.close(code=4429)
+        return
+
     await websocket.accept()
     active_connections.append(websocket)
     logger.info(f"WebSocket client connected. Total connections: {len(active_connections)}")

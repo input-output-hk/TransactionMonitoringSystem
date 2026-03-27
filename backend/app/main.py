@@ -102,8 +102,7 @@ async def lifespan(app: FastAPI):
             logger.info(
                 f"Analysis Engine started "
                 f"(interval={settings.ANALYSIS_ENGINE_INTERVAL_SECONDS}s, "
-                f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE}, "
-                f"version={settings.ANALYSIS_ENGINE_VERSION})"
+                f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
             )
 
         # Start Ogmios ingestion
@@ -171,7 +170,7 @@ if settings.RATE_LIMIT_ENABLED:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

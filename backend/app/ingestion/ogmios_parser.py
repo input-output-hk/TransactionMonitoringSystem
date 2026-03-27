@@ -95,11 +95,17 @@ def parse_ogmios_transaction(
 
         value = out.get("value", {})
         if isinstance(value, dict):
-            lovelace = value.get("lovelace", 0)
-            # Multi-asset: everything except "lovelace" key
+            # Ogmios v6: {"ada": {"lovelace": N}, ...}
+            # Ogmios v5: {"lovelace": N, ...}
+            ada = value.get("ada")
+            if isinstance(ada, dict):
+                lovelace = ada.get("lovelace", 0)
+            else:
+                lovelace = value.get("lovelace", 0)
+            # Multi-asset: everything except "lovelace" and "ada" keys
             assets = {}
             for key, val in value.items():
-                if key == "lovelace":
+                if key in ("lovelace", "ada"):
                     continue
                 if isinstance(val, dict):
                     # Format: {"policyId": {"assetName": quantity}}
@@ -124,7 +130,11 @@ def parse_ogmios_transaction(
     if collateral_return:
         addr = collateral_return.get("address", "")
         val = collateral_return.get("value", {})
-        lv = val.get("lovelace", 0) if isinstance(val, dict) else 0
+        if isinstance(val, dict):
+            ada = val.get("ada")
+            lv = ada.get("lovelace", 0) if isinstance(ada, dict) else val.get("lovelace", 0)
+        else:
+            lv = 0
         outputs.append(TransactionOutput(
             address=addr,
             amount=int(lv),

@@ -29,7 +29,10 @@ Rollback (rollBackward):
                                    WebSocket                           (TX_ROLLED_BACK broadcast)
 
 Analysis Engine (background, interval-based):
-        ClickHouse [Analytics Warehouse] (read unscored txs) --> score --> ClickHouse (write tx_analysis_results)
+        ClickHouse [Analytics Warehouse] (read unscored txs)
+            --> enrich (resolve input addresses, collision data, cycle detection, sandwich patterns)
+            --> score (9 attack-class scorers: gate/score pipeline per class)
+            --> ClickHouse (write tx_class_scores: 9-element score vector per tx)
 ```
 
 ## Transaction Lifecycle
@@ -59,8 +62,8 @@ All state is stored in `tx_lifecycle` (PostgreSQL). Raw payloads are written asy
 
 | Store | Role | Engine | Purpose |
 |---|---|---|---|
-| ClickHouse | **Analytics Warehouse** | MergeTree, daily partitions (`toYYYYMMDD`) | Structured blockchain facts: `transactions`, `transaction_inputs`, `transaction_outputs`, `address_transactions` (MV), `tx_analysis_results`. Append-only. `total_input_value` is `Nullable(UInt64)`; `NULL` means unresolved (tx confirmed without prior mempool observation); non-NULL for mempool-observed txs where inputs were resolved via `queryLedgerState/utxo`. |
-| PostgreSQL | **Operational Database** | asyncpg connection pool | Mutable state: `tx_lifecycle`, `sync_checkpoint`, `entity_state`, `audit_logs`, config. Strong consistency; row-level UPDATE/DELETE. |
+| ClickHouse | **Analytics Warehouse** | MergeTree, daily partitions (`toYYYYMMDD`) | Structured blockchain facts: `transactions`, `transaction_inputs`, `transaction_outputs`, `address_transactions` (MV), `tx_class_scores` (9-class score vectors), `baselines` (per-script/per-policy/global percentile baselines). Append-only. `total_input_value` is `Nullable(UInt64)`; `NULL` means unresolved (tx confirmed without prior mempool observation); non-NULL for mempool-observed txs where inputs were resolved via `queryLedgerState/utxo`. |
+| PostgreSQL | **Operational Database** | asyncpg connection pool | Mutable state: `tx_lifecycle`, `sync_checkpoint`, `entity_state`, `audit_logs`, `mempool_collisions` (front-running detection). Strong consistency; row-level UPDATE/DELETE. |
 | Filesystem | **Data Lake** | Local FS → S3/MinIO (upgrade path) | Write-once gzip JSON blobs. `confirmed/{network}/{YYYYMMDD}/{shard}/{tx_hash}.json.gz` and `mempool/` prefix. Schema-on-read. Source of truth for raw Ogmios payloads; Analytics Warehouse is derived from this layer. |
 
 ## Resilience
@@ -104,12 +107,29 @@ backend/app/
 │   ├── analysis.py          GET /api/analysis/*
 │   └── entities.py          GET/PUT /api/entities/*
 ├── analysis/
-│   └── engine.py            Rule-based scoring engine (mock M1)
+│   ├── engine.py            Multi-class orchestrator (9 attack classes, enrichment, scoring)
+│   ├── normalise.py         Percentile-based normalisation and baseline resolution
+│   ├── baselines.py         Baseline computation and drift detection
+│   ├── features.py          UTxO-level and tx-level feature extraction from raw Ogmios data
+│   ├── graph.py             Transfer graph cycle detection (bounded BFS) for Circular scorer
+│   ├── dex.py               Structural sandwich pattern detection
+│   ├── external.py          Reference data (token registry, phishing feeds, protocol domains)
+│   └── scorers/
+│       ├── base.py          BaseScorer interface and ScorerResult dataclass
+│       ├── token_dust.py    Class 1: Token Dust (value size spam)
+│       ├── large_value.py   Class 2: Large Value (quantity magnitude bloat)
+│       ├── large_datum.py   Class 3: Large Datum (oversized inline datum)
+│       ├── multiple_sat.py  Class 4: Multiple Satisfaction (redeemer reuse)
+│       ├── front_running.py Class 5: Front-Running (UTxO displacement)
+│       ├── sandwich.py      Class 6: Sandwich Attack (DEX exploit)
+│       ├── circular.py      Class 7: Circular Transfers (wash trading / layering)
+│       ├── fake_token.py    Class 8: Fake Token Distribution (homoglyph impersonation)
+│       └── phishing.py      Class 9: Phishing via Metadata (malicious URLs / social engineering)
 ├── tasks/
 │   └── analysis.py          Background task: runs engine on interval
 └── routers/
-    ├── websocket.py         WS /ws — lifecycle event broadcast
-    └── ui.py                GET / — operator dashboard (HTML)
+    ├── websocket.py         WS /ws: lifecycle event broadcast
+    └── ui.py                GET /: operator dashboard (HTML)
 ```
 
 ## Deployment

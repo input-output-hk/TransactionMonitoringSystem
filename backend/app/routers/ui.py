@@ -12,12 +12,6 @@ router = APIRouter()
 async def root():
     """Serve the real-time transaction monitoring UI"""
     network = settings.CARDANO_NETWORK
-    # API key is intentionally NOT embedded in the HTML.
-    # In dev mode (API_KEYS not set) all endpoints are open and the dashboard works
-    # without a key.  In production, stats calls will return 403 and show "-"; operators
-    # should access the dashboard from a trusted network or inject the key via a
-    # reverse-proxy auth header.  Embedding the key in page source would expose it
-    # to anyone with HTTP access to the host.
 
     html_content = f"""
     <!DOCTYPE html>
@@ -61,29 +55,10 @@ async def root():
             .badge.disconnected {{ background: #ff4444; color: #fff; }}
             .badge.network {{ background: #6b4c9a; color: #fff; }}
 
-            /* Stats row */
-            .stats {{
-                display: grid;
-                grid-template-columns: repeat(5, 1fr);
-                gap: 12px;
-                margin-bottom: 16px;
-            }}
-            .stat {{
-                background: #1a1f3a;
-                padding: 14px;
-                border-radius: 8px;
-                text-align: center;
-            }}
-            .stat-label {{ font-size: 11px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
-            .stat-value {{ font-size: 22px; font-weight: 700; color: #00d4ff; }}
-            .stat-value.pending {{ color: #ffaa00; }}
-            .stat-value.confirmed {{ color: #00ff88; }}
-            .stat-value.rollback {{ color: #ff4444; }}
-
             /* Panels */
             .panels {{
                 display: grid;
-                grid-template-columns: 1fr 1fr;
+                grid-template-columns: 1fr;
                 gap: 16px;
             }}
             .panel {{
@@ -91,7 +66,6 @@ async def root():
                 border-radius: 8px;
                 overflow: hidden;
             }}
-            .panel.full {{ grid-column: 1 / -1; }}
             .panel-header {{
                 padding: 12px 16px;
                 font-size: 13px;
@@ -102,9 +76,8 @@ async def root():
                 justify-content: space-between;
                 align-items: center;
             }}
-            .panel-header.block {{ background: #1a4d8f; color: #fff; }}
-            .panel-header.mempool {{ background: #e65100; color: #fff; }}
             .panel-header.txs {{ background: #2e7d32; color: #fff; }}
+            .panel-header.risk {{ background: #b71c1c; color: #fff; }}
             .panel-body {{
                 padding: 12px;
                 max-height: 45vh;
@@ -116,21 +89,6 @@ async def root():
                 border-radius: 10px;
                 font-size: 12px;
             }}
-
-            /* Block info */
-            .block-info {{
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 8px;
-            }}
-            .block-field {{
-                padding: 8px 12px;
-                background: #151a35;
-                border-radius: 4px;
-            }}
-            .block-field .label {{ font-size: 11px; color: #888; }}
-            .block-field .value {{ font-size: 14px; color: #fff; font-family: 'Courier New', monospace; word-break: break-all; }}
-            .block-field.wide {{ grid-column: 1 / -1; }}
 
             /* Transaction rows */
             .tx-row {{
@@ -161,14 +119,76 @@ async def root():
                 font-size: 11px;
                 font-weight: 600;
             }}
-            .tx-status.PENDING {{ background: #ffaa00; color: #000; }}
             .tx-status.CONFIRMED {{ background: #00ff88; color: #000; }}
-            .tx-status.ROLLED_BACK {{ background: #ff4444; color: #fff; }}
             .tx-fee {{ color: #888; }}
             .tx-time {{ color: #666; }}
-            .tx-outputs {{ color: #00ff88; font-weight: 600; }}
 
             .empty {{ text-align: center; padding: 30px; color: #555; font-size: 13px; }}
+            .copy-btn {{
+                background: none; border: 1px solid #3a3f5a; color: #888;
+                border-radius: 4px; padding: 2px 6px; font-size: 11px;
+                cursor: pointer; margin-left: 6px; transition: all 0.15s;
+            }}
+            .copy-btn:hover {{ border-color: #00d4ff; color: #00d4ff; }}
+            .copy-btn.copied {{ border-color: #00ff88; color: #00ff88; }}
+
+            /* Risk bands */
+            .risk-band {{
+                padding: 2px 8px;
+                border-radius: 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            .risk-band.Critical {{ background: #ff1744; color: #fff; }}
+            .risk-band.High {{ background: #ff6d00; color: #fff; }}
+            .risk-band.Moderate {{ background: #ffab00; color: #000; }}
+            .risk-band.Low {{ background: #00c853; color: #000; }}
+            .attack-class {{ color: #ce93d8; font-size: 12px; font-weight: 600; }}
+            .risk-score {{ color: #fff; font-size: 13px; font-weight: 700; }}
+            .risk-sub {{ font-size: 11px; color: #888; margin-top: 2px; }}
+            .risk-row {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 10px 12px;
+                background: #151a35;
+                border-radius: 4px;
+                margin-bottom: 6px;
+                border-left: 3px solid transparent;
+            }}
+            .risk-row.Critical {{ border-left-color: #ff1744; }}
+            .risk-row.High {{ border-left-color: #ff6d00; }}
+            .risk-row.Moderate {{ border-left-color: #ffab00; }}
+            .risk-row.Low {{ border-left-color: #00c853; }}
+
+            /* Filters */
+            .filters {{
+                display: flex;
+                gap: 8px;
+                padding: 10px 12px;
+                flex-wrap: wrap;
+                border-bottom: 1px solid #2a2f4a;
+            }}
+            .filter-btn {{
+                padding: 4px 12px;
+                border-radius: 14px;
+                font-size: 11px;
+                font-weight: 600;
+                border: 1px solid #3a3f5a;
+                background: transparent;
+                color: #888;
+                cursor: pointer;
+                transition: all 0.15s;
+            }}
+            .filter-btn:hover {{ border-color: #00d4ff; color: #00d4ff; }}
+            .filter-btn.active {{ background: #00d4ff; color: #000; border-color: #00d4ff; }}
+            .risk-details {{ display: flex; gap: 10px; align-items: center; }}
+            .score-bar {{ width: 60px; height: 6px; background: #2a2f4a; border-radius: 3px; overflow: hidden; }}
+            .score-bar-fill {{ height: 100%; border-radius: 3px; }}
+            .score-bar-fill.Critical {{ background: #ff1744; }}
+            .score-bar-fill.High {{ background: #ff6d00; }}
+            .score-bar-fill.Moderate {{ background: #ffab00; }}
+            .score-bar-fill.Low {{ background: #00c853; }}
 
             /* Scrollbar */
             ::-webkit-scrollbar {{ width: 6px; }}
@@ -185,54 +205,35 @@ async def root():
             </div>
         </div>
 
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-label">Total Tracked</div>
-                <div class="stat-value" id="statTotal">-</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Pending</div>
-                <div class="stat-value pending" id="statPending">-</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Confirmed</div>
-                <div class="stat-value confirmed" id="statConfirmed">-</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Rolled Back</div>
-                <div class="stat-value rollback" id="statRolledBack">-</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Avg Latency</div>
-                <div class="stat-value" id="statLatency">-</div>
-            </div>
-        </div>
-
         <div class="panels">
-            <!-- Latest Block -->
+            <!-- Risk Alerts -->
             <div class="panel">
-                <div class="panel-header block">
-                    Latest Block
-                    <span class="panel-count" id="blockTxCount">-</span>
+                <div class="panel-header risk">
+                    Risk Alerts
+                    <span class="panel-count" id="riskCount">0</span>
                 </div>
-                <div class="panel-body" id="blockPanel">
-                    <div class="empty">Waiting for blocks...</div>
+                <div class="filters" id="riskFilters">
+                    <button class="filter-btn active" data-attack="">All</button>
+                    <button class="filter-btn" data-attack="token_dust">Token Dust</button>
+                    <button class="filter-btn" data-attack="large_value">Large Value</button>
+                    <button class="filter-btn" data-attack="large_datum">Large Datum</button>
+                    <button class="filter-btn" data-attack="multiple_sat">Multiple Sat</button>
+                    <button class="filter-btn" data-attack="front_running">Front-Running</button>
+                    <button class="filter-btn" data-attack="sandwich">Sandwich</button>
+                    <button class="filter-btn" data-attack="circular">Circular</button>
+                    <button class="filter-btn" data-attack="fake_token">Fake Token</button>
+                    <button class="filter-btn" data-attack="phishing">Phishing</button>
+                    <span style="border-left:1px solid #3a3f5a;height:20px;margin:0 4px"></span>
+                    <button class="filter-btn" data-sort="score">By Score</button>
+                    <button class="filter-btn active" data-sort="date">By Date</button>
                 </div>
-            </div>
-
-            <!-- Mempool -->
-            <div class="panel">
-                <div class="panel-header mempool">
-                    Mempool
-                    <span class="panel-count" id="mempoolCount">0</span>
-                </div>
-                <div class="panel-body" id="mempoolPanel">
-                    <div class="empty">No pending transactions</div>
+                <div class="panel-body" id="riskPanel">
+                    <div class="empty">No risky transactions detected</div>
                 </div>
             </div>
 
             <!-- Latest Transactions -->
-            <div class="panel full">
+            <div class="panel">
                 <div class="panel-header txs">
                     Latest Confirmed Transactions
                     <span class="panel-count" id="txsCount">0</span>
@@ -244,23 +245,24 @@ async def root():
         </div>
 
         <script>
-            // API_KEY is not embedded server-side.  Works out-of-the-box in dev
-            // mode (API_KEYS not set).  In production, stats calls return 403 and
-            // counters display "-" — configure auth at the reverse-proxy layer.
             const API_KEY = "";
             const headers = API_KEY ? {{"TMS-API-Key": API_KEY}} : {{}};
 
             // State
-            let mempoolTxs = new Map();
             let confirmedTxs = [];
-            let latestBlock = null;
             let txsCount = 0;
 
             // DOM refs
-            const blockPanel = document.getElementById("blockPanel");
-            const mempoolPanel = document.getElementById("mempoolPanel");
             const txsPanel = document.getElementById("txsPanel");
             const connStatus = document.getElementById("connStatus");
+
+            function copyTx(btn, hash) {{
+                navigator.clipboard.writeText(hash).then(() => {{
+                    btn.textContent = "Copied";
+                    btn.classList.add("copied");
+                    setTimeout(() => {{ btn.textContent = "Copy"; btn.classList.remove("copied"); }}, 1500);
+                }});
+            }}
 
             // --- WebSocket ---
             const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -284,18 +286,7 @@ async def root():
             }};
 
             function handleLifecycleEvent(ev) {{
-                if (ev.eventType === "TX_PENDING") {{
-                    mempoolTxs.set(ev.txId, {{
-                        txId: ev.txId,
-                        firstSeenAt: ev.firstSeenAt || ev.observedAt,
-                    }});
-                    renderMempool();
-                }} else if (ev.eventType === "TX_CONFIRMED") {{
-                    // Remove from mempool
-                    mempoolTxs.delete(ev.txId);
-                    renderMempool();
-
-                    // Add to confirmed list
+                if (ev.eventType === "TX_CONFIRMED") {{
                     confirmedTxs.unshift({{
                         txId: ev.txId,
                         observedAt: ev.observedAt,
@@ -304,71 +295,11 @@ async def root():
                     if (confirmedTxs.length > 100) confirmedTxs.pop();
                     txsCount++;
                     renderConfirmed();
-
-                    // Update block panel
-                    if (ev.block) {{
-                        if (!latestBlock || ev.block.slot > latestBlock.slot) {{
-                            latestBlock = {{ ...ev.block, txCount: 1, time: ev.observedAt }};
-                        }} else if (ev.block.slot === latestBlock.slot) {{
-                            latestBlock.txCount++;
-                        }}
-                        renderBlock();
-                    }}
-                }} else if (ev.eventType === "TX_ROLLED_BACK") {{
-                    // Visual indicator — could flash or mark in UI
+                    debouncedRefreshRisk();
                 }}
-                refreshStats();
             }}
 
             // --- Rendering ---
-            function renderBlock() {{
-                if (!latestBlock) return;
-                const b = latestBlock;
-                blockPanel.innerHTML = `
-                    <div class="block-info">
-                        <div class="block-field">
-                            <div class="label">Height</div>
-                            <div class="value">${{b.height || '-'}}</div>
-                        </div>
-                        <div class="block-field">
-                            <div class="label">Slot</div>
-                            <div class="value">${{b.slot || '-'}}</div>
-                        </div>
-                        <div class="block-field wide">
-                            <div class="label">Hash</div>
-                            <div class="value">${{b.hash || '-'}}</div>
-                        </div>
-                        <div class="block-field">
-                            <div class="label">Transactions</div>
-                            <div class="value">${{b.txCount || 0}}</div>
-                        </div>
-                        <div class="block-field">
-                            <div class="label">Time</div>
-                            <div class="value">${{b.time ? new Date(b.time).toLocaleTimeString() : '-'}}</div>
-                        </div>
-                    </div>
-                `;
-                document.getElementById("blockTxCount").textContent = (b.txCount || 0) + " txs";
-            }}
-
-            function renderMempool() {{
-                const items = Array.from(mempoolTxs.values());
-                document.getElementById("mempoolCount").textContent = items.length;
-                if (items.length === 0) {{
-                    mempoolPanel.innerHTML = '<div class="empty">No pending transactions</div>';
-                    return;
-                }}
-                mempoolPanel.innerHTML = items.map(tx => `
-                    <div class="tx-row">
-                        <span class="tx-hash">${{tx.txId.substring(0, 16)}}...${{tx.txId.substring(tx.txId.length - 8)}}</span>
-                        <div class="tx-meta">
-                            <span class="tx-status PENDING">PENDING</span>
-                            <span class="tx-time">${{new Date(tx.firstSeenAt).toLocaleTimeString()}}</span>
-                        </div>
-                    </div>
-                `).join('');
-            }}
-
             function renderConfirmed() {{
                 document.getElementById("txsCount").textContent = txsCount;
                 if (confirmedTxs.length === 0) {{
@@ -377,7 +308,7 @@ async def root():
                 }}
                 txsPanel.innerHTML = confirmedTxs.map(tx => `
                     <div class="tx-row">
-                        <span class="tx-hash">${{tx.txId.substring(0, 20)}}...${{tx.txId.substring(tx.txId.length - 10)}}</span>
+                        <span class="tx-hash">${{tx.txId.substring(0, 20)}}...${{tx.txId.substring(tx.txId.length - 10)}}</span><button class="copy-btn" onclick="copyTx(this,'${{tx.txId}}')">Copy</button>
                         <div class="tx-meta">
                             <span class="tx-status CONFIRMED">CONFIRMED</span>
                             ${{tx.block.height ? `<span class="tx-fee">Block ${{tx.block.height}}</span>` : ''}}
@@ -387,23 +318,155 @@ async def root():
                 `).join('');
             }}
 
-            // --- Stats polling ---
-            async function refreshStats() {{
+            // --- Risk Alerts ---
+            const riskPanel = document.getElementById("riskPanel");
+            const CLASS_LABELS = {{
+                token_dust: "Token Dust",
+                large_value: "Large Value",
+                large_datum: "Large Datum",
+                multiple_sat: "Multiple Satisfaction",
+                front_running: "Front-Running",
+                sandwich: "Sandwich",
+                circular: "Circular Transfer",
+                fake_token: "Fake Token",
+                phishing: "Phishing",
+            }};
+
+            const SUB_SCORE_LABELS = {{
+                value_cbor_bytes: "Large CBOR payload",
+                unique_assetclass_count: "Many distinct tokens",
+                lovelace_inverted: "Low ADA amount",
+                sender_recurrence: "Repeated sender",
+                quantity_digits: "Extreme token quantity",
+                datum_bytes: "Large datum size",
+                datum_ratio: "High datum-to-value ratio",
+                value_cbor_bytes_inverted: "Small value payload",
+                redeemer_input_ratio_inv: "Low redeemer-to-input ratio",
+                net_value_extraction: "Value extracted from script",
+                exunits_per_input_inv: "Low execution units per input",
+                full_drain: "Full drain from script",
+                collision_outcome: "Collision detected",
+                mempool_delta_inv: "Fast mempool submission",
+                attacker_recurrence: "Repeated attacker",
+                structural_similarity: "Structurally similar txs",
+                attacker_link: "Linked attacker addresses",
+                swap_rate_delta: "DEX rate manipulation",
+                price_impact: "Price impact detected",
+                profit: "Profit extracted",
+                recurrence: "Repeated pattern",
+                amount_similarity: "Similar amounts in cycle",
+                cycle_recurrence: "Repeated cycle",
+                recipient_entropy_inv: "Low recipient diversity",
+                speed: "Fast cycle completion",
+                tokenname_similarity: "Similar token name",
+                unicode_suspicion: "Suspicious unicode",
+                cip25_similarity: "Similar CIP-25 metadata",
+                recipient_count: "Many recipients",
+                mint_ratio_inv: "Low mint ratio",
+                policy_age_inv: "New policy",
+                url_recurrence: "Recurring phishing URL",
+                targeting: "Targeted delivery",
+                sender_recurrence_phish: "Repeated phishing sender",
+            }};
+
+            function explainSubScores(sub, cls) {{
+                const entries = Object.entries(sub[cls] || {{}});
+                if (entries.length === 0) return "";
+                const top = entries
+                    .filter(([_, v]) => typeof v === "number" && v > 0.3 && v <= 1.0)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3);
+                if (top.length === 0) return "";
+                return top.map(([k, v]) =>
+                    `<span style="color:#aaa">${{SUB_SCORE_LABELS[k] || k}}</span> <span style="color:${{v > 0.7 ? '#ff6d00' : '#888'}}">${{(v * 100).toFixed(0)}}%</span>`
+                ).join(' &middot; ');
+            }}
+
+            function renderRiskAlerts(alerts) {{
+                document.getElementById("riskCount").textContent = alerts.length;
+                if (alerts.length === 0) {{
+                    riskPanel.innerHTML = '<div class="empty">No risky transactions detected</div>';
+                    return;
+                }}
+                riskPanel.innerHTML = alerts.map(a => {{
+                    const topClasses = Object.entries(a.scores)
+                        .filter(([_, s]) => s > 0)
+                        .sort((x, y) => y[1] - x[1])
+                        .slice(0, 3);
+                    const classHtml = topClasses.map(([cls, score]) =>
+                        `<span class="attack-class">${{CLASS_LABELS[cls] || cls}}</span>`
+                    ).join(' &middot; ');
+
+                    // Sub-score explanation for the top class
+                    const explain = a.sub_scores ? explainSubScores(a.sub_scores, a.max_class) : "";
+
+                    const fee = a.fee != null ? (a.fee / 1_000_000).toFixed(3) + " ADA" : "-";
+                    const outs = a.output_count != null ? a.output_count : "-";
+                    const when = a.analyzed_at ? new Date(a.analyzed_at).toLocaleString() : "-";
+                    return `
+                        <div class="risk-row ${{a.risk_band}}">
+                            <div style="flex:1;min-width:0">
+                                <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button>
+                                    <span style="color:#888;font-size:11px">Fee: ${{fee}}</span>
+                                    <span style="color:#888;font-size:11px">Outputs: ${{outs}}</span>
+                                    <span style="color:#666;font-size:11px">${{when}}</span>
+                                </div>
+                                <div class="risk-sub">${{classHtml}}</div>
+                                ${{explain ? `<div class="risk-sub" style="margin-top:2px">${{explain}}</div>` : ''}}
+                            </div>
+                            <div class="risk-details">
+                                <div class="score-bar">
+                                    <div class="score-bar-fill ${{a.risk_band}}" style="width:${{a.max_score}}%"></div>
+                                </div>
+                                <span class="risk-score">${{a.max_score.toFixed(0)}}</span>
+                                <span class="risk-band ${{a.risk_band}}">${{a.risk_band}}</span>
+                            </div>
+                        </div>
+                    `;
+                }}).join('');
+            }}
+
+            let activeClassFilter = "";
+            let activeSort = "date";
+            let _riskTimer = null;
+            function debouncedRefreshRisk() {{
+                if (_riskTimer) return;
+                _riskTimer = setTimeout(() => {{ _riskTimer = null; refreshRiskAlerts(); }}, 5000);
+            }}
+
+            async function refreshRiskAlerts() {{
                 try {{
-                    const res = await fetch("/api/lifecycle/stats/summary", {{ headers }});
-                    const s = await res.json();
-                    document.getElementById("statTotal").textContent = s.total_tracked;
-                    document.getElementById("statPending").textContent = s.pending_count;
-                    document.getElementById("statConfirmed").textContent = s.confirmed_count;
-                    document.getElementById("statRolledBack").textContent = s.rolled_back_count;
-                    document.getElementById("statLatency").textContent =
-                        s.avg_latency_ms != null ? (s.avg_latency_ms / 1000).toFixed(1) + "s" : "-";
+                    let url = `/api/analysis/results?min_score=1&limit=50&sort=${{activeSort}}`;
+                    if (activeClassFilter) {{
+                        url += "&attack_class=" + activeClassFilter;
+                    }}
+                    const res = await fetch(url, {{ headers }});
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    renderRiskAlerts(data.data || []);
                 }} catch(e) {{}}
             }}
 
+            // Filter + sort buttons
+            document.getElementById("riskFilters").addEventListener("click", (e) => {{
+                const btn = e.target.closest(".filter-btn");
+                if (!btn) return;
+                if (btn.dataset.sort) {{
+                    document.querySelectorAll("#riskFilters [data-sort]").forEach(b => b.classList.remove("active"));
+                    btn.classList.add("active");
+                    activeSort = btn.dataset.sort;
+                }} else {{
+                    document.querySelectorAll("#riskFilters [data-attack]").forEach(b => b.classList.remove("active"));
+                    btn.classList.add("active");
+                    activeClassFilter = btn.dataset.attack || "";
+                }}
+                refreshRiskAlerts();
+            }});
+
             // Initial load
-            refreshStats();
-            setInterval(refreshStats, 15000);
+            refreshRiskAlerts();
+            setInterval(refreshRiskAlerts, 20000);
 
             // Load recent confirmed txs on page load
             (async () => {{
@@ -418,18 +481,6 @@ async def root():
                         }}));
                         txsCount = confirmedTxs.length;
                         renderConfirmed();
-                        // Set latest block from most recent tx
-                        const latest = data.data[0];
-                        if (latest.slot) {{
-                            latestBlock = {{
-                                hash: latest.block_hash,
-                                slot: latest.slot,
-                                height: latest.height,
-                                txCount: data.data.filter(t => t.slot === latest.slot).length,
-                                time: latest.confirmed_at,
-                            }};
-                            renderBlock();
-                        }}
                     }}
                 }} catch(e) {{}}
             }})();

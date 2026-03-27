@@ -10,7 +10,7 @@ The system ingests all Cardano blockchain transactions into a queryable store. T
 
 ### Decision
 
-Use **ClickHouse** (MergeTree engine, daily partitions) as the append-only **Analytics Warehouse** for `transactions`, `transaction_inputs`, `transaction_outputs`, and `tx_analysis_results`. ClickHouse holds structured, normalized facts derived from the raw payloads in the Data Lake (filesystem). See ADR-009 for the Data Lake layer.
+Use **ClickHouse** (MergeTree engine, daily partitions) as the append-only **Analytics Warehouse** for `transactions`, `transaction_inputs`, `transaction_outputs`, and `tx_class_scores`. ClickHouse holds structured, normalized facts derived from the raw payloads in the Data Lake (filesystem). See ADR-009 for the Data Lake layer.
 
 ### Consequences
 
@@ -147,8 +147,8 @@ Use **FastAPI** (on Uvicorn/ASGI) as the sole web framework, serving REST endpoi
 - Native `asyncio` support throughout; no thread pools needed for I/O operations.
 - Automatic OpenAPI documentation (Swagger UI at `/docs`, ReDoc at `/redoc`) generated from Pydantic type annotations with zero extra configuration.
 - Pydantic integration provides request validation, response serialization, and typed settings (`.env` parsing) in one library.
-- Single-process deployment simplifies operations at M1 scale.
-- Running background tasks in the same process as the HTTP server means a task crash can affect API availability; this is an acceptable trade-off for Preprod M1.
+- Single-process deployment simplifies operations at Preprod scale.
+- Running background tasks in the same process as the HTTP server means a task crash can affect API availability; this is an acceptable trade-off for Preprod.
 
 ### Alternatives Considered
 
@@ -159,11 +159,11 @@ Use **FastAPI** (on Uvicorn/ASGI) as the sole web framework, serving REST endpoi
 | aiohttp |
 | Tornado |
 
-## ADR-006: Single-Process Architecture (Milestone 1)
+## ADR-006: Single-Process Architecture (Preprod)
 
 ### Context
 
-The Milestone 1 scope targets the Preprod testnet with low transaction volume and a single operator. The Milestone 1 specification explicitly marks the Event Stream as optional at this stage. Deploying multiple networked services before the core pipeline is validated would add operational complexity with no immediate benefit.
+The Preprod scope targets the Preprod testnet with low transaction volume and a single operator. The specification explicitly marks the Event Stream as optional at this stage. Deploying multiple networked services before the core pipeline is validated would add operational complexity with no immediate benefit.
 
 ### Decision
 
@@ -174,7 +174,7 @@ Run all four logical layers (Blockchain Connector, Analysis Engine, API Gateway,
 - Single process, single port, single `docker-compose up`; minimal operational overhead.
 - No inter-service serialization overhead.
 - The in-memory `asyncio.Queue` used for internal event delivery maps directly to a message queue interface, making future decomposition straightforward.
-- The in-memory rate limiter and WebSocket broadcast will not work correctly if the application is horizontally scaled; this is acceptable for M1 but must be addressed before multi-instance deployment.
+- The in-memory rate limiter and WebSocket broadcast will not work correctly if the application is horizontally scaled; this is acceptable for Preprod but must be addressed before multi-instance deployment.
 - A failure in the Blockchain Connector task can affect API availability (mitigated by the circuit breaker and task restart logic).
 
 ### Future
@@ -223,7 +223,7 @@ A *fact* is something that happened on the Cardano blockchain and cannot change:
 | `transaction_inputs` | One row per input, never updated. Queried for graph analytics and address tracing. |
 | `transaction_outputs` | Same. Queried for address lookups and value analytics. |
 | `address_transactions` | Populated by materialized view. `ReplacingMergeTree ORDER BY (network, address, slot, tx_hash)` gives O(log n) address lookup with no application code. |
-| `tx_analysis_results` | Analysis output. `ReplacingMergeTree(analyzed_at)` handles re-scoring: the engine inserts a new row and the engine's dedup key retains the latest version at merge time. |
+| `tx_class_scores` | Analysis output. `ReplacingMergeTree(analyzed_at)` handles re-scoring: the engine inserts a new row and the engine's dedup key retains the latest version at merge time. |
 
 **PostgreSQL: mutable state**
 
@@ -261,7 +261,7 @@ If `tx_lifecycle` were in ClickHouse, every status check would require `SELECT .
 - Status queries (is this tx confirmed?) always run against PostgreSQL; they do not wait for ClickHouse merges.
 - A ROLLED_BACK transaction leaves a row in ClickHouse `transactions` permanently. The lifecycle API (PostgreSQL) is the source of truth for current status. Queries that need both the fact and the status must join across both stores at the application layer.
 
-## ADR-009: Local Filesystem for Raw Transaction Storage (M1)
+## ADR-009: Local Filesystem for Raw Transaction Storage (Preprod)
 
 ### Context
 
@@ -295,7 +295,7 @@ The `{tx_hash[:2]}` shard directory is the first 2 hex characters of the transac
 
 | Scale | Storage | Notes |
 |---|---|---|
-| M1 / Preprod | Local filesystem (this ADR) | Zero new service; Docker named volume |
+| Preprod | Local filesystem (this ADR) | Zero new service; Docker named volume |
 | Production / multi-instance | **MinIO** (S3-compatible) | Drop-in `boto3` client; same path structure; single Docker container |
 | Mainnet | Cloudflare R2, Backblaze B2, or AWS S3 | Same `boto3` client; change `S3_ENDPOINT_URL` only |
 
@@ -308,7 +308,7 @@ When moving to MinIO: replace `_write_sync` / `read_raw` in `backend/app/db/raw_
 | PostgreSQL JSONB (`raw_event`) | Write-only; TOAST overhead; not queryable for analytics |
 | ClickHouse String column (full blob) | 300 KB+ blobs degrade compression; wrong tool for blob storage |
 | RocksDB | Optimised for small KV lookups (<10 KB); large Plutus blobs cause write amplification; Python binding removed (ADR-003) |
-| MinIO at M1 | Extra Docker container for Preprod with <100 txs/day; unjustified overhead |
+| MinIO at Preprod | Extra Docker container for Preprod with <100 txs/day; unjustified overhead |
 
 ### Consequences
 
@@ -331,7 +331,7 @@ Implement the full backend in **Python 3.12+**.
 
 - Strong ecosystem support: `websockets`, `asyncpg`, `clickhouse-driver`, `fastapi`, `pydantic`; all well-maintained async Python libraries.
 - Future clustering and analysis milestones (scikit-learn, NetworkX, pandas) are native to the Python data science ecosystem.
-- No unusual runtime constraints at M1 scale.
+- No unusual runtime constraints at Preprod scale.
 - Python's GIL limits CPU-bound parallelism; this is not a concern for the I/O-bound ingestion pipeline but may become one for compute-intensive clustering at Mainnet scale.
 
 ### Trade-off Acknowledged

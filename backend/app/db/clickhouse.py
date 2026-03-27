@@ -320,6 +320,101 @@ def execute_schema():
         except Exception as e:
             logger.debug(f"address_transactions backfill skipped: {e}")
 
+        # Multi-class detection tables
+
+        # Extended UTxO-level features, populated inline during ingestion.
+        # One row per output per transaction.
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS utxo_features (
+                tx_hash              String,
+                network              String,
+                output_index         UInt16,
+                address              String,
+                is_script_address    UInt8,
+                ada_amount           UInt64,
+                value_cbor_bytes     UInt32,
+                unique_policy_count  UInt16,
+                unique_token_count   UInt16,
+                datum_present        UInt8,
+                datum_bytes          UInt32,
+                datum_ratio          Float32,
+                utxo_total_bytes     UInt32,
+                ingestion_timestamp  DateTime DEFAULT now(),
+                INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_network    network TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_address    address TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_is_script  is_script_address TYPE minmax GRANULARITY 1
+            ) ENGINE = MergeTree()
+            ORDER BY (network, tx_hash, output_index)
+            PARTITION BY toYYYYMM(ingestion_timestamp)
+        """)
+
+        # Transaction-level script execution features, populated inline
+        # during ingestion.  One row per transaction.
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS tx_script_features (
+                tx_hash              String,
+                network              String,
+                redeemers_count      UInt16,
+                spending_inputs      UInt16,
+                exunits_mem_total    UInt64,
+                exunits_cpu_total    UInt64,
+                mint_policy_count    UInt16,
+                mint_entries         String,
+                ingestion_timestamp  DateTime DEFAULT now(),
+                INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_network    network TYPE bloom_filter GRANULARITY 1
+            ) ENGINE = MergeTree()
+            ORDER BY (network, tx_hash)
+            PARTITION BY toYYYYMM(ingestion_timestamp)
+        """)
+
+        # Multi-class scoring output.  One row per scored transaction.
+        # Each attack class gets an independent 0-100 score; -1 means the
+        # gate condition failed (class not applicable).
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS tx_class_scores (
+                tx_hash          String,
+                network          String,
+                token_dust       Float32 DEFAULT -1,
+                large_value      Float32 DEFAULT -1,
+                large_datum      Float32 DEFAULT -1,
+                multiple_sat     Float32 DEFAULT -1,
+                front_running    Float32 DEFAULT -1,
+                sandwich         Float32 DEFAULT -1,
+                circular         Float32 DEFAULT -1,
+                fake_token       Float32 DEFAULT -1,
+                phishing         Float32 DEFAULT -1,
+                max_score        Float32,
+                max_class        String,
+                risk_band        String,
+                sub_scores       String,
+                analysis_version String,
+                analyzed_at      DateTime,
+                INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1
+            ) ENGINE = ReplacingMergeTree(analyzed_at)
+            ORDER BY (network, tx_hash)
+            PARTITION BY toYYYYMMDD(analyzed_at)
+        """)
+
+        # Per-script / per-policy / global baseline statistics used by the
+        # percentile normalisation framework.  Updated daily (or on bootstrap).
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS baselines (
+                scope_type   String,
+                scope_id     String,
+                feature      String,
+                p50          Float64,
+                p99          Float64,
+                sample_count UInt64,
+                computed_at  DateTime,
+                window_days  UInt16
+            ) ENGINE = ReplacingMergeTree(computed_at)
+            ORDER BY (scope_type, scope_id, feature)
+        """)
+
         logger.info("ClickHouse schema initialized")
     except ClickHouseError as e:
         logger.error(f"Failed to create ClickHouse schema: {e}")
@@ -420,6 +515,31 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 all_outputs,
             )
 
+        # ------------------------------------------------------------------
+        # Populate extended feature tables from raw_data (best-effort)
+        try:
+            from app.analysis.features import extract_utxo_features, extract_tx_script_features
+
+            all_utxo_features = []
+            all_script_features = []
+            for tx in transactions:
+                if not tx.raw_data:
+                    continue
+                net = tx.network or settings.CARDANO_NETWORK
+                utxo_rows = extract_utxo_features(tx.tx_hash, net, tx.raw_data)
+                all_utxo_features.extend(utxo_rows)
+                script_row = extract_tx_script_features(tx.tx_hash, net, tx.raw_data)
+                if script_row:
+                    all_script_features.append(script_row)
+
+            if all_utxo_features:
+                insert_utxo_features(all_utxo_features)
+            if all_script_features:
+                insert_tx_script_features(all_script_features)
+        except Exception as e:
+            # Feature extraction is non-critical; log and continue
+            logger.warning(f"Feature extraction failed (non-fatal): {e}")
+
         logger.debug(f"Inserted {len(transactions)} transactions into ClickHouse")
     except ClickHouseError as e:
         logger.error(f"Failed to insert transactions batch: {e}")
@@ -492,6 +612,46 @@ def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[s
     }
 
 
+def get_outputs_for_refs(
+    refs: List[tuple],
+    network: str,
+) -> Dict[tuple, tuple]:
+    """Batch-fetch output address and amount for a list of (tx_hash, output_index) pairs.
+
+    Returns {(tx_hash, output_index): (address, amount)} for found outputs.
+    Used at ingestion time to resolve input values from previously ingested blocks.
+    """
+    if not refs:
+        return {}
+    # Deduplicate and build a set for filtering
+    ref_set = set(refs)
+    unique_tx_hashes = list({r[0] for r in ref_set})
+    rows = _get_client().execute(
+        """
+        SELECT tx_hash, output_index, address, amount
+        FROM transaction_outputs
+        WHERE tx_hash IN %(tx_hashes)s
+          AND network = %(network)s
+          AND is_collateral = 0
+        """,
+        {"tx_hashes": unique_tx_hashes, "network": network},
+    )
+    # Only return rows matching requested (tx_hash, output_index) pairs
+    return {
+        (r[0], r[1]): (r[2], int(r[3]))
+        for r in rows if (r[0], r[1]) in ref_set
+    }
+
+
+async def get_outputs_for_refs_async(
+    refs: List[tuple],
+    network: str,
+) -> Dict[tuple, tuple]:
+    """Async wrapper for get_outputs_for_refs."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_ch_executor, get_outputs_for_refs, refs, network)
+
+
 def get_address_activity(addresses: List[str], network: str) -> Dict[str, int]:
     """Return the total observed transaction count per address.
 
@@ -513,41 +673,95 @@ def get_address_activity(addresses: List[str], network: str) -> Dict[str, int]:
     return {row[0]: int(row[1]) for row in rows}
 
 
-def insert_analysis_results(results: List[Dict[str, Any]]):
-    """Batch-insert analysis result rows into tx_analysis_results."""
+def _execute_query(query: str, params: Optional[Dict] = None) -> list:
+    """Execute a parameterized SELECT query. Called via execute_query_async."""
+    return _get_client().execute(query, params or {})
+
+
+async def execute_query_async(query: str, params: Optional[Dict] = None) -> list:
+    """Non-blocking wrapper: runs a parameterized SELECT on the ClickHouse executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, _execute_query, query, params,
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# Multi-class scoring, feature tables, baselines
+
+def insert_utxo_features(rows: List[tuple]):
+    """Batch-insert UTxO-level feature rows extracted during ingestion."""
+    if not rows:
+        return
+    _get_client().execute(
+        """
+        INSERT INTO utxo_features (
+            tx_hash, network, output_index, address, is_script_address,
+            ada_amount, value_cbor_bytes, unique_policy_count, unique_token_count,
+            datum_present, datum_bytes, datum_ratio, utxo_total_bytes
+        ) VALUES
+        """,
+        rows,
+    )
+
+
+def insert_tx_script_features(rows: List[tuple]):
+    """Batch-insert transaction-level script feature rows."""
+    if not rows:
+        return
+    _get_client().execute(
+        """
+        INSERT INTO tx_script_features (
+            tx_hash, network, redeemers_count, spending_inputs,
+            exunits_mem_total, exunits_cpu_total, mint_policy_count, mint_entries
+        ) VALUES
+        """,
+        rows,
+    )
+
+
+def insert_class_scores(results: List[Dict[str, Any]]):
+    """Batch-insert multi-class scoring results into tx_class_scores."""
     if not results:
         return
     _get_client().execute(
         """
-        INSERT INTO tx_analysis_results (
-            tx_hash, network, risk_score, risk_level, cluster_id,
-            is_anomaly, anomaly_reasons, analysis_version, analyzed_at
+        INSERT INTO tx_class_scores (
+            tx_hash, network,
+            token_dust, large_value, large_datum, multiple_sat,
+            front_running, sandwich, circular, fake_token, phishing,
+            max_score, max_class, risk_band, sub_scores,
+            analysis_version, analyzed_at
         ) VALUES
         """,
         [
             (
-                r["tx_hash"],
-                r["network"],
-                r["risk_score"],
-                r["risk_level"],
-                r["cluster_id"],
-                r["is_anomaly"],
-                r["anomaly_reasons"],
-                r["analysis_version"],
-                r["analyzed_at"],
+                r["tx_hash"], r["network"],
+                r.get("token_dust", -1), r.get("large_value", -1),
+                r.get("large_datum", -1), r.get("multiple_sat", -1),
+                r.get("front_running", -1), r.get("sandwich", -1),
+                r.get("circular", -1), r.get("fake_token", -1),
+                r.get("phishing", -1),
+                r["max_score"], r["max_class"], r["risk_band"],
+                json.dumps(r.get("sub_scores", {})),
+                r["analysis_version"], r["analyzed_at"],
             )
             for r in results
         ],
     )
 
 
-def get_analysis_result(tx_hash: str) -> Optional[Dict[str, Any]]:
-    """Return the latest analysis result for a single transaction."""
+def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
+    """Return the latest multi-class score vector for a single transaction."""
     rows = _get_client().execute(
         """
-        SELECT tx_hash, network, risk_score, risk_level, cluster_id,
-               is_anomaly, anomaly_reasons, analysis_version, analyzed_at
-        FROM tx_analysis_results FINAL
+        SELECT tx_hash, network,
+               token_dust, large_value, large_datum, multiple_sat,
+               front_running, sandwich, circular, fake_token, phishing,
+               max_score, max_class, risk_band, sub_scores,
+               analysis_version, analyzed_at
+        FROM tx_class_scores FINAL
         WHERE tx_hash = %(tx_hash)s
         LIMIT 1
         """,
@@ -555,107 +769,273 @@ def get_analysis_result(tx_hash: str) -> Optional[Dict[str, Any]]:
     )
     if not rows:
         return None
-    keys = ("tx_hash", "network", "risk_score", "risk_level", "cluster_id",
-            "is_anomaly", "anomaly_reasons", "analysis_version", "analyzed_at")
+    keys = (
+        "tx_hash", "network",
+        "token_dust", "large_value", "large_datum", "multiple_sat",
+        "front_running", "sandwich", "circular", "fake_token", "phishing",
+        "max_score", "max_class", "risk_band", "sub_scores",
+        "analysis_version", "analyzed_at",
+    )
+    result = dict(zip(keys, rows[0]))
+    if isinstance(result["sub_scores"], str):
+        try:
+            result["sub_scores"] = json.loads(result["sub_scores"])
+        except (json.JSONDecodeError, TypeError):
+            result["sub_scores"] = {}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Baseline read/write
+# ---------------------------------------------------------------------------
+
+def get_baseline(scope_type: str, scope_id: str, feature: str) -> Optional[Dict[str, Any]]:
+    """Return the latest baseline for a given (scope_type, scope_id, feature)."""
+    rows = _get_client().execute(
+        """
+        SELECT p50, p99, sample_count, computed_at, window_days
+        FROM baselines FINAL
+        WHERE scope_type = %(scope_type)s
+          AND scope_id   = %(scope_id)s
+          AND feature    = %(feature)s
+        LIMIT 1
+        """,
+        {"scope_type": scope_type, "scope_id": scope_id, "feature": feature},
+    )
+    if not rows:
+        return None
+    keys = ("p50", "p99", "sample_count", "computed_at", "window_days")
     return dict(zip(keys, rows[0]))
 
 
-def get_analysis_results(
+def insert_baselines(rows: List[tuple]):
+    """Batch-insert or update baseline statistics."""
+    if not rows:
+        return
+    _get_client().execute(
+        """
+        INSERT INTO baselines (
+            scope_type, scope_id, feature, p50, p99,
+            sample_count, computed_at, window_days
+        ) VALUES
+        """,
+        rows,
+    )
+
+
+def get_class_scores_list(
     network: str,
-    risk_level: Optional[str] = None,
+    risk_band: Optional[str] = None,
+    attack_class: Optional[str] = None,
+    min_score: float = 0.0,
+    sort: str = "score",
     limit: int = 100,
     offset: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Return analysis results, optionally filtered by risk_level."""
-    if risk_level:
-        rows = _get_client().execute(
-            """
-            SELECT tx_hash, network, risk_score, risk_level, cluster_id,
-                   is_anomaly, anomaly_reasons, analysis_version, analyzed_at
-            FROM tx_analysis_results FINAL
-            WHERE network = %(network)s AND risk_level = %(risk_level)s
-            ORDER BY analyzed_at DESC
-            LIMIT %(limit)s OFFSET %(offset)s
-            """,
-            {"network": network, "risk_level": risk_level, "limit": limit, "offset": offset},
-        )
-    else:
-        rows = _get_client().execute(
-            """
-            SELECT tx_hash, network, risk_score, risk_level, cluster_id,
-                   is_anomaly, anomaly_reasons, analysis_version, analyzed_at
-            FROM tx_analysis_results FINAL
-            WHERE network = %(network)s
-            ORDER BY analyzed_at DESC
-            LIMIT %(limit)s OFFSET %(offset)s
-            """,
-            {"network": network, "limit": limit, "offset": offset},
-        )
-    keys = ("tx_hash", "network", "risk_score", "risk_level", "cluster_id",
-            "is_anomaly", "anomaly_reasons", "analysis_version", "analyzed_at")
-    return [dict(zip(keys, row)) for row in rows]
+    """Return multi-class score rows with optional filters.
 
+    sort: "score" (default) or "date" (most recent first).
+    """
+    _CLASS_COLS = (
+        "token_dust", "large_value", "large_datum", "multiple_sat",
+        "front_running", "sandwich", "circular", "fake_token", "phishing",
+    )
+    _ALLOWED_SORTS = {
+        "score": "max_score DESC, analyzed_at DESC",
+        "date": "analyzed_at DESC, max_score DESC",
+    }
+    order_clause = _ALLOWED_SORTS.get(sort, _ALLOWED_SORTS["score"])
+    if attack_class and attack_class not in _CLASS_COLS:
+        raise ValueError(f"Invalid attack_class '{attack_class}'")
 
-def get_analysis_stats(network: str) -> Dict[str, Any]:
-    """Return aggregate analysis statistics for a network."""
+    conditions = ["network = %(network)s"]
+    params: Dict[str, Any] = {
+        "network": network, "limit": limit, "offset": offset,
+    }
+    if risk_band:
+        conditions.append("risk_band = %(risk_band)s")
+        params["risk_band"] = risk_band
+    if attack_class and attack_class in _CLASS_COLS:
+        # Safe: attack_class validated against _CLASS_COLS allowlist above
+        conditions.append(f"`{attack_class}` >= %(min_score)s")
+        params["min_score"] = min_score
+    elif min_score > 0:
+        conditions.append("max_score >= %(min_score)s")
+        params["min_score"] = min_score
+
+    where = " AND ".join(conditions)
+    # Query scores first, then batch-fetch tx details separately.
+    # ClickHouse 26+ does not allow FINAL on tables inside JOINs.
     rows = _get_client().execute(
-        """
-        SELECT
-            count()                                         AS total_analyzed,
-            avg(risk_score)                                 AS avg_risk_score,
-            countIf(risk_level = 'HIGH')                    AS high_risk_count,
-            countIf(is_anomaly = 1)                         AS anomaly_count,
-            uniq(cluster_id)                                AS cluster_count,
-            max(analyzed_at)                                AS last_run_at
-        FROM tx_analysis_results FINAL
+        f"""
+        SELECT tx_hash, network,
+               token_dust, large_value, large_datum, multiple_sat,
+               front_running, sandwich, circular, fake_token, phishing,
+               max_score, max_class, risk_band, sub_scores,
+               analysis_version, analyzed_at
+        FROM tx_class_scores FINAL
+        WHERE {where}
+        ORDER BY {order_clause}
+        LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        params,
+    )
+    score_keys = (
+        "tx_hash", "network",
+        *_CLASS_COLS,
+        "max_score", "max_class", "risk_band", "sub_scores",
+        "analysis_version", "analyzed_at",
+    )
+    # Batch-fetch fee/output_count for matched tx_hashes
+    tx_hashes = [r[0] for r in rows]
+    tx_details: Dict[str, Dict[str, Any]] = {}
+    if tx_hashes:
+        detail_rows = _get_client().execute(
+            """
+            SELECT tx_hash, fee, output_count
+            FROM transactions
+            WHERE tx_hash IN %(hashes)s AND network = %(network)s
+            """,
+            {"hashes": tx_hashes, "network": network},
+        )
+        for dr in detail_rows:
+            tx_details[dr[0]] = {"fee": dr[1], "output_count": dr[2]}
+    keys = (*score_keys, "fee", "output_count")
+    results = []
+    for row in rows:
+        d = dict(zip(score_keys, row))
+        detail = tx_details.get(d["tx_hash"], {})
+        d["fee"] = detail.get("fee")
+        d["output_count"] = detail.get("output_count")
+        if isinstance(d["sub_scores"], str):
+            try:
+                d["sub_scores"] = json.loads(d["sub_scores"])
+            except (json.JSONDecodeError, TypeError):
+                d["sub_scores"] = {}
+        results.append(d)
+    return results
+
+
+async def get_class_scores_list_async(
+    network: str, risk_band: Optional[str], attack_class: Optional[str],
+    min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
+) -> List[Dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, get_class_scores_list,
+        network, risk_band, attack_class, min_score, sort, limit, offset,
+    )
+
+
+async def get_class_scores_async(tx_hash: str) -> Optional[Dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_ch_executor, get_class_scores, tx_hash)
+
+
+def get_class_scores_stats(network: str) -> Dict[str, Any]:
+    """Per-class distribution stats for a network."""
+    _CLASS_COLS = (
+        "token_dust", "large_value", "large_datum", "multiple_sat",
+        "front_running", "sandwich", "circular", "fake_token", "phishing",
+    )
+    # Build per-class aggregation: count of scored (>= 0), avg, max
+    agg_parts = []
+    for col in _CLASS_COLS:
+        agg_parts.append(
+            f"countIf({col} >= 0) AS {col}_count, "
+            f"avgIf({col}, {col} >= 0) AS {col}_avg, "
+            f"maxIf({col}, {col} >= 0) AS {col}_max"
+        )
+    agg_sql = ", ".join(agg_parts)
+    rows = _get_client().execute(
+        f"""
+        SELECT count() AS total,
+               countIf(risk_band = 'Critical') AS critical_count,
+               countIf(risk_band = 'High') AS high_count,
+               countIf(risk_band = 'Moderate') AS moderate_count,
+               countIf(risk_band = 'Low') AS low_count,
+               avg(max_score) AS avg_max_score,
+               max(analyzed_at) AS last_analyzed_at,
+               {agg_sql}
+        FROM tx_class_scores FINAL
         WHERE network = %(network)s
         """,
         {"network": network},
     )
-    # ClickHouse aggregate queries always return exactly one row even on empty tables.
-    # When the table is empty: count()=0, avg()=nan, max(DateTime)=epoch (1970-01-01).
-    # Normalise these to the expected zero/None values before returning.
-    keys = ("total_analyzed", "avg_risk_score", "high_risk_count",
-            "anomaly_count", "cluster_count", "last_run_at")
-    result = dict(zip(keys, rows[0])) if rows else {
-        "total_analyzed": 0, "avg_risk_score": None,
-        "high_risk_count": 0, "anomaly_count": 0,
-        "cluster_count": 0, "last_run_at": None,
+    if not rows:
+        return {}
+    row = rows[0]
+    idx = 0
+    result: Dict[str, Any] = {
+        "total": row[idx], "critical_count": row[idx+1],
+        "high_count": row[idx+2], "moderate_count": row[idx+3],
+        "low_count": row[idx+4], "avg_max_score": row[idx+5],
+        "last_analyzed_at": row[idx+6],
     }
-    if result["total_analyzed"] == 0:
-        result["avg_risk_score"] = None
-        result["last_run_at"] = None
+    idx = 7
+    per_class = {}
+    for col in _CLASS_COLS:
+        per_class[col] = {
+            "scored_count": row[idx], "avg_score": row[idx+1], "max_score": row[idx+2],
+        }
+        idx += 3
+    result["per_class"] = per_class
     return result
 
 
-def _execute_query(query: str) -> list:
-    """Execute a raw SELECT query. Called via execute_query_async (executor)."""
-    return _get_client().execute(query)
-
-
-async def execute_query_async(query: str) -> list:
-    """Non-blocking wrapper: runs a raw SELECT query on the ClickHouse executor."""
+async def get_class_scores_stats_async(network: str) -> Dict[str, Any]:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ch_executor, _execute_query, query)
+    return await loop.run_in_executor(_ch_executor, get_class_scores_stats, network)
 
 
-async def get_analysis_result_async(tx_hash: str) -> Optional[Dict[str, Any]]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ch_executor, get_analysis_result, tx_hash)
+def get_baselines_for_scope(
+    scope_type: str, scope_id: str,
+) -> List[Dict[str, Any]]:
+    """Return all baselines for a given scope."""
+    rows = _get_client().execute(
+        """
+        SELECT feature, p50, p99, sample_count, computed_at, window_days
+        FROM baselines FINAL
+        WHERE scope_type = %(scope_type)s AND scope_id = %(scope_id)s
+        ORDER BY feature
+        """,
+        {"scope_type": scope_type, "scope_id": scope_id},
+    )
+    keys = ("feature", "p50", "p99", "sample_count", "computed_at", "window_days")
+    return [dict(zip(keys, r)) for r in rows]
 
 
-async def get_analysis_results_async(
-    network: str,
-    risk_level: Optional[str],
-    limit: int,
-    offset: int,
+async def get_baselines_for_scope_async(
+    scope_type: str, scope_id: str,
 ) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, get_analysis_results, network, risk_level, limit, offset
+        _ch_executor, get_baselines_for_scope, scope_type, scope_id,
     )
 
 
-async def get_analysis_stats_async(network: str) -> Dict[str, Any]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ch_executor, get_analysis_stats, network)
+def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str, Any]]:
+    """Return transactions that have no multi-class score yet.
+
+    Fetches raw_data alongside the standard fields so that the feature
+    extraction pipeline can derive UTxO-level and script-level features
+    without a second round-trip.
+    """
+    rows = _get_client().execute(
+        """
+        SELECT t.tx_hash, t.network, t.fee, t.input_count, t.output_count,
+               t.total_output_value, t.metadata, t.addresses, t.raw_data,
+               t.slot, t.block_height, t.timestamp
+        FROM transactions t
+        LEFT ANTI JOIN tx_class_scores s
+          ON t.tx_hash = s.tx_hash AND t.network = s.network
+        WHERE t.network = %(network)s
+        ORDER BY t.ingestion_timestamp ASC
+        LIMIT %(batch_size)s
+        """,
+        {"network": network, "batch_size": batch_size},
+    )
+    keys = ("tx_hash", "network", "fee", "input_count", "output_count",
+            "total_output_value", "metadata", "addresses", "raw_data",
+            "slot", "block_height", "timestamp")
+    return [dict(zip(keys, row)) for row in rows]

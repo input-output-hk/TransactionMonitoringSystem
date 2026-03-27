@@ -1,5 +1,5 @@
 # Core Framework
-fastapi==0.133.0
+fastapi==0.135.1
 uvicorn[standard]==0.41.0
 pydantic==2.12.5
 pydantic-settings==2.13.1
@@ -13,6 +13,10 @@ asyncpg==0.31.0
 
 # Configuration
 python-dotenv==1.2.1
+
+# Analysis Engine (Milestone 2)
+cbor2==5.6.5
+rapidfuzz==3.12.2
 
 # Testing
 pytest==9.0.2

@@ -6,14 +6,14 @@ Who uses the system and what external systems does it interact with.
 
 ```mermaid
 C4Context
-    title System Context — Cardano Transaction Monitoring System
+    title System Context: Cardano Transaction Monitoring System
 
     Person(user, "User", "Monitors, queries, and investigates Cardano transactions via dashboard and REST API")
 
-    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides mock analysis engine for risk scoring, clustering, and anomaly detection.")
+    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides 9-class Polimi detection engine for risk scoring, clustering, and anomaly detection.")
 
-    System_Ext(cardano_node, "Cardano Node", "Full node — source of truth for chain state, mempool, and block data")
-    System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano node — provides ChainSync, LocalTxMonitor, and LocalStateQuery mini-protocols via JSON-RPC 2.0")
+    System_Ext(cardano_node, "Cardano Node", "Full node: source of truth for chain state, mempool, and block data")
+    System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano node: provides ChainSync, LocalTxMonitor, and LocalStateQuery mini-protocols via JSON-RPC 2.0")
 
     Rel(user, tms, "Browse and investigate", "HTTPS, WebSocket")
     Rel(tms, ogmios, "Blocks + mempool + UTxO queries", "WebSocket :1337")
@@ -22,19 +22,19 @@ C4Context
 
 ## Level 2: Container Diagram
 
-The four layers from the Milestone 1 spec mapped to running containers.
-Event Stream is optional for Preprod; the Blockchain Connector writes directly to storage in the current phase.
+The four layers from the spec mapped to running containers.
+Event Stream is optional for Preprod; the Blockchain Connector writes directly to storage.
 
 ```mermaid
 C4Container
-    title Container Diagram — Transaction Monitoring System
+    title Container Diagram: Transaction Monitoring System
 
     Person(user, "User")
 
     System_Boundary(tms, "Transaction Monitoring System") {
         Container(connector, "Blockchain Connector", "Python, websockets", "Ingestion layer. Three persistent Ogmios WebSocket connections: ChainSync, LocalTxMonitor, LocalStateQuery. Normalizes transactions. Resolves mempool input UTxOs. Circuit breaker + checkpoint resumption.")
         Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. API key auth, per-key rate limiting.")
-        Container(analysis, "Analysis Engine", "Python (mock — M1)", "Services layer. Reads unscored transactions, assigns mock risk scores, writes results to Analytics Warehouse.")
+        Container(analysis, "Analysis Engine", "Python", "Services layer. 9-class Polimi detection engine. Reads unscored transactions, assigns multi-class risk scores, writes results to Analytics Warehouse.")
         Container(ui, "TMS Dashboard", "HTML5", "Presentation layer. Real-time mempool feed, confirmed txs, lifecycle stats. Served by API Gateway.")
         ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Storage layer. Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store. Derived from the Data Lake.")
         ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Storage layer. Mutable state: transaction lifecycle, sync checkpoint, entity state, API keys, config, audit logs.")
@@ -57,11 +57,11 @@ C4Container
 ## Level 3: Component Diagram (FastAPI Application)
 
 All four logical layers (Blockchain Connector, API Gateway, Analysis Engine, TMS Dashboard)
-run as components within a single FastAPI async process (single-process architecture for Preprod M1).
+run as components within a single FastAPI async process (single-process architecture for Preprod).
 
 ```mermaid
 C4Component
-    title Component Diagram — FastAPI Application
+    title Component Diagram: FastAPI Application
 
     Container_Boundary(api, "FastAPI Application") {
 
@@ -75,7 +75,7 @@ C4Component
 
         Component(parser, "Transaction Parser", "Python module", "Normalizes Ogmios v6 JSON into NormalizedTransaction. Captures block_index for MEV analysis.")
 
-        Component(analysis_engine, "Analysis Engine", "asyncio background task (mock)", "Polls Analytics Warehouse for unscored transactions. Assigns mock risk scores and labels. M1 mock implementation.")
+        Component(analysis_engine, "Analysis Engine", "asyncio background task", "Polls Analytics Warehouse for unscored transactions. 9-class Polimi detection engine assigns multi-class risk scores and labels.")
 
         Component(tx_api, "Transaction API", "FastAPI Router", "GET /api/transactions/, /api/transactions/{hash}, /api/transactions/address/{addr}, /api/transactions/stats/summary")
 
@@ -85,9 +85,9 @@ C4Component
 
         Component(entity_api, "Entity API", "FastAPI Router", "GET/PUT /api/entities/{type}/{id}")
 
-        Component(ws_router, "WebSocket Router", "FastAPI WebSocket", "WS /ws — broadcasts real-time lifecycle events to connected clients.")
+        Component(ws_router, "WebSocket Router", "FastAPI WebSocket", "WS /ws: broadcasts real-time lifecycle events to connected clients.")
 
-        Component(ui_router, "UI Router", "FastAPI Router", "GET / — serves the TMS Dashboard (HTML5).")
+        Component(ui_router, "UI Router", "FastAPI Router", "GET /: serves the TMS Dashboard (HTML5).")
 
         Component(auth, "Auth Middleware", "FastAPI Security", "TMS-API-Key header validation. Open access in dev mode (API_KEYS empty).")
 
@@ -281,19 +281,19 @@ The TMS connects to it via `OGMIOS_WS_URL` (default: `ws://localhost:1337`).
 
 ```mermaid
 C4Deployment
-    title Deployment Diagram — Production
+    title Deployment Diagram: Production
 
     Deployment_Node(server, "Server", "Linux VM / Bare Metal") {
-        Deployment_Node(docker, "Docker Compose — TMS") {
+        Deployment_Node(docker, "Docker Compose: TMS") {
             Deployment_Node(app_container, "tms-app") {
-                Container(app, "FastAPI App", "Python", "Uvicorn ASGI server — all four logical layers in one process")
+                Container(app, "FastAPI App", "Python", "Uvicorn ASGI server: all four logical layers in one process")
                 ContainerDb(fs_inst, "Data Lake", "Docker named volume (raw_store_data)", "Write-once gzip JSON blobs. confirmed/ and mempool/ prefixes. Upgrade path: MinIO → S3/R2/B2.")
             }
             Deployment_Node(pg_container, "tms-postgres") {
                 ContainerDb(pg_inst, "Operational Database", "PostgreSQL 18", "tx_lifecycle, sync_checkpoint, entity_state, audit_logs, config")
             }
             Deployment_Node(ch_container, "tms-clickhouse") {
-                ContainerDb(ch_inst, "Analytics Warehouse", "ClickHouse 26.1 MergeTree", "transactions, transaction_inputs, transaction_outputs, address_transactions, tx_analysis_results")
+                ContainerDb(ch_inst, "Analytics Warehouse", "ClickHouse 26.1 MergeTree", "transactions, transaction_inputs, transaction_outputs, address_transactions, tx_class_scores, baselines")
             }
         }
         Deployment_Node(node_infra, "Cardano Node Infrastructure") {

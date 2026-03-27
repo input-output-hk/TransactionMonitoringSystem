@@ -1,8 +1,8 @@
 C4Container
-    title Container Diagram — Transaction Monitoring System
+    title Container Diagram: Transaction Monitoring System
 
     Enterprise_Boundary(blockchain, "Cardano Blockchain") {
-        System_Ext(cardano_node, "Cardano Node", "Full node — source of truth for chain state, mempool, and block data")
+        System_Ext(cardano_node, "Cardano Node", "Full node: source of truth for chain state, mempool, and block data")
         System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano Node via JSON-RPC 2.0")
     }
 
@@ -12,18 +12,18 @@ C4Container
 
         Boundary(ingestion, "Ingestion") {
             Container(connector, "Blockchain Connector", "Python / websockets", "Three persistent WebSocket connections to Ogmios: ChainSync (blocks), LocalTxMonitor (mempool), LocalStateQuery (UTxO input resolution). Normalizes transactions. Circuit breaker + exponential backoff + checkpoint-based resumption.")
-            Container(queue, "Event Stream", "", "[Mainnet] Decouples ingestion from storage. Optional for Preprod — connector writes directly to storage.")
+            Container(queue, "Event Stream", "", "[Mainnet] Decouples ingestion from storage. Optional for Preprod; connector writes directly to storage.")
         }
 
         Boundary(storage, "Storage") {
-            ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store, partitioned monthly. Derived from the Data Lake.")
+            ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store, partitioned daily. Derived from the Data Lake.")
             ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Mutable state: transaction lifecycle (PENDING / CONFIRMED / ROLLED_BACK / DROPPED), sync checkpoint, entity state, API keys, config, audit logs.")
-            ContainerDb(rawstore, "Data Lake", "Local Filesystem → S3/MinIO", "Write-once gzip-compressed JSON blobs. confirmed/ and mempool/ prefixes. Schema-on-read. Source of truth for raw Ogmios payloads — the Analytics Warehouse is derived from this layer.")
+            ContainerDb(rawstore, "Data Lake", "Local Filesystem → S3/MinIO", "Write-once gzip-compressed JSON blobs. confirmed/ and mempool/ prefixes. Schema-on-read. Source of truth for raw Ogmios payloads; the Analytics Warehouse is derived from this layer.")
         }
 
         Boundary(services, "Services") {
             Container(api, "API Gateway", "FastAPI + Uvicorn", "REST and WebSocket endpoints. API key authentication, per-key rate limiting, CORS.")
-            Container(analysis, "Analysis Engine", "Python (mock — M1)", "Reads unscored transactions from Analytics Warehouse. Assigns mock risk scores and labels. Writes analysis results back to Analytics Warehouse.")
+            Container(analysis, "Analysis Engine", "Python", "9-class Polimi detection engine. Reads unscored transactions from Analytics Warehouse. Assigns multi-class risk scores and labels. Writes analysis results back to Analytics Warehouse.")
         }
 
         Boundary(presentation, "Presentation") {

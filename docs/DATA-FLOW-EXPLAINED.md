@@ -68,7 +68,16 @@ The filesystem holds the complete raw Ogmios payload for every transaction, both
 
 ### Analysis Engine
 
-A background process queries ClickHouse for unscored transactions and runs a risk-scoring pipeline (`_score_transaction()`). It joins transaction data with inputs, outputs, and the address activity index to produce a risk score, which is written to `tx_analysis_results` in ClickHouse.
+A background process queries ClickHouse for unscored transactions and runs a multi-class detection pipeline. Each batch goes through four enrichment phases before scoring:
+
+1. **Input address resolution**: resolves input addresses from `transaction_inputs` table and patches `raw_data` in-place so scorers have complete UTxO context.
+2. **Collision enrichment**: queries PostgreSQL `mempool_collisions` for transactions involved in UTxO input collisions or displacements (feeds the Front-Running scorer).
+3. **Cycle enrichment**: runs bounded BFS in the transfer graph to detect value cycles returning to origin within 6 hops (feeds the Circular scorer).
+4. **Sandwich enrichment**: detects structural three-transaction patterns at the same script address within a 5-slot window (feeds the Sandwich scorer).
+
+After enrichment, each transaction is scored by 9 independent attack-class scorers (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing). Each scorer has a gate condition (cheap check to skip inapplicable transactions) and a score function (weighted sub-score composition producing a 0-100 risk score). Sub-scores use percentile-based normalisation against per-script or per-policy baselines, falling back to global baselines or fixed anchors.
+
+The output is a 9-element score vector per transaction, written to `tx_class_scores` in ClickHouse along with the max score, max class, risk band (Low/Moderate/High/Critical), and sub-score breakdowns.
 
 ## 3. Transaction Lifecycle: State Transitions
 
@@ -85,11 +94,11 @@ All state is stored in the `tx_lifecycle` table in PostgreSQL. ClickHouse and th
 
 ### Normal path
 
-A transaction first appears in the mempool. The mempool monitor immediately resolves the transaction's inputs via `queryLedgerState/utxo` on the third WebSocket connection — before any write. Because a transaction can only enter the mempool if all its inputs are currently unspent, this query is guaranteed to return data at observation time. The resolved address and lovelace amount for each input are stored in an in-memory cache keyed by `(input_tx_hash, input_index)`. After the UTxO query, the monitor writes the raw payload to `mempool/` on the filesystem, inserts a `PENDING` row to `tx_lifecycle` in PostgreSQL, and broadcasts `TX_PENDING` to connected clients — in that order.
+A transaction first appears in the mempool. The mempool monitor immediately resolves the transaction's inputs via `queryLedgerState/utxo` on the third WebSocket connection, before any write. Because a transaction can only enter the mempool if all its inputs are currently unspent, this query is guaranteed to return data at observation time. The resolved address and lovelace amount for each input are stored in an in-memory cache keyed by `(input_tx_hash, input_index)`. After the UTxO query, the monitor writes the raw payload to `mempool/` on the filesystem, inserts a `PENDING` row to `tx_lifecycle` in PostgreSQL, and broadcasts `TX_PENDING` to connected clients, in that order.
 
 When the chain sync component sees the transaction in a confirmed block (~20 s later), it pops the cache entry and applies the resolved input data to the `NormalizedTransaction` before inserting into ClickHouse, populating `total_input_value` and the per-input `address` and `amount` columns. By that point the inputs are spent and can no longer be queried from the ledger, so the cache is the only source for this data.
 
-For transactions confirmed without a prior mempool observation, `total_input_value` remains `NULL` and input addresses remain empty — this is the unresolved path and is expected behaviour.
+For transactions confirmed without a prior mempool observation, `total_input_value` remains `NULL` and input addresses remain empty; this is the unresolved path and is expected behaviour.
 
 ### Edge cases worth noting
 

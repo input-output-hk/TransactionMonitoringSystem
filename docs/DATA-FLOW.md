@@ -12,7 +12,7 @@ How a Cardano block travels from the node to every storage layer and connected c
 
 Three persistent WebSocket connections to Ogmios run independently at all times: chain sync (`nextBlock` loop), mempool (`nextTransaction` loop), and a query connection (`queryLedgerState/utxo`).
 This diagram covers the **chain sync** connection.
-The mempool connection writes to `tx_lifecycle` (PENDING), the raw store (`mempool/` prefix), and resolves input UTxOs via the query connection — storing results in `_pending_input_cache` for use at confirmation time. Those paths are not shown in the sequence below; see the Storage Map in section 2.
+The mempool connection writes to `tx_lifecycle` (PENDING), the raw store (`mempool/` prefix), and resolves input UTxOs via the query connection, storing results in `_pending_input_cache` for use at confirmation time. Those paths are not shown in the sequence below; see the Storage Map in section 2.
 
 ```mermaid
 sequenceDiagram
@@ -26,7 +26,7 @@ sequenceDiagram
     participant PG     as Operational Database (PostgreSQL)
     participant WS     as WebSocket Clients
 
-    Note over CS,PG: Application startup — resume from last known position
+    Note over CS,PG: Application startup: resume from last known position
     CS->>PG: get_sync_point(network)
     PG-->>CS: {slot, block_id} or None
 
@@ -44,7 +44,7 @@ sequenceDiagram
             Note right of CS: _apply_resolved_inputs(): pop _pending_input_cache[tx_hash]<br/>if found: overwrite input address/amount, set total_input_value
         end
 
-        Note over CS,CH: Async — runs on thread pool, does not block PostgreSQL writes
+        Note over CS,CH: Async: runs on thread pool, does not block PostgreSQL writes
         CS-)CH: insert_transactions_batch_async(normalized_txs)
         activate CH
         CH->>CH: INSERT transactions        (1 row per tx)
@@ -81,7 +81,7 @@ sequenceDiagram
 **Key design points:**
 
 - ClickHouse and raw store writes are shown as `-)` (async arrows) because they run on thread pools; the event loop stays responsive and PostgreSQL writes from the mempool monitor can proceed concurrently. However, the chain sync coroutine itself **awaits** both before saving the checkpoint.
-- The sync checkpoint is saved **last** — after all storage writes and the WebSocket broadcast. If the process crashes before the checkpoint save, the block is reprocessed on restart. ClickHouse `MergeTree` deduplication and raw store write-once logic (atomic temp-file + rename) handle the duplicate insert gracefully.
+- The sync checkpoint is saved **last**, after all storage writes and the WebSocket broadcast. If the process crashes before the checkpoint save, the block is reprocessed on restart. ClickHouse `MergeTree` deduplication and raw store write-once logic (atomic temp-file + rename) handle the duplicate insert gracefully.
 - The raw store uses an atomic write pattern (`gzip → .tmp`, then `os.replace()`). A crash mid-write leaves only the `.tmp` file; the final path does not exist, so the write is retried on replay.
 - The materialized view `address_transactions_mv` fires automatically on every `INSERT INTO transactions`; no application code required.
 - **UTxO input resolution**: when a PENDING tx is observed by the mempool monitor, its inputs are guaranteed unspent (the node validates this before admitting the tx). The system immediately calls `queryLedgerState/utxo` on a third WebSocket connection and caches address + lovelace data per input. When ChainSync confirms the block (~20 s later), those inputs are already spent and no longer queryable; the cached data is applied instead, populating `total_input_value` and input addresses in ClickHouse. For txs confirmed without prior mempool observation, `total_input_value` remains `NULL`.
@@ -93,16 +93,16 @@ The vertical axis represents the journey from raw chain event to queryable stora
 
 ```mermaid
 flowchart TD
-    OG(["Ogmios v6 — WebSocket"])
+    OG(["Ogmios v6: WebSocket"])
 
-    subgraph ingest["Ingestion — ogmios_client.py"]
-        CS["Chain Sync — nextBlock loop"]
-        MM["Mempool Monitor — nextTransaction loop"]
-        QC["Query Connection — queryLedgerState/utxo"]
-        CACHE[("_pending_input_cache — in-memory")]
+    subgraph ingest["Ingestion: ogmios_client.py"]
+        CS["Chain Sync: nextBlock loop"]
+        MM["Mempool Monitor: nextTransaction loop"]
+        QC["Query Connection: queryLedgerState/utxo"]
+        CACHE[("_pending_input_cache: in-memory")]
     end
 
-    subgraph parse["Parser — ogmios_parser.py"]
+    subgraph parse["Parser: ogmios_parser.py"]
         P["parse_ogmios_transaction()"]
     end
 
@@ -110,14 +110,15 @@ flowchart TD
         T[("transactions")]
         TI[("transaction_inputs")]
         TO[("transaction_outputs")]
-        AT[("address_transactions — auto via MV")]
-        AR[("tx_analysis_results")]
+        AT[("address_transactions: auto via MV")]
+        AR[("tx_class_scores")]
+        BL[("baselines: per-script/policy percentiles")]
     end
 
     subgraph pg["Operational Database (PostgreSQL)"]
-        LC[("tx_lifecycle — current status")]
-        SC[("sync_checkpoint — last slot")]
-        ES[("entity_state — user annotations")]
+        LC[("tx_lifecycle: current status")]
+        SC[("sync_checkpoint: last slot")]
+        ES[("entity_state: user annotations")]
     end
 
     subgraph fs["Data Lake (Filesystem)"]
@@ -125,7 +126,7 @@ flowchart TD
         RM[("mempool/{network}/{YYYYMMDD}/{shard}")]
     end
 
-    subgraph ae["Analysis Engine — engine.py (background)"]
+    subgraph ae["Analysis Engine: engine.py (background)"]
         AE["_score_transaction()"]
     end
 
