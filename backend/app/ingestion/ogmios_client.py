@@ -9,7 +9,7 @@ Uses three separate WebSocket connections (Ogmios multiplexes one mini-protocol 
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Awaitable, Optional, Set, Dict, Any, List
 
 import websockets
@@ -44,6 +44,10 @@ class OgmiosClient:
         # LocalStateQuery connection for UTxO input resolution (on-demand)
         self._query_ws = None
         self._query_lock = asyncio.Lock()
+
+        # Front-running collision detection: tracks input ref sets of pending txs
+        # Key: tx_hash, Value: (set of (input_tx_hash, input_index), first_seen_at, fee)
+        self._pending_input_sets: Dict[str, tuple] = {}
 
         # Cache of resolved UTxO inputs for PENDING transactions.
         # Populated by the mempool monitor via queryLedgerState/utxo, consumed
@@ -317,6 +321,90 @@ class OgmiosClient:
             "addresses": list(set(tx.addresses) | resolved_addrs),
         })
 
+    async def _resolve_input_amounts(
+        self, txs: List[NormalizedTransaction]
+    ) -> List[NormalizedTransaction]:
+        """Resolve input addresses and amounts from ClickHouse and intra-block outputs.
+
+        1. Build an intra-block output map from earlier txs in this block.
+        2. Collect all unresolved (input_tx_hash, input_index) refs.
+        3. Batch-fetch from ClickHouse for cross-block refs.
+        4. Apply resolved values to each input.
+        """
+        # Build intra-block output map: {(tx_hash, output_index): (address, amount)}
+        intra_block: Dict[tuple, tuple] = {}
+        for tx in txs:
+            for idx, out in enumerate(tx.outputs):
+                if not out.is_collateral:
+                    intra_block[(tx.tx_hash, idx)] = (out.address, out.amount)
+
+        # Collect all unresolved input refs (skip already-resolved from mempool cache)
+        cross_block_refs = []
+        for tx in txs:
+            for inp in tx.inputs:
+                if inp.is_collateral or inp.is_reference:
+                    continue
+                if inp.amount > 0:
+                    continue  # already resolved
+                ref = (inp.tx_hash, inp.index)
+                if ref not in intra_block:
+                    cross_block_refs.append(ref)
+
+        # Batch fetch from ClickHouse
+        ch_resolved: Dict[tuple, tuple] = {}
+        if cross_block_refs:
+            ch_resolved = await clickhouse.get_outputs_for_refs_async(
+                cross_block_refs, self.network
+            )
+
+        # Merge: intra-block takes priority over ClickHouse
+        all_resolved = {**ch_resolved, **intra_block}
+
+        # Apply to each tx
+        result = []
+        for tx in txs:
+            total = 0
+            new_inputs = []
+            changed = False
+            for inp in tx.inputs:
+                if inp.is_collateral or inp.is_reference:
+                    new_inputs.append(inp)
+                    continue  # don't include collateral/reference in total_input_value
+                if inp.amount > 0:
+                    total += inp.amount
+                    new_inputs.append(inp)
+                    continue
+                ref = (inp.tx_hash, inp.index)
+                resolved = all_resolved.get(ref)
+                if resolved:
+                    addr, amt = resolved
+                    new_inputs.append(TransactionInput(
+                        tx_hash=inp.tx_hash,
+                        index=inp.index,
+                        address=addr,
+                        amount=int(amt),
+                        assets=inp.assets,
+                        is_reference=False,
+                        is_collateral=False,
+                    ))
+                    total += int(amt)
+                    changed = True
+                else:
+                    new_inputs.append(inp)
+
+            if changed:
+                resolved_addrs = {
+                    i.address for i in new_inputs
+                    if i.address and not i.is_collateral and not i.is_reference
+                }
+                tx = tx.model_copy(update={
+                    "inputs": new_inputs,
+                    "total_input_value": total if total > 0 else None,
+                    "addresses": list(set(tx.addresses) | resolved_addrs),
+                })
+            result.append(tx)
+        return result
+
     async def _handle_roll_forward(self, result: dict):
         """Process a new block (rollForward)."""
         block = result.get("block", {})
@@ -366,6 +454,13 @@ class OgmiosClient:
                 tx_id = tx_data.get("id", "unknown")
                 logger.error(f"Error parsing transaction {tx_id}: {e}")
 
+        # Resolve input amounts from ClickHouse + intra-block outputs
+        if normalized_txs:
+            try:
+                normalized_txs = await self._resolve_input_amounts(normalized_txs)
+            except Exception as e:
+                logger.error(f"Input amount resolution failed (non-fatal): {e}")
+
         if normalized_txs:
             # Batch persist to ClickHouse (non-blocking — runs in thread pool)
             try:
@@ -392,6 +487,66 @@ class OgmiosClient:
                 await postgres.batch_upsert_lifecycle_confirmed(confirmed_records)
             except Exception as e:
                 logger.error(f"Error updating lifecycle for block {block_slot}: {e}")
+
+            # Detect displacement: a confirmed tx may spend inputs that a
+            # still-pending tx also wanted.  This is the primary Cardano
+            # front-running signal (two competing txs are never in the same
+            # node's mempool simultaneously).
+            confirmed_hashes = {tx.tx_hash for tx in normalized_txs}
+            for tx in normalized_txs:
+                conf_refs = {
+                    (inp.tx_hash, inp.index) for inp in tx.inputs
+                    if not inp.is_collateral and not inp.is_reference
+                }
+                if not conf_refs:
+                    continue
+                for pending_id, (pending_refs, pending_seen, pending_fee, pending_addr, pending_ttl) in self._pending_input_sets.items():
+                    if pending_id in confirmed_hashes:
+                        continue  # this pending tx is also in this block
+                    shared = conf_refs & pending_refs
+                    if shared:
+                        delta_ms = (now_utc - pending_seen).total_seconds() * 1000
+                        conf_addr = ""
+                        conf_inp = next(
+                            (i for i in tx.inputs if not i.is_collateral and not i.is_reference and i.address),
+                            None,
+                        )
+                        if conf_inp:
+                            conf_addr = conf_inp.address
+                        try:
+                            await postgres.insert_mempool_collision(
+                                tx_a=pending_id, tx_b=tx.tx_hash,
+                                network=self.network,
+                                shared_inputs=[list(s) for s in shared],
+                                shared_count=len(shared),
+                                tx_a_seen_at=pending_seen, tx_b_seen_at=now_utc,
+                                delta_ms=delta_ms,
+                                tx_a_fee=pending_fee, tx_b_fee=tx.fee or 0,
+                                tx_a_first_input_addr=pending_addr,
+                                tx_b_first_input_addr=conf_addr,
+                                tx_a_ttl=pending_ttl, tx_b_ttl=0,
+                            )
+                            # Immediately mark outcome: the confirmed tx (tx_b) won
+                            await postgres.update_collision_outcome(
+                                tx.tx_hash, self.network
+                            )
+                            logger.info(
+                                f"Displacement detected: pending {pending_id[:16]}.. "
+                                f"displaced by confirmed {tx.tx_hash[:16]}.. "
+                                f"({len(shared)} shared inputs)"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Displacement record error: {e}")
+
+            # Update collision outcomes for pre-existing collisions and clean up
+            for tx in normalized_txs:
+                self._pending_input_sets.pop(tx.tx_hash, None)
+                try:
+                    await postgres.update_collision_outcome(
+                        tx.tx_hash, self.network
+                    )
+                except Exception:
+                    pass
 
             # Emit lifecycle events after DB writes so API queries are consistent
             for tx in normalized_txs:
@@ -502,6 +657,66 @@ class OgmiosClient:
 
                 self._seen_mempool_txs.add(tx_id)
                 now = datetime.now(timezone.utc)
+
+                # Collision detection: extract input refs and check against pending txs
+                try:
+                    input_refs = set()
+                    fee_obj = tx_data.get("fee", {})
+                    tx_fee = fee_obj.get("lovelace", 0) if isinstance(fee_obj, dict) else int(fee_obj or 0)
+                    tx_ttl = tx_data.get("timeToLive", 0) or 0
+                    # Extract first input address for address clustering.
+                    # Ogmios mempool inputs are unresolved references (tx_hash + index),
+                    # not full UTxOs with addresses. Extract the address field if present
+                    # (resolved inputs), otherwise leave empty.
+                    first_input_addr = ""
+                    first_inp = (tx_data.get("inputs") or [None])[0]
+                    if first_inp:
+                        first_input_addr = first_inp.get("address", "")
+                    for inp in tx_data.get("inputs", []):
+                        inp_tx = inp.get("transaction", {})
+                        inp_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
+                        input_refs.add((inp_hash, inp.get("index", 0)))
+
+                    if input_refs:
+                        # Check for collisions with existing pending txs
+                        for other_id, (other_refs, other_seen, other_fee, other_addr, other_ttl) in self._pending_input_sets.items():
+                            shared = input_refs & other_refs
+                            if shared:
+                                delta_ms = (now - other_seen).total_seconds() * 1000
+                                try:
+                                    await postgres.insert_mempool_collision(
+                                        tx_a=other_id, tx_b=tx_id,
+                                        network=self.network,
+                                        shared_inputs=[list(s) for s in shared],
+                                        shared_count=len(shared),
+                                        tx_a_seen_at=other_seen, tx_b_seen_at=now,
+                                        delta_ms=delta_ms,
+                                        tx_a_fee=other_fee, tx_b_fee=tx_fee,
+                                        tx_a_first_input_addr=other_addr,
+                                        tx_b_first_input_addr=first_input_addr,
+                                        tx_a_ttl=other_ttl, tx_b_ttl=tx_ttl,
+                                    )
+                                    logger.info(
+                                        f"Mempool collision: {other_id[:16]}.. vs {tx_id[:16]}.. "
+                                        f"({len(shared)} shared inputs, delta={delta_ms:.0f}ms)"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Failed to record collision: {e}")
+
+                        self._pending_input_sets[tx_id] = (input_refs, now, tx_fee, first_input_addr, tx_ttl)
+
+                    # Prune stale entries (throttled: every 100 txs)
+                    if len(self._seen_mempool_txs) % 100 == 0:
+                        cutoff = now - timedelta(hours=2)
+                        stale = [k for k, v in self._pending_input_sets.items() if v[1] < cutoff]
+                        for k in stale:
+                            del self._pending_input_sets[k]
+                            self._pending_input_cache.pop(k, None)
+                        # Cap dedup set to prevent unbounded growth
+                        if len(self._seen_mempool_txs) > 50_000:
+                            self._seen_mempool_txs.clear()
+                except Exception as e:
+                    logger.debug(f"Collision detection error for {tx_id}: {e}")
 
                 # Resolve UTxO inputs while the tx is still PENDING (inputs
                 # are guaranteed unspent at this point). Results are cached

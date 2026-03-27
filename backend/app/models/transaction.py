@@ -30,11 +30,28 @@ class LifecycleStatus(str, Enum):
     DROPPED = "DROPPED"
 
 
-class RiskLevel(str, Enum):
-    """Risk classification produced by the Analysis Engine"""
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
+class RiskBand(str, Enum):
+    """Interpretive score bands from Polimi scoring framework.
+
+    Scores are continuous 0-100; bands guide analyst workflow and alerting.
+    """
+    LOW = "Low"             # 0-30: no action, baseline calibration
+    MODERATE = "Moderate"   # 31-59: flagged for periodic review
+    HIGH = "High"           # 60-79: queued for analyst review
+    CRITICAL = "Critical"   # 80-100: immediate alert
+
+
+class AttackClass(str, Enum):
+    """The nine attack classes defined by the Polimi detection spec."""
+    TOKEN_DUST = "token_dust"
+    LARGE_VALUE = "large_value"
+    LARGE_DATUM = "large_datum"
+    MULTIPLE_SAT = "multiple_sat"
+    FRONT_RUNNING = "front_running"
+    SANDWICH = "sandwich"
+    CIRCULAR = "circular"
+    FAKE_TOKEN = "fake_token"
+    PHISHING = "phishing"
 
 
 class TransactionLifecycleEvent(BaseModel):
@@ -84,27 +101,31 @@ class TransactionOutput(BaseModel):
     is_collateral: bool = Field(default=False, description="True if this is a collateral return output")
 
 
-class TransactionAnalysisResult(BaseModel):
-    """Output record produced by the Analysis Engine for a single transaction."""
+
+class ClassScoreResult(BaseModel):
+    """Multi-class scoring output produced by the Analysis Engine.
+
+    Each transaction receives an independent 0-100 score for every applicable
+    attack class.  A score of -1 means the class was not applicable (gate
+    condition failed).
+    """
     tx_hash: str
     network: str
-    risk_score: float = Field(..., ge=0.0, le=1.0, description="Composite risk score in [0, 1]")
-    risk_level: RiskLevel
-    cluster_id: int = Field(..., description="Deterministic address-cluster identifier (0–99)")
-    is_anomaly: bool
-    anomaly_reasons: List[str] = Field(default_factory=list)
-    analysis_version: str
-    analyzed_at: datetime
-
-
-class AnalysisStats(BaseModel):
-    """Aggregate statistics across all analysis results for a network."""
-    total_analyzed: int = 0
-    avg_risk_score: Optional[float] = None
-    high_risk_count: int = 0
-    anomaly_count: int = 0
-    cluster_count: int = 0
-    last_run_at: Optional[datetime] = None
+    scores: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Attack class name -> score (0-100, or -1 if not applicable)",
+    )
+    max_score: float = Field(0.0, description="Highest score across all classes")
+    max_class: str = Field("", description="Attack class with the highest score")
+    risk_band: RiskBand = RiskBand.LOW
+    sub_scores: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Per-class sub-score breakdown for drill-down",
+    )
+    analysis_version: str = ""
+    analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    fee: Optional[int] = Field(None, description="Transaction fee in lovelace")
+    output_count: Optional[int] = Field(None, description="Number of transaction outputs")
 
 
 class NormalizedTransaction(BaseModel):
@@ -116,14 +137,14 @@ class NormalizedTransaction(BaseModel):
     block_hash: Optional[str] = Field(None, description="Block hash")
     block_index: Optional[int] = Field(None, description="Transaction index within its block (0-based)")
     timestamp: datetime = Field(..., description="Transaction timestamp")
-    fee: int = Field(..., description="Transaction fee in Lovelace")
-    deposit: Optional[int] = Field(None, description="Deposit amount (positive for deposits, negative for withdrawals) in Lovelace")
+    fee: int = Field(..., description="Transaction fee in lovelace")
+    deposit: Optional[int] = Field(None, description="Deposit amount (positive for deposits, negative for withdrawals) in lovelace")
     inputs: List[TransactionInput] = Field(default_factory=list)
     outputs: List[TransactionOutput] = Field(default_factory=list)
     input_count: int = Field(0, description="Number of inputs")
     output_count: int = Field(0, description="Number of outputs")
-    total_input_value: Optional[int] = Field(None, description="Total input value in Lovelace; NULL when input amounts are unresolved (UTxO cache not available)")
-    total_output_value: int = Field(0, description="Total output value in Lovelace")
+    total_input_value: Optional[int] = Field(None, description="Total input value in lovelace; NULL when input amounts are unresolved (UTxO cache not available)")
+    total_output_value: int = Field(0, description="Total output value in lovelace")
     addresses: List[str] = Field(default_factory=list, description="All addresses involved")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Transaction metadata")
     raw_data: Optional[Dict[str, Any]] = Field(None, description="Raw transaction data for audit")

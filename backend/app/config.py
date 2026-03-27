@@ -52,7 +52,29 @@ class Settings(BaseSettings):
     ANALYSIS_ENGINE_ENABLED: bool = True
     ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30   # how often the engine polls for new txs
     ANALYSIS_ENGINE_BATCH_SIZE: int = 100         # max transactions scored per run
-    ANALYSIS_ENGINE_VERSION: str = "mock-v1"      # version tag written to every result row
+
+    # Analysis Engine: multi-class detection
+    ANALYSIS_ENABLED: bool = True
+    BASELINE_MIN_SAMPLES: int = 200          # min txs before per-script baseline is trusted
+    BASELINE_BOOTSTRAP_ON_STARTUP: bool = True
+    BASELINE_RECOMPUTE_INTERVAL_HOURS: int = 24  # recompute script baselines daily
+    BASELINE_MAX_SCRIPTS: int = 500              # max script addresses to recompute per cycle
+    SCORER_PHISHING_ENABLED: bool = True
+    SCORER_TOKEN_DUST_ENABLED: bool = True
+    SCORER_LARGE_VALUE_ENABLED: bool = True
+    SCORER_LARGE_DATUM_ENABLED: bool = True
+    SCORER_MULTIPLE_SAT_ENABLED: bool = True
+    SCORER_FAKE_TOKEN_ENABLED: bool = True
+    SCORER_FRONT_RUNNING_ENABLED: bool = True
+    SCORER_SANDWICH_ENABLED: bool = True
+    SCORER_CIRCULAR_ENABLED: bool = True
+
+    # Phase 4: cross-transaction detection infrastructure
+    COLLISION_DETECTION_ENABLED: bool = True
+    CYCLE_DETECTION_ENABLED: bool = True
+    CYCLE_MAX_HOPS: int = 6
+    CYCLE_MAX_FANOUT: int = 50
+    SANDWICH_SIMPLIFIED_ENABLED: bool = True
 
     # Lifecycle cleanup — PENDING → DROPPED sweep
     # PENDING transactions older than this threshold are marked DROPPED by the

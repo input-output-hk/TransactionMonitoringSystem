@@ -43,6 +43,7 @@ CLAUDE.md
 # Internal documents (not for public repo)
 internal/
 docs/MILESTONE-1-REVIEW.md
+docs/PolimiDocs/
 
 # Logs
 *.log
@@ -70,3 +71,6 @@ backend/data/rocksdb/
 data/raw/
 # Default path when running from backend/ directory
 backend/data/raw/
+
+# Demo dashboard (temporary Vercel mockup)
+demo-dashboard/

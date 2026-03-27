@@ -15,9 +15,9 @@ Write-once: existing files are skipped (safe on ingestion replay after restart).
 Async via dedicated 2-worker thread pool — event loop is never blocked.
 
 Upgrade path:
-  M1/Preprod  → local filesystem (this module, zero new service)
-  Production  → MinIO: replace _write_sync / read_raw with boto3 S3 calls
-  Mainnet     → Cloudflare R2 / Backblaze B2 / AWS S3 (same boto3 client)
+  Preprod     : local filesystem (this module, zero new service)
+  Production  : MinIO, replace _write_sync / read_raw with boto3 S3 calls
+  Mainnet     : Cloudflare R2 / Backblaze B2 / AWS S3 (same boto3 client)
 """
 
 import asyncio
@@ -66,6 +66,10 @@ def _build_path(prefix: str, network: str, tx_hash: str, date: datetime) -> str:
     shard prefix distributes PUTs across multiple index partitions, avoiding
     the hot-prefix throttling that occurs when millions of keys share a prefix.
     """
+    # Validate tx_hash to prevent path traversal (Ogmios data is untrusted)
+    if not tx_hash or not all(c in "0123456789abcdef" for c in tx_hash):
+        logger.warning(f"Invalid tx_hash for raw store: {tx_hash[:20]!r}")
+        return ""
     day_dir = date.strftime("%Y%m%d")
     shard = tx_hash[:2]  # 256 uniform buckets (tx_hash is SHA-256 derived)
     dir_path = os.path.join(settings.RAW_STORE_PATH, prefix, network, day_dir, shard)
@@ -84,6 +88,8 @@ def _write_sync(prefix: str, network: str, tx_hash: str,
     os.replace() is guaranteed atomic on POSIX (rename(2) syscall).
     """
     path = _build_path(prefix, network, tx_hash, ts)
+    if not path:
+        return
     if os.path.exists(path):
         return  # write-once: skip on ingestion replay after restart
     os.makedirs(os.path.dirname(path), exist_ok=True)

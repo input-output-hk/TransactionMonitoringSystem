@@ -1,8 +1,8 @@
 """In-memory sliding window rate limiter.
 
 Keyed by API key when present, falling back to client IP address.
-Sufficient for a single-process deployment (M1). A shared store
-(Redis/Valkey) will be required if the application is horizontally scaled.
+Sufficient for a single-process deployment. A shared store (Redis/Valkey)
+will be required if the application is horizontally scaled.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Paths that are never rate-limited
-_EXEMPT_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+_EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/ws"}
 
 
 class RateLimiter:

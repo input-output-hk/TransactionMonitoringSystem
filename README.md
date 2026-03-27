@@ -1,12 +1,12 @@
 # Cardano Transaction Monitoring System
 
-Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), and exposes a REST API and live WebSocket feed.
+Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), scores transactions against 9 Polimi attack classes (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing), and exposes a REST API and live WebSocket feed.
 
 **For step-by-step setup and operations see [RUNBOOK.md](RUNBOOK.md).**
 
 ## Prerequisites
 
-- A running Cardano node + Ogmios v6 (external infrastructure — see [RUNBOOK.md §Prerequisites](RUNBOOK.md#prerequisites))
+- A running Cardano node + Ogmios v6 (external infrastructure; see [RUNBOOK.md §Prerequisites](RUNBOOK.md#prerequisites))
 - Python 3.12+
 - Docker and Docker Compose
 
@@ -26,7 +26,7 @@ pip install -r requirements.txt
 
 # 4. Configure
 cp .env.example .env
-# Edit .env — set OGMIOS_WS_URL, API_KEYS, and network
+# Edit .env: set OGMIOS_WS_URL, API_KEYS, and network
 
 # 5. Start databases
 docker-compose up -d
@@ -52,6 +52,7 @@ Key variables in `.env`:
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window duration |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background analysis engine |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | Analysis poll interval |
+| `ANALYSIS_ENABLED` | `true` | Enable 9-class detection engine |
 | `LOG_LEVEL` | `INFO` | Log verbosity |
 
 Database defaults match the Docker Compose setup and rarely need changing. See `.env.example` for the full list.
@@ -78,12 +79,12 @@ Interactive docs: `http://localhost:8000/docs`
 | GET | `/api/lifecycle/{tx_id}` | Lifecycle state for a single transaction |
 | GET | `/api/lifecycle/stats/summary` | Pending count, avg latency, rollback rate |
 
-Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (chain reorg).
+Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (chain reorg), `DROPPED` (pending beyond TTL without confirmation).
 
 ### Analysis
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/analysis/results` | Analysis results (params: `risk_level`, `limit`, `offset`) |
+| GET | `/api/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `attack_class`, `sort`, `limit`, `offset`) |
 | GET | `/api/analysis/results/{tx_hash}` | Analysis result for a single transaction |
 | GET | `/api/analysis/stats` | Risk distribution, anomaly count, cluster count |
 
@@ -113,15 +114,15 @@ curl http://localhost:8000/health
 
 Single-process FastAPI application. Three async background tasks run in the same event loop:
 
-- **ChainSync** — streams new blocks via Ogmios, enriches transactions with cached UTxO input data, persists to ClickHouse, updates lifecycle to CONFIRMED
-- **Mempool Monitor** — polls `LocalTxMonitor` via Ogmios, resolves input UTxOs via `queryLedgerState/utxo`, writes PENDING lifecycle records to PostgreSQL, broadcasts TX_PENDING over WebSocket
-- **Analysis Engine** — polls ClickHouse for unscored transactions, applies mock risk scoring (M1), writes results back to ClickHouse
+- **ChainSync**: streams new blocks via Ogmios, enriches transactions with cached UTxO input data, persists to ClickHouse, updates lifecycle to CONFIRMED
+- **Mempool Monitor**: polls `LocalTxMonitor` via Ogmios, resolves input UTxOs via `queryLedgerState/utxo`, writes PENDING lifecycle records to PostgreSQL, broadcasts TX_PENDING over WebSocket
+- **Analysis Engine**: polls ClickHouse for unscored transactions, enriches with cross-tx data (mempool collisions, transfer graph cycles, sandwich patterns), runs 9 attack-class scorers (Polimi spec), writes score vectors to ClickHouse
 
 | Store | Purpose |
 |---|---|
-| ClickHouse | Analytics Warehouse — transactions, inputs, outputs, analysis results |
-| PostgreSQL | Lifecycle state, sync checkpoint, entity state, audit logs |
-| Filesystem | Data Lake — write-once gzip JSON blobs of raw Ogmios payloads |
+| ClickHouse | Analytics Warehouse: transactions, inputs, outputs, 9-class score vectors, baselines |
+| PostgreSQL | Lifecycle state, sync checkpoint, entity state, mempool collisions, audit logs |
+| Filesystem | Data Lake: write-once gzip JSON blobs of raw Ogmios payloads |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs/C4-ARCHITECTURE.md), and [docs/TECHNOLOGY-DECISIONS.md](docs/TECHNOLOGY-DECISIONS.md) for details.
 

@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Cardano tx hash: exactly 64 lowercase hex characters.
 _TX_HASH_RE = re.compile(r'^[0-9a-f]{64}$')
-# Cardano addresses: bech32 (addr1…/addr_test1…) and legacy base58 (Ae2…/Dzz…).
-# Only alphanumeric + underscore — no SQL metacharacters possible.
+# Cardano addresses: bech32 (addr1.../addr_test1...) and legacy base58 (Ae2.../Dzz...).
+# Only alphanumeric + underscore; no SQL metacharacters possible.
 _ADDRESS_RE = re.compile(r'^[A-Za-z0-9_]{10,200}$')
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
@@ -68,18 +68,15 @@ async def get_transactions(
     if address and not _ADDRESS_RE.match(address):
         raise HTTPException(status_code=422, detail="Invalid address format")
     try:
-        # Use provided network or default to configured network
         query_network = network or settings.CARDANO_NETWORK
-
-        escaped_network = query_network.replace("'", "''")
+        params: Dict[str, Any] = {"network": query_network, "limit": limit}
 
         if address:
-            # Use the address_transactions lookup table: one row per
-            # (network, address, slot, tx_hash), ORDER BY (network, address, slot).
-            # This is a B-tree point seek; has(Array, ?) on the main table would
-            # degrade to a per-granule scan at scale.
-            escaped_address = address.replace("'", "''")
-            before_clause = f"AND t.timestamp < '{before.isoformat()}'" if before else ""
+            before_clause = ""
+            if before:
+                before_clause = "AND t.timestamp < %(before)s"
+                params["before"] = before
+            params["address"] = address
             query = f"""
                 SELECT
                     t.tx_hash, t.slot, t.block_height, t.block_hash, t.block_index,
@@ -90,30 +87,31 @@ async def get_transactions(
                 INNER JOIN (
                     SELECT DISTINCT tx_hash
                     FROM address_transactions
-                    WHERE network = '{escaped_network}'
-                      AND address = '{escaped_address}'
+                    WHERE network = %(network)s
+                      AND address = %(address)s
                 ) at USING tx_hash
-                WHERE t.network = '{escaped_network}'
+                WHERE t.network = %(network)s
                   {before_clause}
                 ORDER BY t.timestamp DESC
-                LIMIT {limit}
+                LIMIT %(limit)s
             """
         else:
-            conditions = [f"network = '{escaped_network}'"]
+            before_clause = ""
             if before:
-                conditions.append(f"timestamp < '{before.isoformat()}'")
-            where_clause = "WHERE " + " AND ".join(conditions)
+                before_clause = "AND timestamp < %(before)s"
+                params["before"] = before
             query = f"""
                 SELECT
                     tx_hash, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
                     input_count, output_count, total_input_value, total_output_value, addresses
                 FROM transactions
-                {where_clause}
+                WHERE network = %(network)s
+                  {before_clause}
                 ORDER BY timestamp DESC
-                LIMIT {limit}
+                LIMIT %(limit)s
             """
 
-        results = await clickhouse.execute_query_async(query)
+        results = await clickhouse.execute_query_async(query, params)
 
         transactions = []
         for row in results:
@@ -132,9 +130,9 @@ async def get_transactions(
                 total_output_value=row[11],
                 addresses=row[12] if row[12] else []
             ))
-        
+
         return transactions
-    
+
     except Exception as e:
         logger.error(f"Error querying transactions: {e}")
         raise HTTPException(status_code=500, detail="Failed to query transactions")
@@ -153,36 +151,31 @@ async def get_transaction_by_hash(
     if not _TX_HASH_RE.match(tx_hash):
         raise HTTPException(status_code=422, detail="Invalid transaction hash: must be 64 lowercase hex characters")
     try:
-        # Use provided network or default to configured network
         query_network = network or settings.CARDANO_NETWORK
+        params = {"tx_hash": tx_hash, "network": query_network}
 
-        # Escape single quotes in tx_hash and network
-        escaped_tx_hash = tx_hash.replace("'", "''")
-        escaped_network = query_network.replace("'", "''")
-        tx_query = f"""
+        tx_results = await clickhouse.execute_query_async("""
             SELECT
                 tx_hash, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
                 input_count, output_count, total_input_value, total_output_value, addresses, metadata
             FROM transactions
-            WHERE tx_hash = '{escaped_tx_hash}' AND network = '{escaped_network}'
+            WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             LIMIT 1
-        """
-        tx_results = await clickhouse.execute_query_async(tx_query)
+        """, params)
 
         if not tx_results:
             raise HTTPException(status_code=404, detail="Transaction not found")
 
         tx_row = tx_results[0]
 
-        # Get inputs
-        inputs_query = f"""
+        inputs_results = await clickhouse.execute_query_async("""
             SELECT
                 input_tx_hash, input_index_in_tx, address, amount, assets, is_reference, is_collateral
             FROM transaction_inputs
-            WHERE tx_hash = '{escaped_tx_hash}' AND network = '{escaped_network}'
+            WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             ORDER BY input_index
-        """
-        inputs_results = await clickhouse.execute_query_async(inputs_query)
+            LIMIT 500
+        """, params)
 
         inputs = []
         for row in inputs_results:
@@ -202,15 +195,14 @@ async def get_transaction_by_hash(
                 "is_collateral": bool(row[6])
             })
 
-        # Get outputs
-        outputs_query = f"""
+        outputs_results = await clickhouse.execute_query_async("""
             SELECT
                 output_index, address, amount, assets, is_collateral
             FROM transaction_outputs
-            WHERE tx_hash = '{escaped_tx_hash}' AND network = '{escaped_network}'
+            WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             ORDER BY output_index
-        """
-        outputs_results = await clickhouse.execute_query_async(outputs_query)
+            LIMIT 500
+        """, params)
 
         outputs = []
         for row in outputs_results:
@@ -228,7 +220,6 @@ async def get_transaction_by_hash(
                 "is_collateral": bool(row[4])
             })
 
-        # Parse metadata
         metadata = None
         if tx_row[13]:
             try:
@@ -254,7 +245,7 @@ async def get_transaction_by_hash(
             outputs=outputs,
             metadata=metadata
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -292,22 +283,18 @@ async def get_transaction_stats(
 ):
     """Get transaction statistics"""
     try:
-        # Use provided network or default to configured network
         query_network = network or settings.CARDANO_NETWORK
+        params: Dict[str, Any] = {"network": query_network}
 
-        # Escape single quotes in network
-        escaped_network = query_network.replace("'", "''")
-        conditions = [f"network = '{escaped_network}'"]
-
+        time_clauses = ""
         if start_time:
-            conditions.append(f"timestamp >= '{start_time.isoformat()}'")
-
+            time_clauses += " AND timestamp >= %(start_time)s"
+            params["start_time"] = start_time
         if end_time:
-            conditions.append(f"timestamp <= '{end_time.isoformat()}'")
+            time_clauses += " AND timestamp <= %(end_time)s"
+            params["end_time"] = end_time
 
-        where_clause = "WHERE " + " AND ".join(conditions)
-
-        query = f"""
+        results = await clickhouse.execute_query_async(f"""
             SELECT
                 count() as total_count,
                 sum(total_output_value) as total_volume,
@@ -316,12 +303,11 @@ async def get_transaction_stats(
                 min(timestamp) as first_tx,
                 max(timestamp) as last_tx
             FROM transactions
-            {where_clause}
-        """
-
-        results = await clickhouse.execute_query_async(query)
+            WHERE network = %(network)s
+              {time_clauses}
+        """, params)
         row = results[0]
-        
+
         return {
             "total_count": row[0],
             "total_volume": row[1],
@@ -330,7 +316,7 @@ async def get_transaction_stats(
             "first_tx": row[4].isoformat() if row[4] else None,
             "last_tx": row[5].isoformat() if row[5] else None
         }
-    
+
     except Exception as e:
         logger.error(f"Error getting transaction stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get transaction stats")

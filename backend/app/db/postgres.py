@@ -199,6 +199,37 @@ async def execute_schema():
             )
         """)
 
+        # Mempool collision tracking for front-running detection
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS mempool_collisions (
+                id SERIAL PRIMARY KEY,
+                tx_a TEXT NOT NULL,
+                tx_b TEXT NOT NULL,
+                network TEXT NOT NULL,
+                shared_inputs JSONB NOT NULL,
+                shared_count INT NOT NULL,
+                tx_a_seen_at TIMESTAMPTZ NOT NULL,
+                tx_b_seen_at TIMESTAMPTZ NOT NULL,
+                delta_ms DOUBLE PRECISION,
+                outcome TEXT DEFAULT 'BOTH_PENDING',
+                tx_a_fee BIGINT,
+                tx_b_fee BIGINT,
+                tx_a_first_input_addr TEXT DEFAULT '',
+                tx_b_first_input_addr TEXT DEFAULT '',
+                tx_a_ttl INT DEFAULT 0,
+                tx_b_ttl INT DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mempool_collisions_tx_a
+                ON mempool_collisions(tx_a);
+            CREATE INDEX IF NOT EXISTS idx_mempool_collisions_tx_b
+                ON mempool_collisions(tx_b);
+            CREATE INDEX IF NOT EXISTS idx_mempool_collisions_network
+                ON mempool_collisions(network);
+        """)
+
         logger.info("PostgreSQL schema initialized")
 
 
@@ -430,3 +461,128 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
         """, network, older_than_seconds)
         # asyncpg returns "UPDATE N" — extract the row count
         return int(result.split()[1])
+
+
+# --- Mempool Collision Tracking (Front-Running Detection) ---
+
+async def insert_mempool_collision(
+    tx_a: str, tx_b: str, network: str,
+    shared_inputs: list, shared_count: int,
+    tx_a_seen_at: datetime, tx_b_seen_at: datetime,
+    delta_ms: float,
+    tx_a_fee: int = 0, tx_b_fee: int = 0,
+    tx_a_first_input_addr: str = "",
+    tx_b_first_input_addr: str = "",
+    tx_a_ttl: int = 0, tx_b_ttl: int = 0,
+):
+    """Record a mempool collision between two transactions sharing inputs."""
+    async with get_connection() as conn:
+        await conn.execute("""
+            INSERT INTO mempool_collisions
+                (tx_a, tx_b, network, shared_inputs, shared_count,
+                 tx_a_seen_at, tx_b_seen_at, delta_ms, tx_a_fee, tx_b_fee,
+                 tx_a_first_input_addr, tx_b_first_input_addr,
+                 tx_a_ttl, tx_b_ttl)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14)
+        """, tx_a, tx_b, network, json.dumps(shared_inputs), shared_count,
+            tx_a_seen_at, tx_b_seen_at, delta_ms, tx_a_fee, tx_b_fee,
+            tx_a_first_input_addr, tx_b_first_input_addr,
+            tx_a_ttl, tx_b_ttl)
+
+
+async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dict[str, Any]]:
+    """Fetch collision data for a batch of tx hashes. Returns {tx_hash: collision_dict}."""
+    if not tx_hashes:
+        return {}
+    async with get_connection() as conn:
+        rows = await conn.fetch("""
+            SELECT tx_a, tx_b, shared_count, delta_ms, outcome,
+                   tx_a_fee, tx_b_fee,
+                   tx_a_first_input_addr, tx_b_first_input_addr,
+                   tx_a_ttl, tx_b_ttl
+            FROM mempool_collisions
+            WHERE network = $1
+              AND (tx_a = ANY($2) OR tx_b = ANY($2))
+        """, network, tx_hashes)
+
+    # Pre-compute attacker win counts for all counterpart addresses in one query
+    counterpart_addrs = set()
+    for r in rows:
+        counterpart_addrs.add(r["tx_a_first_input_addr"])
+        counterpart_addrs.add(r["tx_b_first_input_addr"])
+    counterpart_addrs.discard("")
+
+    win_counts: Dict[str, int] = {}
+    if counterpart_addrs:
+        async with get_connection() as conn:
+            win_rows = await conn.fetch("""
+                SELECT addr, COUNT(*) AS cnt FROM (
+                    SELECT tx_a_first_input_addr AS addr
+                    FROM mempool_collisions
+                    WHERE network = $1 AND outcome = 'TX_A_CONFIRMED'
+                      AND tx_a_first_input_addr = ANY($2)
+                    UNION ALL
+                    SELECT tx_b_first_input_addr AS addr
+                    FROM mempool_collisions
+                    WHERE network = $1 AND outcome = 'TX_B_CONFIRMED'
+                      AND tx_b_first_input_addr = ANY($2)
+                ) sub GROUP BY addr
+            """, network, list(counterpart_addrs))
+            win_counts = {r["addr"]: r["cnt"] for r in win_rows}
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        for tx_hash in [r["tx_a"], r["tx_b"]]:
+            if tx_hash in tx_hashes and tx_hash not in result:
+                is_a = tx_hash == r["tx_a"]
+                counterpart = r["tx_b"] if is_a else r["tx_a"]
+                counterpart_addr = r["tx_b_first_input_addr"] if is_a else r["tx_a_first_input_addr"]
+                my_addr = r["tx_a_first_input_addr"] if is_a else r["tx_b_first_input_addr"]
+                counterpart_ttl = r["tx_b_ttl"] if is_a else r["tx_a_ttl"]
+                result[tx_hash] = {
+                    "counterpart_tx": counterpart,
+                    "shared_inputs": r["shared_count"],
+                    "delta_ms": r["delta_ms"] or 0.0,
+                    "outcome": r["outcome"],
+                    "counterpart_fee": r["tx_b_fee"] if is_a else r["tx_a_fee"],
+                    "counterpart_ttl": counterpart_ttl or 0,
+                    "shares_change_address": my_addr == counterpart_addr and my_addr != "",
+                    "attacker_win_count": win_counts.get(counterpart_addr, 0),
+                }
+    return result
+
+
+async def update_collision_outcome(confirmed_tx_hash: str, network: str):
+    """Update collision outcomes when a tx is confirmed on-chain.
+
+    Sets outcome based on which side of the collision confirmed:
+    - TX_A_CONFIRMED if the confirmed tx is tx_a
+    - TX_B_CONFIRMED if the confirmed tx is tx_b
+    """
+    async with get_connection() as conn:
+        await conn.execute("""
+            UPDATE mempool_collisions
+            SET outcome = CASE
+                WHEN tx_a = $1 THEN 'TX_A_CONFIRMED'
+                WHEN tx_b = $1 THEN 'TX_B_CONFIRMED'
+            END
+            WHERE network = $2
+              AND (tx_a = $1 OR tx_b = $1)
+              AND outcome = 'BOTH_PENDING'
+        """, confirmed_tx_hash, network)
+
+
+async def count_collision_wins(address: str, network: str) -> int:
+    """Count how many collisions an address cluster has won (for recurrence scoring)."""
+    async with get_connection() as conn:
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) AS cnt
+            FROM mempool_collisions
+            WHERE network = $1
+              AND (
+                  (outcome = 'TX_A_CONFIRMED' AND tx_a_first_input_addr = $2)
+                  OR (outcome = 'TX_B_CONFIRMED' AND tx_b_first_input_addr = $2)
+              )
+        """, network, address)
+        return row["cnt"] if row else 0
