@@ -853,8 +853,8 @@ def get_class_scores_list(
         "network": network, "limit": limit, "offset": offset,
     }
     if risk_band:
-        conditions.append("risk_band = %(risk_band)s")
-        params["risk_band"] = risk_band
+        conditions.append("lower(risk_band) = %(risk_band)s")
+        params["risk_band"] = risk_band.lower()
     if attack_class and attack_class in _CLASS_COLS:
         # Safe: attack_class validated against _CLASS_COLS allowlist above
         conditions.append(f"`{attack_class}` >= %(min_score)s")
@@ -964,19 +964,28 @@ def get_class_scores_stats(network: str) -> Dict[str, Any]:
     )
     if not rows:
         return {}
+
+    import math
+
+    def _safe(v):
+        """Convert NaN/inf floats (ClickHouse empty-agg artefacts) to None."""
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
+        return v
+
     row = rows[0]
     idx = 0
     result: Dict[str, Any] = {
         "total": row[idx], "critical_count": row[idx+1],
         "high_count": row[idx+2], "moderate_count": row[idx+3],
-        "low_count": row[idx+4], "avg_max_score": row[idx+5],
+        "low_count": row[idx+4], "avg_max_score": _safe(row[idx+5]),
         "last_analyzed_at": row[idx+6],
     }
     idx = 7
     per_class = {}
     for col in _CLASS_COLS:
         per_class[col] = {
-            "scored_count": row[idx], "avg_score": row[idx+1], "max_score": row[idx+2],
+            "scored_count": row[idx], "avg_score": _safe(row[idx+1]), "max_score": _safe(row[idx+2]),
         }
         idx += 3
     result["per_class"] = per_class
