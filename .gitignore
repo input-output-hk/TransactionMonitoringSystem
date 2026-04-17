@@ -39,6 +39,9 @@ ENV/
 
 # Claude Code
 CLAUDE.md
+.superpowers/
+docs/superpowers/
+TMS-*.docx
 
 # Internal documents (not for public repo)
 internal/
