@@ -205,16 +205,17 @@ A spending contract validates outputs for its input without checking that each i
 
 | Feature | Role | Weight |
 |---------|------|--------|
-| `redeemer_input_ratio` | Derived primary (inverted): `redeemers_count / n_inputs_same_script`. Ratio << 1.0 = structural fingerprint. **Fixed anchors for inversion: p50=0.0, p99=0.7** (applied to `1 - ratio`). | 0.30 |
-| `net_value_out_of_script` | Primary: total value extracted minus value returned to the same script. Per-script baseline. | 0.20 |
-| `exunits_per_script_input` | Corroborating (inverted): low execution units per script input is anomalous. Per-script baseline. | 0.20 |
-| `full_drain` | Structural: 1.0 if all value extracted from script (nothing returned), 0.0 otherwise. Strong signal independent of redeemer ratio. | 0.20 |
-| `sender_recurrence` | Contextual | 0.10 |
+| `net_value_out_of_script` | Primary: total value extracted minus value returned to the same script. Per-script baseline. | 0.42 |
+| `exunits_per_script_input` | Corroborating (inverted): low execution units per script input is anomalous given multiple script inputs. Per-script baseline. | 0.28 |
+| `n_inputs_same_script` | Primary structural: the severity gradation above the gate threshold; draining 10 UTxOs is more severe than 2. Per-script baseline. | 0.16 |
+| `sender_recurrence` | Contextual: repeated attempts against the same script suggest systematic exploitation. Per-script baseline. | 0.14 |
+
+`redeemer_input_ratio` is deliberately excluded. The Cardano ledger enforces `dom txrdmrs ≡ᵉ scriptRdrptrs`, so the ratio is structurally 1.0 for every valid on-chain transaction. The Multiple Satisfaction vulnerability is semantic (inside the validator) and is not observable through redeemer counts.
 
 ### Key Derived Features
-- `redeemer_input_ratio = redeemers_count / n_inputs_same_script`: should be 1.0 under normal semantics
 - `net_value_out_of_script = sum(script_input_values) - sum(script_output_values)`
-- `net_value_per_input = net_value_out / n_inputs_same_script`: near-constant value suggests linear drainage
+- `exunits_per_script_input = exunits_total.cpu / n_inputs_same_script`
+- `net_value_per_input = net_value_out / n_inputs_same_script`: near-constant value suggests linear drainage (linearity check; not currently scored)
 
 ### Scoring
 
@@ -222,30 +223,27 @@ A spending contract validates outputs for its input without checking that each i
 score_multiple_satisfaction(tx):
     if tx.n_inputs_same_script < 2: return 0
 
-    redeemer_ratio = tx.redeemers_count / (tx.n_inputs_same_script + EPSILON)
-    net_value_out  = compute_net_value_out_of_script(tx)
+    net_value_out      = compute_net_value_out_of_script(tx)
+    exunits_per_input  = tx.exunits_total.cpu / (tx.n_inputs_same_script + EPSILON)
 
-    s_redeemer   = normalise(1 - redeemer_ratio, p50=0.0, p99=0.7)
-    s_extraction = normalise(net_value_out, per_script_baselines)
-    s_exunits    = 1 - normalise(exunits_per_input, per_script_baselines)
-    s_full_drain = 1.0 if (value_in > 0 and value_returned == 0) else 0.0
-    s_recurrence = normalise(tx.sender_recurrence, per_script_baselines)
+    s_extraction   = normalise(net_value_out,       per_script_baselines)
+    s_exunits_inv  = 1 - normalise(exunits_per_input, per_script_baselines)
+    s_inputs       = normalise(tx.n_inputs_same_script, per_script_baselines)
+    s_recurrence   = normalise(tx.sender_recurrence,  per_script_baselines)
 
-    score = 0.30 * s_redeemer + 0.20 * s_extraction + 0.20 * s_exunits + 0.20 * s_full_drain + 0.10 * s_recurrence
+    score = 0.42 * s_extraction + 0.28 * s_exunits_inv + 0.16 * s_inputs + 0.14 * s_recurrence
     return clip(score, 0, 1) * 100
 ```
 
 ### False Positive: Legitimate UTxO Batching
-- DEX batch settlement, staking reward consolidation, multi-position liquidation all have elevated `n_inputs_same_script`.
-- Some use the *withdraw-zero trick* (staking validator invoked once for many inputs), resulting in a legitimately low redeemer count.
-- Per-script allowlist of known batch-processing contracts should bypass `redeemer_input_ratio`.
-- **Net value linearity check**: if coefficient of variation of per-input extracted values is low (near-constant extraction), boost the score; if high, suppress it.
+- DEX batch settlement, staking reward consolidation, multi-position liquidation, and prediction-market resolution all have elevated `n_inputs_same_script` and large `net_value_out_of_script` as normal behaviour.
+- Per-script allowlist of known batch-processing / resolution contracts **reduces** the `s_extraction` weight (redistributed proportionally to `s_inputs` and `s_recurrence`) rather than bypassing the scorer. This preserves the structural signals while suppressing the economic-magnitude signal for contracts where large extraction is legitimate.
+- **Net value linearity check** (not yet implemented): if the coefficient of variation of per-input extracted values is low (near-constant extraction), boost the score; if high, suppress it.
 
 ### What TMS Forge Produces
 - **Setup TX**: creates `utxo_count` (2-10) outputs at a `ScriptAll([ScriptPubkey(vkh)])` address, each carrying `ada_per_utxo` ADA
 - **Exploit TX**: consumes all script UTxOs (filtered by setup TX ID) in a single transaction, sends everything back to the sender as change
-- The exploit TX uses NativeScript (no Plutus), so `redeemers_count == 0` while `n_inputs_same_script == utxo_count`
-- Look for: `n_inputs_same_script >= 2`, `redeemer_input_ratio == 0`, all inputs share the same script hash, large `net_value_out_of_script`
+- Look for: `n_inputs_same_script >= 2`, all inputs share the same script hash, large `net_value_out_of_script`
 
 
 ## Attack 5: Front-Running
@@ -507,7 +505,6 @@ All values are recommended starting points. Validate against production data.
 | Attack Class | Feature | p50 Anchor | p99 Anchor | Notes |
 |-------------|---------|------------|------------|-------|
 | Large Datum | `datum_ratio` | 0.20 | 0.60 | Fraction of UTxO bytes from datum |
-| Multiple Satisfaction | `1 - redeemer_input_ratio` | 0.00 | 0.70 | 0.70 ≈ ratio of 0.30 |
 | Front-Running | `1 / mempool_delta_ms` | 1/2000 | 1/200 | 200ms = automation threshold |
 | Front-Running | `fee_delta` | 500 | 5000 | Lovelace |
 | Front-Running | `ttl_delta` | 10 | 100 | Slots |
@@ -581,7 +578,6 @@ Several sub-scores are placeholders pending cross-tx analysis infrastructure:
 - `url_hash_recurrence`, `targeting_score`, `sender_recurrence` (Phishing delivery): always 0.0; delivery score uses `recipient_count` as sole active signal
 
 ### Weight Deviations from Polimi Spec
-- **Multiple Satisfaction**: adds `full_drain` sub-score (0.20 weight) to detect complete script drainage. Weights: redeemer_ratio 0.30, extraction 0.20, exunits 0.20, full_drain 0.20, recurrence 0.10.
 - **Fake Token**: `policy_age_slots` assumes the policy is new (age=1 slot) for minting transactions. A policy registry lookup would provide the actual first-seen slot.
 
 ### Minimum Recurrence Gate
