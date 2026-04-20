@@ -26,6 +26,7 @@ def _minimal_valid_yaml() -> str:
             allowlist_prefixes: []
             reason_threshold: 0.5
           large_datum:
+            gate: {}
             weights: {}
             fixed_anchors: {}
             bootstrap_anchors: {}

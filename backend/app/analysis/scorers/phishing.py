@@ -15,14 +15,35 @@ containing at least one URL.
 
 import re
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+import tldextract
 from rapidfuzz import fuzz
 
 from app.analysis.normalise import normalise, resolve_baseline
 from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 from app.analysis import external
+
+# No-network tldextract: use the PSL snapshot bundled with the wheel rather
+# than hitting the network on first use. Safer for offline / sandboxed envs.
+_tld = tldextract.TLDExtract(suffix_list_urls=(), fallback_to_snapshot=True)
+
+
+def _registrable_domain(url_or_domain: str) -> Optional[str]:
+    """Return the registrable domain (brand + public suffix), e.g.
+    'api.andamio.io' -> 'andamio.io', 'foo.co.uk' -> 'foo.co.uk'.
+    Returns None for IP addresses or unparseable input."""
+    ext = _tld(url_or_domain)
+    if not ext.domain or not ext.suffix:
+        return None  # IP address, localhost, or non-domain
+    return f"{ext.domain}.{ext.suffix}"
+
+
+def _brand(url_or_domain: str) -> Optional[str]:
+    """Return the brand (registrable domain minus public suffix)."""
+    ext = _tld(url_or_domain)
+    return ext.domain or None
 
 logger = logging.getLogger(__name__)
 
@@ -212,22 +233,38 @@ class PhishingScorer(BaseScorer):
     def _score_domain_suspicion(self, urls: List[str]) -> float:
         """Composite domain suspicion: brand similarity to known protocols.
 
+        Uses tldextract to isolate the registrable domain (`api.andamio.io` ->
+        `andamio`, `foo.co.uk` -> `foo`) before Levenshtein comparison, so
+        subdomain prefixes and multi-part TLDs don't pollute the signal.
+        Exact matches on the registrable domain are skipped: a legitimate
+        subdomain of a known protocol (`api.sundaeswap.finance`) should not
+        be flagged against `sundaeswap.finance`.
+
         Domain age scoring requires WHOIS lookup (deferred to mainnet).
         """
         known_domains = external.get_protocol_domains()
+        # Precompute legit (registrable_domain, brand) once per call. Cached
+        # module-level would be better but the list may refresh via external.
+        legit_info = [
+            (_registrable_domain(d), _brand(d))
+            for d in known_domains
+        ]
+        legit_info = [(r, b) for r, b in legit_info if r and b]
         max_brand_sim = 0.0
 
         for url in urls:
-            domain = self._extract_domain(url)
-            if not domain:
+            tx_registrable = _registrable_domain(url)
+            tx_brand = _brand(url)
+            if not tx_registrable or not tx_brand:
                 continue
-            # Strip TLD for comparison
-            domain_base = domain.split(".")[0] if "." in domain else domain
-
-            for legit in known_domains:
-                legit_base = legit.split(".")[0] if "." in legit else legit
-                sim = fuzz.ratio(domain_base.lower(), legit_base.lower()) / 100.0
-                # Only count as suspicious if it's similar but NOT an exact match
+            # Skip subdomains of legitimate domains: andamio.io is not
+            # phishing sundaeswap.finance just because its subdomain
+            # overlaps with another site's subdomain.
+            if any(tx_registrable == lr for lr, _ in legit_info):
+                continue
+            tx_brand_lc = tx_brand.lower()
+            for _, legit_brand in legit_info:
+                sim = fuzz.ratio(tx_brand_lc, legit_brand.lower()) / 100.0
                 if float(_SIM_RANGE["lo"]) < sim < float(_SIM_RANGE["hi"]):
                     max_brand_sim = max(max_brand_sim, sim)
 
@@ -277,16 +314,3 @@ class PhishingScorer(BaseScorer):
 
         p50_s, p99_s = _anchor(_FIXED, "social_score")
         return normalise(score, p50=p50_s, p99=p99_s)
-
-    def _extract_domain(self, url: str) -> str:
-        """Extract the domain from a URL string."""
-        try:
-            # Strip protocol
-            domain = url.split("://", 1)[-1]
-            # Strip path
-            domain = domain.split("/", 1)[0]
-            # Strip port
-            domain = domain.split(":", 1)[0]
-            return domain.lower()
-        except Exception:
-            return ""

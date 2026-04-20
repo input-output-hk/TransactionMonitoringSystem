@@ -10,18 +10,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.rate_limit import RateLimitMiddleware, RateLimiter
-from app.db import postgres, clickhouse, raw_store
-from app.api import transactions, entities, lifecycle, analysis
-from app.tasks import analysis as analysis_task
-from app.routers import ui, websocket
 
-# Configure logging before any module-level code that may emit log records
+# Configure logging before importing modules that emit log records at import time
+# (e.g. app.analysis.scorer_config which logs the config file it loaded).
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+from app.rate_limit import RateLimitMiddleware, RateLimiter
+from app.db import postgres, clickhouse, raw_store
+from app.api import transactions, entities, lifecycle, analysis
+from app.tasks import analysis as analysis_task
+from app.routers import ui, websocket
 
 # Global state
 active_connections: List = []
