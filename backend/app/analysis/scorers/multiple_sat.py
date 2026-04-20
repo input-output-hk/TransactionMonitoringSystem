@@ -1,24 +1,30 @@
 """Multiple Satisfaction attack scorer (Class 4).
 
 Detects transactions that consume multiple UTxOs from the same script address
-while providing fewer redeemers than inputs: the structural fingerprint of a
-validator vulnerability where a single spending condition satisfies multiple
-inputs simultaneously.
+with structural properties consistent with a validator vulnerability where a
+single satisfying argument covers multiple inputs simultaneously.
 
-The key signal is redeemer_input_ratio: under correct Cardano semantics each
-script input requires its own redeemer, yielding a ratio of 1.0.  A ratio
-significantly below 1.0 indicates potential redeemer reuse.
+`redeemer_input_ratio` is deliberately not a scoring feature: the Cardano
+ledger enforces `redeemers_count == n_script_inputs`
+(dom txrdmrs ≡ᵉ scriptRdrptrs), so the ratio is structurally constant at 1.0
+for all valid on-chain txs and carries no discriminative information. The
+vulnerability is semantic and is not observable through redeemer counts.
 
-Sub-scores (Polimi Section 4.4.3, adjusted):
-  redeemer_input_ratio  (0.30): inverted, fixed anchors p50=0.0 p99=0.70
-  net_value_out_of_script (0.20): per-script baseline
-  exunits_per_input     (0.20): inverted, per-script baseline
-  full_drain            (0.20): 1.0 if all script value extracted, nothing returned
-  sender_recurrence     (0.10): requires entity clustering (deferred to mainnet)
+Sub-scores (Polimi §4.4.3), all per-script baselined:
+
+  net_value_out_of_script    (0.42): per-script baseline
+  exunits_per_script_input   (0.28): inverted, per-script baseline
+  n_inputs_same_script       (0.16): per-script baseline
+  sender_recurrence          (0.14): per-script baseline (DBSCAN deferred, §5.1)
+
+Allowlist behaviour (§4.4.4): transactions interacting with known batch
+validators (DEX settlement, staking consolidation, prediction-market
+resolution) have `s_extraction` weight set to 0 and redistributed across
+`s_inputs` and `s_recurrence`, instead of bypassing the scorer entirely.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
 from app.analysis.scorers.base import BaseScorer, ScorerResult
@@ -26,18 +32,33 @@ from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
 
-# Fixed anchors for 1 - redeemer_input_ratio (Polimi Section 5.4)
-_RIR_P50 = 0.0
-_RIR_P99 = 0.70
-
 EPSILON = 1e-6
+
+# Weights (Polimi §4.4.3)
+_W_EXTRACTION = 0.42
+_W_EXUNITS = 0.28
+_W_INPUTS = 0.16
+_W_RECURRENCE = 0.14
+
+# Bootstrap anchors used when resolve_baseline() returns "missing".
+_BOOT_NET_VALUE = (5_000_000.0, 500_000_000.0)
+_BOOT_EXUNITS = (100_000.0, 10_000_000.0)
+_BOOT_N_INPUTS = (2.0, 10.0)
+_BOOT_RECURRENCE = (0.0, 1.0)
+
+# Known batch-processing / resolution script prefixes. Transactions interacting
+# with these scripts have s_extraction neutralised and its weight redistributed
+# (§4.4.4). Add prediction-market resolution contracts here as they are
+# discovered.
+_ALLOWLISTED_SCRIPT_PREFIXES: List[str] = [
+    "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq",  # SundaeSwap v3 batch
+    "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz",   # Minswap v2 batch
+    "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh",   # WingRiders batch
+]
 
 
 def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
-    """Group transaction inputs by script address.
-
-    Returns {address: [input_dicts]} for script addresses only.
-    """
+    """Group transaction inputs by script address."""
     groups: Dict[str, List[Dict]] = {}
     for inp in raw_data.get("inputs", []):
         addr = inp.get("address", "")
@@ -47,18 +68,11 @@ def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
 
 
 def _extract_lovelace(val: Any) -> int:
-    """Extract lovelace from various Ogmios value formats.
-
-    Ogmios v5: {"lovelace": N}
-    Ogmios v6: {"ada": {"lovelace": N}}
-    Scalar: N
-    """
+    """Extract lovelace from Ogmios v5 `{"lovelace": N}` or v6 `{"ada": {"lovelace": N}}`."""
     if isinstance(val, dict):
-        # Ogmios v6: {"ada": {"lovelace": N}}
         ada = val.get("ada")
         if isinstance(ada, dict):
             return int(ada.get("lovelace", 0))
-        # Ogmios v5: {"lovelace": N}
         return int(val.get("lovelace", 0))
     if val:
         return int(val)
@@ -68,11 +82,7 @@ def _extract_lovelace(val: Any) -> int:
 def _compute_net_value_out(
     inputs: List[Dict], outputs: List[Dict], script_addr: str,
 ) -> int:
-    """Compute net ADA extraction from a script address.
-
-    Sum of input values from script_addr minus sum of output values sent
-    back to script_addr.
-    """
+    """Net lovelace extraction: Σ(inputs from script) − Σ(outputs to script)."""
     value_in = sum(
         _extract_lovelace(inp.get("value"))
         for inp in inputs if inp.get("address", "") == script_addr
@@ -84,96 +94,38 @@ def _compute_net_value_out(
     return max(0, value_in - value_out)
 
 
-def _count_spending_redeemers_for_script(
-    raw_data: Dict, script_addr: str, n_inputs_before: int,
-) -> int:
-    """Count spending redeemers scoped to a specific script address.
-
-    Cardano redeemers are indexed by input position.  We identify which
-    input indices belong to the target script and count how many of those
-    indices have a corresponding spending redeemer.
-
-    When redeemer indexing cannot be resolved (e.g., Ogmios v5 list format
-    without explicit indices), falls back to global spending redeemer count
-    as an approximation.
-    """
-    redeemers = raw_data.get("redeemers")
-    if not redeemers:
-        return 0
-
-    # Build set of input indices belonging to the target script
-    inputs = raw_data.get("inputs", [])
-    script_indices = set()
-    for idx, inp in enumerate(inputs):
-        if inp.get("address", "") == script_addr:
-            script_indices.add(idx)
-
-    if isinstance(redeemers, dict):
-        # Ogmios v6 format: "spend:N" keys where N is the input index
-        count = 0
-        for key in redeemers:
-            if key.startswith("spend:"):
-                try:
-                    idx = int(key.split(":")[1])
-                    if idx in script_indices:
-                        count += 1
-                except (ValueError, IndexError):
-                    pass
-        return count
-
-    if isinstance(redeemers, list):
-        # Ogmios v6 list format: [{"validator": {"index": N, "purpose": "spend"}, ...}]
-        # Ogmios v5 list format: [{"purpose": "spend", "index": N, ...}]
-        count = 0
-        for r in redeemers:
-            validator = r.get("validator", {})
-            purpose = (
-                validator.get("purpose", "")
-                or r.get("purpose", r.get("tag", ""))
-            ).lower()
-            if purpose.startswith("spend"):
-                idx = validator.get("index", r.get("index", -1))
-                if idx in script_indices:
-                    count += 1
-        # If no indices matched (missing index fields), fall back to global
-        if count == 0 and any(
-            (r.get("validator", {}).get("purpose", "")
-             or r.get("purpose", r.get("tag", ""))).lower().startswith("spend")
-            for r in redeemers
-        ):
-            return sum(
-                1 for r in redeemers
-                if (r.get("validator", {}).get("purpose", "")
-                    or r.get("purpose", r.get("tag", ""))).lower().startswith("spend")
-            )
-        return count
-
-    return 0
-
-
-# Known batch-processing script address prefixes (withdraw-zero, DEX settlement)
-# Transactions interacting with these scripts bypass redeemer_input_ratio scoring
-_BATCH_SCRIPT_ALLOWLIST: List[str] = [
-    # SundaeSwap v3 order batch validator
-    "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq",
-    # Minswap v2 batch validator
-    "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz",
-    # WingRiders batch settlement
-    "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh",
-]
-
-
 def _total_exunits_cpu(raw_data: Dict) -> int:
-    """Sum CPU execution units across all redeemers."""
+    """Sum CPU execution units across all redeemers (v5 list or v6 dict/list)."""
     redeemers = raw_data.get("redeemers")
     if not redeemers:
         return 0
-    total = 0
     items = redeemers.values() if isinstance(redeemers, dict) else redeemers
+    total = 0
     for r in items:
         budget = r.get("executionUnits", r.get("budget", {}))
         total += int(budget.get("cpu", budget.get("steps", 0)))
     return total
+
+
+def _is_allowlisted(script_addr: str) -> bool:
+    return any(script_addr.startswith(p) for p in _ALLOWLISTED_SCRIPT_PREFIXES)
+
+
+def _reweight_without_extraction() -> Tuple[float, float, float, float]:
+    """Redistribute _W_EXTRACTION proportionally to _W_INPUTS and _W_RECURRENCE.
+
+    Returns (w_extraction, w_exunits, w_inputs, w_recurrence) with w_extraction
+    forced to 0 and its mass spread across inputs/recurrence by their ratio.
+    """
+    surviving = _W_INPUTS + _W_RECURRENCE
+    bonus_inputs = _W_EXTRACTION * (_W_INPUTS / surviving)
+    bonus_recurrence = _W_EXTRACTION * (_W_RECURRENCE / surviving)
+    return (
+        0.0,
+        _W_EXUNITS,
+        _W_INPUTS + bonus_inputs,
+        _W_RECURRENCE + bonus_recurrence,
+    )
 
 
 class MultipleSatScorer(BaseScorer):
@@ -189,140 +141,126 @@ class MultipleSatScorer(BaseScorer):
 
     def score(self, features: Dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
-        network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
+        total_cpu = _total_exunits_cpu(raw_data)
+        sender_recurrence = float(features.get("sender_recurrence", 0.0) or 0.0)
 
         groups = _group_inputs_by_script(raw_data)
-        total_cpu = _total_exunits_cpu(raw_data)
 
-        best_score = 0.0
-        best_sub = {}
-        best_reasons = []
-        best_bl_source = "missing"
+        best: ScorerResult = ScorerResult()
 
         for script_addr, inps in groups.items():
             n_inputs = len(inps)
             if n_inputs < 2:
                 continue
 
-            # Skip allowlisted batch-processing scripts
-            if any(script_addr.startswith(p) for p in _BATCH_SCRIPT_ALLOWLIST):
-                continue
-
-            # Scope redeemer count to this specific script
-            script_redeemers = _count_spending_redeemers_for_script(
-                raw_data, script_addr, n_inputs,
-            )
-
             result = self._score_script(
-                script_addr, n_inputs, script_redeemers,
-                total_cpu, raw_data, outputs, network,
+                script_addr, n_inputs, total_cpu,
+                raw_data, outputs, sender_recurrence,
             )
-            if result.score > best_score:
-                best_score = result.score
-                best_sub = result.sub_scores
-                best_reasons = result.reasons
-                best_bl_source = result.baseline_source
+            if result.score > best.score:
+                best = result
 
-        return ScorerResult(
-            score=best_score,
-            sub_scores=best_sub,
-            reasons=best_reasons,
-            baseline_source=best_bl_source,
-        )
+        return best
 
     def _score_script(
         self,
         script_addr: str,
         n_inputs: int,
-        spending_redeemers: int,
         total_cpu: int,
         raw_data: Dict,
         outputs: List[Dict],
-        network: str,
+        sender_recurrence: float,
     ) -> ScorerResult:
-        # Derived features
-        redeemer_input_ratio = spending_redeemers / (n_inputs + EPSILON)
-        inverted_rir = 1.0 - redeemer_input_ratio
-
         net_value = _compute_net_value_out(
             raw_data.get("inputs", []), outputs, script_addr,
         )
-
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
-        # Sub-score 1: redeemer_input_ratio inverted (fixed anchors)
-        s_redeemer = normalise(inverted_rir, p50=_RIR_P50, p99=_RIR_P99)
-
-        # Sub-score 2: net_value_out_of_script (per-script baseline)
-        p50_nv, p99_nv, bl1 = resolve_baseline(
+        # Per-script baselines with bootstrap fallbacks.
+        p50_nv, p99_nv, bl_nv = resolve_baseline(
             "net_value_out_of_script", "per_script", script_addr,
         )
-        if bl1 == "missing":
-            p50_nv, p99_nv = 5_000_000.0, 500_000_000.0  # bootstrap
-        s_extraction = normalise(net_value, p50=p50_nv, p99=p99_nv)
+        if bl_nv == "missing":
+            p50_nv, p99_nv = _BOOT_NET_VALUE
 
-        # Sub-score 3: exunits per input inverted (per-script baseline)
-        p50_ex, p99_ex, bl2 = resolve_baseline(
+        p50_ex, p99_ex, bl_ex = resolve_baseline(
             "exunits_per_script_input", "per_script", script_addr,
         )
-        if bl2 == "missing":
-            p50_ex, p99_ex = 100_000.0, 10_000_000.0  # bootstrap
-        s_exunits = normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex)
+        if bl_ex == "missing":
+            p50_ex, p99_ex = _BOOT_EXUNITS
 
-        # Sub-score 4: full drain detection
-        # If all value is extracted from script (nothing returned), this is a
-        # strong structural signal regardless of redeemer ratio or amount.
-        value_in = sum(
-            _extract_lovelace(inp.get("value"))
-            for inp in raw_data.get("inputs", [])
-            if inp.get("address", "") == script_addr
+        p50_ni, p99_ni, bl_ni = resolve_baseline(
+            "n_inputs_same_script", "per_script", script_addr,
         )
-        value_returned = sum(
-            _extract_lovelace(out.get("value"))
-            for out in outputs
-            if out.get("address", "") == script_addr
+        if bl_ni == "missing":
+            p50_ni, p99_ni = _BOOT_N_INPUTS
+
+        p50_rc, p99_rc, bl_rc = resolve_baseline(
+            "sender_recurrence", "per_script", script_addr,
         )
-        # Full drain: script had value and nothing came back
-        s_full_drain = 1.0 if (value_in > 0 and value_returned == 0) else 0.0
+        if bl_rc == "missing":
+            p50_rc, p99_rc = _BOOT_RECURRENCE
 
-        # Sub-score 5: sender recurrence (requires entity clustering)
-        s_recurrence = 0.0
+        # Sub-scores.
+        s_extraction = normalise(net_value, p50=p50_nv, p99=p99_nv)
+        s_exunits_inv = normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex)
+        s_inputs = normalise(float(n_inputs), p50=p50_ni, p99=p99_ni)
+        s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
 
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        # Allowlisted scripts: neutralise s_extraction and redistribute its weight.
+        allowlisted = _is_allowlisted(script_addr)
+        if allowlisted:
+            w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
+            s_extraction = 0.0
+        else:
+            w_ex, w_eu, w_ni, w_rc = (
+                _W_EXTRACTION, _W_EXUNITS, _W_INPUTS, _W_RECURRENCE,
+            )
 
-        # Weights: redeemer_ratio 0.30, extraction 0.20, exunits 0.20,
-        #          full_drain 0.20, recurrence 0.10
         raw = (
-            0.30 * s_redeemer
-            + 0.20 * s_extraction
-            + 0.20 * s_exunits
-            + 0.20 * s_full_drain
-            + 0.10 * s_recurrence
+            w_ex * s_extraction
+            + w_eu * s_exunits_inv
+            + w_ni * s_inputs
+            + w_rc * s_recurrence
         )
         final = round(max(0.0, min(1.0, raw)) * 100, 2)
 
+        # The baseline source reported is the "most specific tier actually used"
+        # across the four features. Prefer per_script > per_policy > global > missing.
+        bl_source = _dominant_source([bl_nv, bl_ex, bl_ni, bl_rc])
+
         reasons = []
-        if s_redeemer > 0.5:
-            reasons.append("low_redeemer_input_ratio")
         if s_extraction > 0.5:
             reasons.append("large_net_value_extraction")
-        if s_exunits > 0.5:
+        if s_exunits_inv > 0.5:
             reasons.append("low_exunits_per_input")
-        if s_full_drain > 0.5:
-            reasons.append("full_drain_from_script")
+        if s_inputs > 0.5:
+            reasons.append("high_n_inputs_same_script")
+        if allowlisted:
+            reasons.append("allowlisted_batch_script")
 
         return ScorerResult(
             score=final,
             sub_scores={
-                "redeemer_input_ratio_inv": round(s_redeemer, 4),
-                "net_value_extraction": round(s_extraction, 4),
-                "exunits_per_input_inv": round(s_exunits, 4),
-                "full_drain": round(s_full_drain, 4),
-                "sender_recurrence": round(s_recurrence, 4),
-                "n_inputs_same_script": n_inputs,
-                "redeemer_input_ratio": round(redeemer_input_ratio, 4),
+                "s_extraction": round(s_extraction, 4),
+                "s_exunits_inv": round(s_exunits_inv, 4),
+                "s_inputs": round(s_inputs, 4),
+                "s_recurrence": round(s_recurrence, 4),
+                "n_inputs_same_script": float(n_inputs),
             },
             reasons=reasons,
             baseline_source=bl_source,
         )
+
+
+def _dominant_source(sources: List[str]) -> str:
+    """Return the most specific baseline tier used.
+
+    Priority: per_script > per_policy > global > missing.
+    """
+    order = ["per_script", "per_policy", "global", "missing"]
+    for tier in order:
+        if tier in sources:
+            return tier
+    return "missing"
