@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # scorer itself (KeyError there still beats a silent wrong value).
 _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold"),
-    "large_datum":   ("weights", "fixed_anchors", "bootstrap_anchors", "reason_threshold"),
+    "large_datum":   ("gate", "weights", "fixed_anchors", "bootstrap_anchors", "reason_threshold"),
     "token_dust":    ("weights", "bootstrap_anchors", "reason_threshold"),
     "large_value":   ("weights", "bootstrap_anchors", "reason_threshold"),
     "front_running": ("weights", "fixed_anchors", "bootstrap_anchors", "outcome_scores",

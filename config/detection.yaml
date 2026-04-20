@@ -34,15 +34,20 @@ scorers:
 
   # ------------------------------------------------------------------
   large_datum:
+    # Gate: only score script UTxOs whose datum exceeds this byte floor.
+    # Below this, the output is a normal Plutus state-carrier, not a bloat
+    # attack candidate. Roughly the p50 of the bootstrap distribution.
+    gate:
+      min_datum_bytes: 6000
     weights:
-      datum_bytes: 0.40
+      datum_bytes: 0.50
       datum_ratio: 0.35
-      value_cbor_inv: 0.15
+      value_cbor_inv: 0.05
       recurrence: 0.10
     fixed_anchors:
-      datum_ratio: { p50: 0.40, p99: 0.85 }
+      datum_ratio: { p50: 0.70, p99: 0.97 }
     bootstrap_anchors:
-      datum_bytes:      { p50: 200, p99: 8000 }
+      datum_bytes:      { p50: 500, p99: 14000 }
       value_cbor_bytes: { p50: 100, p99: 1500 }
     reason_threshold: 0.5
 

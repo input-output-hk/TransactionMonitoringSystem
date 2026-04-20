@@ -144,6 +144,15 @@ async def root():
             .risk-band.Moderate {{ background: #ffab00; color: #000; }}
             .risk-band.Low {{ background: #00c853; color: #000; }}
             .attack-class {{ color: #ce93d8; font-size: 12px; font-weight: 600; }}
+            .class-score {{
+                display: inline-block;
+                padding: 1px 6px;
+                border-radius: 8px;
+                font-size: 10px;
+                font-weight: 700;
+                margin-left: 4px;
+                vertical-align: middle;
+            }}
             .risk-score {{ color: #fff; font-size: 13px; font-weight: 700; }}
             .risk-sub {{ font-size: 11px; color: #888; margin-top: 2px; }}
             .risk-row {{
@@ -388,13 +397,20 @@ async def root():
                     riskPanel.innerHTML = '<div class="empty">No risky transactions detected</div>';
                     return;
                 }}
+                const bandOf = (s) => {{
+                    if (s >= 80) return 'Critical';
+                    if (s >= 60) return 'High';
+                    if (s >= 31) return 'Moderate';
+                    return 'Low';
+                }};
                 riskPanel.innerHTML = alerts.map(a => {{
                     const topClasses = Object.entries(a.scores)
                         .filter(([_, s]) => s > 0)
                         .sort((x, y) => y[1] - x[1])
                         .slice(0, 3);
                     const classHtml = topClasses.map(([cls, score]) =>
-                        `<span class="attack-class">${{CLASS_LABELS[cls] || cls}}</span>`
+                        `<span class="attack-class">${{CLASS_LABELS[cls] || cls}}</span>
+                         <span class="class-score risk-band ${{bandOf(score)}}">${{score.toFixed(1)}}</span>`
                     ).join(' &middot; ');
 
                     // Sub-score explanation for the top class

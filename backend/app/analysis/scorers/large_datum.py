@@ -32,13 +32,18 @@ _W = _CFG["weights"]
 _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
+_MIN_DATUM_BYTES = int(_CFG["gate"]["min_datum_bytes"])
 
 
 class LargeDatumScorer(BaseScorer):
     name = "large_datum"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """Script address with datum present (inline or hash)."""
+        """Script UTxO with a datum whose byte size exceeds the floor.
+
+        The floor filters out normal Plutus state-carrier outputs whose
+        datums are small enough to never constitute bloat.
+        """
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
             return False
@@ -48,7 +53,7 @@ class LargeDatumScorer(BaseScorer):
             if not feat_mod.is_script_address(addr):
                 continue
             datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
-            if datum_flag > 0 and datum_bytes > 0:
+            if datum_flag > 0 and datum_bytes >= _MIN_DATUM_BYTES:
                 return True
         return False
 
@@ -67,7 +72,7 @@ class LargeDatumScorer(BaseScorer):
             if not feat_mod.is_script_address(addr):
                 continue
             datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
-            if datum_flag == 0 or datum_bytes == 0:
+            if datum_flag == 0 or datum_bytes < _MIN_DATUM_BYTES:
                 continue
 
             result = self._score_utxo(out, addr, datum_bytes, network)
