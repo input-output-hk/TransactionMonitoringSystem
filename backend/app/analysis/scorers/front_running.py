@@ -23,29 +23,22 @@ import logging
 from typing import Any, Dict, Optional
 
 from app.analysis.normalise import normalise, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 
 logger = logging.getLogger(__name__)
 
-# Fixed anchors (Polimi Section 5.4)
-_DELTA_INV_P50 = 1 / 2000    # 2000ms = normal propagation variance
-_DELTA_INV_P99 = 1 / 200     # 200ms = automation-consistent
-_FEE_DELTA_P50 = 500         # 500 lovelace fee difference = normal variance
-_FEE_DELTA_P99 = 5000        # 5000 lovelace = near-identical fees suggest mimicry
-_TTL_DELTA_P50 = 10          # 10 slots TTL difference = normal
-_TTL_DELTA_P99 = 100         # 100 slots = structurally similar TTLs
-
-# Outcome score mapping
-# TX_B_CONFIRMED means the later-seen tx won: strong front-running signal
-# TX_A_CONFIRMED means the earlier-seen tx won: no front-run
-_OUTCOME_SCORES = {
-    "TX_B_CONFIRMED": 1.0,   # later tx confirmed, earlier tx lost UTxO
-    "TX1_FAILS_UTXO_SPENT": 1.0,  # legacy compat
-    "BOTH_PENDING": 0.5,
-    "TX_A_CONFIRMED": 0.0,   # earlier tx won, no front-run
-    "TX1_WINS": 0.0,         # legacy compat
-    "TX2_WINS": 0.3,         # legacy compat
+_CFG = _get_cfg("front_running")
+_W = _CFG["weights"]
+_FIXED = _CFG["fixed_anchors"]
+_BOOT = _CFG["bootstrap_anchors"]
+_OUTCOME_SCORES: Dict[str, float] = {
+    k: float(v) for k, v in _CFG["outcome_scores"].items()
 }
+_REASON_T = _CFG["reason_thresholds"]
+_MIN_RECURRENCE_WINS = int(_CFG["min_recurrence_wins"])
+_HIGH_BAND_CAP = float(_CFG["high_band_cap"])
+_DELTA_MS_DEFAULT = float(_CFG["delta_ms_default"])
 
 EPSILON = 1e-6
 
@@ -88,31 +81,34 @@ class FrontRunningScorer(BaseScorer):
         outcome = collision.get("outcome", "BOTH_PENDING")
         s_outcome = _OUTCOME_SCORES.get(outcome, 0.5)
 
-        # Sub-score 2: mempool_delta_ms reciprocal (weight = 0.30)
-        delta_ms = max(collision.get("delta_ms", 10000), 1.0)
+        # Sub-score 2: mempool_delta_ms reciprocal
+        delta_ms = max(collision.get("delta_ms", _DELTA_MS_DEFAULT), 1.0)
         delta_inv = 1.0 / delta_ms
-        s_delta = normalise(delta_inv, p50=_DELTA_INV_P50, p99=_DELTA_INV_P99)
+        p50_d, p99_d = _anchor(_FIXED, "mempool_delta_inv")
+        s_delta = normalise(delta_inv, p50=p50_d, p99=p99_d)
 
-        # Sub-score 3: attacker recurrence (weight = 0.25)
+        # Sub-score 3: attacker recurrence
         win_count = collision.get("attacker_win_count", 0)
         p50_r, p99_r, bl1 = resolve_baseline(
             "collision_win_count", "per_cluster", "__global__",
         )
         if bl1 == "missing":
-            p50_r, p99_r = 0.0, 5.0  # bootstrap
+            p50_r, p99_r = _anchor(_BOOT, "attacker_recurrence")
         s_recurrence = normalise(win_count, p50=p50_r, p99=p99_r)
 
-        # Sub-score 4: structural similarity (weight = 0.10)
+        # Sub-score 4: structural similarity
         fee = features.get("fee", 0)
         counterpart_fee = collision.get("counterpart_fee", 0)
+        p50_f, p99_f = _anchor(_FIXED, "fee_delta")
         fee_sim = 1.0 - normalise(
-            abs(fee - counterpart_fee), p50=_FEE_DELTA_P50, p99=_FEE_DELTA_P99,
+            abs(fee - counterpart_fee), p50=p50_f, p99=p99_f,
         )
 
         ttl = features.get("raw_data", {}).get("timeToLive", 0) or 0
         counterpart_ttl = collision.get("counterpart_ttl", 0)
+        p50_t, p99_t = _anchor(_FIXED, "ttl_delta")
         ttl_sim = 1.0 - normalise(
-            abs(ttl - counterpart_ttl), p50=_TTL_DELTA_P50, p99=_TTL_DELTA_P99,
+            abs(ttl - counterpart_ttl), p50=p50_t, p99=p99_t,
         )
 
         change_link = 1.0 if collision.get("shares_change_address") else 0.0
@@ -121,25 +117,24 @@ class FrontRunningScorer(BaseScorer):
         bl_source = bl1 if bl1 != "missing" else "bootstrap"
 
         raw = (
-            0.35 * s_outcome
-            + 0.30 * s_delta
-            + 0.25 * s_recurrence
-            + 0.10 * s_structure
+            float(_W["outcome"]) * s_outcome
+            + float(_W["delta"]) * s_delta
+            + float(_W["recurrence"]) * s_recurrence
+            + float(_W["structure"]) * s_structure
         )
         final = round(max(0.0, min(1.0, raw)) * 100, 2)
 
-        # Minimum recurrence gate (Polimi Section 4.5.4): cap below Critical
-        # band when attacker has fewer than 3 collision wins in recent window
-        _MIN_RECURRENCE_WINS = 3
+        # Minimum recurrence gate: cap below Critical band when attacker has
+        # fewer than _MIN_RECURRENCE_WINS collision wins in recent window.
         if win_count < _MIN_RECURRENCE_WINS and final >= 80:
-            final = 79.0  # cap at top of High band
+            final = _HIGH_BAND_CAP
 
         reasons = []
-        if s_outcome >= 0.8:
+        if s_outcome >= float(_REASON_T["outcome"]):
             reasons.append("confirmed_utxo_collision")
-        if s_delta > 0.5:
+        if s_delta > float(_REASON_T["delta"]):
             reasons.append("small_mempool_delta")
-        if s_recurrence > 0.5:
+        if s_recurrence > float(_REASON_T["recurrence"]):
             reasons.append("repeat_collision_winner")
 
         return ScorerResult(

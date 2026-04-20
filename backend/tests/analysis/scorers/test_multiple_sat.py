@@ -3,9 +3,14 @@
 import pytest
 from app.analysis.scorers.multiple_sat import (
     MultipleSatScorer,
-    _W_EXTRACTION, _W_EXUNITS, _W_INPUTS, _W_RECURRENCE,
+    _W as _WEIGHTS,
     _reweight_without_extraction,
 )
+
+_W_EXTRACTION = float(_WEIGHTS["extraction"])
+_W_EXUNITS = float(_WEIGHTS["exunits_inv"])
+_W_INPUTS = float(_WEIGHTS["inputs"])
+_W_RECURRENCE = float(_WEIGHTS["recurrence"])
 
 
 @pytest.fixture
@@ -162,11 +167,25 @@ class TestWeights:
         total = _W_EXTRACTION + _W_EXUNITS + _W_INPUTS + _W_RECURRENCE
         assert total == pytest.approx(1.0, abs=1e-9)
 
-    def test_weight_values(self):
-        assert _W_EXTRACTION == 0.42
-        assert _W_EXUNITS == 0.28
-        assert _W_INPUTS == 0.16
-        assert _W_RECURRENCE == 0.14
+    def test_weight_values_match_example_yaml(self):
+        """Spec-weight regression guard: the tracked example YAML must always
+        carry the Polimi §4.4.3 default weights, regardless of any local
+        detection.yaml override the developer might have."""
+        import pathlib
+        import yaml
+
+        here = pathlib.Path(__file__).resolve()
+        example = next(
+            p for p in here.parents
+            if (p / "config" / "detection.example.yaml").exists()
+        ) / "config" / "detection.example.yaml"
+        with open(example, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        w = data["scorers"]["multiple_sat"]["weights"]
+        assert w["extraction"] == 0.42
+        assert w["exunits_inv"] == 0.28
+        assert w["inputs"] == 0.16
+        assert w["recurrence"] == 0.14
 
     def test_reweight_without_extraction_sums_to_one(self):
         w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()

@@ -30,6 +30,9 @@ ENV/
 .env
 .env.local
 
+# Local detection config overrides (example is tracked)
+config/detection.yaml
+
 # IDE
 .vscode/
 .idea/
@@ -39,6 +42,7 @@ ENV/
 
 # Claude Code
 CLAUDE.md
+.claude/
 .superpowers/
 docs/superpowers/
 TMS-*.docx

@@ -13,6 +13,7 @@ asyncpg==0.31.0
 
 # Configuration
 python-dotenv==1.2.1
+PyYAML==6.0.3
 
 # Analysis Engine (Milestone 2)
 cbor2==5.6.5

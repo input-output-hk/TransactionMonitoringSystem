@@ -18,10 +18,16 @@ import logging
 from typing import Any, Dict
 
 from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
+
+_CFG = _get_cfg("token_dust")
+_W = _CFG["weights"]
+_BOOT = _CFG["bootstrap_anchors"]
+_REASON_T = float(_CFG["reason_threshold"])
 
 
 class TokenDustScorer(BaseScorer):
@@ -99,19 +105,19 @@ class TokenDustScorer(BaseScorer):
             "value_cbor_bytes", "per_script", address,
         )
         if bl1 == "missing":
-            p50_cb, p99_cb = 50.0, 500.0  # bootstrap
+            p50_cb, p99_cb = _anchor(_BOOT, "value_cbor_bytes")
 
         p50_ac, p99_ac, bl2 = resolve_baseline(
             "unique_token_count", "per_script", address,
         )
         if bl2 == "missing":
-            p50_ac, p99_ac = 1.0, 20.0  # bootstrap
+            p50_ac, p99_ac = _anchor(_BOOT, "unique_token_count")
 
         p50_ada, p99_ada, bl3 = resolve_baseline(
             "ada_amount", "per_script", address,
         )
         if bl3 == "missing":
-            p50_ada, p99_ada = 2_000_000.0, 50_000_000.0  # bootstrap
+            p50_ada, p99_ada = _anchor(_BOOT, "ada_amount")
 
         bl_source = bl1 if bl1 != "missing" else "bootstrap"
 
@@ -123,19 +129,19 @@ class TokenDustScorer(BaseScorer):
         s_recurrence = 0.0
 
         raw = (
-            0.35 * s_bytes
-            + 0.35 * s_assets
-            + 0.15 * s_ada
-            + 0.15 * s_recurrence
+            float(_W["bytes"]) * s_bytes
+            + float(_W["assets"]) * s_assets
+            + float(_W["ada_inv"]) * s_ada
+            + float(_W["recurrence"]) * s_recurrence
         )
         final = round(max(0.0, min(1.0, raw)) * 100, 2)
 
         reasons = []
-        if s_bytes > 0.5:
+        if s_bytes > _REASON_T:
             reasons.append("high_value_cbor_bytes")
-        if s_assets > 0.5:
+        if s_assets > _REASON_T:
             reasons.append("many_distinct_assets")
-        if s_ada > 0.5:
+        if s_ada > _REASON_T:
             reasons.append("low_lovelace_amount")
 
         return ScorerResult(
