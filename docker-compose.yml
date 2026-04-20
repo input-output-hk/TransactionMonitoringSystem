@@ -48,7 +48,7 @@ services:
     image: ghcr.io/intersectmbo/cardano-node:10.6.2
     container_name: tms-cardano-node
     volumes:
-      - /Users/romainsoulat/tools/preprod:/config:ro
+      - ${CARDANO_CONFIG_DIR:-./cardano-config/preprod}:/config:ro
       - cardano-node-db:/data
       - node-ipc:/ipc
     command:
@@ -64,6 +64,8 @@ services:
     restart: unless-stopped
     networks:
       - tms-network
+    profiles:
+      - ingestion
 
   ogmios:
     image: cardanosolutions/ogmios:latest
@@ -80,13 +82,15 @@ services:
       - --port
       - "1337"
     volumes:
-      - /Users/romainsoulat/tools/preprod:/config:ro
+      - ${CARDANO_CONFIG_DIR:-./cardano-config/preprod}:/config:ro
       - node-ipc:/ipc
     ports:
       - "127.0.0.1:1337:1337"
     restart: unless-stopped
     networks:
       - tms-network
+    profiles:
+      - ingestion
 
   # Application service (optional - can run on host or in Docker)
   app:

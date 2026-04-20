@@ -950,10 +950,10 @@ def get_class_scores_stats(network: str) -> Dict[str, Any]:
     rows = _get_client().execute(
         f"""
         SELECT count() AS total,
-               countIf(risk_band = 'Critical') AS critical_count,
-               countIf(risk_band = 'High') AS high_count,
-               countIf(risk_band = 'Moderate') AS moderate_count,
-               countIf(risk_band = 'Low') AS low_count,
+               countIf(lower(risk_band) = 'critical') AS critical_count,
+               countIf(lower(risk_band) = 'high') AS high_count,
+               countIf(lower(risk_band) = 'moderate') AS moderate_count,
+               countIf(lower(risk_band) = 'low') AS low_count,
                avg(max_score) AS avg_max_score,
                max(analyzed_at) AS last_analyzed_at,
                {agg_sql}

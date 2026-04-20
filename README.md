@@ -6,9 +6,21 @@ Real-time transaction monitoring system for the Cardano blockchain. Ingests bloc
 
 ## Prerequisites
 
-- A running Cardano node + Ogmios v6 (external infrastructure; see [RUNBOOK.md §Prerequisites](RUNBOOK.md#prerequisites))
+- A running Cardano node + Ogmios v6 — either external infrastructure (see [RUNBOOK.md §Prerequisites](RUNBOOK.md#prerequisites)) or the bundled local stack (see [Ingestion modes](#ingestion-modes) below)
 - Python 3.12+
 - Docker and Docker Compose
+
+## Ingestion modes
+
+The `cardano-node` and `ogmios` services in `docker-compose.yml` are gated behind the `ingestion` Compose profile, so you can choose where transactions come from:
+
+| Mode | How to start | When to use |
+|---|---|---|
+| **Remote Ogmios** | Set `OGMIOS_WS_URL=ws://<host>:1337` in `.env`, then `docker-compose up` | Production, staging, or any environment with shared node infrastructure |
+| **Local full stack** | Place node config at `./cardano-config/preprod/` (or set `CARDANO_CONFIG_DIR`), keep default `OGMIOS_WS_URL=ws://localhost:1337`, then `docker-compose --profile ingestion up` | Self-contained local development; requires ~30 GB disk and initial chain sync |
+| **No ingestion** | `docker-compose up` with ingestion disabled | Frontend/API work against pre-populated data |
+
+`CARDANO_CONFIG_DIR` must contain `config.json` and `topology.json` for the target network. Defaults to `./cardano-config/preprod`.
 
 ## Setup
 
