@@ -24,16 +24,20 @@ import logging
 from typing import Any, Dict, Optional
 
 from app.analysis.normalise import normalise, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 
 logger = logging.getLogger(__name__)
 
-# Fixed anchors (Polimi Section 5.4)
-_RATE_DELTA_P50 = 0.0
-_RATE_DELTA_P99 = 0.15   # 15% deterioration
-
-# Default slot window for triple detection
-W_SLOTS = 5
+_CFG = _get_cfg("sandwich")
+_W = _CFG["weights"]
+_FIXED = _CFG["fixed_anchors"]
+_BOOT = _CFG["bootstrap_anchors"]
+_LINK = _CFG["link_scores"]
+_REASON_T = _CFG["reason_thresholds"]
+W_SLOTS = int(_CFG["window_slots"])
+_MIN_PROFIT_LOVELACE = int(_CFG["min_profit_lovelace"])
+_HIGH_BAND_CAP = float(_CFG["high_band_cap"])
 
 EPSILON = 1e-6
 
@@ -78,10 +82,10 @@ class SandwichScorer(BaseScorer):
 
         pool_id = sw.get("pool_id", "")
 
-        # Sub-score 1: attacker link (weight = 0.30)
-        s_link = 1.0 if sw.get("attacker_linked") else 0.2
+        # Sub-score 1: attacker link
+        s_link = float(_LINK["linked"]) if sw.get("attacker_linked") else float(_LINK["unlinked"])
 
-        # Sub-score 2: swap_rate_delta (weight = 0.30)
+        # Sub-score 2: swap_rate_delta
         rate_victim = sw.get("swap_rate_victim", 0.0)
         rate_baseline = sw.get("swap_rate_baseline", 0.0)
         if rate_baseline > 0:
@@ -89,59 +93,57 @@ class SandwichScorer(BaseScorer):
         else:
             rate_delta = 0.0
         # More negative delta = worse for victim = higher score
-        s_rate = normalise(-rate_delta, p50=_RATE_DELTA_P50, p99=_RATE_DELTA_P99)
+        p50_rd, p99_rd = _anchor(_FIXED, "rate_delta")
+        s_rate = normalise(-rate_delta, p50=p50_rd, p99=p99_rd)
 
-        # Sub-score 3: price_impact of tx_A (weight = 0.20)
+        # Sub-score 3: price_impact of tx_A
         impact = sw.get("price_impact_a", 0.0)
         p50_pi, p99_pi, bl1 = resolve_baseline(
             "price_impact", "per_policy", pool_id,
         )
         if bl1 == "missing":
-            p50_pi, p99_pi = 0.0, 0.05  # bootstrap
+            p50_pi, p99_pi = _anchor(_BOOT, "price_impact")
         s_impact = normalise(impact, p50=p50_pi, p99=p99_pi)
 
-        # Sub-score 4: profit of tx_B (weight = 0.10)
+        # Sub-score 4: profit of tx_B
         profit = sw.get("profit_b", 0.0)
         p50_pr, p99_pr, bl2 = resolve_baseline(
             "swap_profit", "per_policy", pool_id,
         )
         if bl2 == "missing":
-            p50_pr, p99_pr = 0.0, 5_000_000.0  # bootstrap (lovelace)
+            p50_pr, p99_pr = _anchor(_BOOT, "swap_profit")
         s_profit = normalise(profit, p50=p50_pr, p99=p99_pr)
 
-        # Sub-score 5: attacker recurrence (weight = 0.10)
+        # Sub-score 5: attacker recurrence
         sandwich_count = sw.get("attacker_sandwich_count", 0)
         p50_sc, p99_sc, bl3 = resolve_baseline(
             "sandwich_count", "per_cluster", "__global__",
         )
         if bl3 == "missing":
-            p50_sc, p99_sc = 0.0, 5.0  # bootstrap
+            p50_sc, p99_sc = _anchor(_BOOT, "attacker_recurrence")
         s_recurrence = normalise(sandwich_count, p50=p50_sc, p99=p99_sc)
 
         bl_source = bl1 if bl1 != "missing" else "bootstrap"
 
         raw = (
-            0.30 * s_link
-            + 0.30 * s_rate
-            + 0.20 * s_impact
-            + 0.10 * s_profit
-            + 0.10 * s_recurrence
+            float(_W["link"]) * s_link
+            + float(_W["rate"]) * s_rate
+            + float(_W["impact"]) * s_impact
+            + float(_W["profit"]) * s_profit
+            + float(_W["recurrence"]) * s_recurrence
         )
         final = round(max(0.0, min(1.0, raw)) * 100, 2)
 
-        # Minimum profit gate (Polimi Section 4.6.4): if profit is below
-        # a minimum economically meaningful threshold (~median tx fee),
-        # cap below Critical band as likely coincidental
-        _MIN_PROFIT_LOVELACE = 200_000  # ~0.2 ADA, approximate median fee
+        # Minimum profit gate: cap below Critical band for coincidental triples.
         if profit < _MIN_PROFIT_LOVELACE and final >= 80:
-            final = 79.0  # cap at top of High band
+            final = _HIGH_BAND_CAP
 
         reasons = []
-        if s_link >= 0.8:
+        if s_link >= float(_REASON_T["link"]):
             reasons.append("attacker_txs_linked")
-        if s_rate > 0.5:
+        if s_rate > float(_REASON_T["rate"]):
             reasons.append("victim_rate_deterioration")
-        if s_impact > 0.5:
+        if s_impact > float(_REASON_T["impact"]):
             reasons.append("significant_price_impact")
 
         return ScorerResult(

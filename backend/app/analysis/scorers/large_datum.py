@@ -21,14 +21,17 @@ import logging
 from typing import Any, Dict
 
 from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
 
-# Fixed anchors for datum_ratio (Polimi Section 5.4)
-_DATUM_RATIO_P50 = 0.20
-_DATUM_RATIO_P99 = 0.60
+_CFG = _get_cfg("large_datum")
+_W = _CFG["weights"]
+_FIXED = _CFG["fixed_anchors"]
+_BOOT = _CFG["bootstrap_anchors"]
+_REASON_T = float(_CFG["reason_threshold"])
 
 
 class LargeDatumScorer(BaseScorer):
@@ -105,37 +108,39 @@ class LargeDatumScorer(BaseScorer):
             "datum_bytes", "per_script", address,
         )
         if bl1 == "missing":
-            p50_db, p99_db = 50.0, 2000.0  # bootstrap
+            p50_db, p99_db = _anchor(_BOOT, "datum_bytes")
 
         # value_cbor_bytes: per-script baseline (for inversion)
         p50_cb, p99_cb, bl2 = resolve_baseline(
             "value_cbor_bytes", "per_script", address,
         )
         if bl2 == "missing":
-            p50_cb, p99_cb = 50.0, 500.0  # bootstrap
+            p50_cb, p99_cb = _anchor(_BOOT, "value_cbor_bytes")
+
+        p50_r, p99_r = _anchor(_FIXED, "datum_ratio")
 
         bl_source = bl1 if bl1 != "missing" else "bootstrap"
 
         # Sub-scores
         s_datum = normalise(datum_bytes, p50=p50_db, p99=p99_db)
-        s_ratio = normalise(datum_ratio, p50=_DATUM_RATIO_P50, p99=_DATUM_RATIO_P99)
+        s_ratio = normalise(datum_ratio, p50=p50_r, p99=p99_r)
         s_value_inv = normalise_inverted(value_cbor, p50=p50_cb, p99=p99_cb)
         s_recurrence = 0.0  # requires entity clustering (deferred to mainnet)
 
         raw = (
-            0.40 * s_datum
-            + 0.35 * s_ratio
-            + 0.15 * s_value_inv
-            + 0.10 * s_recurrence
+            float(_W["datum_bytes"]) * s_datum
+            + float(_W["datum_ratio"]) * s_ratio
+            + float(_W["value_cbor_inv"]) * s_value_inv
+            + float(_W["recurrence"]) * s_recurrence
         )
         final = round(max(0.0, min(1.0, raw)) * 100, 2)
 
         reasons = []
-        if s_datum > 0.5:
+        if s_datum > _REASON_T:
             reasons.append("large_datum_bytes")
-        if s_ratio > 0.5:
+        if s_ratio > _REASON_T:
             reasons.append("high_datum_ratio")
-        if s_value_inv > 0.5:
+        if s_value_inv > _REASON_T:
             reasons.append("lean_value_field")
 
         return ScorerResult(

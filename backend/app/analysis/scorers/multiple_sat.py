@@ -12,21 +12,25 @@ vulnerability is semantic and is not observable through redeemer counts.
 
 Sub-scores (Polimi §4.4.3), all per-script baselined:
 
-  net_value_out_of_script    (0.42): per-script baseline
-  exunits_per_script_input   (0.28): inverted, per-script baseline
-  n_inputs_same_script       (0.16): per-script baseline
-  sender_recurrence          (0.14): per-script baseline (DBSCAN deferred, §5.1)
+  net_value_out_of_script    : per-script baseline
+  exunits_per_script_input   : inverted, per-script baseline
+  n_inputs_same_script       : per-script baseline
+  sender_recurrence          : per-script baseline (DBSCAN deferred, §5.1)
 
 Allowlist behaviour (§4.4.4): transactions interacting with known batch
 validators (DEX settlement, staking consolidation, prediction-market
 resolution) have `s_extraction` weight set to 0 and redistributed across
 `s_inputs` and `s_recurrence`, instead of bypassing the scorer entirely.
+
+All tunable constants live in ``config/detection.yaml`` under the
+``scorers.multiple_sat`` section.
 """
 
 import logging
 from typing import Any, Dict, List, Tuple
 
 from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 from app.analysis import features as feat_mod
 
@@ -34,27 +38,11 @@ logger = logging.getLogger(__name__)
 
 EPSILON = 1e-6
 
-# Weights (Polimi §4.4.3)
-_W_EXTRACTION = 0.42
-_W_EXUNITS = 0.28
-_W_INPUTS = 0.16
-_W_RECURRENCE = 0.14
-
-# Bootstrap anchors used when resolve_baseline() returns "missing".
-_BOOT_NET_VALUE = (5_000_000.0, 500_000_000.0)
-_BOOT_EXUNITS = (100_000.0, 10_000_000.0)
-_BOOT_N_INPUTS = (2.0, 10.0)
-_BOOT_RECURRENCE = (0.0, 1.0)
-
-# Known batch-processing / resolution script prefixes. Transactions interacting
-# with these scripts have s_extraction neutralised and its weight redistributed
-# (§4.4.4). Add prediction-market resolution contracts here as they are
-# discovered.
-_ALLOWLISTED_SCRIPT_PREFIXES: List[str] = [
-    "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq",  # SundaeSwap v3 batch
-    "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz",   # Minswap v2 batch
-    "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh",   # WingRiders batch
-]
+_CFG = _get_cfg("multiple_sat")
+_W = _CFG["weights"]
+_BOOT = _CFG["bootstrap_anchors"]
+_ALLOWLIST: Tuple[str, ...] = tuple(_CFG["allowlist_prefixes"])
+_REASON_T: float = float(_CFG["reason_threshold"])
 
 
 def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
@@ -108,31 +96,34 @@ def _total_exunits_cpu(raw_data: Dict) -> int:
 
 
 def _is_allowlisted(script_addr: str) -> bool:
-    return any(script_addr.startswith(p) for p in _ALLOWLISTED_SCRIPT_PREFIXES)
+    return any(script_addr.startswith(p) for p in _ALLOWLIST)
 
 
 def _reweight_without_extraction() -> Tuple[float, float, float, float]:
-    """Redistribute _W_EXTRACTION proportionally to _W_INPUTS and _W_RECURRENCE.
+    """Redistribute the extraction weight proportionally to inputs and recurrence.
 
     Returns (w_extraction, w_exunits, w_inputs, w_recurrence) with w_extraction
     forced to 0 and its mass spread across inputs/recurrence by their ratio.
     """
-    surviving = _W_INPUTS + _W_RECURRENCE
-    bonus_inputs = _W_EXTRACTION * (_W_INPUTS / surviving)
-    bonus_recurrence = _W_EXTRACTION * (_W_RECURRENCE / surviving)
-    return (
-        0.0,
-        _W_EXUNITS,
-        _W_INPUTS + bonus_inputs,
-        _W_RECURRENCE + bonus_recurrence,
-    )
+    w_ex = float(_W["extraction"])
+    w_eu = float(_W["exunits_inv"])
+    w_ni = float(_W["inputs"])
+    w_rc = float(_W["recurrence"])
+    surviving = w_ni + w_rc
+    bonus_inputs = w_ex * (w_ni / surviving)
+    bonus_recurrence = w_ex * (w_rc / surviving)
+    return (0.0, w_eu, w_ni + bonus_inputs, w_rc + bonus_recurrence)
 
 
 class MultipleSatScorer(BaseScorer):
     name = "multiple_sat"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """At least 2 inputs from the same script address."""
+        """At least 2 inputs from the same script address.
+
+        The threshold of 2 is definitional, not a tunable: below this count
+        the concept of 'multiple' satisfaction does not apply.
+        """
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
             return False
@@ -182,25 +173,25 @@ class MultipleSatScorer(BaseScorer):
             "net_value_out_of_script", "per_script", script_addr,
         )
         if bl_nv == "missing":
-            p50_nv, p99_nv = _BOOT_NET_VALUE
+            p50_nv, p99_nv = _anchor(_BOOT, "net_value_out_of_script")
 
         p50_ex, p99_ex, bl_ex = resolve_baseline(
             "exunits_per_script_input", "per_script", script_addr,
         )
         if bl_ex == "missing":
-            p50_ex, p99_ex = _BOOT_EXUNITS
+            p50_ex, p99_ex = _anchor(_BOOT, "exunits_per_script_input")
 
         p50_ni, p99_ni, bl_ni = resolve_baseline(
             "n_inputs_same_script", "per_script", script_addr,
         )
         if bl_ni == "missing":
-            p50_ni, p99_ni = _BOOT_N_INPUTS
+            p50_ni, p99_ni = _anchor(_BOOT, "n_inputs_same_script")
 
         p50_rc, p99_rc, bl_rc = resolve_baseline(
             "sender_recurrence", "per_script", script_addr,
         )
         if bl_rc == "missing":
-            p50_rc, p99_rc = _BOOT_RECURRENCE
+            p50_rc, p99_rc = _anchor(_BOOT, "sender_recurrence")
 
         # Sub-scores.
         s_extraction = normalise(net_value, p50=p50_nv, p99=p99_nv)
@@ -214,9 +205,10 @@ class MultipleSatScorer(BaseScorer):
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
             s_extraction = 0.0
         else:
-            w_ex, w_eu, w_ni, w_rc = (
-                _W_EXTRACTION, _W_EXUNITS, _W_INPUTS, _W_RECURRENCE,
-            )
+            w_ex = float(_W["extraction"])
+            w_eu = float(_W["exunits_inv"])
+            w_ni = float(_W["inputs"])
+            w_rc = float(_W["recurrence"])
 
         raw = (
             w_ex * s_extraction
@@ -231,11 +223,11 @@ class MultipleSatScorer(BaseScorer):
         bl_source = _dominant_source([bl_nv, bl_ex, bl_ni, bl_rc])
 
         reasons = []
-        if s_extraction > 0.5:
+        if s_extraction > _REASON_T:
             reasons.append("large_net_value_extraction")
-        if s_exunits_inv > 0.5:
+        if s_exunits_inv > _REASON_T:
             reasons.append("low_exunits_per_input")
-        if s_inputs > 0.5:
+        if s_inputs > _REASON_T:
             reasons.append("high_n_inputs_same_script")
         if allowlisted:
             reasons.append("allowlisted_batch_script")

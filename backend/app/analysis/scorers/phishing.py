@@ -20,29 +20,29 @@ from typing import Any, Dict, List
 from rapidfuzz import fuzz
 
 from app.analysis.normalise import normalise, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 from app.analysis import external
 
 logger = logging.getLogger(__name__)
+
+_CFG = _get_cfg("phishing")
+_W_CONTENT = _CFG["weights"]["content"]
+_W_DELIVERY = _CFG["weights"]["delivery"]
+_W_OVERALL = _CFG["weights"]["overall"]
+_FIXED = _CFG["fixed_anchors"]
+_BOOT = _CFG["bootstrap_anchors"]
+_SIM_RANGE = _CFG["similarity_suspicious_range"]
+_SE = _CFG["social_engineering"]
+_REASON_T = _CFG["reason_thresholds"]
+_CRITICAL_T = float(_CFG["critical_threshold"])
+_RELEVANT_LABELS = set(str(x) for x in _CFG["metadata_labels"])
 
 # URL extraction regex — matches http(s) URLs in metadata strings
 _URL_RE = re.compile(
     r'https?://[^\s"\'<>\]\)}{,]+',
     re.IGNORECASE,
 )
-
-# Relevant CIP metadata labels
-_RELEVANT_LABELS = {"674", "721"}
-
-# Fixed normalisation anchors (from Polimi spec Section 5.4)
-_DOMAIN_AGE_P50 = 1 / 365   # reciprocal: 1-year-old domain is baseline
-_DOMAIN_AGE_P99 = 1 / 7     # 7-day-old domain is highly suspicious
-_BRAND_SIM_P50 = 0.0
-_BRAND_SIM_P99 = 0.85
-_SE_SCORE_P50 = 0.0
-_SE_SCORE_P99 = 0.60
-_TARGETING_P50 = 0.05
-_TARGETING_P99 = 0.50
 
 
 class PhishingScorer(BaseScorer):
@@ -88,9 +88,9 @@ class PhishingScorer(BaseScorer):
         s_social = self._score_social_engineering(metadata)
 
         content_score = (
-            0.40 * s_blacklist
-            + 0.35 * s_domain
-            + 0.25 * s_social
+            float(_W_CONTENT["blacklist"]) * s_blacklist
+            + float(_W_CONTENT["domain"]) * s_domain
+            + float(_W_CONTENT["social"]) * s_social
         )
 
         # ----- Delivery sub-pipeline (weight = 0.35) -----
@@ -100,8 +100,7 @@ class PhishingScorer(BaseScorer):
         output_count = features.get("output_count", 0)
         p50, p99, bl_source = resolve_baseline("recipient_count")
         if bl_source == "missing":
-            # Bootstrap anchors until baseline infra is live (Phase 2)
-            p50, p99 = 1.0, 50.0
+            p50, p99 = _anchor(_BOOT, "recipient_count")
             bl_source = "bootstrap"
         s_recipients = normalise(output_count, p50=p50, p99=p99)
 
@@ -120,14 +119,17 @@ class PhishingScorer(BaseScorer):
         # Spec weights: recipients 0.35, url_recur 0.25, targeting 0.25,
         # recurrence 0.15. Sub-scores 2b-2d are deferred (0.0).
         delivery_score = (
-            0.35 * s_recipients
-            + 0.25 * s_url_recur
-            + 0.25 * s_targeting
-            + 0.15 * s_recurrence
+            float(_W_DELIVERY["recipients"]) * s_recipients
+            + float(_W_DELIVERY["url_recur"]) * s_url_recur
+            + float(_W_DELIVERY["targeting"]) * s_targeting
+            + float(_W_DELIVERY["recurrence"]) * s_recurrence
         )
 
         # ----- Final combined score -----
-        raw = 0.65 * content_score + 0.35 * delivery_score
+        raw = (
+            float(_W_OVERALL["content"]) * content_score
+            + float(_W_OVERALL["delivery"]) * delivery_score
+        )
         final_score = round(max(0.0, min(1.0, raw)) * 100, 2)
 
         sub_scores = {
@@ -143,20 +145,20 @@ class PhishingScorer(BaseScorer):
         }
 
         reasons = []
-        if s_blacklist > 0.5:
+        if s_blacklist > float(_REASON_T["blacklist"]):
             reasons.append("url_blacklist_match")
-        if s_domain > 0.5:
+        if s_domain > float(_REASON_T["domain"]):
             reasons.append("suspicious_domain")
-        if s_social > 0.3:
+        if s_social > float(_REASON_T["social"]):
             reasons.append("social_engineering_language")
-        if s_recipients > 0.5:
+        if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
 
         # Severity classification (Polimi Section 4.9.3)
         severity = None
         if s_blacklist == 1.0:
             severity = "KNOWN_BAD"
-        elif content_score >= 0.60:
+        elif content_score >= _CRITICAL_T:
             severity = "SUSPICIOUS_NEW_DOMAIN"
         else:
             severity = "SOCIAL_ENGINEERING"
@@ -226,10 +228,11 @@ class PhishingScorer(BaseScorer):
                 legit_base = legit.split(".")[0] if "." in legit else legit
                 sim = fuzz.ratio(domain_base.lower(), legit_base.lower()) / 100.0
                 # Only count as suspicious if it's similar but NOT an exact match
-                if 0.5 < sim < 1.0:
+                if float(_SIM_RANGE["lo"]) < sim < float(_SIM_RANGE["hi"]):
                     max_brand_sim = max(max_brand_sim, sim)
 
-        s_brand = normalise(max_brand_sim, p50=_BRAND_SIM_P50, p99=_BRAND_SIM_P99)
+        p50_b, p99_b = _anchor(_FIXED, "brand_sim")
+        s_brand = normalise(max_brand_sim, p50=p50_b, p99=p99_b)
 
         # Domain age: requires WHOIS API (deferred to mainnet).
         # When domain age is available, composite = 0.50 * s_age + 0.50 * s_brand.
@@ -256,7 +259,10 @@ class PhishingScorer(BaseScorer):
             if re.search(pattern, text, re.IGNORECASE):
                 urgency_matches += 1
         if urgency_matches > 0:
-            score += min(0.6, urgency_matches * 0.15)
+            score += min(
+                float(_SE["urgency_cap"]),
+                urgency_matches * float(_SE["urgency_increment"]),
+            )
 
         # Tier 3: brand impersonation in suspicious context
         brand_matches = 0
@@ -264,9 +270,13 @@ class PhishingScorer(BaseScorer):
             if brand.lower() in text:
                 brand_matches += 1
         if brand_matches > 0:
-            score += min(0.3, brand_matches * 0.10)
+            score += min(
+                float(_SE["brand_cap"]),
+                brand_matches * float(_SE["brand_increment"]),
+            )
 
-        return normalise(score, p50=_SE_SCORE_P50, p99=_SE_SCORE_P99)
+        p50_s, p99_s = _anchor(_FIXED, "social_score")
+        return normalise(score, p50=p50_s, p99=p99_s)
 
     def _extract_domain(self, url: str) -> str:
         """Extract the domain from a URL string."""

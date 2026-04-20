@@ -22,23 +22,21 @@ from typing import Any, Dict, List, Optional
 from rapidfuzz import fuzz
 
 from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
+from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
 from app.analysis.scorers.base import BaseScorer, ScorerResult
 from app.analysis import external
 
 logger = logging.getLogger(__name__)
 
-# Fixed anchors (Polimi Section 5.4)
-_NAME_SIM_P50 = 0.80
-_NAME_SIM_P99 = 0.97
-_UNICODE_P50 = 0.0
-_UNICODE_P99 = 0.60
-_CIP25_P50 = 0.0
-_CIP25_P99 = 0.80
-_POLICY_AGE_INV_P50 = 1 / 100_000   # ~55 hours
-_POLICY_AGE_INV_P99 = 1 / 5_000     # ~2.7 hours
-
-# Minimum similarity threshold for gate
-T_SIM_MIN = 0.80
+_CFG = _get_cfg("fake_token")
+_W_IDENT = _CFG["weights"]["identity"]
+_W_DIST = _CFG["weights"]["distribution"]
+_W_OVERALL = _CFG["weights"]["overall"]
+_FIXED = _CFG["fixed_anchors"]
+_BOOT = _CFG["bootstrap_anchors"]
+_UNI_SCORES = _CFG["unicode_scores"]
+_REASON_T = _CFG["reason_thresholds"]
+T_SIM_MIN = float(_CFG["similarity_threshold"])
 
 EPSILON = 1e-6
 
@@ -67,7 +65,7 @@ def _compute_unicode_suspicion(name: str) -> float:
     # Check for zero-width characters in original name
     zw_chars = set("\u200b\u200c\u200d\ufeff\u00ad")
     if any(c in zw_chars for c in name):
-        score += 0.4
+        score += float(_UNI_SCORES["zero_width"])
 
     # Check for mixed Unicode scripts
     scripts = set()
@@ -79,12 +77,12 @@ def _compute_unicode_suspicion(name: str) -> float:
             except (ValueError, IndexError):
                 pass
     if len(scripts) > 1:
-        score += 0.3
+        score += float(_UNI_SCORES["mixed_scripts"])
 
     # Check for common homoglyphs (Cyrillic/Greek lookalikes)
     homoglyphs = set("аеіоруАЕІОРУ" + "αβγδεζηθικλμνξοπρστυφχψω")
     if any(c in homoglyphs for c in name):
-        score += 0.3
+        score += float(_UNI_SCORES["homoglyphs"])
 
     return min(1.0, score)
 
@@ -237,25 +235,28 @@ class FakeTokenScorer(BaseScorer):
         if not best_candidate:
             return ScorerResult(score=0.0)
 
-        # ----- Identity Deception sub-pipeline (weight = 0.60) -----
+        # ----- Identity Deception sub-pipeline -----
 
-        s_name = normalise(best_sim, p50=_NAME_SIM_P50, p99=_NAME_SIM_P99)
+        p50_n, p99_n = _anchor(_FIXED, "name_sim")
+        s_name = normalise(best_sim, p50=p50_n, p99=p99_n)
 
         # Check unicode suspicion on the decoded hex name (preserves zero-width chars)
         hex_decoded = _decode_hex_asset_name(best_candidate.get("token_name_hex", ""))
         unicode_score = _compute_unicode_suspicion(hex_decoded or best_candidate["token_name"])
-        s_unicode = normalise(unicode_score, p50=_UNICODE_P50, p99=_UNICODE_P99)
+        p50_u, p99_u = _anchor(_FIXED, "unicode")
+        s_unicode = normalise(unicode_score, p50=p50_u, p99=p99_u)
 
         cip25_sim = _compute_cip25_similarity(metadata, best_legit_name)
-        s_cip25 = normalise(cip25_sim, p50=_CIP25_P50, p99=_CIP25_P99)
+        p50_c, p99_c = _anchor(_FIXED, "cip25")
+        s_cip25 = normalise(cip25_sim, p50=p50_c, p99=p99_c)
 
         identity_score = (
-            0.40 * s_name
-            + 0.35 * s_unicode
-            + 0.25 * s_cip25
+            float(_W_IDENT["name"]) * s_name
+            + float(_W_IDENT["unicode"]) * s_unicode
+            + float(_W_IDENT["cip25"]) * s_cip25
         )
 
-        # ----- Distribution Pattern sub-pipeline (weight = 0.40) -----
+        # ----- Distribution Pattern sub-pipeline -----
 
         policy_id = best_candidate["policy_id"]
 
@@ -273,7 +274,7 @@ class FakeTokenScorer(BaseScorer):
             "recipient_count", "per_policy", policy_id,
         )
         if bl1 == "missing":
-            p50_rc, p99_rc = 1.0, 100.0  # bootstrap
+            p50_rc, p99_rc = _anchor(_BOOT, "recipient_count")
         s_recipients = normalise(recipient_count, p50=p50_rc, p99=p99_rc)
 
         # mint_to_recipient_ratio inverted
@@ -282,48 +283,42 @@ class FakeTokenScorer(BaseScorer):
             "mint_to_recipient_ratio", "per_policy", policy_id,
         )
         if bl2 == "missing":
-            p50_mr, p99_mr = 100.0, 100_000.0  # bootstrap
+            p50_mr, p99_mr = _anchor(_BOOT, "mint_to_recipient_ratio")
         s_ratio = normalise_inverted(mint_ratio, p50=p50_mr, p99=p99_mr)
 
-        # policy_age inverted: newer policies are more suspicious
-        # Use current slot minus first-seen slot for policy; if unavailable,
-        # estimate from tx slot (minting tx = policy creation is common)
-        current_slot = features.get("slot") or 0
-        # For a minting tx, the policy may be new (this tx creates it) or
-        # pre-existing. Without a policy registry tracking first-seen slot,
-        # assume the policy is new (age ~= 1 slot) which is the suspicious
-        # case. If the policy existed before, this overestimates suspicion
-        # but that's the safer direction for detection.
-        # Policy age defaults to 1 slot (new). On-chain policy age lookup
-        # requires indexing transactions by policy ID (deferred to mainnet).
+        # policy_age inverted: newer policies are more suspicious.
+        # Without a policy registry, assume age = 1 slot (most suspicious case).
+        # Safer direction for detection; on-chain lookup is a future enhancement.
         policy_age_slots = 1
         age_inv = 1.0 / policy_age_slots
-        s_policy_age = normalise(
-            age_inv, p50=_POLICY_AGE_INV_P50, p99=_POLICY_AGE_INV_P99,
-        )
+        p50_pa, p99_pa = _anchor(_FIXED, "policy_age_inv")
+        s_policy_age = normalise(age_inv, p50=p50_pa, p99=p99_pa)
 
         # Sender recurrence: requires entity clustering (deferred to mainnet)
         s_recurrence = 0.0
 
         distribution_score = (
-            0.40 * s_recipients
-            + 0.30 * s_ratio
-            + 0.20 * s_policy_age
-            + 0.10 * s_recurrence
+            float(_W_DIST["recipients"]) * s_recipients
+            + float(_W_DIST["ratio"]) * s_ratio
+            + float(_W_DIST["policy_age"]) * s_policy_age
+            + float(_W_DIST["recurrence"]) * s_recurrence
         )
 
         # ----- Final combined score -----
-        raw = 0.60 * identity_score + 0.40 * distribution_score
+        raw = (
+            float(_W_OVERALL["identity"]) * identity_score
+            + float(_W_OVERALL["distribution"]) * distribution_score
+        )
         final = round(max(0.0, min(1.0, raw)) * 100, 2)
 
         bl_source = bl1 if bl1 != "missing" else "bootstrap"
 
         reasons = []
-        if s_name > 0.3:
+        if s_name > float(_REASON_T["name"]):
             reasons.append(f"similar_to_{best_legit_name}")
-        if s_unicode > 0.3:
+        if s_unicode > float(_REASON_T["unicode"]):
             reasons.append("unicode_suspicion")
-        if s_recipients > 0.5:
+        if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
 
         return ScorerResult(

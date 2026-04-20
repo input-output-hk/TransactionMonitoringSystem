@@ -1,0 +1,223 @@
+# Detection scorer configuration.
+#
+# To override defaults, copy this file to `config/detection.yaml` and edit.
+# `detection.yaml` is gitignored; `detection.example.yaml` is the tracked
+# reference and fallback if no `detection.yaml` exists.
+#
+# Anchor convention: `{p50, p99}` maps to the normalisation bounds used by
+# `normalise()` / `normalise_inverted()`. Values below p50 normalise to 0
+# (or 1 when inverted); values above p99 normalise to 1 (or 0 when inverted).
+#
+# Bootstrap anchors are used only when the per-script / global baseline in
+# ClickHouse has fewer than BASELINE_MIN_SAMPLES rows. Real baselines, once
+# populated, supersede bootstraps automatically.
+
+scorers:
+
+  # ------------------------------------------------------------------
+  multiple_sat:
+    weights:
+      extraction: 0.42     # net_value_out_of_script
+      exunits_inv: 0.28    # exunits_per_script_input, inverted
+      inputs: 0.16         # n_inputs_same_script
+      recurrence: 0.14     # sender_recurrence
+    bootstrap_anchors:
+      net_value_out_of_script:  { p50: 5_000_000,   p99: 500_000_000 }
+      exunits_per_script_input: { p50: 100_000,     p99: 10_000_000 }
+      n_inputs_same_script:     { p50: 2,           p99: 10 }
+      sender_recurrence:        { p50: 0,           p99: 1 }
+    allowlist_prefixes:
+      - "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq"  # SundaeSwap v3 batch
+      - "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz"   # Minswap v2 batch
+      - "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh"   # WingRiders batch
+    reason_threshold: 0.5
+
+  # ------------------------------------------------------------------
+  large_datum:
+    weights:
+      datum_bytes: 0.40
+      datum_ratio: 0.35
+      value_cbor_inv: 0.15
+      recurrence: 0.10
+    fixed_anchors:
+      datum_ratio: { p50: 0.20, p99: 0.60 }
+    bootstrap_anchors:
+      datum_bytes:      { p50: 200, p99: 8000 }
+      value_cbor_bytes: { p50: 100, p99: 1500 }
+    reason_threshold: 0.5
+
+  # ------------------------------------------------------------------
+  token_dust:
+    weights:
+      bytes: 0.35
+      assets: 0.35
+      ada_inv: 0.15
+      recurrence: 0.15
+    bootstrap_anchors:
+      value_cbor_bytes:    { p50: 100,       p99: 1500 }
+      unique_token_count:  { p50: 1,         p99: 20 }
+      ada_amount:          { p50: 1_200_000, p99: 2_000_000 }
+    reason_threshold: 0.5
+
+  # ------------------------------------------------------------------
+  large_value:
+    weights:
+      digits: 0.40
+      bytes: 0.35
+      ada_inv: 0.10
+      recurrence: 0.15
+    bootstrap_anchors:
+      quantity_digits:   { p50: 6,         p99: 18 }
+      value_cbor_bytes:  { p50: 100,       p99: 1500 }
+      ada_amount:        { p50: 1_200_000, p99: 2_000_000 }
+    reason_threshold: 0.5
+
+  # ------------------------------------------------------------------
+  front_running:
+    weights:
+      outcome: 0.35
+      delta: 0.30
+      recurrence: 0.25
+      structure: 0.10
+    fixed_anchors:
+      # Reciprocal of mempool delta in ms. p50=1/2000, p99=1/200.
+      mempool_delta_inv: { p50: 0.0005, p99: 0.005 }
+      fee_delta:         { p50: 500,    p99: 5000 }
+      ttl_delta:         { p50: 10,     p99: 100 }
+    bootstrap_anchors:
+      attacker_recurrence: { p50: 0, p99: 5 }
+    outcome_scores:
+      TX_B_CONFIRMED: 1.0
+      TX1_FAILS_UTXO_SPENT: 1.0
+      BOTH_PENDING: 0.5
+      TX_A_CONFIRMED: 0.0
+      TX1_WINS: 0.0
+      TX2_WINS: 0.3
+    reason_thresholds:
+      outcome: 0.8
+      delta: 0.5
+      recurrence: 0.5
+    min_recurrence_wins: 3       # tx below this count capped at High band
+    high_band_cap: 79.0          # score cap when recurrence is insufficient
+    delta_ms_default: 10000      # fallback when collision missing delta_ms
+
+  # ------------------------------------------------------------------
+  sandwich:
+    weights:
+      link: 0.30
+      rate: 0.30
+      impact: 0.20
+      profit: 0.10
+      recurrence: 0.10
+    fixed_anchors:
+      rate_delta: { p50: 0.0, p99: 0.15 }
+    bootstrap_anchors:
+      price_impact:        { p50: 0.0, p99: 0.05 }
+      swap_profit:         { p50: 0,   p99: 5_000_000 }
+      attacker_recurrence: { p50: 0,   p99: 5 }
+    window_slots: 5              # gate: structural triplet must fit within N slots
+    link_scores:
+      linked: 1.0                # attacker_linked flag present
+      unlinked: 0.2              # triplet present but no linkage evidence
+    min_profit_lovelace: 200_000 # score capped at high_band_cap below this
+    high_band_cap: 79.0
+    reason_thresholds:
+      link: 0.8
+      rate: 0.5
+      impact: 0.5
+
+  # ------------------------------------------------------------------
+  circular:
+    weights:
+      amount: 0.30
+      recurrence: 0.30
+      entropy: 0.20
+      auxiliary: 0.10
+      speed: 0.10
+    fixed_anchors:
+      amount_sim:    { p50: 0.70, p99: 0.97 }
+      entropy:       { p50: 0.80, p99: 0.30 }   # inverted by design: lower entropy = higher score
+      hop_delta_inv: { p50: 0.05, p99: 0.5 }    # 1/20, 1/2
+      temporal:      { p50: 0.30, p99: 0.85 }
+    bootstrap_anchors:
+      attacker_recurrence: { p50: 0, p99: 5 }
+    cycle:
+      min_length: 2                     # gate: minimum cycle hop count
+      max_length: 6                     # gate: maximum cycle hop count
+      fee_tolerance_multiplier: 4.0     # max allowed net_loss / expected_fee at gate
+      fee_tolerance_strict: 2.0         # above which score is capped at moderate_cap
+      per_hop_fee_estimate: 0.02        # 2% per hop for expected_fee heuristic
+    reason_threshold: 0.5
+    moderate_cap: 59.0                  # top of Moderate band
+
+  # ------------------------------------------------------------------
+  fake_token:
+    weights:
+      identity:
+        name: 0.40
+        unicode: 0.35
+        cip25: 0.25
+      distribution:
+        recipients: 0.40
+        ratio: 0.30
+        policy_age: 0.20
+        recurrence: 0.10
+      overall:
+        identity: 0.60
+        distribution: 0.40
+    fixed_anchors:
+      name_sim:       { p50: 0.80,    p99: 0.97 }
+      unicode:        { p50: 0.0,     p99: 0.60 }
+      cip25:          { p50: 0.0,     p99: 0.80 }
+      policy_age_inv: { p50: 0.00001, p99: 0.0002 } # 1/100_000, 1/5_000
+    bootstrap_anchors:
+      recipient_count:         { p50: 1,   p99: 100 }
+      mint_to_recipient_ratio: { p50: 100, p99: 100_000 }
+    similarity_threshold: 0.80      # min Levenshtein similarity to flag name collision
+    unicode_scores:                 # cumulative unicode_suspicion score increments
+      zero_width: 0.4
+      mixed_scripts: 0.3
+      homoglyphs: 0.3
+    reason_thresholds:
+      name: 0.3
+      unicode: 0.3
+      recipients: 0.5
+
+  # ------------------------------------------------------------------
+  phishing:
+    weights:
+      content:
+        blacklist: 0.40
+        domain: 0.35
+        social: 0.25
+      delivery:
+        recipients: 0.35
+        url_recur: 0.25
+        targeting: 0.25
+        recurrence: 0.15
+      overall:
+        content: 0.65
+        delivery: 0.35
+    fixed_anchors:
+      domain_age_inv: { p50: 0.00273972602739726, p99: 0.14285714285714285 } # 1/365, 1/7
+      brand_sim:      { p50: 0.0,     p99: 0.85 }
+      social_score:   { p50: 0.0,     p99: 0.60 }
+      # `targeting` anchors will be wired up when the
+      # recipient-to-protocol interaction graph lands (§5.3 is deferred).
+    bootstrap_anchors:
+      recipient_count: { p50: 1, p99: 50 }
+    similarity_suspicious_range:
+      lo: 0.5                # domain_similarity below this is noise
+      hi: 1.0                # above this is exact match (own brand) — excluded
+    social_engineering:
+      urgency_increment: 0.15
+      urgency_cap: 0.6
+      brand_increment: 0.10
+      brand_cap: 0.3
+    reason_thresholds:
+      blacklist: 0.5
+      domain: 0.5
+      social: 0.3
+      recipients: 0.5
+    critical_threshold: 0.60         # content_score above this → severity=Critical
+    metadata_labels: ["674", "721"]  # CIP-20 message label, CIP-25 NFT metadata
