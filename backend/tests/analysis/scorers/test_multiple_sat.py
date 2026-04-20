@@ -167,19 +167,18 @@ class TestWeights:
         total = _W_EXTRACTION + _W_EXUNITS + _W_INPUTS + _W_RECURRENCE
         assert total == pytest.approx(1.0, abs=1e-9)
 
-    def test_weight_values_match_example_yaml(self):
-        """Spec-weight regression guard: the tracked example YAML must always
-        carry the Polimi §4.4.3 default weights, regardless of any local
-        detection.yaml override the developer might have."""
+    def test_weight_values_match_tracked_yaml(self):
+        """Spec-weight regression guard: the tracked detection.yaml must
+        always carry the documented default weights for Multiple Satisfaction."""
         import pathlib
         import yaml
 
         here = pathlib.Path(__file__).resolve()
-        example = next(
+        cfg_path = next(
             p for p in here.parents
-            if (p / "config" / "detection.example.yaml").exists()
-        ) / "config" / "detection.example.yaml"
-        with open(example, encoding="utf-8") as f:
+            if (p / "config" / "detection.yaml").exists()
+        ) / "config" / "detection.yaml"
+        with open(cfg_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         w = data["scorers"]["multiple_sat"]["weights"]
         assert w["extraction"] == 0.42

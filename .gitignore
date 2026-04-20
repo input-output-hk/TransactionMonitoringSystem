@@ -30,9 +30,6 @@ ENV/
 .env
 .env.local
 
-# Local detection config overrides (example is tracked)
-config/detection.yaml
-
 # IDE
 .vscode/
 .idea/
