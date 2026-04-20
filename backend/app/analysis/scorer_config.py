@@ -1,7 +1,8 @@
 """Loader for client-tunable detection scorer configuration.
 
-Loads ``config/detection.yaml`` (or ``config/detection.example.yaml`` as a
-fallback) at import time. Scorers read their section via :func:`get`.
+Loads ``config/detection.yaml`` at import time. The file is tracked in git:
+edits to detection thresholds, weights, and allowlists are versioned and
+reviewable. Scorers read their section via :func:`get`.
 
 The config is intentionally a plain nested-dict structure so clients can edit
 YAML without running a validation toolchain. A shallow structural check runs
@@ -47,14 +48,14 @@ def _config_dir() -> Path:
     override = os.environ.get("TMS_CONFIG_DIR")
     if override:
         return Path(override)
-    # Walk upward until we find a directory containing `config/detection.example.yaml`.
+    # Walk upward until we find a directory containing `config/detection.yaml`.
     here = Path(__file__).resolve()
     for ancestor in here.parents:
-        candidate = ancestor / "config" / "detection.example.yaml"
+        candidate = ancestor / "config" / "detection.yaml"
         if candidate.exists():
             return candidate.parent
     raise RuntimeError(
-        "Could not locate config/ directory relative to "
+        "Could not locate config/detection.yaml relative to "
         f"{here}. Set TMS_CONFIG_DIR to override."
     )
 
@@ -86,14 +87,9 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
 
 
 def _load() -> Dict[str, Any]:
-    config_dir = _config_dir()
-    active = config_dir / "detection.yaml"
-    default = config_dir / "detection.example.yaml"
-    path = active if active.exists() else default
+    path = _config_dir() / "detection.yaml"
     if not path.exists():
-        raise RuntimeError(
-            f"Detection config not found. Expected {active} or {default}."
-        )
+        raise RuntimeError(f"Detection config not found at {path}.")
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     _validate(path, data)

@@ -40,7 +40,7 @@ scorers:
       value_cbor_inv: 0.15
       recurrence: 0.10
     fixed_anchors:
-      datum_ratio: { p50: 0.20, p99: 0.60 }
+      datum_ratio: { p50: 0.40, p99: 0.85 }
     bootstrap_anchors:
       datum_bytes:      { p50: 200, p99: 8000 }
       value_cbor_bytes: { p50: 100, p99: 1500 }

@@ -7,10 +7,10 @@ import pytest
 
 
 def _reload_module(monkeypatch, tmp_path, yaml_body: str):
-    """Write yaml_body to a temp detection.example.yaml and reload scorer_config."""
+    """Write yaml_body to a temp detection.yaml and reload scorer_config."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
-    (cfg_dir / "detection.example.yaml").write_text(yaml_body, encoding="utf-8")
+    (cfg_dir / "detection.yaml").write_text(yaml_body, encoding="utf-8")
     monkeypatch.setenv("TMS_CONFIG_DIR", str(cfg_dir))
     import app.analysis.scorer_config as sc
     return importlib.reload(sc)
@@ -83,26 +83,17 @@ def _minimal_valid_yaml() -> str:
 
 
 class TestLoader:
-    def test_loads_example_when_override_absent(self, tmp_path, monkeypatch):
+    def test_loads_detection_yaml(self, tmp_path, monkeypatch):
         sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
         assert "multiple_sat" in sc._CFG["scorers"]
 
-    def test_detection_yaml_takes_precedence(self, tmp_path, monkeypatch):
+    def test_missing_file_raises(self, tmp_path, monkeypatch):
         cfg_dir = tmp_path / "config"
         cfg_dir.mkdir()
-        (cfg_dir / "detection.example.yaml").write_text(
-            _minimal_valid_yaml().replace("reason_threshold: 0.5", "reason_threshold: 0.11", 1),
-            encoding="utf-8",
-        )
-        (cfg_dir / "detection.yaml").write_text(
-            _minimal_valid_yaml().replace("reason_threshold: 0.5", "reason_threshold: 0.99", 1),
-            encoding="utf-8",
-        )
         monkeypatch.setenv("TMS_CONFIG_DIR", str(cfg_dir))
         import app.analysis.scorer_config as sc
-        sc = importlib.reload(sc)
-        # First substitution hit multiple_sat (alphabetical first in YAML).
-        assert sc.get("multiple_sat")["reason_threshold"] == 0.99
+        with pytest.raises(RuntimeError, match="Detection config not found"):
+            importlib.reload(sc)
 
     def test_env_override_honoured(self, tmp_path, monkeypatch):
         sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
