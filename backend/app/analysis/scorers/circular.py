@@ -24,9 +24,13 @@ task.  Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    anchor as _anchor,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +108,7 @@ class CircularScorer(BaseScorer):
             return ScorerResult(score=0.0)
 
         origin = cycle.get("origin_cluster", "__unknown__")
+        network = features.get("network", "")
 
         # Sub-score 1: amount_similarity
         amt_sim = cycle.get("amount_similarity", 0.0)
@@ -112,11 +117,10 @@ class CircularScorer(BaseScorer):
 
         # Sub-score 2: cycle_recurrence
         recurrence = cycle.get("recurrence_count", 0)
-        p50_r, p99_r, bl1 = resolve_baseline(
-            "cycle_recurrence", "per_cluster", origin,
+        p50_r, p99_r, bl1 = _resolve(
+            "cycle_recurrence", "per_cluster", origin, network,
+            _BOOT, "attacker_recurrence",
         )
-        if bl1 == "missing":
-            p50_r, p99_r = _anchor(_BOOT, "attacker_recurrence")
         s_recurrence = normalise(recurrence, p50=p50_r, p99=p99_r)
 
         # Sub-score 3: recipient_entropy inverted
@@ -139,7 +143,7 @@ class CircularScorer(BaseScorer):
         p50_h, p99_h = _anchor(_FIXED, "hop_delta_inv")
         s_speed = normalise(hop_inv, p50=p50_h, p99=p99_h)
 
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        bl_source = bl1
 
         raw = (
             float(_W["amount"]) * s_amount
@@ -148,13 +152,26 @@ class CircularScorer(BaseScorer):
             + float(_W["auxiliary"]) * s_auxiliary
             + float(_W["speed"]) * s_speed
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
         # Fee-ratio cap: if net loss exceeds the strict fee-only threshold,
         # the cycle may be incidental transfers rather than deliberate layering.
         net_loss = cycle.get("net_loss_ratio", 0.0)
         expected_fee = _estimate_fee_ratio(cycle.get("cycle_length", 2))
-        if net_loss > expected_fee * FEE_TOLERANCE_STRICT and final > _MODERATE_CAP:
+
+        # Structural-only cap: amount_similarity + cycle_recurrence alone sum
+        # to 0.60 in weights, which tips a plain A->script->A Plutus
+        # interaction into the High band. Require at least one corroborating
+        # signal (entropy / auxiliary / speed) above 0.1 to score above
+        # Moderate; otherwise cap. This cuts the common Plutus false-positive
+        # pattern without weakening detection of real layering (which exhibits
+        # low recipient entropy and temporal concentration).
+        structural_only = (s_entropy + s_auxiliary + s_speed) < 0.1
+
+        if final > _MODERATE_CAP and (
+            structural_only
+            or net_loss > expected_fee * FEE_TOLERANCE_STRICT
+        ):
             final = _MODERATE_CAP
 
         reasons = []

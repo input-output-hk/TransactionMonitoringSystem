@@ -820,7 +820,7 @@ class OgmiosClient:
             "last_processed_slot": self._last_processed_slot,
             "last_ogmios_msg_at": self._last_msg_at.isoformat() if self._last_msg_at else None,
             "sync_lag_slots": sync_lag,
-            # 1 slot ≈ 1 s on Cardano (both mainnet and preprod)
+            # 1 slot ≈ 1 s on Cardano (mainnet, preprod, and preview all use 1s slot length)
             "sync_lag_seconds": sync_lag,
             "ws_url": self.ws_url,
         }

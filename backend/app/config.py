@@ -1,7 +1,48 @@
 """Configuration management using Pydantic Settings"""
 
+import logging
+import os
+import re
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# TMS_ENV must look like a bare identifier so it cannot traverse out of the
+# project directory via the .env.<name> path composition below.
+_TMS_ENV_RE = re.compile(r"[a-z0-9_-]+")
+
+
+def _env_files() -> list[str]:
+    """Select which dotenv file(s) to load.
+
+    ``TMS_ENV=<name>`` picks which per-network file to layer on top of the
+    shared ``.env`` (for example ``TMS_ENV=preview`` loads ``.env.preview``).
+    Unset or empty ``TMS_ENV`` defaults to ``preprod``.
+
+    Resolution paths cover both the backend working directory and the
+    parent (project root), so launching uvicorn from either location works.
+
+    Pydantic-settings loads the list left-to-right; **later files override
+    earlier ones**. The shared ``.env`` is therefore listed first and the
+    network-specific file last. Shell environment variables still win over
+    every file.
+    """
+    raw = os.environ.get("TMS_ENV", "").strip() or "preprod"
+    if not _TMS_ENV_RE.fullmatch(raw):
+        raise RuntimeError(
+            f"TMS_ENV must match [a-z0-9_-]+, got: {raw!r}"
+        )
+    specific = f".env.{raw}"
+    candidates = [".env", "../.env", specific, f"../{specific}"]
+    found = [p for p in candidates if Path(p).is_file()]
+    logger.info(
+        f"Config layering [TMS_ENV={raw}]: "
+        f"loaded={found or ['<none>']} (later files override earlier)"
+    )
+    return candidates
 
 
 class Settings(BaseSettings):
@@ -42,6 +83,15 @@ class Settings(BaseSettings):
     # Security - API Key Authentication
     API_KEYS: str = ""  # Comma-separated list of valid API keys
     API_KEY_HEADER: str = "TMS-API-Key"  # Header name for API key
+    # Must be "1" to allow the app to start with empty API_KEYS (dev mode).
+    # Refusal-to-start otherwise prevents accidental open-API production deploys.
+    TMS_ALLOW_DEV_MODE: str = ""
+    # Override the directory pydantic-settings searches for detection.yaml.
+    # Empty = use the default (project root's config/ dir, resolved upward).
+    TMS_CONFIG_DIR: str = ""
+    # Enable uvicorn's file-watch reloader (dev only; do not enable in Docker
+    # or production — adds latency and spawns a watchdog subprocess).
+    UVICORN_RELOAD: bool = False
 
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
@@ -69,6 +119,19 @@ class Settings(BaseSettings):
     SCORER_SANDWICH_ENABLED: bool = True
     SCORER_CIRCULAR_ENABLED: bool = True
 
+    # Fake-token testnet mode: enables the mainnet-curated legitimate-token
+    # registry on preprod / preview networks. Intended ONLY for running the
+    # internal/attacks.py harness against a test deployment; keep False in
+    # production. Rationale:
+    #   - The registry lists mainnet policy IDs for HOSKY, iUSD, DJED, etc.
+    #   - Dev/test workflows on testnets mint tokens with the same names
+    #     (e.g. for dApp integration tests). Under this flag every such mint
+    #     fires the fake_token scorer, producing a guaranteed stream of
+    #     false positives unrelated to any real threat.
+    #   - When you need to verify detector coverage against build_fake_token,
+    #     flip this on, run the harness, observe the detection, flip it off.
+    FAKE_TOKEN_TESTNET_MODE: bool = False
+
     # Phase 4: cross-transaction detection infrastructure
     COLLISION_DETECTION_ENABLED: bool = True
     CYCLE_DETECTION_ENABLED: bool = True
@@ -93,8 +156,12 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
 
+    # Files are loaded in order with later files overriding earlier ones (see
+    # _env_files docstring). The shared `.env` holds cross-network defaults;
+    # `.env.<TMS_ENV>` supplies per-network overrides for CARDANO_NETWORK,
+    # OGMIOS_WS_URL, API_PORT.
     model_config = SettingsConfigDict(
-        env_file=[".env", "../.env"],  # Look in current dir and parent dir
+        env_file=_env_files(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"

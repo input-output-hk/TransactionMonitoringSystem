@@ -30,6 +30,17 @@ class ScorerResult:
     """Scorer-specific severity classification (e.g. KNOWN_BAD, SUSPICIOUS_NEW_DOMAIN)."""
 
 
+def finalise_score(raw: float, scale: int = 100, ndigits: int = 2) -> float:
+    """Canonical final-score contract: clip to [0, 1], scale, and round.
+
+    Scorers accumulate a weighted sum in ``[0, 1]`` (sometimes slightly
+    outside due to float noise or gate-specific boosts) and need to emit a
+    value in ``[0, 100]`` rounded to two decimals. This helper centralises
+    that convention so the math lives in one place.
+    """
+    return round(max(0.0, min(1.0, raw)) * scale, ndigits)
+
+
 class BaseScorer(ABC):
     """Abstract base for all attack-class scorers."""
 

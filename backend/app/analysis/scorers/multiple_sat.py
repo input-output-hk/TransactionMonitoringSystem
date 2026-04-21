@@ -29,9 +29,12 @@ All tunable constants live in ``config/detection.yaml`` under the
 import logging
 from typing import Any, Dict, List, Tuple
 
-from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
@@ -135,6 +138,7 @@ class MultipleSatScorer(BaseScorer):
         outputs = raw_data.get("outputs", [])
         total_cpu = _total_exunits_cpu(raw_data)
         sender_recurrence = float(features.get("sender_recurrence", 0.0) or 0.0)
+        network = features.get("network", "")
 
         groups = _group_inputs_by_script(raw_data)
 
@@ -147,7 +151,7 @@ class MultipleSatScorer(BaseScorer):
 
             result = self._score_script(
                 script_addr, n_inputs, total_cpu,
-                raw_data, outputs, sender_recurrence,
+                raw_data, outputs, sender_recurrence, network,
             )
             if result.score > best.score:
                 best = result
@@ -162,6 +166,7 @@ class MultipleSatScorer(BaseScorer):
         raw_data: Dict,
         outputs: List[Dict],
         sender_recurrence: float,
+        network: str,
     ) -> ScorerResult:
         net_value = _compute_net_value_out(
             raw_data.get("inputs", []), outputs, script_addr,
@@ -169,29 +174,22 @@ class MultipleSatScorer(BaseScorer):
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
         # Per-script baselines with bootstrap fallbacks.
-        p50_nv, p99_nv, bl_nv = resolve_baseline(
-            "net_value_out_of_script", "per_script", script_addr,
+        p50_nv, p99_nv, bl_nv = _resolve(
+            "net_value_out_of_script", "per_script", script_addr, network,
+            _BOOT, "net_value_out_of_script",
         )
-        if bl_nv == "missing":
-            p50_nv, p99_nv = _anchor(_BOOT, "net_value_out_of_script")
-
-        p50_ex, p99_ex, bl_ex = resolve_baseline(
-            "exunits_per_script_input", "per_script", script_addr,
+        p50_ex, p99_ex, bl_ex = _resolve(
+            "exunits_per_script_input", "per_script", script_addr, network,
+            _BOOT, "exunits_per_script_input",
         )
-        if bl_ex == "missing":
-            p50_ex, p99_ex = _anchor(_BOOT, "exunits_per_script_input")
-
-        p50_ni, p99_ni, bl_ni = resolve_baseline(
-            "n_inputs_same_script", "per_script", script_addr,
+        p50_ni, p99_ni, bl_ni = _resolve(
+            "n_inputs_same_script", "per_script", script_addr, network,
+            _BOOT, "n_inputs_same_script",
         )
-        if bl_ni == "missing":
-            p50_ni, p99_ni = _anchor(_BOOT, "n_inputs_same_script")
-
-        p50_rc, p99_rc, bl_rc = resolve_baseline(
-            "sender_recurrence", "per_script", script_addr,
+        p50_rc, p99_rc, bl_rc = _resolve(
+            "sender_recurrence", "per_script", script_addr, network,
+            _BOOT, "sender_recurrence",
         )
-        if bl_rc == "missing":
-            p50_rc, p99_rc = _anchor(_BOOT, "sender_recurrence")
 
         # Sub-scores.
         s_extraction = normalise(net_value, p50=p50_nv, p99=p99_nv)
@@ -216,10 +214,10 @@ class MultipleSatScorer(BaseScorer):
             + w_ni * s_inputs
             + w_rc * s_recurrence
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
         # The baseline source reported is the "most specific tier actually used"
-        # across the four features. Prefer per_script > per_policy > global > missing.
+        # across the four features. Prefer per_script > per_policy > global > bootstrap.
         bl_source = _dominant_source([bl_nv, bl_ex, bl_ni, bl_rc])
 
         reasons = []
@@ -249,10 +247,13 @@ class MultipleSatScorer(BaseScorer):
 def _dominant_source(sources: List[str]) -> str:
     """Return the most specific baseline tier used.
 
-    Priority: per_script > per_policy > global > missing.
+    Priority: per_script > per_policy > global > bootstrap. Since
+    :func:`resolved_or_bootstrap` guarantees one of these four values,
+    the final fallback is "bootstrap" rather than a sentinel for the
+    unexpected (which would indicate a programming error upstream).
     """
-    order = ["per_script", "per_policy", "global", "missing"]
+    order = ["per_script", "per_policy", "global", "bootstrap"]
     for tier in order:
         if tier in sources:
             return tier
-    return "missing"
+    return "bootstrap"

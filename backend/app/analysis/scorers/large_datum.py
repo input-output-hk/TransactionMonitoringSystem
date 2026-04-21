@@ -20,9 +20,13 @@ Sub-scores (Polimi Section 4.3.3):
 import logging
 from typing import Any, Dict
 
-from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    anchor as _anchor,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
@@ -109,22 +113,17 @@ class LargeDatumScorer(BaseScorer):
         datum_ratio = datum_bytes / (utxo_total + 1e-6) if utxo_total > 0 else 0.0
 
         # datum_bytes: per-script baseline
-        p50_db, p99_db, bl1 = resolve_baseline(
-            "datum_bytes", "per_script", address,
+        p50_db, p99_db, bl1 = _resolve(
+            "datum_bytes", "per_script", address, network,
+            _BOOT, "datum_bytes",
         )
-        if bl1 == "missing":
-            p50_db, p99_db = _anchor(_BOOT, "datum_bytes")
-
         # value_cbor_bytes: per-script baseline (for inversion)
-        p50_cb, p99_cb, bl2 = resolve_baseline(
-            "value_cbor_bytes", "per_script", address,
+        p50_cb, p99_cb, _ = _resolve(
+            "value_cbor_bytes", "per_script", address, network,
+            _BOOT, "value_cbor_bytes",
         )
-        if bl2 == "missing":
-            p50_cb, p99_cb = _anchor(_BOOT, "value_cbor_bytes")
-
         p50_r, p99_r = _anchor(_FIXED, "datum_ratio")
-
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        bl_source = bl1
 
         # Sub-scores
         s_datum = normalise(datum_bytes, p50=p50_db, p99=p99_db)
@@ -138,7 +137,7 @@ class LargeDatumScorer(BaseScorer):
             + float(_W["value_cbor_inv"]) * s_value_inv
             + float(_W["recurrence"]) * s_recurrence
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
         reasons = []
         if s_datum > _REASON_T:

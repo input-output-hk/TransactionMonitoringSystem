@@ -18,6 +18,8 @@ import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional, Set
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -213,20 +215,36 @@ TIER2_URGENCY_PATTERNS: List[str] = [
     "don't miss",
     "ending soon",
     "immediate action",
+    # Explicit urgency framing (common phishing openers)
+    r"\burgent[:\s]",                  # "URGENT:", "urgent ..."
+    r"\btime[- ]sensitive\b",
+    "verify your wallet",
+    "verify wallet",
+    "wallet needs",
+    "resync.{0,20} wallet",
+    "wallet.{0,20} resync",
     # Reward bait
     "earn rewards",
     "claim rewards",
     "claim your",
     "eligible for",
     "receive .{0,20} reward",
+    "reward available",
     "bonus ada",
     "free ada",
+    # Impersonation "you won" / prize-bait language
+    r"\bcongratulations\b",
+    r"you[' ]?(?:re| are|ve| have| ?ve)? ?(?:a )?winner\b",
+    r"you[' ]?(?:ve| have)? ?won\b",
+    "you.{0,10} selected",
     # Governance bait (CIP-1694 / Voltaire era)
     "vote .{0,30} to earn",
     "vote .{0,30} to receive",
     "vote .{0,30} reward",
     "delegate .{0,30} to earn",
     "governance reward",
+    "governance grant",
+    "treasury grant",
     "drep reward",
     "staking bonus",
 ]
@@ -379,12 +397,26 @@ def _refresh_legitimate_tokens() -> Dict[str, List[str]]:
     return registry
 
 
-def get_legitimate_tokens() -> Dict[str, List[str]]:
+def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
     """Return the legitimate token registry {name: [policy_ids]}.
 
     On first call, fetches from the Cardano Token Registry and caches for 24h.
     Falls back to the seed list on network errors.
+
+    The seed list and remote registry entries are mainnet-only. On preview /
+    preprod the same token names (iUSD, DJED, HOSKY, ...) are routinely minted
+    by developers testing integrations, so returning the mainnet registry
+    there produces guaranteed false positives. By default we return an empty
+    registry for non-mainnet networks, which disables the fake_token scorer
+    via its gate (no candidates to match against).
+
+    Override: setting ``FAKE_TOKEN_TESTNET_MODE=True`` (env var) forces the
+    mainnet registry to be used on ALL networks. This is intended for
+    verifying fake_token detection with the ``internal/attacks.py`` harness
+    on preprod/preview. Must be disabled before production deploy.
     """
+    if network != "mainnet" and not settings.FAKE_TOKEN_TESTNET_MODE:
+        return {}
     cached = _get_cached("legitimate_tokens")
     if cached is not None:
         return cached

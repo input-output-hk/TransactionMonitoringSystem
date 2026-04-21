@@ -38,27 +38,51 @@ pip install -r requirements.txt
 
 # 4. Configure
 cp .env.example .env
-# Edit .env: set OGMIOS_WS_URL, API_KEYS, and network
+# Edit .env (shared values: DB ports, log level, API keys).
+# Network-specific values live in .env.preprod / .env.preview (already
+# tracked as local overrides — each holds its CARDANO_NETWORK,
+# OGMIOS_WS_URL and API_PORT).
 
 # 5. Start databases
 docker-compose up -d
 
-# 6. Start server
+# 6. Start server (defaults to preprod — API on port 8000)
 cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run.py
+
+# Switch network at launch via TMS_ENV (loads .env.<name> on top of .env):
+#   TMS_ENV=preview python run.py   # preview — API on 8001
+#   TMS_ENV=preprod python run.py   # explicit preprod (same as default)
 ```
+
+`run.py` binds uvicorn to `settings.API_PORT` (set per-network in `.env.<name>`).
+If you call `uvicorn app.main:app` directly you'll need `--port` on the CLI
+because uvicorn itself does not read pydantic settings.
 
 Or use the helper script: `./scripts/start.sh`
 
 ## Configuration
 
-Key variables in `.env`:
+Configuration is layered across files:
+
+- `.env` — values shared across every network (DB ports, API keys, rate limits, logging, Ogmios tuning).
+- `.env.preprod`, `.env.preview`, `.env.<name>` — per-network overrides. Each file sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT`.
+
+Selection is via `TMS_ENV=<name>` at launch; unset defaults to `preprod`. Shell env vars override both files.
+
+**Per-network variables** (defined in `.env.<name>`):
+
+| Variable | Example | Description |
+|---|---|---|
+| `CARDANO_NETWORK` | `preprod` | `mainnet`, `preprod`, or `preview` |
+| `OGMIOS_WS_URL` | `ws://<host>:1337` | Ogmios WebSocket endpoint |
+| `API_PORT` | `8000` | Port uvicorn binds to |
+
+**Shared variables** (in `.env`):
 
 | Variable | Default | Description |
 |---|---|---|
-| `CARDANO_NETWORK` | `preprod` | `mainnet` or `preprod` |
-| `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
-| `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open (dev mode) |
+| `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; the app refuses to start in that mode unless `TMS_ALLOW_DEV_MODE=1` is also set |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key rate limiting |
 | `RATE_LIMIT_REQUESTS` | `60` | Max requests per window |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window duration |
@@ -71,8 +95,8 @@ Database defaults match the Docker Compose setup and rarely need changing. See `
 
 ## API
 
-All endpoints require `TMS-API-Key` header (unless `API_KEYS` is empty).
-All endpoints accept an optional `network` query parameter (`mainnet` or `preprod`, default: `preprod`).
+All endpoints require a `TMS-API-Key` header. For local dev without a key set, boot with both `API_KEYS=` (empty) and `TMS_ALLOW_DEV_MODE=1`; requests are then accepted without a header.
+All endpoints accept an optional `network` query parameter (`mainnet`, `preprod`, or `preview`); defaults to the instance's `CARDANO_NETWORK`.
 
 Interactive docs: `http://localhost:8000/docs`
 
@@ -105,7 +129,8 @@ Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (
 |---|---|---|
 | GET | `/api/entities/{type}/{id}` | Entity state |
 | PUT | `/api/entities/{type}/{id}` | Set entity state |
-| GET | `/health` | Service health + Ogmios connection status |
+| GET | `/health` | Minimal unauthenticated liveness probe: `{"status":"healthy"}` |
+| GET | `/health/detail` | Full pipeline + Ogmios state (requires API key) |
 | WS  | `/ws` | Real-time lifecycle events (TX_PENDING, TX_CONFIRMED, TX_ROLLED_BACK) |
 | GET | `/` | Operator dashboard (HTML) |
 

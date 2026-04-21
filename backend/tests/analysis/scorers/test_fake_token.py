@@ -15,10 +15,13 @@ LEGIT_HOSKY_POLICY = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235"
 FAKE_POLICY = "deadbeef" * 7
 
 
-def _features(mint=None, outputs=None, metadata=None, slot=100_000):
+def _features(mint=None, outputs=None, metadata=None, slot=100_000, network="mainnet"):
+    # Default to mainnet so fake_token's legitimate-token registry is
+    # populated. On preview/preprod the registry is intentionally empty
+    # (devs routinely test with names like iUSD/DJED/HOSKY).
     return {
         "tx_hash": "ft01",
-        "network": "preprod",
+        "network": network,
         "metadata": metadata,
         "raw_data": {
             "mint": mint or {},
@@ -36,6 +39,21 @@ class TestGate:
         """Minting HOSKY under the real policy should not trigger."""
         mint = {LEGIT_HOSKY_POLICY: {"HOSKY": 1000}}
         assert scorer.gate(_features(mint=mint)) is False
+
+    def test_non_mainnet_disables_gate(self, scorer, monkeypatch):
+        """Preview/preprod have an empty brand registry (test networks where
+        devs legitimately mint names like iUSD/DJED/HOSKY), so the gate must
+        not fire even on an obvious mainnet-style fake.
+
+        Explicitly forces FAKE_TOKEN_TESTNET_MODE=False so the test reflects
+        the default, security-oriented behaviour regardless of whether the
+        local .env has the testnet-mode override turned on for debugging.
+        """
+        from app.config import settings
+        monkeypatch.setattr(settings, "FAKE_TOKEN_TESTNET_MODE", False)
+        mint = {FAKE_POLICY: {"HOSKY": 1000}}
+        assert scorer.gate(_features(mint=mint, network="preview")) is False
+        assert scorer.gate(_features(mint=mint, network="preprod")) is False
 
     def test_similar_name_fake_policy_passes(self, scorer):
         """Minting 'HOSKY' under a fake policy should pass gate."""

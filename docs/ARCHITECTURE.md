@@ -2,7 +2,7 @@
 
 ## Overview
 
-Single-process FastAPI application. On startup, it initialises two databases and launches background tasks under a supervisor loop. The HTTP/WebSocket server runs in the same event loop. A `/health` endpoint exposes `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_seconds`, `last_processed_slot`, and `last_ogmios_msg_at`.
+Single-process FastAPI application. On startup, it initialises two databases and launches background tasks under a supervisor loop. The HTTP/WebSocket server runs in the same event loop. A minimal unauthenticated `/health` returns `{"status":"healthy"}` for liveness probes; the authenticated `/health/detail` exposes `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_seconds`, `last_processed_slot`, and `last_ogmios_msg_at`.
 
 ## Data Flow
 
@@ -73,12 +73,12 @@ All state is stored in `tx_lifecycle` (PostgreSQL). Raw payloads are written asy
 - **Keepalive**: ping every 30 s, pong timeout 90 s
 - **Resume on restart**: last processed slot/block hash upserted to `sync_checkpoint` (PostgreSQL) after each block; used as `findIntersection` point on reconnect
 - **Supervisor loop**: `chain_sync` and `mempool_monitor` tasks are wrapped in a supervisor that restarts them on unexpected exit (clean shutdown and `CancelledError` are not restarted)
-- **Pipeline observability**: `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_slots`, `last_processed_slot`, `last_ogmios_msg_at` derived from circuit-breaker state and block recency; exposed at `GET /health`
+- **Pipeline observability**: `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_slots`, `last_processed_slot`, `last_ogmios_msg_at` derived from circuit-breaker state and block recency; exposed at `GET /health/detail` (API-key authenticated)
 
 ## Security
 
 - `TMS-API-Key` header on all API endpoints
-- `API_KEYS` env var (comma-separated). Empty = open access (dev mode, logged as warning)
+- `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys)
 - Rate limiting: in-memory sliding window per API key (`RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`)
 - CORS: open (`allow_origins=["*"]`), intended for reverse-proxy TLS termination in production
 

@@ -84,3 +84,44 @@ class TestScore:
         for key in ("amount_similarity", "cycle_recurrence", "recipient_entropy_inv",
                      "auxiliary", "speed"):
             assert key in result.sub_scores
+
+    def test_structural_only_cap(self, scorer):
+        """amount_similarity + cycle_recurrence alone must not push score
+        above the Moderate cap. Entropy/auxiliary/speed being near-zero means
+        there's no corroborating evidence; a plain Plutus user->script->user
+        interaction shouldn't tip into the High band."""
+        structural_only = {
+            "cycle_length": 2,
+            "amount_similarity": 1.0,       # ceiling
+            "net_loss_ratio": 0.01,         # fee-only
+            "recurrence_count": 100,        # ceiling
+            "recipient_entropy": 1.0,       # max (entropy_inv = 0)
+            "round_amount_flag": False,
+            "temporal_concentration": 0.0,
+            "mean_inter_hop_delta_slots": 1_000_000,
+            "origin_cluster": "c",
+        }
+        result = scorer.score(_features(cycle=structural_only))
+        assert result.score <= 59.0, (
+            f"structural-only should cap at Moderate; got {result.score}"
+        )
+
+    def test_structural_plus_signal_uncapped(self, scorer):
+        """When corroborating signals are present (low entropy, round amounts,
+        fast hops), the structural cap should NOT fire and the score should
+        rise into High."""
+        corroborated = {
+            "cycle_length": 2,
+            "amount_similarity": 1.0,
+            "net_loss_ratio": 0.01,
+            "recurrence_count": 5,
+            "recipient_entropy": 0.10,      # very low => entropy_inv high
+            "round_amount_flag": True,
+            "temporal_concentration": 0.90, # concentrated in time
+            "mean_inter_hop_delta_slots": 2,
+            "origin_cluster": "c",
+        }
+        result = scorer.score(_features(cycle=corroborated))
+        assert result.score > 59.0, (
+            f"corroborated cycle should exceed Moderate cap; got {result.score}"
+        )

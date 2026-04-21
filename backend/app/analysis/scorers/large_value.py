@@ -17,9 +17,13 @@ Sub-scores (Polimi Section 4.2.3):
 import logging
 from typing import Any, Dict
 
-from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    anchor as _anchor,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
@@ -139,28 +143,26 @@ class LargeValueScorer(BaseScorer):
         qty_digits = _max_quantity_digits(value)
         policy_id = _primary_policy_id(value)
 
-        # quantity_digits: per-policy baseline (Polimi Section 4.2.3)
-        p50_qd, p99_qd, bl1 = resolve_baseline(
-            "quantity_digits", "per_policy", policy_id,
-        ) if policy_id else (0.0, 1.0, "missing")
-        if bl1 == "missing":
-            p50_qd, p99_qd = _anchor(_BOOT, "quantity_digits")
+        # quantity_digits: per-policy baseline (Polimi Section 4.2.3).
+        # When the UTxO has no policy id, skip baseline lookup and jump
+        # straight to the bootstrap anchor.
+        if policy_id:
+            p50_qd, p99_qd, bl1 = _resolve(
+                "quantity_digits", "per_policy", policy_id, network,
+                _BOOT, "quantity_digits",
+            )
+        else:
+            p50_qd, p99_qd, bl1 = (*_anchor(_BOOT, "quantity_digits"), "bootstrap")
 
-        # value_cbor_bytes: per-script baseline
-        p50_cb, p99_cb, bl2 = resolve_baseline(
-            "value_cbor_bytes", "per_script", address,
+        p50_cb, p99_cb, _ = _resolve(
+            "value_cbor_bytes", "per_script", address, network,
+            _BOOT, "value_cbor_bytes",
         )
-        if bl2 == "missing":
-            p50_cb, p99_cb = _anchor(_BOOT, "value_cbor_bytes")
-
-        # lovelace_amount: per-script baseline
-        p50_ada, p99_ada, bl3 = resolve_baseline(
-            "ada_amount", "per_script", address,
+        p50_ada, p99_ada, _ = _resolve(
+            "ada_amount", "per_script", address, network,
+            _BOOT, "ada_amount",
         )
-        if bl3 == "missing":
-            p50_ada, p99_ada = _anchor(_BOOT, "ada_amount")
-
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        bl_source = bl1
 
         # Sub-scores
         s_digits = normalise(qty_digits, p50=p50_qd, p99=p99_qd)
@@ -174,7 +176,7 @@ class LargeValueScorer(BaseScorer):
             + float(_W["ada_inv"]) * s_ada
             + float(_W["recurrence"]) * s_recurrence
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
         reasons = []
         if s_digits > _REASON_T:

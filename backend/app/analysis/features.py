@@ -99,20 +99,36 @@ def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
 
 
 
-def _count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
-    """Count unique policy IDs and total asset classes in a value dict.
+def _nonzero_qty(q: Any) -> bool:
+    """Return True if the asset quantity is non-zero (positive or negative)."""
+    try:
+        return int(q) != 0
+    except (TypeError, ValueError):
+        return False
 
-    Returns (unique_policy_count, unique_token_count).
+
+def _count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
+    """Count unique policy IDs and live asset classes in a value dict.
+
+    Zero-quantity entries are skipped: they appear in mint/burn payloads
+    where a policy is listed with qty=0 (burn-only). Counting them inflates
+    ``unique_token_count`` and causes false positives in token_dust scoring
+    on wallet sweeps of previously held assets.
+
+    Returns ``(unique_policy_count, unique_token_count)``.
     """
     policies = set()
     token_count = 0
     for key, val in value.items():
         if key in ("lovelace", "ada"):
             continue
-        policies.add(key)
         if isinstance(val, dict):
-            token_count += len(val)
-        else:
+            live = sum(1 for q in val.values() if _nonzero_qty(q))
+            if live:
+                policies.add(key)
+                token_count += live
+        elif _nonzero_qty(val):
+            policies.add(key)
             token_count += 1
     return len(policies), token_count
 

@@ -2,12 +2,15 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.auth import verify_api_key
 
 from app.config import settings
 
@@ -72,9 +75,25 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown"""
     global ogmios_client
 
-    # Emit auth dev-mode warning here so logging is already configured
+    # Emit auth dev-mode warning here so logging is already configured.
+    # Dev mode (empty API_KEYS) is useful for local work but must be an
+    # explicit choice — refuse to start without TMS_ALLOW_DEV_MODE=1 so an
+    # accidental production deploy with a blank `.env` does not end up
+    # running an open API. TMS_ALLOW_DEV_MODE is read through pydantic so
+    # it can live in the layered `.env` files, not just the shell env.
     from app.auth import _dev_mode
+    allow_dev_mode = (
+        settings.TMS_ALLOW_DEV_MODE.strip() == "1"
+        or os.environ.get("TMS_ALLOW_DEV_MODE", "").strip() == "1"
+    )
     if _dev_mode:
+        if not allow_dev_mode:
+            raise RuntimeError(
+                "API_KEYS is empty and TMS_ALLOW_DEV_MODE != '1'. "
+                "Refusing to start in open-API mode. Set API_KEYS=<keys> for "
+                "production, or set TMS_ALLOW_DEV_MODE=1 in .env (or the "
+                "shell environment) for local dev."
+            )
         logger.warning("No API keys configured — API is open (development mode)")
     if not settings.CLICKHOUSE_PASSWORD:
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
@@ -147,7 +166,7 @@ app = FastAPI(
     Cardano Transaction Monitoring System API.
 
     **Network Parameter**: All endpoints accept an optional `network` parameter.
-    - Options: `mainnet` or `preprod`
+    - Options: `mainnet`, `preprod`, or `preview`
     - Default: `preprod` (if not specified)
     """
 )
@@ -188,7 +207,19 @@ app.include_router(analysis.router)
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
+    """Liveness probe. Intentionally minimal and unauthenticated so load
+    balancers / orchestration platforms can hit it without a key.
+
+    Detailed operational state (pipeline_state, sync lag, circuit breaker,
+    WebSocket connection count) lives at ``/health/detail`` and requires
+    an API key so external scanners cannot enumerate internals.
+    """
+    return {"status": "healthy"}
+
+
+@app.get("/health/detail")
+async def health_detail(api_key: str = Security(verify_api_key)):
+    """Full operational state: network, pipeline, Ogmios, connections."""
     result = {
         "status": "healthy",
         "network": settings.CARDANO_NETWORK,

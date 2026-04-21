@@ -17,9 +17,12 @@ Sub-scores (Polimi Section 4.1.3):
 import logging
 from typing import Any, Dict
 
-from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
@@ -101,25 +104,19 @@ class TokenDustScorer(BaseScorer):
         policy_count, token_count = feat_mod._count_assets(value)
 
         # Resolve baselines (per-script -> global -> bootstrap)
-        p50_cb, p99_cb, bl1 = resolve_baseline(
-            "value_cbor_bytes", "per_script", address,
+        p50_cb, p99_cb, bl1 = _resolve(
+            "value_cbor_bytes", "per_script", address, network,
+            _BOOT, "value_cbor_bytes",
         )
-        if bl1 == "missing":
-            p50_cb, p99_cb = _anchor(_BOOT, "value_cbor_bytes")
-
-        p50_ac, p99_ac, bl2 = resolve_baseline(
-            "unique_token_count", "per_script", address,
+        p50_ac, p99_ac, _ = _resolve(
+            "unique_token_count", "per_script", address, network,
+            _BOOT, "unique_token_count",
         )
-        if bl2 == "missing":
-            p50_ac, p99_ac = _anchor(_BOOT, "unique_token_count")
-
-        p50_ada, p99_ada, bl3 = resolve_baseline(
-            "ada_amount", "per_script", address,
+        p50_ada, p99_ada, _ = _resolve(
+            "ada_amount", "per_script", address, network,
+            _BOOT, "ada_amount",
         )
-        if bl3 == "missing":
-            p50_ada, p99_ada = _anchor(_BOOT, "ada_amount")
-
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        bl_source = bl1
 
         # Sub-scores
         s_bytes = normalise(value_cbor, p50=p50_cb, p99=p99_cb)
@@ -134,7 +131,7 @@ class TokenDustScorer(BaseScorer):
             + float(_W["ada_inv"]) * s_ada
             + float(_W["recurrence"]) * s_recurrence
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
         reasons = []
         if s_bytes > _REASON_T:

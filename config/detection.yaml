@@ -1,8 +1,6 @@
-# Detection scorer configuration.
-#
-# To override defaults, copy this file to `config/detection.yaml` and edit.
-# `detection.yaml` is gitignored; `detection.example.yaml` is the tracked
-# reference and fallback if no `detection.yaml` exists.
+# Detection scorer configuration. This file is tracked in git — changes to
+# weights, anchors, allowlists, and band caps are reviewed like any other
+# code change. Edit freely and commit alongside the scorer change it supports.
 #
 # Anchor convention: `{p50, p99}` maps to the normalisation bounds used by
 # `normalise()` / `normalise_inverted()`. Values below p50 normalise to 0
@@ -67,12 +65,22 @@ scorers:
   # ------------------------------------------------------------------
   large_value:
     weights:
-      digits: 0.40
-      bytes: 0.35
-      ada_inv: 0.10
-      recurrence: 0.15
+      # digits is the only reliable signal for this attack class. A simple
+      # single-token UTxO has naturally low value_cbor_bytes regardless of
+      # quantity, so the 'bytes' axis only fires for multi-asset outputs.
+      # Heavier weight on 'digits' lets a max-quantity (near int64) attack
+      # reach High/Critical even without the cbor signal.
+      digits: 0.55
+      bytes: 0.20
+      ada_inv: 0.15
+      recurrence: 0.10
     bootstrap_anchors:
-      quantity_digits:   { p50: 6,         p99: 18 }
+      # Normal Cardano native-token supplies span 10^6 to 10^15 (7-16 digits).
+      # int64 max is ~9.22 * 10^18 (19 digits), the ledger hard ceiling.
+      # p50 sits at 13 so typical memecoin supplies (10^12-10^13) contribute
+      # weakly but 15+ digit outliers register meaningfully; p99 at int64
+      # max so bloat attacks reach the digits ceiling.
+      quantity_digits:   { p50: 13,        p99: 19 }
       value_cbor_bytes:  { p50: 100,       p99: 1500 }
       ada_amount:        { p50: 1_200_000, p99: 2_000_000 }
     reason_threshold: 0.5
@@ -152,6 +160,7 @@ scorers:
       fee_tolerance_multiplier: 4.0     # max allowed net_loss / expected_fee at gate
       fee_tolerance_strict: 2.0         # above which score is capped at moderate_cap
       per_hop_fee_estimate: 0.02        # 2% per hop for expected_fee heuristic
+      max_age_slots: 86400              # forward BFS horizon (Cardano ~1 slot/sec => 24h)
     reason_threshold: 0.5
     moderate_cap: 59.0                  # top of Moderate band
 
@@ -192,9 +201,15 @@ scorers:
   phishing:
     weights:
       content:
-        blacklist: 0.40
-        domain: 0.35
-        social: 0.25
+        # Social-engineering text in on-chain metadata is the dominant
+        # practical signal. Real Cardano protocols rarely push Tier-2
+        # urgency/reward language through chain metadata, so a match there
+        # is near-specific to phishing. 0.40 for social, 0.30 each for
+        # blacklist and brand-mimicry, produces High-band hits on clear
+        # phishing without requiring per-protocol baselines.
+        blacklist: 0.30
+        domain: 0.30
+        social: 0.40
       delivery:
         recipients: 0.35
         url_recur: 0.25
@@ -206,7 +221,10 @@ scorers:
     fixed_anchors:
       domain_age_inv: { p50: 0.00273972602739726, p99: 0.14285714285714285 } # 1/365, 1/7
       brand_sim:      { p50: 0.0,     p99: 0.85 }
-      social_score:   { p50: 0.0,     p99: 0.60 }
+      # Saturate at 2 Tier-2 matches (each worth urgency_increment=0.15,
+      # so 2 matches = 0.30 raw). Prior anchor p99=0.60 required 4 matches
+      # which is rare — most phishing txs carry 2-3 patterns.
+      social_score:   { p50: 0.0,     p99: 0.30 }
       # `targeting` anchors will be wired up when the
       # recipient-to-protocol interaction graph lands (§5.3 is deferred).
     bootstrap_anchors:

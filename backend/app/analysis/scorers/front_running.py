@@ -22,9 +22,13 @@ Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    anchor as _anchor,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,8 @@ class FrontRunningScorer(BaseScorer):
         if not collision:
             return ScorerResult(score=0.0)
 
+        network = features.get("network", "")
+
         # Sub-score 1: collision outcome (weight = 0.35)
         outcome = collision.get("outcome", "BOTH_PENDING")
         s_outcome = _OUTCOME_SCORES.get(outcome, 0.5)
@@ -89,11 +95,10 @@ class FrontRunningScorer(BaseScorer):
 
         # Sub-score 3: attacker recurrence
         win_count = collision.get("attacker_win_count", 0)
-        p50_r, p99_r, bl1 = resolve_baseline(
-            "collision_win_count", "per_cluster", "__global__",
+        p50_r, p99_r, bl1 = _resolve(
+            "collision_win_count", "per_cluster", "__global__", network,
+            _BOOT, "attacker_recurrence",
         )
-        if bl1 == "missing":
-            p50_r, p99_r = _anchor(_BOOT, "attacker_recurrence")
         s_recurrence = normalise(win_count, p50=p50_r, p99=p99_r)
 
         # Sub-score 4: structural similarity
@@ -114,7 +119,7 @@ class FrontRunningScorer(BaseScorer):
         change_link = 1.0 if collision.get("shares_change_address") else 0.0
         s_structure = (fee_sim + ttl_sim + change_link) / 3.0
 
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        bl_source = bl1
 
         raw = (
             float(_W["outcome"]) * s_outcome
@@ -122,7 +127,7 @@ class FrontRunningScorer(BaseScorer):
             + float(_W["recurrence"]) * s_recurrence
             + float(_W["structure"]) * s_structure
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
         # Minimum recurrence gate: cap below Critical band when attacker has
         # fewer than _MIN_RECURRENCE_WINS collision wins in recent window.

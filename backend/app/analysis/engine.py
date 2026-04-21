@@ -71,6 +71,7 @@ def _build_scorers() -> List[BaseScorer]:
 
 def _enrich_inputs_with_resolved_addresses(
     rows: List[Dict[str, Any]],
+    network: str,
 ) -> None:
     """Inject resolved input addresses from transaction_inputs into raw_data.
 
@@ -78,6 +79,9 @@ def _enrich_inputs_with_resolved_addresses(
     addresses.  Scorers like multiple_sat need input addresses to group by script.
     The resolved addresses are stored in the transaction_inputs ClickHouse table
     at ingestion time, so we batch-fetch them and patch raw_data in-place.
+
+    Both queries are scoped by network to prevent cross-network pollution when
+    multiple instances (e.g. preprod + preview) share the same ClickHouse.
     """
     tx_hashes = [r["tx_hash"] for r in rows if r.get("raw_data")]
     if not tx_hashes:
@@ -87,8 +91,9 @@ def _enrich_inputs_with_resolved_addresses(
         input_rows = clickhouse._get_client().execute(
             """SELECT tx_hash, input_index, address, amount
             FROM transaction_inputs
-            WHERE tx_hash IN %(hashes)s""",
-            {"hashes": tx_hashes},
+            WHERE tx_hash IN %(hashes)s
+              AND network = %(network)s""",
+            {"hashes": tx_hashes, "network": network},
         )
     except Exception:
         logger.warning("Failed to fetch resolved input addresses", exc_info=True)
@@ -122,8 +127,9 @@ def _enrich_inputs_with_resolved_addresses(
     if ref_tx_hashes:
         try:
             ref_rows = clickhouse._get_client().execute(
-                "SELECT tx_hash, raw_data FROM transactions WHERE tx_hash IN %(hashes)s",
-                {"hashes": list(ref_tx_hashes)},
+                "SELECT tx_hash, raw_data FROM transactions "
+                "WHERE tx_hash IN %(hashes)s AND network = %(network)s",
+                {"hashes": list(ref_tx_hashes), "network": network},
             )
             for ref_hash, ref_rd in ref_rows:
                 if isinstance(ref_rd, str):
@@ -330,7 +336,7 @@ def run_once(network: str) -> int:
             row["metadata"] = None
 
     # Enrich inputs with resolved addresses from transaction_inputs table
-    _enrich_inputs_with_resolved_addresses(rows)
+    _enrich_inputs_with_resolved_addresses(rows, network)
 
     # Enrich collision features for front-running detection
     _enrich_collision_features(rows, network)

@@ -21,9 +21,13 @@ from typing import Any, Dict, List, Optional
 
 from rapidfuzz import fuzz
 
-from app.analysis.normalise import normalise, normalise_inverted, resolve_baseline
-from app.analysis.scorer_config import get as _get_cfg, anchor as _anchor
-from app.analysis.scorers.base import BaseScorer, ScorerResult
+from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+    anchor as _anchor,
+    resolved_or_bootstrap as _resolve,
+)
+from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
 
 logger = logging.getLogger(__name__)
@@ -197,7 +201,7 @@ class FakeTokenScorer(BaseScorer):
         if not minted:
             return False
 
-        legit_tokens = external.get_legitimate_tokens()
+        legit_tokens = external.get_legitimate_tokens(features.get("network", ""))
         for asset in minted:
             for legit_name, legit_policies in legit_tokens.items():
                 sim = _compute_tokenname_similarity(
@@ -213,7 +217,7 @@ class FakeTokenScorer(BaseScorer):
         metadata = features.get("metadata")
 
         minted = _extract_minted_assets(raw_data, metadata)
-        legit_tokens = external.get_legitimate_tokens()
+        legit_tokens = external.get_legitimate_tokens(network)
 
         # Find best candidate (highest similarity, policy mismatch)
         best_candidate = None
@@ -270,20 +274,18 @@ class FakeTokenScorer(BaseScorer):
         recipient_count = len(recipient_addrs)
 
         # recipient_count: per-policy baseline
-        p50_rc, p99_rc, bl1 = resolve_baseline(
-            "recipient_count", "per_policy", policy_id,
+        p50_rc, p99_rc, bl1 = _resolve(
+            "recipient_count", "per_policy", policy_id, network,
+            _BOOT, "recipient_count",
         )
-        if bl1 == "missing":
-            p50_rc, p99_rc = _anchor(_BOOT, "recipient_count")
         s_recipients = normalise(recipient_count, p50=p50_rc, p99=p99_rc)
 
         # mint_to_recipient_ratio inverted
         mint_ratio = best_candidate["quantity"] / (recipient_count + EPSILON)
-        p50_mr, p99_mr, bl2 = resolve_baseline(
-            "mint_to_recipient_ratio", "per_policy", policy_id,
+        p50_mr, p99_mr, _ = _resolve(
+            "mint_to_recipient_ratio", "per_policy", policy_id, network,
+            _BOOT, "mint_to_recipient_ratio",
         )
-        if bl2 == "missing":
-            p50_mr, p99_mr = _anchor(_BOOT, "mint_to_recipient_ratio")
         s_ratio = normalise_inverted(mint_ratio, p50=p50_mr, p99=p99_mr)
 
         # policy_age inverted: newer policies are more suspicious.
@@ -309,9 +311,9 @@ class FakeTokenScorer(BaseScorer):
             float(_W_OVERALL["identity"]) * identity_score
             + float(_W_OVERALL["distribution"]) * distribution_score
         )
-        final = round(max(0.0, min(1.0, raw)) * 100, 2)
+        final = finalise_score(raw)
 
-        bl_source = bl1 if bl1 != "missing" else "bootstrap"
+        bl_source = bl1
 
         reasons = []
         if s_name > float(_REASON_T["name"]):

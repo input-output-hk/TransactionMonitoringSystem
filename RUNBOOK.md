@@ -42,20 +42,34 @@ cd TransactionMonitoringSystem
 cp .env.example .env
 ```
 
-Open `.env` and set the two required values:
+Config is layered:
+
+- `.env` — shared across every network (DB ports, log level, API keys).
+- `.env.preprod`, `.env.preview`, `.env.<name>` — per-network overrides. Each one sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT` for that network.
+
+Edit `.env` for anything shared, and create a per-network file for each Cardano network you want to point at:
 
 ```bash
-CARDANO_NETWORK=preprod        # or mainnet
-OGMIOS_WS_URL=ws://<host>:1337 # address of your Ogmios instance
+# .env.preprod
+CARDANO_NETWORK=preprod
+OGMIOS_WS_URL=ws://<host>:1337
+API_PORT=8000
+
+# .env.preview
+CARDANO_NETWORK=preview
+OGMIOS_WS_URL=ws://<host>:1338
+API_PORT=8001
 ```
 
-Everything else uses safe defaults. If you want API key authentication, also set:
+Which file is applied is chosen at launch via `TMS_ENV`; unset defaults to `preprod`.
+
+If you want API key authentication, set `API_KEYS` in `.env`:
 
 ```bash
 API_KEYS=your-key-1,your-key-2
 ```
 
-Leave `API_KEYS` empty during initial testing; the API runs in open dev mode and logs a warning.
+For open-API local testing, leave `API_KEYS` empty **and** export `TMS_ALLOW_DEV_MODE=1`. The app refuses to start with empty keys and no dev-mode flag — this guard prevents an accidental production deploy from silently running unauthenticated.
 
 
 ## Starting the system
@@ -74,10 +88,16 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Start the application
+# Start the application (defaults to preprod; port comes from .env.preprod)
 cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run.py
+
+# To run against preview instead (port comes from .env.preview):
+TMS_ENV=preview python run.py
 ```
+
+`run.py` binds uvicorn to `settings.API_PORT`. Raw `uvicorn` needs an
+explicit `--port` on the CLI because it does not read pydantic settings.
 
 ### Option B: everything in Docker
 
@@ -92,8 +112,19 @@ The app container connects to the databases internally. `OGMIOS_WS_URL` must sti
 
 ### 1. Health check
 
+The public `/health` endpoint is a minimal liveness probe and does not
+require auth:
+
 ```bash
 curl http://localhost:8000/health
+# {"status":"healthy"}
+```
+
+For the operational detail (pipeline state, Ogmios sync lag, connection
+count), call the authenticated `/health/detail` endpoint:
+
+```bash
+curl -H "TMS-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
 Expected response when connected to Ogmios:
@@ -124,7 +155,7 @@ Open `http://localhost:8000/` in a browser. The dashboard shows a live feed of i
 ### 3. First API call
 
 ```bash
-# No key needed if API_KEYS is empty
+# No key needed when running with empty API_KEYS + TMS_ALLOW_DEV_MODE=1
 curl "http://localhost:8000/api/transactions/?limit=5&network=preprod"
 
 # With a key
@@ -221,19 +252,24 @@ The application reconnects to Ogmios automatically on restart using an exponenti
 # Restart just the app (databases keep running)
 # Ctrl+C the uvicorn process, then:
 cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+python run.py                     # preprod (default)
+# or: TMS_ENV=preview python run.py
 ```
 
 
 ## Configuration reference
 
-All variables are set in `.env`. The application reads them at startup.
+Variables are layered across files:
+
+- `.env` — shared across all networks.
+- `.env.<TMS_ENV>` (e.g. `.env.preprod`, `.env.preview`) — per-network overrides; applied on top of `.env`. Defaults to `.env.preprod` when `TMS_ENV` is unset.
+- Shell environment variables override both files.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CARDANO_NETWORK` | `preprod` | `mainnet` or `preprod` |
+| `CARDANO_NETWORK` | `preprod` | `mainnet`, `preprod`, or `preview` |
 | `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
-| `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access (dev mode) |
+| `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; requires `TMS_ALLOW_DEV_MODE=1` or the app refuses to start |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
 | `RATE_LIMIT_REQUESTS` | `60` | Max requests per window per key |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
@@ -270,7 +306,7 @@ ConnectionRefusedError / WebSocket connection failed
 ### `pipeline_state` is DEGRADED or DOWN
 
 ```bash
-curl http://localhost:8000/health
+curl -H "TMS-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
 Check the `ogmios` field for `chain_circuit_state` and `mempool_circuit_state`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
@@ -293,7 +329,7 @@ Update `POSTGRES_PORT` in `.env` to match.
 
 ### No transactions appearing
 
-1. Check `pipeline_state` is `OK` at `/health`
+1. Check `pipeline_state` is `OK` at `/health/detail` (requires API key)
 2. Ogmios may still be syncing; `networkSynchronization` in its health endpoint should be `1`
 3. On Preprod, blocks arrive roughly every 20 seconds; wait at least one full block cycle
 4. Check logs for parser errors: `grep -i error` in the application log
@@ -312,8 +348,8 @@ On next startup the application recreates all schemas automatically and begins s
 
 ## API quick reference
 
-All endpoints accept `?network=preprod` or `?network=mainnet` (default: `preprod`).
-All endpoints require `TMS-API-Key: <key>` header unless `API_KEYS` is empty.
+All endpoints accept `?network=preprod`, `?network=mainnet`, or `?network=preview`; defaults to the instance's `CARDANO_NETWORK`.
+All endpoints require `TMS-API-Key: <key>`. For open-API dev mode, boot with empty `API_KEYS` **and** `TMS_ALLOW_DEV_MODE=1`.
 
 ```bash
 BASE=http://localhost:8000

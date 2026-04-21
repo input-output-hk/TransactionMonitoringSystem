@@ -2,8 +2,14 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from pydantic import BaseModel, Field
+
+
+# Cardano networks the TMS understands. Enforced at the API boundary via
+# FastAPI's Query type validation. To add a new network, extend this tuple
+# and update `settings.CARDANO_NETWORK`'s docstring + .env.example.
+NetworkType = Literal["mainnet", "preprod", "preview"]
 
 
 class LifecycleStatus(str, Enum):
