@@ -89,7 +89,7 @@ C4Component
 
         Component(ui_router, "UI Router", "FastAPI Router", "GET /: serves the TMS Dashboard (HTML5).")
 
-        Component(auth, "Auth Middleware", "FastAPI Security", "TMS-API-Key header validation. Open access in dev mode (API_KEYS empty).")
+        Component(auth, "Auth Middleware", "FastAPI Security", "TMS-API-Key header validation (constant-time). Open access requires empty API_KEYS + TMS_ALLOW_DEV_MODE=1, else startup aborts.")
 
         Component(rate_limiter, "Rate Limiter", "Middleware", "Per-key sliding-window rate limiter. Configurable via RATE_LIMIT_REQUESTS / RATE_LIMIT_WINDOW_SECONDS.")
 
@@ -254,10 +254,10 @@ sequenceDiagram
 
     Client->>API: GET /api/lifecycle/{txId}<br/>TMS-API-Key: secret-key
     API->>Auth: Validate API key
-    alt API_KEYS is empty
+    alt dev mode (API_KEYS empty + TMS_ALLOW_DEV_MODE=1)
         Auth-->>API: Allow (dev mode)
     else Valid key
-        Auth-->>API: Authorized
+        Auth-->>API: Authorized (hmac.compare_digest)
     else Invalid/missing key
         Auth-->>Client: 403 Forbidden
     end
@@ -298,7 +298,7 @@ C4Deployment
         }
         Deployment_Node(node_infra, "Cardano Node Infrastructure") {
             Container(ogmios_inst, "Ogmios v6", "Haskell", "WebSocket bridge on :1337")
-            Container(node, "Cardano Node", "cardano-node", "Full node (mainnet or preprod)")
+            Container(node, "Cardano Node", "cardano-node", "Full node (mainnet, preprod, or preview)")
         }
     }
 

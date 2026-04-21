@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from app.auth import _dev_mode, _valid_keys
+from app.auth import _dev_mode, is_valid_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ async def websocket_endpoint(
     clients.  WebSocket upgrades cannot carry custom headers from browsers, so
     a query-parameter key is the standard approach.
     """
-    if not _dev_mode and api_key not in _valid_keys:
+    if not _dev_mode and not is_valid_api_key(api_key):
         await websocket.close(code=4403)
         return
 

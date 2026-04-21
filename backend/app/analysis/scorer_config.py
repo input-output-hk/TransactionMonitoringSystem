@@ -17,6 +17,9 @@ import os
 
 import yaml
 
+from app.analysis.normalise import resolve_baseline
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # Required top-level keys for each scorer section. Extend the set when a
@@ -44,8 +47,16 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
 
 
 def _config_dir() -> Path:
-    """Resolve the config directory, honouring TMS_CONFIG_DIR if set."""
-    override = os.environ.get("TMS_CONFIG_DIR")
+    """Resolve the config directory, honouring TMS_CONFIG_DIR if set.
+
+    TMS_CONFIG_DIR can come from .env (via pydantic settings) or the shell
+    environment; shell wins when both are present.
+    """
+    override = (
+        os.environ.get("TMS_CONFIG_DIR")
+        or settings.TMS_CONFIG_DIR
+        or None
+    )
     if override:
         return Path(override)
     # Walk upward until we find a directory containing `config/detection.yaml`.
@@ -115,3 +126,32 @@ def anchor(container: Dict[str, Any], key: str) -> Tuple[float, float]:
     """Extract ``(p50, p99)`` from a ``{key: {p50: ..., p99: ...}}`` mapping."""
     a = container[key]
     return float(a["p50"]), float(a["p99"])
+
+
+def resolved_or_bootstrap(
+    feature: str,
+    scope_type: str,
+    scope_id: str,
+    network: str,
+    bootstrap: Dict[str, Any],
+    bootstrap_key: str,
+) -> Tuple[float, float, str]:
+    """Resolve a baseline, falling back to the scorer's configured bootstrap anchor.
+
+    Wraps :func:`app.analysis.normalise.resolve_baseline` with the idiom every
+    scorer repeats: if the resolved tier is ``"missing"``, replace
+    ``(p50, p99)`` with the values from ``bootstrap[bootstrap_key]`` and report
+    the source as ``"bootstrap"``.
+
+    Parameters mirror ``resolve_baseline`` plus:
+        bootstrap:      the scorer's ``bootstrap_anchors`` config sub-dict.
+        bootstrap_key:  the key inside ``bootstrap`` to read when falling back.
+
+    Returns ``(p50, p99, source)`` where ``source`` is one of
+    ``"per_script" | "per_policy" | "global" | "bootstrap"``.
+    """
+    p50, p99, source = resolve_baseline(feature, scope_type, scope_id, network)
+    if source == "missing":
+        p50, p99 = anchor(bootstrap, bootstrap_key)
+        source = "bootstrap"
+    return p50, p99, source

@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from fastapi import APIRouter, Query, HTTPException, Security
 from pydantic import BaseModel
@@ -11,9 +11,7 @@ from pydantic import BaseModel
 from app.db import clickhouse
 from app.config import settings
 from app.auth import verify_api_key
-
-# Network type for API parameters
-NetworkType = Literal["mainnet", "preprod"]
+from app.models.transaction import NetworkType
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +52,7 @@ class TransactionDetailResponse(TransactionResponse):
 async def get_transactions(
     network: Optional[NetworkType] = Query(
         None,
-        description="Network to query: 'mainnet' or 'preprod'. Defaults to 'preprod' if not specified."
+        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
     ),
     limit: int = Query(100, ge=1, le=200, description="Maximum number of transactions to return"),
     before: Optional[datetime] = Query(
@@ -143,7 +141,7 @@ async def get_transaction_by_hash(
     tx_hash: str,
     network: Optional[NetworkType] = Query(
         None,
-        description="Network to query: 'mainnet' or 'preprod'. Defaults to 'preprod' if not specified."
+        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
     ),
     api_key: str = Security(verify_api_key),
 ):
@@ -258,7 +256,7 @@ async def get_transactions_by_address(
     address: str,
     network: Optional[NetworkType] = Query(
         None,
-        description="Network to query: 'mainnet' or 'preprod'. Defaults to 'preprod' if not specified."
+        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
     ),
     limit: int = Query(100, ge=1, le=200),
     before: Optional[datetime] = Query(
@@ -275,7 +273,7 @@ async def get_transactions_by_address(
 async def get_transaction_stats(
     network: Optional[NetworkType] = Query(
         None,
-        description="Network to query: 'mainnet' or 'preprod'. Defaults to 'preprod' if not specified."
+        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
     ),
     start_time: Optional[datetime] = Query(None),
     end_time: Optional[datetime] = Query(None),

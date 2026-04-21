@@ -11,10 +11,15 @@ import statistics
 from collections import Counter
 from typing import Dict, List, Optional, Set, Tuple
 
+from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
+
+_CYCLE_CFG = _get_cfg("circular")["cycle"]
+_MAX_AGE_SLOTS = int(_CYCLE_CFG.get("max_age_slots", 86400))
+
 
 def detect_cycle(
     tx_hash: str,
@@ -88,7 +93,9 @@ def detect_cycle(
 
         addr_list = list(current_addresses)[:max_fanout]
 
-        # Find txs where these addresses are inputs (they spent received funds)
+        # Find txs where these addresses are inputs (they spent received funds).
+        # The slot window is bounded: cycles spanning >24h are almost always
+        # incidental reuses of an address, not deliberate layering.
         next_rows = client.execute(
             """
             SELECT DISTINCT ti.tx_hash, to2.address, to2.amount, t.slot
@@ -103,6 +110,7 @@ def detect_cycle(
               AND ti.is_reference = 0
               AND to2.is_collateral = 0
               AND t.slot >= %(min_slot)s
+              AND t.slot <= %(max_slot)s
               AND ti.tx_hash != %(origin_tx)s
             ORDER BY t.slot ASC
             LIMIT 500
@@ -111,6 +119,7 @@ def detect_cycle(
                 "addresses": addr_list,
                 "network": network,
                 "min_slot": origin_slot,
+                "max_slot": (origin_slot or 0) + _MAX_AGE_SLOTS,
                 "origin_tx": tx_hash,
             },
         )
@@ -172,6 +181,11 @@ def _count_origin_recurrence(
     previous cycles originated from this address within a 30-day rolling
     window (per Polimi spec Section 5.3).  This feeds the cycle_recurrence
     sub-score (30% weight in the CircularScorer).
+
+    Only counts ancestors scored High or above (>=60). Counting every tx with
+    circular > 0 self-reinforces: once a single tx scored non-zero, every
+    subsequent tx from the same origin got a recurrence boost, cascading
+    false positives. High+ is the signal we want to amplify.
     """
     if not origin_address:
         return 0
@@ -185,7 +199,7 @@ def _count_origin_recurrence(
                 ON s.tx_hash = ti.tx_hash AND s.network = ti.network
             WHERE ti.address = %(origin)s
               AND s.network = %(network)s
-              AND s.circular > 0
+              AND s.circular >= 60
               AND s.tx_hash != %(exclude)s
               AND s.analyzed_at >= now() - INTERVAL %(window)s DAY
               AND ti.is_collateral = 0

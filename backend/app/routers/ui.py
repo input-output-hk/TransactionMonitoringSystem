@@ -144,6 +144,15 @@ async def root():
             .risk-band.Moderate {{ background: #ffab00; color: #000; }}
             .risk-band.Low {{ background: #00c853; color: #000; }}
             .attack-class {{ color: #ce93d8; font-size: 12px; font-weight: 600; }}
+            .filter-label {{ color: #888; font-size: 11px; margin-right: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
+            .band-swatch {{
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                margin-right: 6px;
+                vertical-align: middle;
+            }}
             .class-score {{
                 display: inline-block;
                 padding: 1px 6px;
@@ -222,7 +231,21 @@ async def root():
                     <span class="panel-count" id="riskCount">0</span>
                 </div>
                 <div class="filters" id="riskFilters">
-                    <button class="filter-btn active" data-attack="">All</button>
+                    <span class="filter-label">Show:</span>
+                    <button class="filter-btn band-btn active" data-band="80">
+                        <span class="band-swatch" style="background:#ff1744"></span>Critical only
+                    </button>
+                    <button class="filter-btn band-btn" data-band="60">
+                        <span class="band-swatch" style="background:#ff6d00"></span>High and above
+                    </button>
+                    <button class="filter-btn band-btn" data-band="31">
+                        <span class="band-swatch" style="background:#ffab00"></span>Moderate and above
+                    </button>
+                    <button class="filter-btn band-btn" data-band="1">
+                        <span class="band-swatch" style="background:#00c853"></span>All (inc. Low)
+                    </button>
+                    <span style="border-left:1px solid #3a3f5a;height:20px;margin:0 4px"></span>
+                    <button class="filter-btn active" data-attack="">All classes</button>
                     <button class="filter-btn" data-attack="token_dust">Token Dust</button>
                     <button class="filter-btn" data-attack="large_value">Large Value</button>
                     <button class="filter-btn" data-attack="large_datum">Large Datum</button>
@@ -445,6 +468,9 @@ async def root():
 
             let activeClassFilter = "";
             let activeSort = "date";
+            // Default: Critical band only (score >= 80). Band-min-score map
+            // mirrors normalise.score_to_band: Critical=80, High=60, Moderate=31.
+            let activeMinScore = 80;
             let _riskTimer = null;
             function debouncedRefreshRisk() {{
                 if (_riskTimer) return;
@@ -453,7 +479,7 @@ async def root():
 
             async function refreshRiskAlerts() {{
                 try {{
-                    let url = `/api/analysis/results?min_score=1&limit=50&sort=${{activeSort}}`;
+                    let url = `/api/analysis/results?min_score=${{activeMinScore}}&limit=50&sort=${{activeSort}}`;
                     if (activeClassFilter) {{
                         url += "&attack_class=" + activeClassFilter;
                     }}
@@ -464,11 +490,15 @@ async def root():
                 }} catch(e) {{}}
             }}
 
-            // Filter + sort buttons
+            // Filter + sort buttons (three orthogonal axes: band / class / sort)
             document.getElementById("riskFilters").addEventListener("click", (e) => {{
                 const btn = e.target.closest(".filter-btn");
                 if (!btn) return;
-                if (btn.dataset.sort) {{
+                if (btn.dataset.band !== undefined) {{
+                    document.querySelectorAll("#riskFilters [data-band]").forEach(b => b.classList.remove("active"));
+                    btn.classList.add("active");
+                    activeMinScore = parseFloat(btn.dataset.band);
+                }} else if (btn.dataset.sort) {{
                     document.querySelectorAll("#riskFilters [data-sort]").forEach(b => b.classList.remove("active"));
                     btn.classList.add("active");
                     activeSort = btn.dataset.sort;

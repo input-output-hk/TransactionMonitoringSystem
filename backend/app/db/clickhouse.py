@@ -39,8 +39,25 @@ _ch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="clickhouse"
 
 
 def _get_client() -> Client:
-    """Return the per-thread ClickHouse Client, creating it on first call."""
+    """Return the per-thread ClickHouse Client, creating it on first call.
+
+    When a prior ``client.execute()`` hits a network error, clickhouse_driver's
+    internal error handling calls ``disconnect()`` on the connection, which
+    sets ``connection.connected = False`` but leaves the cached Client object
+    in place. A naive reuse then blocks or fails on the next call. Check the
+    connection state here and tear down a dead client so the next request
+    gets a freshly opened socket.
+    """
     client = getattr(_thread_local, "client", None)
+    if client is not None:
+        conn = getattr(client, "connection", None)
+        if conn is not None and not getattr(conn, "connected", True):
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            _thread_local.client = None
+            client = None
     if client is None:
         client = Client(
             host=settings.CLICKHOUSE_HOST,
@@ -401,8 +418,27 @@ def execute_schema():
 
         # Per-script / per-policy / global baseline statistics used by the
         # percentile normalisation framework.  Updated daily (or on bootstrap).
+        #
+        # The ``network`` column is part of the ORDER BY key so ReplacingMergeTree
+        # deduplicates within a network and preprod / preview / mainnet baselines
+        # cannot overwrite each other. If the legacy (network-less) table exists,
+        # drop it so the new schema applies — baselines are always recomputable
+        # from utxo_features / tx_script_features.
+        try:
+            cols = client.execute(
+                "SELECT name FROM system.columns "
+                "WHERE database = currentDatabase() AND table = 'baselines'"
+            )
+            if cols and not any(row[0] == "network" for row in cols):
+                client.execute("DROP TABLE IF EXISTS baselines")
+                logger.info("Dropped legacy baselines table (pre-network schema)")
+        except ClickHouseError as e:
+            # Concurrent startup of another app instance may have already dropped
+            # the table; log and continue rather than mask the error silently.
+            logger.warning("Legacy baselines check/drop skipped: %s", e)
         client.execute("""
             CREATE TABLE IF NOT EXISTS baselines (
+                network      String,
                 scope_type   String,
                 scope_id     String,
                 feature      String,
@@ -412,7 +448,7 @@ def execute_schema():
                 computed_at  DateTime,
                 window_days  UInt16
             ) ENGINE = ReplacingMergeTree(computed_at)
-            ORDER BY (scope_type, scope_id, feature)
+            ORDER BY (network, scope_type, scope_id, feature)
         """)
 
         logger.info("ClickHouse schema initialized")
@@ -556,27 +592,6 @@ async def insert_transactions_batch_async(transactions: List[NormalizedTransacti
 # ---------------------------------------------------------------------------
 # Analysis Engine helpers
 # ---------------------------------------------------------------------------
-
-def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str, Any]]:
-    """Return up to batch_size transactions that have no analysis result yet."""
-    rows = _get_client().execute(
-        """
-        SELECT tx_hash, network, fee, input_count, output_count,
-               total_output_value, metadata, addresses
-        FROM transactions
-        WHERE network = %(network)s
-          AND tx_hash NOT IN (
-              SELECT tx_hash FROM tx_analysis_results WHERE network = %(network)s
-          )
-        ORDER BY ingestion_timestamp ASC
-        LIMIT %(batch_size)s
-        """,
-        {"network": network, "batch_size": batch_size},
-    )
-    keys = ("tx_hash", "network", "fee", "input_count", "output_count",
-            "total_output_value", "metadata", "addresses")
-    return [dict(zip(keys, row)) for row in rows]
-
 
 def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[str, Any]]:
     """Resolve input values and unique source addresses for a batch of transactions.
@@ -789,18 +804,26 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
 # Baseline read/write
 # ---------------------------------------------------------------------------
 
-def get_baseline(scope_type: str, scope_id: str, feature: str) -> Optional[Dict[str, Any]]:
-    """Return the latest baseline for a given (scope_type, scope_id, feature)."""
+def get_baseline(
+    network: str, scope_type: str, scope_id: str, feature: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest baseline for a given (network, scope_type, scope_id, feature)."""
     rows = _get_client().execute(
         """
         SELECT p50, p99, sample_count, computed_at, window_days
         FROM baselines FINAL
-        WHERE scope_type = %(scope_type)s
+        WHERE network    = %(network)s
+          AND scope_type = %(scope_type)s
           AND scope_id   = %(scope_id)s
           AND feature    = %(feature)s
         LIMIT 1
         """,
-        {"scope_type": scope_type, "scope_id": scope_id, "feature": feature},
+        {
+            "network": network,
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "feature": feature,
+        },
     )
     if not rows:
         return None
@@ -809,13 +832,17 @@ def get_baseline(scope_type: str, scope_id: str, feature: str) -> Optional[Dict[
 
 
 def insert_baselines(rows: List[tuple]):
-    """Batch-insert or update baseline statistics."""
+    """Batch-insert or update baseline statistics.
+
+    Each row tuple: ``(network, scope_type, scope_id, feature, p50, p99,
+    sample_count, computed_at, window_days)``.
+    """
     if not rows:
         return
     _get_client().execute(
         """
         INSERT INTO baselines (
-            scope_type, scope_id, feature, p50, p99,
+            network, scope_type, scope_id, feature, p50, p99,
             sample_count, computed_at, window_days
         ) VALUES
         """,
@@ -998,28 +1025,30 @@ async def get_class_scores_stats_async(network: str) -> Dict[str, Any]:
 
 
 def get_baselines_for_scope(
-    scope_type: str, scope_id: str,
+    network: str, scope_type: str, scope_id: str,
 ) -> List[Dict[str, Any]]:
-    """Return all baselines for a given scope."""
+    """Return all baselines for a given scope on a given network."""
     rows = _get_client().execute(
         """
         SELECT feature, p50, p99, sample_count, computed_at, window_days
         FROM baselines FINAL
-        WHERE scope_type = %(scope_type)s AND scope_id = %(scope_id)s
+        WHERE network = %(network)s
+          AND scope_type = %(scope_type)s
+          AND scope_id = %(scope_id)s
         ORDER BY feature
         """,
-        {"scope_type": scope_type, "scope_id": scope_id},
+        {"network": network, "scope_type": scope_type, "scope_id": scope_id},
     )
     keys = ("feature", "p50", "p99", "sample_count", "computed_at", "window_days")
     return [dict(zip(keys, r)) for r in rows]
 
 
 async def get_baselines_for_scope_async(
-    scope_type: str, scope_id: str,
+    network: str, scope_type: str, scope_id: str,
 ) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, get_baselines_for_scope, scope_type, scope_id,
+        _ch_executor, get_baselines_for_scope, network, scope_type, scope_id,
     )
 
 

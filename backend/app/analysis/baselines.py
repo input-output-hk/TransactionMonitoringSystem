@@ -58,7 +58,7 @@ def compute_global_baselines(network: str) -> List[tuple]:
             continue
         p50, p99, count = result
         rows.append((
-            "global", "__global__", feature,
+            network, "global", "__global__", feature,
             p50, p99, count, now, 180,
         ))
 
@@ -68,7 +68,7 @@ def compute_global_baselines(network: str) -> List[tuple]:
             continue
         p50, p99, count = result
         rows.append((
-            "global", "__global__", feature,
+            network, "global", "__global__", feature,
             p50, p99, count, now, 180,
         ))
 
@@ -97,7 +97,7 @@ def compute_script_baselines(
             continue
         p50, p99, count = result
         rows.append((
-            "per_script", script_hash, feature,
+            network, "per_script", script_hash, feature,
             p50, p99, count, now, 90,
         ))
 
@@ -105,7 +105,7 @@ def compute_script_baselines(
         clickhouse.insert_baselines(rows)
         logger.info(
             f"Baselines [per_script/{script_hash[:16]}...]: "
-            f"computed {len(rows)} features ({rows[0][5]} samples)"
+            f"computed {len(rows)} features ({rows[0][6]} samples)"
         )
     return rows
 
@@ -116,7 +116,9 @@ def bootstrap_baselines(network: str) -> int:
     Called at startup when BASELINE_BOOTSTRAP_ON_STARTUP is True.
     Returns the number of baseline rows created.
     """
-    existing = clickhouse.get_baseline("global", "__global__", "value_cbor_bytes")
+    existing = clickhouse.get_baseline(
+        network, "global", "__global__", "value_cbor_bytes",
+    )
     if existing and existing["sample_count"] >= settings.BASELINE_MIN_SAMPLES:
         logger.info("Baselines already bootstrapped, skipping")
         return 0
