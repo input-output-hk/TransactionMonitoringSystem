@@ -36,9 +36,14 @@ def parse_ogmios_transaction(
     tx_hash = tx_data.get("id", "")
 
     # Fee
+    # Ogmios v6 wraps fee as {"ada": {"lovelace": N}} in Conway/Babbage era
     fee_obj = tx_data.get("fee", {})
     if isinstance(fee_obj, dict):
-        fee = fee_obj.get("lovelace", 0)
+        ada = fee_obj.get("ada")
+        if isinstance(ada, dict):
+            fee = ada.get("lovelace", 0)   # {"ada": {"lovelace": N}}
+        else:
+            fee = fee_obj.get("lovelace", 0)  # legacy {"lovelace": N}
     else:
         fee = int(fee_obj) if fee_obj else 0
 
