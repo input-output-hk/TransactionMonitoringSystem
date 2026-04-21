@@ -662,7 +662,11 @@ class OgmiosClient:
                 try:
                     input_refs = set()
                     fee_obj = tx_data.get("fee", {})
-                    tx_fee = fee_obj.get("lovelace", 0) if isinstance(fee_obj, dict) else int(fee_obj or 0)
+                    if isinstance(fee_obj, dict):
+                        ada = fee_obj.get("ada")
+                        tx_fee = ada.get("lovelace", 0) if isinstance(ada, dict) else fee_obj.get("lovelace", 0)
+                    else:
+                        tx_fee = int(fee_obj or 0)
                     tx_ttl = tx_data.get("timeToLive", 0) or 0
                     # Extract first input address for address clustering.
                     # Ogmios mempool inputs are unresolved references (tx_hash + index),

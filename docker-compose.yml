@@ -44,6 +44,50 @@ services:
     networks:
       - tms-network
 
+  cardano-node:
+    image: ghcr.io/intersectmbo/cardano-node:10.6.2
+    container_name: tms-cardano-node
+    volumes:
+      - /Users/romainsoulat/tools/preprod:/config:ro
+      - cardano-node-db:/data
+      - node-ipc:/ipc
+    command:
+      - run
+      - --config
+      - /config/config.json
+      - --topology
+      - /config/topology.json
+      - --database-path
+      - /data
+      - --socket-path
+      - /ipc/node.socket
+    restart: unless-stopped
+    networks:
+      - tms-network
+
+  ogmios:
+    image: cardanosolutions/ogmios:latest
+    container_name: tms-ogmios
+    depends_on:
+      - cardano-node
+    command:
+      - --node-socket
+      - /ipc/node.socket
+      - --node-config
+      - /config/config.json
+      - --host
+      - 0.0.0.0
+      - --port
+      - "1337"
+    volumes:
+      - /Users/romainsoulat/tools/preprod:/config:ro
+      - node-ipc:/ipc
+    ports:
+      - "127.0.0.1:1337:1337"
+    restart: unless-stopped
+    networks:
+      - tms-network
+
   # Application service (optional - can run on host or in Docker)
   app:
     build:
@@ -87,6 +131,10 @@ volumes:
   clickhouse_logs:
     driver: local
   raw_store_data:
+    driver: local
+  cardano-node-db:
+    driver: local
+  node-ipc:
     driver: local
 
 networks:
