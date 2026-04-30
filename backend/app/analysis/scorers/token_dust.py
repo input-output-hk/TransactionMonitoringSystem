@@ -31,13 +31,19 @@ _CFG = _get_cfg("token_dust")
 _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
+_MIN_TOKEN_COUNT = int(_CFG["gate"]["min_token_count"])
 
 
 class TokenDustScorer(BaseScorer):
     name = "token_dust"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """At least one output must be a script address with native assets."""
+        """At least one script output must carry >= min_token_count live assets.
+
+        A single-NFT UTxO cannot bloat the Value field's CBOR enough to be a
+        dust-of-many-tokens attack, so we require a small bundle to enter
+        scoring. Threshold lives in ``detection.yaml`` (``gate.min_token_count``).
+        """
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
             return False
@@ -49,8 +55,8 @@ class TokenDustScorer(BaseScorer):
             value = out.get("value", {})
             if not isinstance(value, dict):
                 continue
-            # Has native assets beyond lovelace
-            if any(k not in ("lovelace", "ada") for k in value):
+            _, token_count = feat_mod.count_assets(value)
+            if token_count >= _MIN_TOKEN_COUNT:
                 return True
         return False
 
@@ -71,10 +77,11 @@ class TokenDustScorer(BaseScorer):
             value = out.get("value", {})
             if not isinstance(value, dict):
                 continue
-            if not any(k not in ("lovelace", "ada") for k in value):
+            policy_count, token_count = feat_mod.count_assets(value)
+            if token_count < _MIN_TOKEN_COUNT:
                 continue
 
-            result = self._score_utxo(out, addr, network)
+            result = self._score_utxo(out, addr, network, policy_count, token_count)
             if result.score > best_score:
                 best_score = result.score
                 best_sub = result.sub_scores
@@ -89,7 +96,12 @@ class TokenDustScorer(BaseScorer):
         )
 
     def _score_utxo(
-        self, output: Dict, address: str, network: str,
+        self,
+        output: Dict,
+        address: str,
+        network: str,
+        policy_count: int,
+        token_count: int,
     ) -> ScorerResult:
         value = output.get("value", {})
         if not isinstance(value, dict):
@@ -101,7 +113,6 @@ class TokenDustScorer(BaseScorer):
         else:
             ada_amount = int(value.get("lovelace", 0))
         value_cbor = feat_mod._estimate_value_cbor_bytes(value)
-        policy_count, token_count = feat_mod._count_assets(value)
 
         # Resolve baselines (per-script -> global -> bootstrap)
         p50_cb, p99_cb, bl1 = _resolve(

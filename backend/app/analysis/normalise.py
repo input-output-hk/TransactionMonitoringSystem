@@ -21,11 +21,15 @@ EPSILON = 1e-6
 def normalise(value: float, p50: float, p99: float) -> float:
     """Percentile-based normalisation: clip((value - p50) / (p99 - p50), 0, 1).
 
-    When p99 <= p50 (degenerate baseline), returns 0 if value <= p50, else 1.
+    When p99 <= p50 the baseline has zero variance and carries no
+    discriminative signal, so we return 0.0. The previous behaviour returned
+    1.0 for any value above the constant, which (combined with
+    ``normalise_inverted``) caused per-script baselines like p50==p99==10M ADA
+    to flag every minUTxO output as maximally suspicious.
     """
     denom = p99 - p50
     if denom <= 0:
-        return 0.0 if value <= p50 else 1.0
+        return 0.0
     return max(0.0, min(1.0, (value - p50) / (denom + EPSILON)))
 
 
@@ -34,7 +38,13 @@ def normalise_inverted(value: float, p50: float, p99: float) -> float:
 
     Used for features like lovelace_amount in dust attacks (low ADA = suspicious)
     and redeemer_input_ratio (ratio near 0 = suspicious).
+
+    Degenerate baselines (p99 <= p50) return 0.0 rather than ``1 - 0 = 1``:
+    a zero-variance baseline cannot tell a "low" value apart from a "normal"
+    one, so the inverted axis must not push toward Critical.
     """
+    if p99 - p50 <= 0:
+        return 0.0
     return 1.0 - normalise(value, p50, p99)
 
 
@@ -73,12 +83,22 @@ def resolve_baseline(
     return 0.0, 1.0, "missing"
 
 
+# Risk-band thresholds, exported so scorers that floor or cap their score to
+# a specific band (e.g. multiple_sat's lazy-validator floor, front_running's
+# high_band_cap) can key off the same numeric values rather than duplicating
+# them in their own configs. Changes here propagate; changes in scorer
+# config files do not, so this is the single source of truth.
+BAND_CRITICAL_THRESHOLD = 80.0
+BAND_HIGH_THRESHOLD = 60.0
+BAND_MODERATE_THRESHOLD = 31.0
+
+
 def score_to_band(score: float) -> str:
     """Map a 0-100 score to the interpretive risk band."""
-    if score >= 80:
+    if score >= BAND_CRITICAL_THRESHOLD:
         return "Critical"
-    if score >= 60:
+    if score >= BAND_HIGH_THRESHOLD:
         return "High"
-    if score >= 31:
+    if score >= BAND_MODERATE_THRESHOLD:
         return "Moderate"
     return "Low"

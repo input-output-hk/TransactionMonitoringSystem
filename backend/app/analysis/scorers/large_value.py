@@ -87,7 +87,7 @@ class LargeValueScorer(BaseScorer):
             value = out.get("value", {})
             if not isinstance(value, dict):
                 continue
-            _, token_count = feat_mod._count_assets(value)
+            _, token_count = feat_mod.count_assets(value)
             if 0 < token_count <= 2:
                 return True
         return False
@@ -109,7 +109,7 @@ class LargeValueScorer(BaseScorer):
             value = out.get("value", {})
             if not isinstance(value, dict):
                 continue
-            _, token_count = feat_mod._count_assets(value)
+            _, token_count = feat_mod.count_assets(value)
             if token_count == 0 or token_count > 2:
                 continue
 

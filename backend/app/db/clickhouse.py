@@ -1058,6 +1058,19 @@ def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str,
     Fetches raw_data alongside the standard fields so that the feature
     extraction pipeline can derive UTxO-level and script-level features
     without a second round-trip.
+
+    Defers a tx until ``transaction_inputs`` rows for it are visible. The
+    ingester writes ``transactions`` and ``transaction_inputs`` as separate
+    ``INSERT`` statements (ClickHouse has no multi-statement transactions;
+    see :func:`insert_transactions_batch` for the writer side), so a poll
+    that lands between the two writes would see the tx with no resolved
+    input addresses, the scorer enrichment would no-op, and gate conditions
+    like ``≥2 inputs from same script`` would silently fail. Per-statement
+    atomicity guarantees that if any ``transaction_inputs`` row exists for
+    the tx, all of them do; "any row exists" is therefore a sufficient
+    witness that the inputs side is ready. Txs with ``input_count = 0``
+    (treasury / collateral-only edge cases) are admitted directly since
+    they need no input enrichment.
     """
     rows = _get_client().execute(
         """
@@ -1068,6 +1081,11 @@ def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str,
         LEFT ANTI JOIN tx_class_scores s
           ON t.tx_hash = s.tx_hash AND t.network = s.network
         WHERE t.network = %(network)s
+          AND (t.input_count = 0
+               OR t.tx_hash IN (
+                   SELECT tx_hash FROM transaction_inputs
+                   WHERE network = %(network)s
+               ))
         ORDER BY t.ingestion_timestamp ASC
         LIMIT %(batch_size)s
         """,

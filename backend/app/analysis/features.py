@@ -33,6 +33,44 @@ def _get_cbor2():
 # Address classification
 # ---------------------------------------------------------------------------
 
+def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
+    """True if the tx has at least one spend-purpose redeemer (Plutus input).
+
+    Native scripts never carry redeemers: they are declarative ledger predicates
+    (signatures, timelocks, n-of-m clauses) evaluated without Plutus execution.
+    By contract (Cardano ledger: ``dom txrdmrs ≡ᵉ scriptRdrptrs``), every
+    Plutus-script input must have exactly one ``spend`` redeemer; therefore
+    "no spend redeemer" implies "all script inputs are native".
+
+    This is the structural test the ``multiple_sat`` gate uses to skip
+    native-script multisig wallets, which are immune to multiple-satisfaction
+    by construction (no validator code to short-circuit).
+
+    Caveat: a True return does not localise the Plutus inputs to a specific
+    script address. In a mixed tx (Plutus mint or spend on script A combined
+    with native-script consolidation on script B), this returns True even
+    though script B's inputs are still native. Callers needing per-script
+    granularity must inspect redeemer pointers (``spend:N`` keys or
+    ``validator.index`` fields) and map them to input indices.
+    """
+    redeemers = raw_data.get("redeemers")
+    if not redeemers:
+        return False
+    if isinstance(redeemers, dict):
+        # Ogmios v6 keys are "spend:N" / "mint:N" / "publish:N" / "withdraw:N".
+        return any(str(k).startswith("spend") for k in redeemers.keys())
+    if isinstance(redeemers, list):
+        for r in redeemers:
+            if not isinstance(r, dict):
+                continue
+            tag = r.get("validator")
+            if isinstance(tag, dict) and tag.get("purpose") == "spend":
+                return True
+            if r.get("purpose") == "spend":
+                return True
+    return False
+
+
 def is_script_address(address: str) -> bool:
     """Detect whether a Cardano address is a script (validator) address.
 
@@ -107,7 +145,7 @@ def _nonzero_qty(q: Any) -> bool:
         return False
 
 
-def _count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
+def count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
     """Count unique policy IDs and live asset classes in a value dict.
 
     Zero-quantity entries are skipped: they appear in mint/burn payloads
@@ -181,7 +219,7 @@ def extract_utxo_features(
         else:
             ada_amount = value.get("lovelace", 0)
         value_cbor = _estimate_value_cbor_bytes(value)
-        policy_count, token_count = _count_assets(value)
+        policy_count, token_count = count_assets(value)
         datum_flag, datum_bytes = _extract_datum_info(out)
 
         # Estimate total UTxO bytes (address + value + datum + script ref)

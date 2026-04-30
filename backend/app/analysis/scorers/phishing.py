@@ -59,6 +59,8 @@ _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
 _SIM_RANGE = _CFG["similarity_suspicious_range"]
 _SE = _CFG["social_engineering"]
+_URL_COMBO_BONUS = float(_SE["url_combo_bonus"])
+_PHISHING_TLD_BONUS = float(_SE["phishing_tld_bonus"])
 _REASON_T = _CFG["reason_thresholds"]
 _CRITICAL_T = float(_CFG["critical_threshold"])
 _RELEVANT_LABELS = set(str(x) for x in _CFG["metadata_labels"])
@@ -323,20 +325,21 @@ class PhishingScorer(BaseScorer):
         # alone. Individual signals are ambiguous (a bare URL could be a
         # link share; "claim your rewards" could be a legitimate staking
         # notification) but the pair is a textbook phishing move and rarely
-        # appears in legitimate traffic. +0.25 pushes the clearer cases into
-        # the High band without overreliance on blacklist / brand matching.
+        # appears in legitimate traffic. The bonus pushes the clearer cases
+        # into the High band without overreliance on blacklist / brand
+        # matching. Magnitude tunable via phishing.social_engineering.
         if len(urls) > 0 and s_social >= float(_REASON_T["social"]):
-            raw += 0.25
+            raw += _URL_COMBO_BONUS
 
         # Additional bonus: phishing-prone TLDs (.xyz / .top / .click / ...
         # and RFC 2606 placeholders like .test / .example). Cardano protocols
         # don't live in these TLDs; a URL on one of them paired with Tier-2
         # text is very high-signal, so this bonus stacks on top of the URL
-        # combo.
+        # combo. Magnitude tunable via phishing.social_engineering.
         if s_social >= float(_REASON_T["social"]) and any(
             _has_phishing_prone_tld(u) for u in urls
         ):
-            raw += 0.15
+            raw += _PHISHING_TLD_BONUS
 
         final_score = finalise_score(raw)
 

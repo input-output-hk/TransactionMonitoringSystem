@@ -23,7 +23,7 @@ built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -136,8 +136,11 @@ class SandwichScorer(BaseScorer):
         )
         final = finalise_score(raw)
 
-        # Minimum profit gate: cap below Critical band for coincidental triples.
-        if profit < _MIN_PROFIT_LOVELACE and final >= 80:
+        # Minimum profit gate: cap below Critical band for coincidental
+        # triples. Cap and profit floor tunable via sandwich.high_band_cap /
+        # min_profit_lovelace; the Critical threshold itself is the canonical
+        # band boundary in normalise.BAND_CRITICAL_THRESHOLD.
+        if profit < _MIN_PROFIT_LOVELACE and final >= BAND_CRITICAL_THRESHOLD:
             final = _HIGH_BAND_CAP
 
         reasons = []

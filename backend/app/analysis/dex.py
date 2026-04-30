@@ -11,11 +11,16 @@ are set to 0 (structural detection only).
 import logging
 from typing import Any, Dict, List, Optional
 
+from app.analysis.scorer_config import get as _get_cfg
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
 
-_SLOT_WINDOW = 5
+# Slot window for sandwich pattern detection. Read from the sandwich scorer
+# config so a single edit in detection.yaml propagates to both the detector
+# and the scorer (previously hardcoded here AND defined in detection.yaml as
+# sandwich.window_slots, allowing silent drift).
+_SLOT_WINDOW = int(_get_cfg("sandwich")["window_slots"])
 
 # Cardano script address Bech32 prefixes (Shelley era type bytes 0x11, 0x31, etc.)
 _SCRIPT_ADDR_PREFIXES = ("addr1w", "addr1z", "addr_test1w", "addr_test1z")

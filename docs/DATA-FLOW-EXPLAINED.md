@@ -68,7 +68,9 @@ The filesystem holds the complete raw Ogmios payload for every transaction, both
 
 ### Analysis Engine
 
-A background process queries ClickHouse for unscored transactions and runs a multi-class detection pipeline. Each batch goes through four enrichment phases before scoring:
+A background process queries ClickHouse for unscored transactions and runs a multi-class detection pipeline. The query admits a transaction only when its inputs are visible — either `input_count = 0` (treasury or collateral-only edge cases that need no input enrichment) or at least one row exists in `transaction_inputs` for that tx. ClickHouse `INSERT` statements are atomic per-statement, so "any row exists" is a sufficient witness that all input rows for the tx are visible. This guarantees that downstream scorers receive complete UTxO context regardless of where in the ingestion pipeline the analysis poll lands.
+
+Each batch then goes through four enrichment phases before scoring:
 
 1. **Input address resolution**: resolves input addresses from `transaction_inputs` table and patches `raw_data` in-place so scorers have complete UTxO context.
 2. **Collision enrichment**: queries PostgreSQL `mempool_collisions` for transactions involved in UTxO input collisions or displacements (feeds the Front-Running scorer).

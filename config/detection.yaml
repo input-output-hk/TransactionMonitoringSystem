@@ -15,12 +15,22 @@ scorers:
   # ------------------------------------------------------------------
   multiple_sat:
     weights:
-      extraction: 0.42     # net_value_out_of_script
+      # 'extraction' is now value-agnostic: max(s_extraction_lov, s_extraction_assets).
+      # Same weight as before so existing scores for lovelace-extraction txs are
+      # preserved; the asset axis closes the NFT-marketplace blind spot.
+      extraction: 0.42     # max(net_value_out_of_script, n_assets_out_of_script)
       exunits_inv: 0.28    # exunits_per_script_input, inverted
       inputs: 0.16         # n_inputs_same_script
       recurrence: 0.14     # sender_recurrence
     bootstrap_anchors:
       net_value_out_of_script:  { p50: 5_000_000,   p99: 500_000_000 }
+      # Distinct native-asset (policy, name) pairs net-leaving the script.
+      # Most multi-input script txs touch 0 assets; NFT-marketplace double-sat
+      # exploits (canonical case) extract 2+. p50=0 so any extraction
+      # registers; p99=2 so the canonical 2-NFT exploit reaches the ceiling.
+      # Per-script baselines override this for legitimate NFT-batchers once
+      # enough samples accumulate.
+      n_assets_out_of_script:   { p50: 0,           p99: 2 }
       exunits_per_script_input: { p50: 100_000,     p99: 10_000_000 }
       n_inputs_same_script:     { p50: 2,           p99: 10 }
       sender_recurrence:        { p50: 0,           p99: 1 }
@@ -29,6 +39,14 @@ scorers:
       - "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz"   # Minswap v2 batch
       - "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh"   # WingRiders batch
     reason_threshold: 0.5
+    # Band floor for "lazy validator" structural confirmation: when the gate
+    # has fired (≥2 same-script inputs + spend redeemer) AND s_exunits_inv
+    # exceeds the threshold (validator did near-zero CPU per input), elevate
+    # the score to at least the floor so the band lands at High. Mirrors the
+    # mechanism front_running uses in reverse (front_running caps down with
+    # high_band_cap; here we floor up). Allowlisted scripts are exempt.
+    lazy_validator_threshold: 0.8
+    lazy_validator_floor: 60.0
 
   # ------------------------------------------------------------------
   large_datum:
@@ -51,6 +69,13 @@ scorers:
 
   # ------------------------------------------------------------------
   token_dust:
+    gate:
+      # Minimum live asset classes in a single script-address output before
+      # the scorer engages. A single-NFT UTxO cannot bloat Value-field CBOR
+      # enough to be a dust attack, and per-script baselines with p99=1 (all
+      # outputs carry 0-1 assets) saturate the assets axis on any NFT deposit.
+      # Set to 2 to require a real bundle. Raise if false positives persist.
+      min_token_count: 2
     weights:
       bytes: 0.35
       assets: 0.35
@@ -161,8 +186,18 @@ scorers:
       fee_tolerance_strict: 2.0         # above which score is capped at moderate_cap
       per_hop_fee_estimate: 0.02        # 2% per hop for expected_fee heuristic
       max_age_slots: 86400              # forward BFS horizon (Cardano ~1 slot/sec => 24h)
+      max_output_fanout: 20             # skip cycle scoring for txs with > N distinct
+                                        # output addresses (very unlikely to be circular)
     reason_threshold: 0.5
     moderate_cap: 59.0                  # top of Moderate band
+    # Floor on the sum of corroborating signals (entropy + auxiliary + speed).
+    # Structural-only matches (just amount_similarity + recurrence) score ~60
+    # under the weighted average alone, which would tip a plain
+    # A→script→A interaction into High. Require at least this much signal
+    # from the corroborating axes; otherwise cap at Moderate. Loosen if real
+    # layering attacks with very thin temporal/entropy signals are missed.
+    structural_corroboration_floor: 0.1
+    recurrence_window_days: 30          # lookback for origin-recurrence count
 
   # ------------------------------------------------------------------
   fake_token:
@@ -237,6 +272,15 @@ scorers:
       urgency_cap: 0.6
       brand_increment: 0.10
       brand_cap: 0.3
+      # Stacking bonuses applied to the content sub-score when both a URL
+      # and Tier-2 social-engineering text are present in the same metadata.
+      # url_combo_bonus fires whenever any URL is present alongside Tier-2
+      # text; phishing_tld_bonus stacks on top when the URL also lives in a
+      # phishing-prone TLD (.xyz / .top / .click / RFC 2606 reserved).
+      # Cardano protocols don't deploy in those TLDs, so the combination is
+      # near-specific to phishing.
+      url_combo_bonus: 0.25
+      phishing_tld_bonus: 0.15
     reason_thresholds:
       blacklist: 0.5
       domain: 0.5
