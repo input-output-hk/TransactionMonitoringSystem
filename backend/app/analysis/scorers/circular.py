@@ -41,6 +41,7 @@ _BOOT = _CFG["bootstrap_anchors"]
 _CYCLE = _CFG["cycle"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MODERATE_CAP = float(_CFG["moderate_cap"])
+_STRUCTURAL_CORROBORATION_FLOOR = float(_CFG["structural_corroboration_floor"])
 
 FEE_TOLERANCE_MULTIPLIER = float(_CYCLE["fee_tolerance_multiplier"])
 FEE_TOLERANCE_STRICT = float(_CYCLE["fee_tolerance_strict"])
@@ -161,12 +162,15 @@ class CircularScorer(BaseScorer):
 
         # Structural-only cap: amount_similarity + cycle_recurrence alone sum
         # to 0.60 in weights, which tips a plain A->script->A Plutus
-        # interaction into the High band. Require at least one corroborating
-        # signal (entropy / auxiliary / speed) above 0.1 to score above
-        # Moderate; otherwise cap. This cuts the common Plutus false-positive
-        # pattern without weakening detection of real layering (which exhibits
-        # low recipient entropy and temporal concentration).
-        structural_only = (s_entropy + s_auxiliary + s_speed) < 0.1
+        # interaction into the High band. Require the corroborating axes
+        # (entropy / auxiliary / speed) to clear the configured floor;
+        # otherwise cap at Moderate. This cuts the common Plutus
+        # false-positive pattern without weakening detection of real
+        # layering (low recipient entropy + temporal concentration).
+        # Floor magnitude tunable via circular.structural_corroboration_floor.
+        structural_only = (
+            s_entropy + s_auxiliary + s_speed
+        ) < _STRUCTURAL_CORROBORATION_FLOOR
 
         if final > _MODERATE_CAP and (
             structural_only

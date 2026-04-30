@@ -42,8 +42,17 @@ class TestGate:
         out = _make_output(SCRIPT_ADDR)  # lovelace only
         assert scorer.gate(_features([out])) is False
 
-    def test_script_with_assets_passes(self, scorer):
+    def test_script_with_single_asset_rejected(self, scorer):
+        # A single-asset output cannot bloat the Value field's CBOR; the gate
+        # requires >= min_token_count (default 2) live assets to engage.
         out = _make_output(SCRIPT_ADDR, policies={"policyA": {"tok1": 1}})
+        assert scorer.gate(_features([out])) is False
+
+    def test_script_with_bundle_passes(self, scorer):
+        out = _make_output(
+            SCRIPT_ADDR,
+            policies={"policyA": {"tok1": 1, "tok2": 1}},
+        )
         assert scorer.gate(_features([out])) is True
 
 

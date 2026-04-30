@@ -13,14 +13,34 @@ vulnerability is semantic and is not observable through redeemer counts.
 Sub-scores (Polimi §4.4.3), all per-script baselined:
 
   net_value_out_of_script    : per-script baseline
+  n_assets_out_of_script     : per-script baseline (Phase 1 extension, see below)
   exunits_per_script_input   : inverted, per-script baseline
   n_inputs_same_script       : per-script baseline
   sender_recurrence          : per-script baseline (DBSCAN deferred, §5.1)
+
+Phase 1 extension to §4.4.3: ``s_extraction`` is value-agnostic. The Polimi
+spec defines extraction in lovelace only, but the canonical real-world cases
+(Vacuumlabs/Invariant0 #1; the 2021-22 Canonical disclosure affecting
+jpg.store, SpaceBudz, Genesis, Adapix, Martify) drain native assets while
+the script's lovelace position barely moves. We compute both axes
+independently against per-script baselines and take the max, so either
+dimension can carry the signal without dilution. Both axes are reported in
+``sub_scores`` for observability.
 
 Allowlist behaviour (§4.4.4): transactions interacting with known batch
 validators (DEX settlement, staking consolidation, prediction-market
 resolution) have `s_extraction` weight set to 0 and redistributed across
 `s_inputs` and `s_recurrence`, instead of bypassing the scorer entirely.
+
+Band floor for confirmed structural exploitation: when the gate has fired
+and ``s_exunits_inv`` saturates (low CPU per input → "lazy validator"
+fingerprint), the final score is floored to at least the High band. The
+spec's weighted average is biased toward value extraction, so a low-value
+structural exploit can score in the Moderate band even when the
+structural confirmation is strong; this floor lifts those into High so
+operators triage on signal strength rather than dollar impact. Mirrors
+the mechanism in ``front_running`` (where ``high_band_cap`` *caps* scores
+when structural confirmation is weak). Allowlisted scripts are exempt.
 
 All tunable constants live in ``config/detection.yaml`` under the
 ``scorers.multiple_sat`` section.
@@ -29,7 +49,7 @@ All tunable constants live in ``config/detection.yaml`` under the
 import logging
 from typing import Any, Dict, List, Tuple
 
-from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.normalise import BAND_HIGH_THRESHOLD, normalise, normalise_inverted
 from app.analysis.scorer_config import (
     get as _get_cfg,
     resolved_or_bootstrap as _resolve,
@@ -46,6 +66,20 @@ _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
 _ALLOWLIST: Tuple[str, ...] = tuple(_CFG["allowlist_prefixes"])
 _REASON_T: float = float(_CFG["reason_threshold"])
+_LAZY_VALIDATOR_THRESHOLD: float = float(_CFG["lazy_validator_threshold"])
+_LAZY_VALIDATOR_FLOOR: float = float(_CFG["lazy_validator_floor"])
+
+# The floor's purpose is to guarantee the band lands at High; if config
+# drifts below the High threshold the docstring's promise breaks. Fail
+# loud at import. Use an explicit raise rather than ``assert`` so the
+# check survives ``python -O`` / ``PYTHONOPTIMIZE``.
+if _LAZY_VALIDATOR_FLOOR < BAND_HIGH_THRESHOLD:
+    raise RuntimeError(
+        f"multiple_sat.lazy_validator_floor={_LAZY_VALIDATOR_FLOOR} is below "
+        f"normalise.BAND_HIGH_THRESHOLD={BAND_HIGH_THRESHOLD}; floor would not "
+        f"reach the High band. Either raise the floor in detection.yaml or "
+        f"adjust the band threshold in normalise.py."
+    )
 
 
 def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
@@ -85,6 +119,53 @@ def _compute_net_value_out(
     return max(0, value_in - value_out)
 
 
+def _iter_assets(val: Any):
+    """Yield ((policy_id, asset_name), qty) pairs from an Ogmios value dict.
+
+    Skips the lovelace component. Handles both v5 (`{"lovelace": N, policy: {asset: qty}}`)
+    and v6 (`{"ada": {"lovelace": N}, policy: {asset: qty}}`) shapes.
+    """
+    if not isinstance(val, dict):
+        return
+    for policy, inner in val.items():
+        if policy in ("ada", "lovelace"):
+            continue
+        if not isinstance(inner, dict):
+            continue
+        for asset_name, qty in inner.items():
+            try:
+                yield (policy, asset_name), int(qty)
+            except (TypeError, ValueError):
+                continue
+
+
+def _compute_n_assets_out(
+    inputs: List[Dict], outputs: List[Dict], script_addr: str,
+) -> int:
+    """Count of distinct native-asset ``(policy, name)`` pairs with positive
+    net flow out of the script address.
+
+    For each pair: ``qty_in_at_script − qty_out_at_script``; return the number
+    of pairs whose net is strictly > 0. The metric is *pair count*, not unit
+    count: a partial extraction of 50 fungible-token units of one asset
+    registers as 1, the same as a single NFT. This matches the canonical
+    Vacuumlabs/Invariant0 NFT-marketplace double-satisfaction shape (N NFTs
+    leaving = N pairs leaving) and is robust to fungible-vs-NFT differences.
+    """
+    flow: Dict[Tuple[str, str], int] = {}
+    for inp in inputs:
+        if inp.get("address", "") != script_addr:
+            continue
+        for key, qty in _iter_assets(inp.get("value")):
+            flow[key] = flow.get(key, 0) + qty
+    for out in outputs:
+        if out.get("address", "") != script_addr:
+            continue
+        for key, qty in _iter_assets(out.get("value")):
+            flow[key] = flow.get(key, 0) - qty
+    return sum(1 for net in flow.values() if net > 0)
+
+
 def _total_exunits_cpu(raw_data: Dict) -> int:
     """Sum CPU execution units across all redeemers (v5 list or v6 dict/list)."""
     redeemers = raw_data.get("redeemers")
@@ -122,13 +203,25 @@ class MultipleSatScorer(BaseScorer):
     name = "multiple_sat"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """At least 2 inputs from the same script address.
+        """At least 2 inputs from the same script address AND at least one
+        spend redeemer in the tx.
 
-        The threshold of 2 is definitional, not a tunable: below this count
-        the concept of 'multiple' satisfaction does not apply.
+        The 2-input threshold is definitional: below this count the concept of
+        'multiple' satisfaction does not apply.
+
+        The spend-redeemer requirement excludes native-script (multisig /
+        timelock) addresses, which the ledger evaluates as declarative
+        predicates per-input. Native scripts cannot be exploited via
+        multiple-satisfaction by construction. See
+        :func:`features.has_spend_redeemer` for the rationale; this gate
+        is conservative for the rare mixed native+Plutus tx but eliminates
+        the dominant false-positive class observed on preprod (native-script
+        multisig wallets consolidating their own UTxOs).
         """
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
+            return False
+        if not feat_mod.has_spend_redeemer(raw_data):
             return False
         groups = _group_inputs_by_script(raw_data)
         return any(len(inps) >= 2 for inps in groups.values())
@@ -168,15 +261,19 @@ class MultipleSatScorer(BaseScorer):
         sender_recurrence: float,
         network: str,
     ) -> ScorerResult:
-        net_value = _compute_net_value_out(
-            raw_data.get("inputs", []), outputs, script_addr,
-        )
+        inputs = raw_data.get("inputs", [])
+        net_value = _compute_net_value_out(inputs, outputs, script_addr)
+        n_assets_out = _compute_n_assets_out(inputs, outputs, script_addr)
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
         # Per-script baselines with bootstrap fallbacks.
         p50_nv, p99_nv, bl_nv = _resolve(
             "net_value_out_of_script", "per_script", script_addr, network,
             _BOOT, "net_value_out_of_script",
+        )
+        p50_na, p99_na, bl_na = _resolve(
+            "n_assets_out_of_script", "per_script", script_addr, network,
+            _BOOT, "n_assets_out_of_script",
         )
         p50_ex, p99_ex, bl_ex = _resolve(
             "exunits_per_script_input", "per_script", script_addr, network,
@@ -191,8 +288,13 @@ class MultipleSatScorer(BaseScorer):
             _BOOT, "sender_recurrence",
         )
 
-        # Sub-scores.
-        s_extraction = normalise(net_value, p50=p50_nv, p99=p99_nv)
+        # Extraction is value-agnostic: take the stronger of the lovelace and
+        # the native-asset axis. NFT-marketplace double-sat exploits drain
+        # native assets while the script's lovelace position barely moves;
+        # taking max lets either axis carry the signal without dilution.
+        s_extraction_lov = normalise(net_value, p50=p50_nv, p99=p99_nv)
+        s_extraction_assets = normalise(float(n_assets_out), p50=p50_na, p99=p99_na)
+        s_extraction = max(s_extraction_lov, s_extraction_assets)
         s_exunits_inv = normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex)
         s_inputs = normalise(float(n_inputs), p50=p50_ni, p99=p99_ni)
         s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
@@ -202,6 +304,8 @@ class MultipleSatScorer(BaseScorer):
         if allowlisted:
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
             s_extraction = 0.0
+            s_extraction_lov = 0.0
+            s_extraction_assets = 0.0
         else:
             w_ex = float(_W["extraction"])
             w_eu = float(_W["exunits_inv"])
@@ -216,15 +320,37 @@ class MultipleSatScorer(BaseScorer):
         )
         final = finalise_score(raw)
 
+        # Band floor for confirmed structural double-satisfaction. The gate
+        # already required ≥2 inputs from the same script plus a spend
+        # redeemer; if on top of that ``s_exunits_inv`` saturates (the
+        # validator did near-zero work per input), we have a high-confidence
+        # "lazy validator" fingerprint that is unlikely to occur on legitimate
+        # txs. The weighted score under §4.4.3 is biased toward value
+        # extraction, so a low-value structural exploit can score in the
+        # Moderate band even when the structural confirmation is strong.
+        # Floor the band to High in that case so operators triage the right
+        # signal first. Allowlisted scripts are exempt: legitimate batchers
+        # often run minimal per-input CPU by design. Threshold and floor
+        # tunable via multiple_sat.lazy_validator_threshold / _floor.
+        floor_applies = (
+            not allowlisted and s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
+        )
+        if floor_applies:
+            final = max(final, _LAZY_VALIDATOR_FLOOR)
+
         # The baseline source reported is the "most specific tier actually used"
         # across the four features. Prefer per_script > per_policy > global > bootstrap.
-        bl_source = _dominant_source([bl_nv, bl_ex, bl_ni, bl_rc])
+        bl_source = _dominant_source([bl_nv, bl_na, bl_ex, bl_ni, bl_rc])
 
         reasons = []
-        if s_extraction > _REASON_T:
+        if s_extraction_lov > _REASON_T:
             reasons.append("large_net_value_extraction")
+        if s_extraction_assets > _REASON_T:
+            reasons.append("native_asset_extraction")
         if s_exunits_inv > _REASON_T:
             reasons.append("low_exunits_per_input")
+        if floor_applies:
+            reasons.append("lazy_validator_band_floor")
         if s_inputs > _REASON_T:
             reasons.append("high_n_inputs_same_script")
         if allowlisted:
@@ -234,10 +360,13 @@ class MultipleSatScorer(BaseScorer):
             score=final,
             sub_scores={
                 "s_extraction": round(s_extraction, 4),
+                "s_extraction_lov": round(s_extraction_lov, 4),
+                "s_extraction_assets": round(s_extraction_assets, 4),
                 "s_exunits_inv": round(s_exunits_inv, 4),
                 "s_inputs": round(s_inputs, 4),
                 "s_recurrence": round(s_recurrence, 4),
                 "n_inputs_same_script": float(n_inputs),
+                "n_assets_out_of_script": float(n_assets_out),
             },
             reasons=reasons,
             baseline_source=bl_source,

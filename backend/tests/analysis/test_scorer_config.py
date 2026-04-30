@@ -32,6 +32,8 @@ def _minimal_valid_yaml() -> str:
             bootstrap_anchors: {}
             reason_threshold: 0.5
           token_dust:
+            gate:
+              min_token_count: 2
             weights: {}
             bootstrap_anchors: {}
             reason_threshold: 0.5
@@ -122,6 +124,17 @@ class TestValidation:
             "multiple_sat:\n    weights: {}\n    bootstrap_anchors: {}\n    reason_threshold: 0.5",
         )
         with pytest.raises(RuntimeError, match="scorers.multiple_sat.allowlist_prefixes"):
+            _reload_module(monkeypatch, tmp_path, body)
+
+    def test_missing_nested_required_key_raises_with_full_path(self, tmp_path, monkeypatch):
+        # The token_dust scorer requires gate.min_token_count. Removing only
+        # the leaf field (while leaving the gate block in place) must surface
+        # the dotted path, not a downstream KeyError at scorer import time.
+        body = _minimal_valid_yaml().replace(
+            "  token_dust:\n    gate:\n      min_token_count: 2",
+            "  token_dust:\n    gate: {}",
+        )
+        with pytest.raises(RuntimeError, match="scorers.token_dust.gate.min_token_count"):
             _reload_module(monkeypatch, tmp_path, body)
 
     def test_non_dict_scorer_section_raises(self, tmp_path, monkeypatch):

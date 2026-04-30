@@ -17,8 +17,11 @@ from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
 
-_CYCLE_CFG = _get_cfg("circular")["cycle"]
-_MAX_AGE_SLOTS = int(_CYCLE_CFG.get("max_age_slots", 86400))
+_CIRCULAR_CFG = _get_cfg("circular")
+_CYCLE_CFG = _CIRCULAR_CFG["cycle"]
+_MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
+_MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
+_RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
 
 
 def detect_cycle(
@@ -77,8 +80,9 @@ def detect_cycle(
     if not current_addresses:
         return None
 
-    # Pre-filter: skip txs with too many output addresses (unlikely circular)
-    if len(current_addresses) > 20:
+    # Pre-filter: skip txs with too many output addresses (unlikely circular).
+    # Threshold tunable via circular.cycle.max_output_fanout.
+    if len(current_addresses) > _MAX_OUTPUT_FANOUT:
         return None
 
     # Step 3: Bounded BFS forward
@@ -167,9 +171,6 @@ def detect_cycle(
     return None
 
 
-_RECURRENCE_WINDOW_DAYS = 30
-
-
 def _count_origin_recurrence(
     origin_address: str,
     network: str,
@@ -178,8 +179,9 @@ def _count_origin_recurrence(
     """Count prior transactions from the same origin that were scored as circular.
 
     Queries tx_class_scores joined with transaction_inputs to find how many
-    previous cycles originated from this address within a 30-day rolling
-    window (per Polimi spec Section 5.3).  This feeds the cycle_recurrence
+    previous cycles originated from this address within a rolling window
+    (per Polimi spec Section 5.3, default 30 days, tunable via
+    circular.recurrence_window_days).  This feeds the cycle_recurrence
     sub-score (30% weight in the CircularScorer).
 
     Only counts ancestors scored High or above (>=60). Counting every tx with

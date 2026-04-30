@@ -71,6 +71,9 @@ A UTxO value size spam attack. The attacker creates a single UTxO carrying hundr
 
 ### Gate Condition
 - `address_type == SCRIPT` (attack is only meaningful at script addresses)
+- `unique_assetclass_count >= min_token_count` (default 2; tunable via `token_dust.gate.min_token_count`)
+
+The minimum-bundle gate is part of the attack definition: a CBOR-bloat attack requires multiple distinct `(policy, name)` entries to inflate the Value field. A single-asset UTxO is bounded in size regardless of quantity and is not in scope for this scorer.
 
 ### Detection Features
 
@@ -199,46 +202,70 @@ score_large_datum(utxo):
 A spending contract validates outputs for its input without checking that each input is independently satisfied. This lets an attacker consume N UTxOs from the same script in one TX while satisfying the spending condition only once, extracting N times the authorized value.
 
 ### Gate Condition
-- `n_inputs_same_script >= 2`
+- `n_inputs_same_script >= 2` AND
+- transaction carries at least one `spend`-purpose redeemer (excludes native-script multisig / timelock consolidations, which the ledger evaluates as declarative predicates per-input and which are immune to multiple-satisfaction by construction)
 
 ### Detection Features
 
 | Feature | Role | Weight |
 |---------|------|--------|
-| `net_value_out_of_script` | Primary: total value extracted minus value returned to the same script. Per-script baseline. | 0.42 |
+| `s_extraction` = max(`net_value_out_of_script`, `n_assets_out_of_script`) | Primary: value extracted from the script, measured along two complementary axes (lovelace and distinct native-asset `(policy, name)` pairs) and combined via `max()` so either dimension can carry the signal. Per-script baseline on each axis. | 0.42 |
 | `exunits_per_script_input` | Corroborating (inverted): low execution units per script input is anomalous given multiple script inputs. Per-script baseline. | 0.28 |
-| `n_inputs_same_script` | Primary structural: the severity gradation above the gate threshold; draining 10 UTxOs is more severe than 2. Per-script baseline. | 0.16 |
+| `n_inputs_same_script` | Primary structural: severity gradation above the gate threshold; draining 10 UTxOs is more severe than 2. Per-script baseline. | 0.16 |
 | `sender_recurrence` | Contextual: repeated attempts against the same script suggest systematic exploitation. Per-script baseline. | 0.14 |
 
 `redeemer_input_ratio` is deliberately excluded. The Cardano ledger enforces `dom txrdmrs ≡ᵉ scriptRdrptrs`, so the ratio is structurally 1.0 for every valid on-chain transaction. The Multiple Satisfaction vulnerability is semantic (inside the validator) and is not observable through redeemer counts.
 
 ### Key Derived Features
-- `net_value_out_of_script = sum(script_input_values) - sum(script_output_values)`
+- `net_value_out_of_script = sum(script_input_lovelace) - sum(script_output_lovelace)`
+- `n_assets_out_of_script` = count of distinct `(policy_id, asset_name)` pairs with strictly positive net flow out of the script address. Pair-count, not unit-count: 50 fungible-token units of one asset count as 1, the same as a single NFT.
 - `exunits_per_script_input = exunits_total.cpu / n_inputs_same_script`
-- `net_value_per_input = net_value_out / n_inputs_same_script`: near-constant value suggests linear drainage (linearity check; not currently scored)
+
+### Value-Agnostic Extraction
+
+Real-world double-satisfaction targets two distinct asset classes: lovelace (DeFi vaults, escrow contracts) and native assets (NFT marketplaces, token-locking contracts). The canonical NFT-marketplace case drains native assets while the script's lovelace position is flat — min-UTxO ADA enters and the same min-UTxO ADA leaves. A lovelace-only extraction signal is invariant in that case and produces no detection.
+
+The scorer therefore computes both axes independently against per-script baselines and combines them via `max()`. Either dimension is a sufficient signal of value extraction; combining via `max()` rather than a weighted sum prevents one neutral axis from diluting the other. The extraction sub-score reaches its ceiling whenever either axis does.
 
 ### Scoring
 
 ```
 score_multiple_satisfaction(tx):
     if tx.n_inputs_same_script < 2: return 0
+    if not has_spend_redeemer(tx):  return 0
 
     net_value_out      = compute_net_value_out_of_script(tx)
+    n_assets_out       = compute_n_assets_out_of_script(tx)
     exunits_per_input  = tx.exunits_total.cpu / (tx.n_inputs_same_script + EPSILON)
 
-    s_extraction   = normalise(net_value_out,       per_script_baselines)
-    s_exunits_inv  = 1 - normalise(exunits_per_input, per_script_baselines)
-    s_inputs       = normalise(tx.n_inputs_same_script, per_script_baselines)
-    s_recurrence   = normalise(tx.sender_recurrence,  per_script_baselines)
+    s_extraction_lov    = normalise(net_value_out, per_script_baselines)
+    s_extraction_assets = normalise(n_assets_out,  per_script_baselines)
+    s_extraction        = max(s_extraction_lov, s_extraction_assets)
+    s_exunits_inv       = 1 - normalise(exunits_per_input, per_script_baselines)
+    s_inputs            = normalise(tx.n_inputs_same_script, per_script_baselines)
+    s_recurrence        = normalise(tx.sender_recurrence,  per_script_baselines)
 
     score = 0.42 * s_extraction + 0.28 * s_exunits_inv + 0.16 * s_inputs + 0.14 * s_recurrence
-    return clip(score, 0, 1) * 100
+    score = clip(score, 0, 1) * 100
+
+    # Lazy-validator band floor (see below)
+    if not allowlisted and s_exunits_inv > lazy_validator_threshold:
+        score = max(score, lazy_validator_floor)
+
+    return score
 ```
+
+### Lazy-Validator Band Floor
+
+When the gate has fired AND `s_exunits_inv` saturates above `lazy_validator_threshold` (default 0.8 — the validator did near-zero CPU per input), the final score is floored to `lazy_validator_floor` (default 60.0, the High band threshold). The weighted average is biased toward value extraction, so a low-value but structurally unambiguous exploit (multiple inputs, gate satisfied, validator clearly skipping per-input work) can produce a Moderate score; the floor surfaces these to operators on signal strength rather than dollar impact. The mechanism is the inverse of `front_running.high_band_cap`, which caps the score when structural confirmation is weak.
+
+Allowlisted scripts are exempt: legitimate batch-processing contracts often run minimal per-input CPU by design (the validator runs once and amortises across all batched orders), so the lazy-validator fingerprint is part of their normal operation.
 
 ### False Positive: Legitimate UTxO Batching
 - DEX batch settlement, staking reward consolidation, multi-position liquidation, and prediction-market resolution all have elevated `n_inputs_same_script` and large `net_value_out_of_script` as normal behaviour.
 - Per-script allowlist of known batch-processing / resolution contracts **reduces** the `s_extraction` weight (redistributed proportionally to `s_inputs` and `s_recurrence`) rather than bypassing the scorer. This preserves the structural signals while suppressing the economic-magnitude signal for contracts where large extraction is legitimate.
-- **Net value linearity check** (not yet implemented): if the coefficient of variation of per-input extracted values is low (near-constant extraction), boost the score; if high, suppress it.
+- The spend-redeemer gate condition excludes native-script multisig wallets, which evaluate as declarative ledger predicates per-input and are immune to multiple-satisfaction by construction.
+- **Net value linearity check**: spec-defined corroboration on the coefficient of variation of per-input extracted values, on the roadmap.
 
 ### What TMS Forge Produces
 - **Setup TX**: creates `utxo_count` (2-10) outputs at a `ScriptAll([ScriptPubkey(vkh)])` address, each carrying `ada_per_utxo` ADA

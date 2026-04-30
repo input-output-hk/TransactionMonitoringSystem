@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold"),
     "large_datum":   ("gate", "weights", "fixed_anchors", "bootstrap_anchors", "reason_threshold"),
-    "token_dust":    ("weights", "bootstrap_anchors", "reason_threshold"),
+    "token_dust":    ("gate.min_token_count", "weights", "bootstrap_anchors", "reason_threshold"),
     "large_value":   ("weights", "bootstrap_anchors", "reason_threshold"),
     "front_running": ("weights", "fixed_anchors", "bootstrap_anchors", "outcome_scores",
                       "reason_thresholds", "min_recurrence_wins", "high_band_cap",
@@ -88,8 +88,17 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
                 f"Detection config {path}: scorers.{name} must be a mapping."
             )
         for key in keys:
-            if key not in section:
-                missing = list(missing) + [f"scorers.{name}.{key}"]
+            # Dotted keys ("a.b.c") walk into nested dicts so callers can
+            # require leaf tunables, not just top-level blocks. Reports the
+            # full path in the error so YAML edits surface the precise
+            # missing field rather than a downstream KeyError at import.
+            cur: Any = section
+            parts = key.split(".")
+            for part in parts:
+                if not isinstance(cur, dict) or part not in cur:
+                    missing = list(missing) + [f"scorers.{name}.{key}"]
+                    break
+                cur = cur[part]
     if missing:
         joined = ", ".join(sorted(missing))
         raise RuntimeError(

@@ -22,7 +22,7 @@ Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -131,7 +131,10 @@ class FrontRunningScorer(BaseScorer):
 
         # Minimum recurrence gate: cap below Critical band when attacker has
         # fewer than _MIN_RECURRENCE_WINS collision wins in recent window.
-        if win_count < _MIN_RECURRENCE_WINS and final >= 80:
+        # Cap and recurrence floor tunable via front_running.high_band_cap /
+        # min_recurrence_wins; the Critical threshold itself is the canonical
+        # band boundary in normalise.BAND_CRITICAL_THRESHOLD.
+        if win_count < _MIN_RECURRENCE_WINS and final >= BAND_CRITICAL_THRESHOLD:
             final = _HIGH_BAND_CAP
 
         reasons = []

@@ -22,8 +22,9 @@ class TestNormalise:
         assert 0.45 < result < 0.55
 
     def test_degenerate_p50_equals_p99(self):
+        # Zero-variance baselines carry no signal, so both directions return 0.
         assert normalise(5.0, p50=10.0, p99=10.0) == 0.0
-        assert normalise(15.0, p50=10.0, p99=10.0) == 1.0
+        assert normalise(15.0, p50=10.0, p99=10.0) == 0.0
 
 
 class TestNormaliseInverted:
@@ -36,6 +37,13 @@ class TestNormaliseInverted:
 
     def test_below_p50_clipped_to_one(self):
         assert normalise_inverted(5.0, p50=10.0, p99=20.0) == 1.0
+
+    def test_inverted_returns_zero_on_constant_baseline(self):
+        # Without this guard, an inverted call against a constant baseline
+        # (p50 == p99) flips into 1.0 for every value at or below the constant,
+        # which produced the token_dust false-positive cluster on preprod.
+        assert normalise_inverted(5.0, p50=10.0, p99=10.0) == 0.0
+        assert normalise_inverted(15.0, p50=10.0, p99=10.0) == 0.0
 
 
 class TestScoreToBand:
