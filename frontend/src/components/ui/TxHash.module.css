@@ -1,0 +1,43 @@
+.wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-accent);
+  letter-spacing: 0.5px;
+}
+
+.link {
+  text-decoration: none;
+}
+
+.link:hover .text {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+}
+
+.wrap:hover .copy {
+  opacity: 1;
+}
+
+.copy:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}

@@ -1,0 +1,31 @@
+.wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--dot-size, 8px);
+  height: var(--dot-size, 8px);
+  flex-shrink: 0;
+}
+
+.dot {
+  width: var(--dot-size, 8px);
+  height: var(--dot-size, 8px);
+  border-radius: 50%;
+  background: var(--dot-color);
+}
+
+.ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--dot-color);
+  animation: pulse-ring 2.4s ease-out infinite;
+  opacity: 0.6;
+}
+
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  70%  { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}

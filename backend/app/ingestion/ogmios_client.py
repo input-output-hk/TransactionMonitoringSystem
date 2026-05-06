@@ -96,7 +96,14 @@ class OgmiosClient:
         await ws.send(msg)
         raw = await ws.recv()
         self._last_msg_at = datetime.now(timezone.utc)
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            logger.warning(
+                f"Ogmios [{method}]: unexpected non-dict response "
+                f"({type(parsed).__name__}): {repr(parsed)[:200]}"
+            )
+            return {}
+        return parsed
 
     # --- WebSocket connection with resilience ---
 
@@ -267,8 +274,16 @@ class OgmiosClient:
             resp = await self._send_recv(ws, "findIntersection", {
                 "points": [{"slot": sync_point["slot"], "id": sync_point["id"]}]
             })
-        else:
-            logger.info("Ogmios [chain]: first run, starting from current tip")
+            # If the saved point was rolled back or is unknown, fall through to tip logic
+            if "error" in resp or not resp.get("result"):
+                logger.warning(
+                    f"Ogmios [chain]: saved sync point not found "
+                    f"(slot {sync_point['slot']}), falling back to current tip"
+                )
+                sync_point = None
+
+        if not sync_point:
+            logger.info("Ogmios [chain]: intersecting at current tip")
             resp = await self._send_recv(ws, "findIntersection", {"points": ["origin"]})
             tip = resp.get("result", {}).get("tip", {})
             if isinstance(tip, dict) and "slot" in tip:
@@ -551,11 +566,16 @@ class OgmiosClient:
             # Emit lifecycle events after DB writes so API queries are consistent
             for tx in normalized_txs:
                 await self._emit({
-                    "eventType": "TX_CONFIRMED",
-                    "txId": tx.tx_hash,
+                    "tx_id": tx.tx_hash,
                     "network": self.network,
-                    "observedAt": now.isoformat(),
-                    "block": {"hash": block_id, "slot": block_slot, "height": block_height},
+                    "status": "CONFIRMED",
+                    "first_seen_at": None,
+                    "confirmed_at": now.isoformat(),
+                    "rolled_back_at": None,
+                    "block_hash": block_id,
+                    "slot": block_slot,
+                    "height": block_height,
+                    "latency_ms": None,
                 })
 
             # Remove confirmed txs from mempool dedup set
@@ -594,10 +614,16 @@ class OgmiosClient:
         self._seen_mempool_txs.clear()
 
         await self._emit({
-            "eventType": "TX_ROLLED_BACK",
+            "tx_id": None,
             "network": self.network,
-            "observedAt": datetime.now(timezone.utc).isoformat(),
-            "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
+            "status": "ROLLED_BACK",
+            "first_seen_at": None,
+            "confirmed_at": None,
+            "rolled_back_at": datetime.now(timezone.utc).isoformat(),
+            "block_hash": rollback_id or None,
+            "slot": rollback_slot or None,
+            "height": None,
+            "latency_ms": None,
         })
 
     # --- Mempool Monitoring ---
@@ -746,11 +772,16 @@ class OgmiosClient:
                     logger.error(f"Error persisting pending tx {tx_id}: {e}")
 
                 await self._emit({
-                    "eventType": "TX_PENDING",
-                    "txId": tx_id,
+                    "tx_id": tx_id,
                     "network": self.network,
-                    "observedAt": now.isoformat(),
-                    "firstSeenAt": now.isoformat(),
+                    "status": "PENDING",
+                    "first_seen_at": now.isoformat(),
+                    "confirmed_at": None,
+                    "rolled_back_at": None,
+                    "block_hash": None,
+                    "slot": None,
+                    "height": None,
+                    "latency_ms": None,
                 })
 
                 logger.debug(f"TX_PENDING: {tx_id}")
