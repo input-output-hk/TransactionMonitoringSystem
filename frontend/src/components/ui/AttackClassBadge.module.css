@@ -1,0 +1,20 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
+  font-weight: 600;
+  color: var(--cls-color);
+  background: var(--cls-bg);
+  border: 1px solid var(--cls-border);
+  white-space: nowrap;
+}
+
+.sm {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.md {
+  font-size: 11px;
+  padding: 3px 9px;
+}

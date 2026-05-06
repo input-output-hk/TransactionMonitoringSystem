@@ -44,23 +44,86 @@ services:
     networks:
       - tms-network
 
+  # One-shot Mithril bootstrap — downloads a certified chain snapshot so
+  # cardano-node starts from near tip instead of syncing from genesis.
+  # Skips automatically if the DB already exists.
+  # Genesis keys are fetched automatically from the Mithril GitHub repo;
+  # override MITHRIL_GENESIS_VERIFICATION_KEY in .env if needed.
+  mithril-client:
+    image: ghcr.io/input-output-hk/mithril-client:latest
+    container_name: tms-mithril-client
+    user: root
+    environment:
+      NETWORK: ${NETWORK:-preprod}
+      MITHRIL_GENESIS_VERIFICATION_KEY: ${MITHRIL_GENESIS_VERIFICATION_KEY:-}
+      MITHRIL_AGGREGATOR_ENDPOINT: ${MITHRIL_AGGREGATOR_ENDPOINT:-}
+      ANCILLARY_VERIFICATION_KEY: ${ANCILLARY_VERIFICATION_KEY:-}
+    volumes:
+      - ./data/cardano-node/${NETWORK:-preprod}:/db
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        NETWORK=$${NETWORK:-preprod}
+        case "$$NETWORK" in
+          preprod) MITHRIL_NET="release-preprod" ;;
+          preview)  MITHRIL_NET="release-preview" ; GENESIS_NET="pre-release-preview" ;;
+          mainnet)  MITHRIL_NET="release-mainnet" ;;
+          *) echo "Mithril not available for $$NETWORK, skipping." ; exit 0 ;;
+        esac
+        GENESIS_NET=$${GENESIS_NET:-$$MITHRIL_NET}
+        AGGREGATOR=$${MITHRIL_AGGREGATOR_ENDPOINT:-https://aggregator.$${MITHRIL_NET}.api.mithril.network/aggregator}
+        GVK="$$MITHRIL_GENESIS_VERIFICATION_KEY"
+        if [ -z "$$GVK" ]; then
+          echo "Fetching genesis verification key for $$MITHRIL_NET..."
+          GVK=$$(wget -qO- "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/$${GENESIS_NET}/genesis.vkey")
+        fi
+        if [ -d /db/immutable ] && [ -n "$$(ls -A /db/immutable 2>/dev/null)" ]; then
+          echo "Mithril: chain DB already exists, skipping snapshot download."
+          exit 0
+        fi
+        AVK="$$ANCILLARY_VERIFICATION_KEY"
+        if [ -z "$$AVK" ]; then
+          echo "Fetching ancillary verification key for $$MITHRIL_NET..."
+          AVK=$$(wget -qO- "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/$${GENESIS_NET}/ancillary.vkey" 2>/dev/null || true)
+        fi
+        echo "Mithril: downloading latest $$NETWORK CardanoDatabase snapshot (this takes a while)..."
+        (while true; do
+          SIZE=$$(du -sh /db 2>/dev/null | cut -f1)
+          echo "[mithril] downloaded so far: $${SIZE:-0}"
+          sleep 15
+        done) &
+        PROGRESS_PID=$$!
+        if [ -n "$$AVK" ]; then
+          AGGREGATOR_ENDPOINT="$$AGGREGATOR" GENESIS_VERIFICATION_KEY="$$GVK" ANCILLARY_VERIFICATION_KEY="$$AVK" \
+            /app/bin/mithril-client cardano-db download latest --download-dir / \
+            --include-ancillary --ancillary-verification-key "$$AVK"
+        else
+          AGGREGATOR_ENDPOINT="$$AGGREGATOR" GENESIS_VERIFICATION_KEY="$$GVK" \
+            /app/bin/mithril-client cardano-db download latest --download-dir /
+        fi
+        kill $$PROGRESS_PID 2>/dev/null || true
+    restart: "no"
+    networks:
+      - tms-network
+    profiles:
+      - ingestion
+
   cardano-node:
     image: ghcr.io/intersectmbo/cardano-node:10.6.2
     container_name: tms-cardano-node
+    environment:
+      # The image entrypoint uses NETWORK to select its built-in Nix configs.
+      # Do NOT override command: — the entrypoint already prepends "run".
+      NETWORK: ${NETWORK:-preprod}
     volumes:
-      - ${CARDANO_CONFIG_DIR:-./cardano-config/preprod}:/config:ro
-      - cardano-node-db:/data
+      # Per-network node DB; image default db path is /data/db
+      - ./data/cardano-node/${NETWORK:-preprod}:/data/db
       - node-ipc:/ipc
-    command:
-      - run
-      - --config
-      - /config/config.json
-      - --topology
-      - /config/topology.json
-      - --database-path
-      - /data
-      - --socket-path
-      - /ipc/node.socket
+    depends_on:
+      mithril-client:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks:
       - tms-network
@@ -68,21 +131,22 @@ services:
       - ingestion
 
   ogmios:
-    image: cardanosolutions/ogmios:latest
+    image: cardanosolutions/ogmios:v6.9.0
     container_name: tms-ogmios
     depends_on:
       - cardano-node
     command:
       - --node-socket
       - /ipc/node.socket
+      # config.json lives in the cardano-node/ subdir; genesis refs use ../genesis/
       - --node-config
-      - /config/config.json
+      - /config/cardano-node/config.json
       - --host
       - 0.0.0.0
       - --port
       - "1337"
     volumes:
-      - ${CARDANO_CONFIG_DIR:-./cardano-config/preprod}:/config:ro
+      - ./cardano-config/${NETWORK:-preprod}:/config:ro
       - node-ipc:/ipc
     ports:
       - "127.0.0.1:1337:1337"
@@ -99,7 +163,7 @@ services:
       dockerfile: backend/Dockerfile
     container_name: tms-app
     environment:
-      - CARDANO_NETWORK=${CARDANO_NETWORK:-preprod}
+      - CARDANO_NETWORK=${NETWORK:-preprod}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER:-tms_user}
@@ -135,8 +199,6 @@ volumes:
   clickhouse_logs:
     driver: local
   raw_store_data:
-    driver: local
-  cardano-node-db:
     driver: local
   node-ipc:
     driver: local

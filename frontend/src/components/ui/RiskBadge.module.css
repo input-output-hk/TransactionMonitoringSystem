@@ -1,0 +1,44 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 20px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--badge-color);
+  background: var(--badge-bg);
+  border: 1px solid color-mix(in srgb, var(--badge-color) 30%, transparent);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--badge-color);
+  flex-shrink: 0;
+}
+
+.score {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  opacity: 0.85;
+}
+
+/* Sizes */
+.sm {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+.sm .dot { width: 4px; height: 4px; }
+
+.md {
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.lg {
+  font-size: 13px;
+  padding: 5px 12px;
+}
+.lg .dot { width: 7px; height: 7px; }

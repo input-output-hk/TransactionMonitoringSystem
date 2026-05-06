@@ -1,0 +1,260 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1200px;
+}
+
+.loading, .notFound {
+  padding: 48px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color var(--duration-fast);
+}
+.back:hover { color: var(--text-primary); }
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+}
+
+.headerLeft { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+.hashFull {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.metaRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.metaItem {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.monoVal {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.metaDot { color: var(--text-muted); }
+
+.explorerLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-accent);
+  text-decoration: none;
+  margin-left: 4px;
+}
+.explorerLink:hover { text-decoration: underline; }
+
+/* Grid */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
+.left, .right {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Card */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cardTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Summary */
+.summaryGrid { display: flex; flex-direction: column; gap: 2px; }
+
+.summaryRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.summaryRow:last-child { border-bottom: none; }
+
+.summaryKey {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.summaryVal {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+/* UTxO list */
+.utxoList { display: flex; flex-direction: column; gap: 6px; }
+
+.utxo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  gap: 12px;
+}
+
+.utxoAddr {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-accent);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.utxoRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.utxoAda {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.tag {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+}
+
+/* Score breakdown */
+.topClass {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.topClassSub {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.allScores { display: flex; flex-direction: column; gap: 7px; }
+
+.scoreRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scoreRowNA {
+  opacity: 0.35;
+}
+
+.naLabel {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* Sub-scores */
+.subTitle {
+  margin-bottom: -4px;
+}
+
+.subRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.subKey {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 90px;
+  flex-shrink: 0;
+  text-transform: capitalize;
+}
+
+.subBar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.subFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+  transition: width 0.4s var(--ease-out);
+}
+
+.subVal {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  min-width: 30px;
+  text-align: right;
+}
