@@ -77,5 +77,20 @@ data/raw/
 # Default path when running from backend/ directory
 backend/data/raw/
 
+# Cardano node data (per-network chain store, downloaded at runtime)
+data/cardano-node/
+
+# Cardano node configs (downloaded by scripts/fetch-cardano-config.sh)
+cardano-config/
+
 # Demo dashboard (temporary Vercel mockup)
 demo-dashboard/
+
+# Node / npm (root + frontend/)
+node_modules/
+package-lock.json
+
+# Frontend build output (Vite)
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
