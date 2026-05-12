@@ -82,13 +82,64 @@ if _LAZY_VALIDATOR_FLOOR < BAND_HIGH_THRESHOLD:
     )
 
 
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_BECH32_INVERSE = {c: i for i, c in enumerate(_BECH32_CHARSET)}
+
+
+def _payment_credential(addr: str) -> str:
+    """Return a stable per-script-hash key for a Shelley script address.
+
+    Two addresses sharing the same payment credential (script hash) but
+    differing in stake credential must group together: CTF 05
+    (purchase_offer) showed that a validator vulnerability can be exploited
+    by spending multiple UTxOs at the same script with distinct stake
+    credentials, putting them at distinct ``address`` strings but the same
+    script. Grouping by raw address misses the attack.
+
+    Decodes the bech32 data, drops the network header byte, and returns the
+    first 28 bytes (= payment credential hash) as hex. On any failure falls
+    back to the raw address so legacy code paths keep working.
+    """
+    if not addr or "1" not in addr:
+        return addr
+    try:
+        data_part = addr.rsplit("1", 1)[1].lower()
+        # Drop the 6-char bech32 checksum at the tail.
+        if len(data_part) <= 6:
+            return addr
+        data_part = data_part[:-6]
+        bits: List[int] = []
+        for c in data_part:
+            v = _BECH32_INVERSE.get(c)
+            if v is None:
+                return addr
+            for shift in (4, 3, 2, 1, 0):
+                bits.append((v >> shift) & 1)
+        if len(bits) < 8 + 28 * 8:
+            return addr
+        out = bytearray()
+        for i in range(8, 8 + 28 * 8, 8):
+            byte = 0
+            for b in bits[i : i + 8]:
+                byte = (byte << 1) | b
+            out.append(byte)
+        return out.hex()
+    except Exception:
+        return addr
+
+
 def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
-    """Group transaction inputs by script address."""
+    """Group transaction inputs by script payment credential.
+
+    Keyed by payment credential (not full address) so that script UTxOs at
+    the same validator with different stake credentials group together. See
+    :func:`_payment_credential`.
+    """
     groups: Dict[str, List[Dict]] = {}
     for inp in raw_data.get("inputs", []):
         addr = inp.get("address", "")
         if feat_mod.is_script_address(addr):
-            groups.setdefault(addr, []).append(inp)
+            groups.setdefault(_payment_credential(addr), []).append(inp)
     return groups
 
 
@@ -105,16 +156,19 @@ def _extract_lovelace(val: Any) -> int:
 
 
 def _compute_net_value_out(
-    inputs: List[Dict], outputs: List[Dict], script_addr: str,
+    inputs: List[Dict], outputs: List[Dict], script_key: str,
 ) -> int:
-    """Net lovelace extraction: Σ(inputs from script) − Σ(outputs to script)."""
+    """Net lovelace extraction: Σ(inputs from script) − Σ(outputs to script).
+
+    ``script_key`` is a payment credential (see :func:`_payment_credential`).
+    """
     value_in = sum(
         _extract_lovelace(inp.get("value"))
-        for inp in inputs if inp.get("address", "") == script_addr
+        for inp in inputs if _payment_credential(inp.get("address", "")) == script_key
     )
     value_out = sum(
         _extract_lovelace(out.get("value"))
-        for out in outputs if out.get("address", "") == script_addr
+        for out in outputs if _payment_credential(out.get("address", "")) == script_key
     )
     return max(0, value_in - value_out)
 
@@ -140,7 +194,7 @@ def _iter_assets(val: Any):
 
 
 def _compute_n_assets_out(
-    inputs: List[Dict], outputs: List[Dict], script_addr: str,
+    inputs: List[Dict], outputs: List[Dict], script_key: str,
 ) -> int:
     """Count of distinct native-asset ``(policy, name)`` pairs with positive
     net flow out of the script address.
@@ -154,12 +208,12 @@ def _compute_n_assets_out(
     """
     flow: Dict[Tuple[str, str], int] = {}
     for inp in inputs:
-        if inp.get("address", "") != script_addr:
+        if _payment_credential(inp.get("address", "")) != script_key:
             continue
         for key, qty in _iter_assets(inp.get("value")):
             flow[key] = flow.get(key, 0) + qty
     for out in outputs:
-        if out.get("address", "") != script_addr:
+        if _payment_credential(out.get("address", "")) != script_key:
             continue
         for key, qty in _iter_assets(out.get("value")):
             flow[key] = flow.get(key, 0) - qty
@@ -237,13 +291,18 @@ class MultipleSatScorer(BaseScorer):
 
         best: ScorerResult = ScorerResult()
 
-        for script_addr, inps in groups.items():
+        for script_key, inps in groups.items():
             n_inputs = len(inps)
             if n_inputs < 2:
                 continue
 
+            # Pick the first input's address as the representative for
+            # baseline / allowlist lookups (these are still keyed by full
+            # address). Group membership is already determined by
+            # payment credential.
+            representative_addr = inps[0].get("address", script_key)
             result = self._score_script(
-                script_addr, n_inputs, total_cpu,
+                script_key, representative_addr, n_inputs, total_cpu,
                 raw_data, outputs, sender_recurrence, network,
             )
             if result.score > best.score:
@@ -253,7 +312,8 @@ class MultipleSatScorer(BaseScorer):
 
     def _score_script(
         self,
-        script_addr: str,
+        script_key: str,
+        representative_addr: str,
         n_inputs: int,
         total_cpu: int,
         raw_data: Dict,
@@ -262,29 +322,30 @@ class MultipleSatScorer(BaseScorer):
         network: str,
     ) -> ScorerResult:
         inputs = raw_data.get("inputs", [])
-        net_value = _compute_net_value_out(inputs, outputs, script_addr)
-        n_assets_out = _compute_n_assets_out(inputs, outputs, script_addr)
+        net_value = _compute_net_value_out(inputs, outputs, script_key)
+        n_assets_out = _compute_n_assets_out(inputs, outputs, script_key)
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
-        # Per-script baselines with bootstrap fallbacks.
+        # Per-script baselines still keyed by full address; use the
+        # representative address picked from the group.
         p50_nv, p99_nv, bl_nv = _resolve(
-            "net_value_out_of_script", "per_script", script_addr, network,
+            "net_value_out_of_script", "per_script", representative_addr, network,
             _BOOT, "net_value_out_of_script",
         )
         p50_na, p99_na, bl_na = _resolve(
-            "n_assets_out_of_script", "per_script", script_addr, network,
+            "n_assets_out_of_script", "per_script", representative_addr, network,
             _BOOT, "n_assets_out_of_script",
         )
         p50_ex, p99_ex, bl_ex = _resolve(
-            "exunits_per_script_input", "per_script", script_addr, network,
+            "exunits_per_script_input", "per_script", representative_addr, network,
             _BOOT, "exunits_per_script_input",
         )
         p50_ni, p99_ni, bl_ni = _resolve(
-            "n_inputs_same_script", "per_script", script_addr, network,
+            "n_inputs_same_script", "per_script", representative_addr, network,
             _BOOT, "n_inputs_same_script",
         )
         p50_rc, p99_rc, bl_rc = _resolve(
-            "sender_recurrence", "per_script", script_addr, network,
+            "sender_recurrence", "per_script", representative_addr, network,
             _BOOT, "sender_recurrence",
         )
 
@@ -300,7 +361,7 @@ class MultipleSatScorer(BaseScorer):
         s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
 
         # Allowlisted scripts: neutralise s_extraction and redistribute its weight.
-        allowlisted = _is_allowlisted(script_addr)
+        allowlisted = _is_allowlisted(representative_addr)
         if allowlisted:
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
             s_extraction = 0.0
