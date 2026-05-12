@@ -47,6 +47,7 @@ All tunable constants live in ``config/detection.yaml`` under the
 """
 
 import logging
+from functools import lru_cache
 from typing import Any, Dict, List, Tuple
 
 from app.analysis.normalise import BAND_HIGH_THRESHOLD, normalise, normalise_inverted
@@ -86,19 +87,26 @@ _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_INVERSE = {c: i for i, c in enumerate(_BECH32_CHARSET)}
 
 
+@lru_cache(maxsize=4096)
 def _payment_credential(addr: str) -> str:
     """Return a stable per-script-hash key for a Shelley script address.
 
     Two addresses sharing the same payment credential (script hash) but
-    differing in stake credential must group together: CTF 05
-    (purchase_offer) showed that a validator vulnerability can be exploited
-    by spending multiple UTxOs at the same script with distinct stake
-    credentials, putting them at distinct ``address`` strings but the same
-    script. Grouping by raw address misses the attack.
+    differing in stake credential must group together: a validator
+    vulnerability can be exploited by spending multiple UTxOs at the same
+    script with distinct stake credentials, putting them at distinct
+    ``address`` strings but the same script. Grouping by raw address
+    misses the attack (canonical purchase-offer double-satisfaction shape).
 
     Decodes the bech32 data, drops the network header byte, and returns the
-    first 28 bytes (= payment credential hash) as hex. On any failure falls
-    back to the raw address so legacy code paths keep working.
+    first 28 bytes (= payment credential hash) as hex. The 6-char bech32
+    checksum at the tail is *stripped without validation*: callers must not
+    rely on a successful decode meaning the address is well-formed. On any
+    structural failure falls back to the raw address so legacy code paths
+    keep working.
+
+    Cached because each tx triggers up to 3·(N_inputs + N_outputs) calls
+    (grouping + lovelace flow + asset flow) across the same address set.
     """
     if not addr or "1" not in addr:
         return addr
@@ -361,7 +369,11 @@ class MultipleSatScorer(BaseScorer):
         s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
 
         # Allowlisted scripts: neutralise s_extraction and redistribute its weight.
-        allowlisted = _is_allowlisted(representative_addr)
+        # Check every address in the group, not just the representative: a known
+        # batcher may publish UTxOs under multiple stake-cred variants, and the
+        # group must be allowlisted if any variant is.
+        group_addrs = {inp.get("address", "") for inp in inputs if _payment_credential(inp.get("address", "")) == script_key}
+        allowlisted = any(_is_allowlisted(a) for a in group_addrs)
         if allowlisted:
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
             s_extraction = 0.0

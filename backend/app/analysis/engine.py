@@ -275,7 +275,20 @@ def _enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
             logger.debug(f"Cycle detection failed for {row['tx_hash'][:16]}: {e}")
 
 
+# Captured by run_once_async() so that _enrich_collision_features (running on
+# a clickhouse worker thread) can schedule async postgres calls back onto the
+# main event loop. Module-level mutable state assumes a single asyncio loop
+# per process, which matches our production deployment. Tests that drive the
+# engine directly without run_once_async() will see collision enrichment
+# skipped (debug log emitted); call set_main_loop() manually if that path
+# matters for the test.
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    """Test hook: explicitly set or clear the captured main event loop."""
+    global _main_loop
+    _main_loop = loop
 
 
 def _enrich_collision_features(rows: List[Dict[str, Any]], network: str):
