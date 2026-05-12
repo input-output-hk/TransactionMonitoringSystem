@@ -85,6 +85,31 @@ class TestGate:
         redeemers = {"mint:0": {"executionUnits": {"memory": 1, "cpu": 1}}}
         assert scorer.gate(_features(inputs, redeemers=redeemers)) is False
 
+    def test_same_payment_cred_different_stake_cred_groups_together(self, scorer):
+        # Regression: cardano-ctf 05 (purchase_offer) exploits double-sat by
+        # spending two UTxOs at the same validator deployed under different
+        # stake credentials, putting them at distinct ``address`` strings
+        # but the same script. Grouping by raw address misses this; we now
+        # group by payment credential. Use real preprod addresses captured
+        # from the CTF run (same payment cred, different stake parts).
+        addr_a = (
+            "addr_test1zpsqdy4efletcs8d6pgzjrxmjq6gg82dr5fyvepn9yv09l"
+            "d285x8fy9ezxxyczxq0rfc3m5rfl6yj6ex3ecxx70xngnsf52z3z"
+        )
+        addr_b = (
+            "addr_test1zpsqdy4efletcs8d6pgzjrxmjq6gg82dr5fyvepn9yv09l"
+            "vysjzwzgewp6evhc7rl83l3z5ftvhfeuhmt29sxgxh3yzqkesp9d"
+        )
+        inputs = [
+            {"address": addr_a, "value": {"lovelace": 10_000_000}},
+            {"address": addr_b, "value": {"lovelace": 10_000_000}},
+        ]
+        redeemers = {
+            "spend:0": {"executionUnits": {"memory": 1, "cpu": 1}},
+            "spend:1": {"executionUnits": {"memory": 1, "cpu": 1}},
+        }
+        assert scorer.gate(_features(inputs, redeemers=redeemers)) is True
+
 
 class TestScore:
     def test_sub_score_keys(self, scorer):
