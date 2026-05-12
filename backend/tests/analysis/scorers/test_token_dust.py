@@ -89,3 +89,32 @@ class TestScore:
         result = scorer.score(_features([low, high]))
         single = scorer.score(_features([high]))
         assert result.score == single.score
+
+    def test_value_bloat_dos_composite_reason(self, scorer):
+        """When all three primary signals saturate at a script address, the
+        composite ``script_value_bloat_dos`` reason fires. Canonical
+        value-bloat DoS signature: many unique policies, large value CBOR,
+        minimal lovelace. Distinguishes a contract-DoS shape from generic
+        dust spam without renaming the class column."""
+        # 80 unique (policy, name) pairs to mirror the canonical mint.
+        policies = {f"policy{i:03d}": {"x": 1} for i in range(80)}
+        out = _make_output(SCRIPT_ADDR, lovelace=1_200_000, policies=policies)
+        result = scorer.score(_features([out]))
+        assert "script_value_bloat_dos" in result.reasons
+        # Sanity: the three primary signals must all be present too.
+        assert "high_value_cbor_bytes" in result.reasons
+        assert "many_distinct_assets" in result.reasons
+        assert "low_lovelace_amount" in result.reasons
+
+    def test_no_composite_reason_when_one_signal_missing(self, scorer):
+        """Generous ada cushion should suppress lovelace_inverted and
+        therefore suppress the composite reason even with many assets.
+
+        Uses 1000 ADA so the margin against any plausible upward baseline
+        rebase stays comfortable; if this flips in the future the bootstrap
+        ``ada_amount.p99`` has been raised dramatically and the test is no
+        longer the right test."""
+        policies = {f"p{i:03d}": {"x": 1} for i in range(20)}
+        out = _make_output(SCRIPT_ADDR, lovelace=1_000_000_000, policies=policies)
+        result = scorer.score(_features([out]))
+        assert "script_value_bloat_dos" not in result.reasons

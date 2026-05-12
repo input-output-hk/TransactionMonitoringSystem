@@ -151,6 +151,28 @@ class TokenDustScorer(BaseScorer):
             reasons.append("many_distinct_assets")
         if s_ada > _REASON_T:
             reasons.append("low_lovelace_amount")
+        # Composite reason: when all three primary signals saturate at a
+        # script-address output, the shape is the canonical value-bloat DoS
+        # signature, not retail dust spam routed at a contract. Surfacing
+        # this lets the analyst distinguish "bloat the contract so it cannot
+        # be used" from "spray dust at random addresses" without renaming
+        # the class column.
+        #
+        # Convenience composite over the three primary reasons; downstream
+        # could derive the same predicate, but emitting it here keeps the
+        # analyst path uniform.
+        #
+        # Threshold: each sub-signal must clear ``reason_threshold`` (0.5
+        # by default). The composite fires on the *shape*; the score still
+        # conveys severity. Matches the existing pattern used for
+        # ``lazy_validator_band_floor`` in multiple_sat.
+        if (
+            feat_mod.is_script_address(address)
+            and s_bytes > _REASON_T
+            and s_assets > _REASON_T
+            and s_ada > _REASON_T
+        ):
+            reasons.append("script_value_bloat_dos")
 
         return ScorerResult(
             score=final,
