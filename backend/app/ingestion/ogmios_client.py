@@ -572,8 +572,14 @@ class OgmiosClient:
     async def _handle_roll_backward(self, result: dict):
         """Process a chain rollback (rollBackward)."""
         point = result.get("point", {})
-        rollback_slot = point.get("slot", 0)
-        rollback_id = point.get("id", "")
+        # Ogmios v6 returns the literal string "origin" when rolling back past
+        # the volatile chain instead of a {slot, id} object.
+        if isinstance(point, str):
+            rollback_slot = 0
+            rollback_id = ""
+        else:
+            rollback_slot = point.get("slot", 0)
+            rollback_id = point.get("id", "")
 
         tip = result.get("tip", {})
         if isinstance(tip, dict) and "slot" in tip:
