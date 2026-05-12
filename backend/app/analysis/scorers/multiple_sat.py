@@ -85,6 +85,9 @@ if _LAZY_VALIDATOR_FLOOR < BAND_HIGH_THRESHOLD:
 
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_INVERSE = {c: i for i, c in enumerate(_BECH32_CHARSET)}
+_BECH32_CHECKSUM_LEN = 6
+_BECH32_BITS_PER_CHAR = 5
+_PAYMENT_CRED_BYTES = 28  # CIP-19: Blake2b-224 hash size, payment + stake creds
 
 
 @lru_cache(maxsize=4096)
@@ -112,21 +115,26 @@ def _payment_credential(addr: str) -> str:
         return addr
     try:
         data_part = addr.rsplit("1", 1)[1].lower()
-        # Drop the 6-char bech32 checksum at the tail.
-        if len(data_part) <= 6:
+        if len(data_part) <= _BECH32_CHECKSUM_LEN:
             return addr
-        data_part = data_part[:-6]
+        # Strip the trailing checksum without validating it; callers must
+        # not rely on a successful decode meaning the address is well-formed.
+        data_part = data_part[:-_BECH32_CHECKSUM_LEN]
         bits: List[int] = []
         for c in data_part:
             v = _BECH32_INVERSE.get(c)
             if v is None:
                 return addr
-            for shift in (4, 3, 2, 1, 0):
+            # Unpack 5-bit bech32 group MSB-first.
+            for shift in range(_BECH32_BITS_PER_CHAR - 1, -1, -1):
                 bits.append((v >> shift) & 1)
-        if len(bits) < 8 + 28 * 8:
+        # Layout: 1 header byte + 28-byte payment cred + (optional stake cred).
+        header_bits = 8
+        payment_cred_bits = _PAYMENT_CRED_BYTES * 8
+        if len(bits) < header_bits + payment_cred_bits:
             return addr
         out = bytearray()
-        for i in range(8, 8 + 28 * 8, 8):
+        for i in range(header_bits, header_bits + payment_cred_bits, 8):
             byte = 0
             for b in bits[i : i + 8]:
                 byte = (byte << 1) | b
