@@ -106,6 +106,7 @@ docker compose --profile app up -d
 ```
 
 The app container connects to the databases internally. `OGMIOS_WS_URL` must still point to your external Ogmios host.
+`TMS_ENV` must be set in .env to select the correct network-specific environment file (.env.<TMS_ENV>).
 
 
 ## Verifying the system is working
