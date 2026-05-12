@@ -20,7 +20,7 @@ Sub-scores (Polimi §4.4.3), all per-script baselined:
 
 Phase 1 extension to §4.4.3: ``s_extraction`` is value-agnostic. The Polimi
 spec defines extraction in lovelace only, but the canonical real-world cases
-(Vacuumlabs/Invariant0 #1; the 2021-22 Canonical disclosure affecting
+(the 2021-22 NFT-marketplace double-satisfaction disclosures affecting
 jpg.store, SpaceBudz, Genesis, Adapix, Martify) drain native assets while
 the script's lovelace position barely moves. We compute both axes
 independently against per-script baselines and take the max, so either
@@ -211,8 +211,8 @@ def _compute_n_assets_out(
     of pairs whose net is strictly > 0. The metric is *pair count*, not unit
     count: a partial extraction of 50 fungible-token units of one asset
     registers as 1, the same as a single NFT. This matches the canonical
-    Vacuumlabs/Invariant0 NFT-marketplace double-satisfaction shape (N NFTs
-    leaving = N pairs leaving) and is robust to fungible-vs-NFT differences.
+    NFT-marketplace double-satisfaction shape (N NFTs leaving = N pairs
+    leaving) and is robust to fungible-vs-NFT differences.
     """
     flow: Dict[Tuple[str, str], int] = {}
     for inp in inputs:
