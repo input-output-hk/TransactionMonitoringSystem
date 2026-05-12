@@ -86,12 +86,13 @@ class TestGate:
         assert scorer.gate(_features(inputs, redeemers=redeemers)) is False
 
     def test_same_payment_cred_different_stake_cred_groups_together(self, scorer):
-        # Regression: cardano-ctf 05 (purchase_offer) exploits double-sat by
-        # spending two UTxOs at the same validator deployed under different
+        # Regression: the canonical purchase-offer double-satisfaction shape
+        # spends two UTxOs at the same validator deployed under different
         # stake credentials, putting them at distinct ``address`` strings
         # but the same script. Grouping by raw address misses this; we now
-        # group by payment credential. Use real preprod addresses captured
-        # from the CTF run (same payment cred, different stake parts).
+        # group by payment credential. Uses real preprod addresses captured
+        # from a representative exploit run (same payment cred, different
+        # stake parts).
         addr_a = (
             "addr_test1zpsqdy4efletcs8d6pgzjrxmjq6gg82dr5fyvepn9yv09l"
             "d285x8fy9ezxxyczxq0rfc3m5rfl6yj6ex3ecxx70xngnsf52z3z"
@@ -146,7 +147,7 @@ class TestScore:
     def test_native_asset_extraction_scores_high(self, scorer):
         """NFT-marketplace double-sat shape: assets leave the script, lovelace
         position is flat. The asset axis must carry the signal where the
-        lovelace axis bottoms out. Mirrors the cardano-ctf 01_sell_nft case.
+        lovelace axis bottoms out. Mirrors the canonical NFT-marketplace case.
         """
         policy_a = "33776c029a27667146c43531a69e2e0bd4affa384dc96e2fb8508c17"
         policy_b = "07c2650ee55434e578fdd328a1f794504359af3730a278842f5a4865"
@@ -300,7 +301,7 @@ class TestLazyValidatorBandFloor:
 
     def test_floor_does_not_apply_when_validator_did_real_work(self, scorer):
         # Real validator CPU (well above p99=10M) → s_exunits_inv = 0 →
-        # floor must NOT trigger. Mirrors the cardano-ctf 01_sell_nft case
+        # floor must NOT trigger. Mirrors the canonical NFT-marketplace case
         # where the score should stay at its weighted-average value.
         policy = "33776c029a27667146c43531a69e2e0bd4affa384dc96e2fb8508c17"
         nft_a = "6e66743031"
