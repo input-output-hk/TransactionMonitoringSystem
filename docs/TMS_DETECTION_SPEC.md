@@ -105,6 +105,11 @@ score_token_dust(utxo):
 - **Per-script allowlist**: known batch-handling contracts bypass scoring or get adjusted weights.
 - **Novelty gate**: if all sub-scores < 0.5, suppress the final score.
 
+### Reason Flags
+Primary reasons (per sub-score, fired when above `reason_threshold`, default 0.5): `high_value_cbor_bytes`, `many_distinct_assets`, `low_lovelace_amount`.
+
+Composite reason `script_value_bloat_dos`: emitted when all three primary signals saturate at the same script-address output. The shape is the canonical value-bloat denial-of-service signature (many unique native tokens locked at a contract UTxO with minimal ADA cushion, forcing every future spender to carry them forward and pushing min-UTxO and tx-size limits). The class column stays `token_dust` because the underlying observable is correctly "many tokens, low ADA, large CBOR"; the reason flag lets analysts distinguish "bloat a contract" from "spray dust at random addresses" without a schema migration. The score conveys severity; the reason conveys shape.
+
 ### What TMS Forge Produces
 - Single TX minting `token_count` (1-200) unique tokens named `DUST000`, `DUST001`, etc.
 - Distributed across `policy_count` (1-10) distinct PolicyIDs (each using `ScriptAll([ScriptPubkey(vkh), InvalidBefore(nonce)])` for uniqueness)
@@ -220,6 +225,17 @@ A spending contract validates outputs for its input without checking that each i
 - `net_value_out_of_script = sum(script_input_lovelace) - sum(script_output_lovelace)`
 - `n_assets_out_of_script` = count of distinct `(policy_id, asset_name)` pairs with strictly positive net flow out of the script address. Pair-count, not unit-count: 50 fungible-token units of one asset count as 1, the same as a single NFT.
 - `exunits_per_script_input = exunits_total.cpu / n_inputs_same_script`
+
+### Grouping Basis: Payment Credential
+
+"Same script" means same **payment credential** (script hash, CIP-19 28-byte
+Blake2b-224 hash), not same full address. Two UTxOs at the same validator
+deployed under different stake credentials live at distinct Shelley addresses
+but share a payment credential. Grouping on full address misses the canonical
+purchase-offer double-satisfaction shape, where the attacker spends offers
+from multiple stake-cred variants of one script in a single transaction.
+Per-script baselines and the allowlist remain keyed by full address; the
+group representative is the first input's address in the group.
 
 ### Value-Agnostic Extraction
 
