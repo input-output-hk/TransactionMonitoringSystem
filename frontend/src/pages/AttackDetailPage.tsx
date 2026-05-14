@@ -23,6 +23,11 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -39,6 +44,7 @@ import {
   isArchived,
   restoreAlert,
   useArchiveSnapshot,
+  type ArchiveMeta,
 } from '@/lib/archive-store'
 import { ATTACK_ICON, SEVERITY_VARIANT } from '@/lib/attack-display'
 import { cn } from '@/lib/utils'
@@ -104,6 +110,7 @@ function DetailCard({
   onRestored: () => void
 }) {
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
   const meta = ATTACK_META[alert.attackType]
   const Icon = ATTACK_ICON[alert.attackType]
   const archiveMeta = archived ? getArchiveMeta(alert.slug) : undefined
@@ -115,17 +122,14 @@ function DetailCard({
       {/* Header */}
       <header className="flex items-center justify-between gap-3 px-5 py-3">
         <h1 className="text-base font-semibold text-foreground">
-          {archived ? 'archived Attack Detail' : 'Attack Detail'}
+          {archived ? 'Archived Attack Detail' : 'Attack Detail'}
         </h1>
         <div className="flex items-center gap-1 text-muted-foreground">
           {archived ? (
             <button
               type="button"
-              onClick={() => {
-                restoreAlert(alert.slug)
-                onRestored()
-              }}
-              className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => setRestoreOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Restore
@@ -179,6 +183,14 @@ function DetailCard({
 
       <Divider />
 
+      {/* Archive reason — only shown when archived */}
+      {archived && archiveMeta && (
+        <>
+          <ArchiveReasonRow meta={archiveMeta} />
+          <Divider />
+        </>
+      )}
+
       {/* Transactions metrics */}
       <Section title="Transactions">
         <MetricsTwoCol
@@ -225,21 +237,77 @@ function DetailCard({
           }}
         />
       )}
-      {archived && archiveMeta && (
-        <div className="border-t border-border bg-muted/20 px-5 py-3 text-xs text-muted-foreground">
-          <span className="font-semibold uppercase tracking-wide">
-            Archive reason:
-          </span>{' '}
-          <span className="text-foreground">{archiveMeta.reason}</span>
-          {archiveMeta.notes && (
-            <>
-              {' — '}
-              <span>{archiveMeta.notes}</span>
-            </>
-          )}
-        </div>
+      {archived && (
+        <RestoreDialog
+          open={restoreOpen}
+          onOpenChange={setRestoreOpen}
+          onConfirm={() => {
+            restoreAlert(alert.slug)
+            setRestoreOpen(false)
+            onRestored()
+          }}
+        />
       )}
     </section>
+  )
+}
+
+function ArchiveReasonRow({ meta }: { meta: ArchiveMeta }) {
+  const summary = meta.notes ? `${meta.reason}. ${meta.notes}` : meta.reason
+  return (
+    <div className="flex items-baseline gap-6 px-5 py-3">
+      <span className="text-sm font-semibold text-brand">
+        Archive Reason & Notes:
+      </span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="min-w-0 flex-1 cursor-help truncate text-right text-sm text-brand">
+            {summary}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="end" className="max-w-md">
+          <div className="space-y-1">
+            <div className="font-semibold text-foreground">{meta.reason}</div>
+            {meta.notes && (
+              <div className="whitespace-pre-line text-muted-foreground">
+                {meta.notes}
+              </div>
+            )}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  )
+}
+
+function RestoreDialog({
+  open,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onConfirm: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent showClose={false} className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Are you sure you want to restore this attack?</DialogTitle>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={onConfirm}
+            className="border border-border bg-transparent text-brand hover:bg-accent hover:text-brand"
+          >
+            Confirm
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
