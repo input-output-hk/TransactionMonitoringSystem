@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowUp,
@@ -7,15 +8,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Copy,
-  Repeat,
-  Coins,
-  Layers,
   AlertCircle,
-  ScrollText,
-  Banknote,
-  Fish,
-  PackageOpen,
-  GitFork,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -39,30 +32,10 @@ import {
   criticalAlertIdLong,
   latestBlocks,
   latestTransactions,
-  riskAlerts,
-  type AttackType,
-  type Severity,
 } from '@/mocks/attacks'
+import { useActiveAlerts } from '@/lib/archive-store'
+import { ATTACK_ICON, SEVERITY_VARIANT } from '@/lib/attack-display'
 import { cn } from '@/lib/utils'
-
-const SEVERITY_VARIANT: Record<Severity, 'low' | 'medium' | 'high' | 'critical'> = {
-  LOW: 'low',
-  MEDIUM: 'medium',
-  HIGH: 'high',
-  CRITICAL: 'critical',
-}
-
-const ATTACK_ICON: Record<AttackType, React.ComponentType<{ className?: string }>> = {
-  Sandwich: PackageOpen,
-  Phishing: Fish,
-  Circular: Repeat,
-  'Multiple Sat': Layers,
-  'Large Value': Banknote,
-  'Large Datum': ScrollText,
-  'Token Dust': Coins,
-  'Front Running': GitFork,
-  'Fake Token': AlertCircle,
-}
 
 const SECONDARY_INFOS = [
   { label: 'TX / min', value: '12345' },
@@ -72,16 +45,18 @@ const SECONDARY_INFOS = [
 ]
 
 export function AttacksPage() {
+  const navigate = useNavigate()
+  const activeAlerts = useActiveAlerts()
   const [attackFilter, setAttackFilter] = useState<string>('all')
   const [severityFilter, setSeverityFilter] = useState<string>('all')
 
   const filtered = useMemo(() => {
-    return riskAlerts.filter((a) => {
+    return activeAlerts.filter((a) => {
       if (attackFilter !== 'all' && a.attackType !== attackFilter) return false
       if (severityFilter !== 'all' && a.severity !== severityFilter) return false
       return true
     })
-  }, [attackFilter, severityFilter])
+  }, [activeAlerts, attackFilter, severityFilter])
 
   return (
     <div className="flex flex-col gap-4">
@@ -140,7 +115,11 @@ export function AttacksPage() {
             {filtered.map((a) => {
               const Icon = ATTACK_ICON[a.attackType] ?? AlertCircle
               return (
-                <TableRow key={a.id + a.attackType + a.severity}>
+                <TableRow
+                  key={a.slug}
+                  onClick={() => navigate(`/attacks/${a.slug}`)}
+                  className="cursor-pointer"
+                >
                   <TableCell>
                     <div className="flex items-center gap-2 font-mono text-[13px] text-foreground">
                       <span>{a.id}</span>
@@ -148,6 +127,10 @@ export function AttacksPage() {
                         type="button"
                         className="text-muted-foreground hover:text-foreground"
                         title="Copy"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          navigator.clipboard?.writeText(a.id)
+                        }}
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </button>

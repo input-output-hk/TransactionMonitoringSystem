@@ -1,17 +1,10 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertCircle,
   ArrowUp,
-  Banknote,
-  Coins,
   Copy,
   ExternalLink,
-  Fish,
-  GitFork,
-  Layers,
-  PackageOpen,
-  Repeat,
-  ScrollText,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -31,32 +24,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import {
-  ATTACK_TYPES,
-  riskAlerts,
-  type AttackType,
-  type Severity,
-} from '@/mocks/attacks'
+import { ATTACK_TYPES } from '@/mocks/attacks'
+import { useActiveAlerts } from '@/lib/archive-store'
+import { ATTACK_ICON, SEVERITY_VARIANT } from '@/lib/attack-display'
 import { cn } from '@/lib/utils'
-
-const SEVERITY_VARIANT: Record<Severity, 'low' | 'medium' | 'high' | 'critical'> = {
-  LOW: 'low',
-  MEDIUM: 'medium',
-  HIGH: 'high',
-  CRITICAL: 'critical',
-}
-
-const ATTACK_ICON: Record<AttackType, React.ComponentType<{ className?: string }>> = {
-  Sandwich: PackageOpen,
-  Phishing: Fish,
-  Circular: Repeat,
-  'Multiple Sat': Layers,
-  'Large Value': Banknote,
-  'Large Datum': ScrollText,
-  'Token Dust': Coins,
-  'Front Running': GitFork,
-  'Fake Token': AlertCircle,
-}
 
 // "DD.MM.YYYY, HH:mm" → Date
 function parseAlertDate(s: string): Date {
@@ -67,6 +38,8 @@ function parseAlertDate(s: string): Date {
 }
 
 export function ReportsPage() {
+  const navigate = useNavigate()
+  const activeAlerts = useActiveAlerts()
   const [startDate, setStartDate] = useState('2026-02-01')
   const [endDate, setEndDate] = useState('2026-03-01')
   const [attackFilter, setAttackFilter] = useState<string>('all')
@@ -76,7 +49,7 @@ export function ReportsPage() {
     const from = startDate ? new Date(startDate) : null
     const to = endDate ? new Date(endDate) : null
     if (to) to.setHours(23, 59, 59, 999)
-    return riskAlerts.filter((a) => {
+    return activeAlerts.filter((a) => {
       if (attackFilter !== 'all' && a.attackType !== attackFilter) return false
       if (severityFilter !== 'all' && a.severity !== severityFilter) return false
       const d = parseAlertDate(a.date)
@@ -84,7 +57,7 @@ export function ReportsPage() {
       if (to && d > to) return false
       return true
     })
-  }, [attackFilter, severityFilter, startDate, endDate])
+  }, [activeAlerts, attackFilter, severityFilter, startDate, endDate])
 
   return (
     <div className="flex flex-col gap-4">
@@ -164,10 +137,14 @@ export function ReportsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map((a, i) => {
+            {filtered.map((a) => {
               const Icon = ATTACK_ICON[a.attackType] ?? AlertCircle
               return (
-                <TableRow key={`${a.id}-${a.attackType}-${a.severity}-${i}`}>
+                <TableRow
+                  key={a.slug}
+                  onClick={() => navigate(`/attacks/${a.slug}`)}
+                  className="cursor-pointer"
+                >
                   <TableCell>
                     <div className="flex items-center gap-2 font-mono text-[13px] text-foreground">
                       <span>{a.id}</span>
@@ -175,6 +152,10 @@ export function ReportsPage() {
                         type="button"
                         className="text-muted-foreground hover:text-foreground"
                         title="Copy"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          navigator.clipboard?.writeText(a.id)
+                        }}
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </button>
