@@ -1,84 +1,78 @@
-import { cn } from '@/lib/utils'
+import { cn } from "@/lib/utils";
 
 export function Table({
-  className,
-  ...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLTableElement>) {
-  return (
-    <div className="w-full overflow-x-auto">
-      <table
-        className={cn('w-full caption-bottom text-sm', className)}
-        {...props}
-      />
-    </div>
-  )
+	return (
+		<div className="w-full overflow-x-auto">
+			<table
+				className={cn("w-full caption-bottom text-sm", className)}
+				{...props}
+			/>
+		</div>
+	);
 }
 
 export function TableHeader({
-  className,
-  ...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return (
-    <thead
-      className={cn(
-        'border-b border-border [&_tr]:border-b-0',
-        className
-      )}
-      {...props}
-    />
-  )
+	return (
+		<thead
+			className={cn("border-border border-b [&_tr]:border-b-0", className)}
+			{...props}
+		/>
+	);
 }
 
 export function TableBody({
-  className,
-  ...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return (
-    <tbody
-      className={cn('[&_tr:last-child]:border-0', className)}
-      {...props}
-    />
-  )
+	return (
+		<tbody className={cn("[&_tr:last-child]:border-0", className)} {...props} />
+	);
 }
 
 export function TableRow({
-  className,
-  ...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLTableRowElement>) {
-  return (
-    <tr
-      className={cn(
-        'border-b border-border/60 transition-colors hover:bg-muted/40',
-        className
-      )}
-      {...props}
-    />
-  )
+	return (
+		<tr
+			className={cn(
+				"border-border/60 hover:bg-muted/40 border-b transition-colors",
+				className,
+			)}
+			{...props}
+		/>
+	);
 }
 
 export function TableHead({
-  className,
-  ...props
+	className,
+	...props
 }: React.ThHTMLAttributes<HTMLTableCellElement>) {
-  return (
-    <th
-      className={cn(
-        'h-10 px-4 text-left align-middle text-xs font-semibold uppercase tracking-wide text-muted-foreground',
-        className
-      )}
-      {...props}
-    />
-  )
+	return (
+		<th
+			className={cn(
+				"text-muted-foreground h-10 px-4 text-left align-middle text-xs font-semibold tracking-wide uppercase",
+				className,
+			)}
+			{...props}
+		/>
+	);
 }
 
 export function TableCell({
-  className,
-  ...props
+	className,
+	...props
 }: React.TdHTMLAttributes<HTMLTableCellElement>) {
-  return (
-    <td
-      className={cn('h-12 px-4 align-middle text-foreground', className)}
-      {...props}
-    />
-  )
+	return (
+		<td
+			className={cn("text-foreground h-12 px-4 align-middle", className)}
+			{...props}
+		/>
+	);
 }
