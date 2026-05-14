@@ -1,16 +1,16 @@
-import { cn } from '@/lib/utils'
+import { cn } from "@/lib/utils";
 
 export function Label({
-  className,
-  ...props
+	className,
+	...props
 }: React.LabelHTMLAttributes<HTMLLabelElement>) {
-  return (
-    <label
-      className={cn(
-        'text-sm font-semibold leading-none text-foreground',
-        className
-      )}
-      {...props}
-    />
-  )
+	return (
+		<label
+			className={cn(
+				"text-foreground text-sm leading-none font-semibold",
+				className,
+			)}
+			{...props}
+		/>
+	);
 }
