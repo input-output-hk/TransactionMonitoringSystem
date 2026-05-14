@@ -4,6 +4,7 @@ import { ArchivePage } from "@/pages/ArchivePage";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AttacksPage } from "@/pages/AttacksPage";
 import { ReportsPage } from "@/pages/ReportsPage";
+import { UsersPage } from "@/pages/UsersPage";
 import { EmailSentPage } from "@/pages/auth/EmailSentPage";
 import { SignUpPage } from "@/pages/auth/SignUpPage";
 import { Navigate, createBrowserRouter } from "react-router-dom";
@@ -31,6 +32,7 @@ export const router = createBrowserRouter([
 						path: "/archive/:id",
 						element: <AttackDetailPage archived />,
 					},
+					{ path: "/users", element: <UsersPage /> },
 				],
 			},
 		],

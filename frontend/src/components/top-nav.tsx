@@ -9,7 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useAuth } from '@/lib/auth-context'
+import { useAuth } from '@/lib/auth'
 import { useTheme } from '@/components/theme-context'
 import { systemModules } from '@/mocks/attacks'
 import { cn } from '@/lib/utils'
@@ -40,6 +40,7 @@ export function TopNav() {
           <span className="mr-3 text-border">|</span>
           <NavItem to="/dashboard">Attacks</NavItem>
           <NavItem to="/reports">Reports</NavItem>
+          {user?.role === 'Admin' && <NavItem to="/users">Users</NavItem>}
         </nav>
 
         <div className="flex items-center gap-5">
