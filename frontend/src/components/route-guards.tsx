@@ -1,4 +1,4 @@
-import { useAuth } from "@/lib/auth-context";
+import { useAuth } from "@/lib/auth";
 import { Navigate, Outlet } from "react-router-dom";
 
 export function RequireAuth() {

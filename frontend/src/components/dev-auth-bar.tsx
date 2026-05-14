@@ -1,34 +1,25 @@
 import { LogIn, LogOut } from 'lucide-react'
-
-const AUTH_KEY = 'tms-auth'
+import { useAuth, useAuthStore } from '@/lib/auth'
 
 export function DevAuthBar() {
   if (!import.meta.env.DEV) return null
 
-  const isAuthed = (() => {
-    try {
-      const raw = window.localStorage.getItem(AUTH_KEY)
-      if (!raw) return false
-      const parsed = JSON.parse(raw) as { verified?: boolean } | null
-      return Boolean(parsed?.verified)
-    } catch {
-      return false
-    }
-  })()
+  const { isAuthenticated } = useAuth()
 
   const skipAuth = () => {
-    window.localStorage.setItem(
-      AUTH_KEY,
-      JSON.stringify({
-        user: { fullName: 'Dev User', email: 'dev@example.com' },
-        verified: true,
-      })
-    )
+    useAuthStore.setState({
+      user: {
+        fullName: 'Dev User',
+        email: 'dev@example.com',
+        role: 'Admin',
+      },
+      verified: true,
+    })
     window.location.href = '/dashboard'
   }
 
   const devLogout = () => {
-    window.localStorage.removeItem(AUTH_KEY)
+    useAuthStore.getState().logout()
     window.location.href = '/signup'
   }
 
@@ -37,7 +28,7 @@ export function DevAuthBar() {
       <span className="rounded-sm bg-brand/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-brand">
         Dev
       </span>
-      {isAuthed ? (
+      {isAuthenticated ? (
         <button
           type="button"
           onClick={devLogout}
