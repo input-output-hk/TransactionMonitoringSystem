@@ -1,5 +1,7 @@
 import { AppShell } from "@/components/app-shell";
 import { RedirectIfAuthed, RequireAuth } from "@/components/route-guards";
+import { ArchivePage } from "@/pages/ArchivePage";
+import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AttacksPage } from "@/pages/AttacksPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { EmailSentPage } from "@/pages/auth/EmailSentPage";
@@ -22,7 +24,13 @@ export const router = createBrowserRouter([
 				element: <AppShell />,
 				children: [
 					{ path: "/dashboard", element: <AttacksPage /> },
+					{ path: "/attacks/:id", element: <AttackDetailPage /> },
 					{ path: "/reports", element: <ReportsPage /> },
+					{ path: "/archive", element: <ArchivePage /> },
+					{
+						path: "/archive/:id",
+						element: <AttackDetailPage archived />,
+					},
 				],
 			},
 		],
