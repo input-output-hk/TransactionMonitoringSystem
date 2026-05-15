@@ -1,9 +1,9 @@
-import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/lib/auth";
+import { useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
 
 export function SignUpPage() {
 	const navigate = useNavigate();
@@ -26,7 +26,7 @@ export function SignUpPage() {
 
 	return (
 		<div className="bg-background flex min-h-screen items-center justify-center px-4">
-			<div className="border-border bg-card w-full max-w-[460px] rounded-2xl border p-10 shadow-sm">
+			<div className="border-border bg-card w-full max-w-115 rounded-2xl border p-10 shadow-sm">
 				<h1 className="text-foreground mb-8 text-center text-4xl font-extrabold tracking-tight">
 					TMS
 				</h1>
@@ -62,7 +62,7 @@ export function SignUpPage() {
 							type="submit"
 							variant="outline"
 							disabled={submitting}
-							className="min-w-[140px]"
+							className="min-w-35"
 						>
 							{submitting ? "Signing Up…" : "Sign Up"}
 						</Button>
