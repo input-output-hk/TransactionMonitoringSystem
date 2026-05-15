@@ -26,9 +26,18 @@ logger = logging.getLogger(__name__)
 # scorer starts reading a new block. Nested key validation is left to the
 # scorer itself (KeyError there still beats a silent wrong value).
 _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
-    "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold"),
-    "large_datum":   ("gate", "weights", "fixed_anchors", "bootstrap_anchors", "reason_threshold"),
-    "token_dust":    ("gate.min_token_count", "weights", "bootstrap_anchors", "reason_threshold"),
+    "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold",
+                      "lazy_validator_threshold", "lazy_validator_floor",
+                      "lazy_validator_extraction_min",
+                      "uniform_sweep_guard.enabled",
+                      "uniform_sweep_guard.require_uniform_redeemer",
+                      "uniform_sweep_guard.require_no_script_return",
+                      "uniform_sweep_guard.min_inputs"),
+    "large_datum":   ("gate", "weights", "fixed_anchors", "bootstrap_anchors",
+                      "aggregate_engagement_min", "reason_threshold"),
+    "token_dust":    ("gate.min_token_count", "weights", "bootstrap_anchors",
+                      "allowlist_prefixes", "allowlist_policies",
+                      "dos_asset_min", "reason_threshold"),
     "large_value":   ("weights", "bootstrap_anchors", "reason_threshold"),
     "front_running": ("weights", "fixed_anchors", "bootstrap_anchors", "outcome_scores",
                       "reason_thresholds", "min_recurrence_wins", "high_band_cap",
@@ -135,6 +144,51 @@ def anchor(container: Dict[str, Any], key: str) -> Tuple[float, float]:
     """Extract ``(p50, p99)`` from a ``{key: {p50: ..., p99: ...}}`` mapping."""
     a = container[key]
     return float(a["p50"]), float(a["p99"])
+
+
+def load_network_map(
+    raw: Any,
+    *,
+    scorer: str,
+    field: str,
+    collect=tuple,
+) -> Dict[str, Any]:
+    """Normalise a ``{network: [str, ...]}`` config block into ``{network: collect([...])}``.
+
+    Both ``multiple_sat.allowlist_prefixes`` and
+    ``token_dust.allowlist_prefixes`` / ``allowlist_policies`` share the
+    same shape and the same null-tolerant + fail-loud semantics. This
+    helper centralises that logic so the two scorers cannot drift.
+
+    - ``None`` and missing networks degrade to an empty collection at the
+      call site (via ``.get(network, collect())``).
+    - Non-mapping or non-list payloads raise a ``RuntimeError`` with the
+      scorer and field name in the message, so a malformed YAML edit
+      surfaces at import time rather than silently masking every alert.
+
+    ``collect`` is the constructor used for each network's list of items;
+    pass ``frozenset`` for membership-test callers (token_dust policies),
+    leave as the default ``tuple`` for prefix-match callers.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RuntimeError(
+            f"{scorer}.{field} must be a mapping of {{network: [...]}}; "
+            f"got {type(raw).__name__}. Update config/detection.yaml."
+        )
+    out: Dict[str, Any] = {}
+    for network, items in raw.items():
+        if items is None:
+            out[network] = collect()
+            continue
+        if not isinstance(items, list):
+            raise RuntimeError(
+                f"{scorer}.{field}.{network} must be a list; "
+                f"got {type(items).__name__}."
+            )
+        out[network] = collect(items)
+    return out
 
 
 def resolved_or_bootstrap(

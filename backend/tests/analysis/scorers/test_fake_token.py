@@ -104,3 +104,46 @@ class TestScore:
         mint = {FAKE_POLICY: {"COMPLETELY_UNIQUE_NAME": 1}}
         result = scorer.score(_features(mint=mint))
         assert result.score == 0.0
+
+
+class TestConfusablesFold:
+    """Confusables fold for cross-script visual homoglyphs.
+
+    NFKC does not fold Greek/Cyrillic characters that look identical to
+    Latin letters but encode under different codepoints. The
+    `_normalize_token_name` helper applies a curated confusables table
+    after NFKC so the gate's similarity comparison sees a folded form.
+    """
+
+    def test_normalize_folds_greek_capital_nu_to_latin_n(self):
+        # Greek capital Nu (U+039D) looks identical to Latin N (U+004E).
+        from app.analysis.scorers.fake_token import _normalize_token_name
+        assert _normalize_token_name("ΝTX") == "NTX"
+
+    def test_normalize_folds_cyrillic_straight_u_to_latin_y(self):
+        # Cyrillic capital Straight U (U+04AE) looks like Latin Y.
+        from app.analysis.scorers.fake_token import _normalize_token_name
+        assert _normalize_token_name("INDҮ") == "INDY"
+
+    def test_normalize_folds_full_forge_homoglyph(self):
+        # The exact forge attack bytes for the INDY homoglyph:
+        # `6cce9d44d2ae` = "lΝDҮ" (Latin l, Greek Nu, Latin D, Cyrillic
+        # Straight U). After fold, three of four chars match INDY; the
+        # remaining `l` is an intra-Latin confusable for `I` not folded
+        # here (would inflate FPs on legitimate lowercase-L tokens).
+        from app.analysis.scorers.fake_token import _normalize_token_name
+        homoglyph = bytes.fromhex("6cce9d44d2ae").decode("utf-8")
+        assert _normalize_token_name(homoglyph) == "lNDY"
+
+    def test_unicode_suspicion_fires_on_uppercase_greek(self):
+        # Pre-fix, the homoglyph set was lowercase-Greek only and missed
+        # uppercase confusables like the forge INDY attack.
+        from app.analysis.scorers.fake_token import _compute_unicode_suspicion
+        homoglyph = bytes.fromhex("6cce9d44d2ae").decode("utf-8")
+        assert _compute_unicode_suspicion(homoglyph) > 0.0
+
+    def test_unicode_suspicion_does_not_fire_on_pure_ascii(self):
+        from app.analysis.scorers.fake_token import _compute_unicode_suspicion
+        # Pure ASCII case-spoof has no confusables, no zero-width, no
+        # mixed scripts. Score must be 0.
+        assert _compute_unicode_suspicion("nTX") == 0.0

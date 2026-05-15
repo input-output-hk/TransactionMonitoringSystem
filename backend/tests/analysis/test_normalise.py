@@ -62,3 +62,35 @@ class TestScoreToBand:
     def test_critical(self):
         assert score_to_band(80) == "Critical"
         assert score_to_band(100) == "Critical"
+
+
+class TestBaselineSpreadGuard:
+    """``resolve_baseline`` must fall through narrow baselines.
+
+    A per-script baseline with near-zero spread between p50 and p99
+    collapses ``normalise_inverted`` so that any value at the median
+    scores 1.0. Treating those baselines as uninformative and falling
+    through to the next tier preserves intended scorer semantics.
+    """
+
+    def test_baseline_is_usable_strict_equality(self):
+        from app.analysis.normalise import _baseline_is_usable
+        assert _baseline_is_usable({"p50": 10.0, "p99": 10.0}) is False
+
+    def test_baseline_is_usable_tight_spread(self):
+        from app.analysis.normalise import _baseline_is_usable
+        # 2.7% spread — the exact shape seen on the 2026-05-15 state-machine
+        # script cluster. Must fall through.
+        assert _baseline_is_usable({"p50": 2_519_195.0, "p99": 2_586_000.0}) is False
+
+    def test_baseline_is_usable_healthy_spread(self):
+        from app.analysis.normalise import _baseline_is_usable
+        # 641% spread — natural variation across UTxOs at a real script.
+        assert _baseline_is_usable({"p50": 1_349_030.0, "p99": 10_000_000.0}) is True
+
+    def test_baseline_is_usable_p50_zero(self):
+        from app.analysis.normalise import _baseline_is_usable
+        # When p50 is zero the ratio is undefined; accept any positive p99
+        # (the spread is "infinite" by convention) and reject p99 == 0.
+        assert _baseline_is_usable({"p50": 0.0, "p99": 5.0}) is True
+        assert _baseline_is_usable({"p50": 0.0, "p99": 0.0}) is False

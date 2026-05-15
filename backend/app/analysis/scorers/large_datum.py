@@ -27,6 +27,7 @@ from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
+from app.analysis.scorers.multiple_sat import _payment_credential
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
@@ -37,16 +38,53 @@ _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MIN_DATUM_BYTES = int(_CFG["gate"]["min_datum_bytes"])
+_AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
+
+
+def _per_script_datum_bytes(outputs):
+    """Return ``{payment_credential: total_datum_bytes}`` across script
+    outputs.
+
+    Aggregation is keyed by payment credential so the multi-output
+    bloat shape ("N inflated outputs at the SAME contract") aggregates
+    correctly across stake-credential variants of the same script, and
+    does NOT aggregate across distinct contracts (where the carry-
+    forward DoS mechanism does not apply). Falls back gracefully when
+    ``_payment_credential`` cannot bech32-decode the address: the raw
+    address is used as the key, so two outputs at the same raw address
+    still group together.
+    """
+    by_script: Dict[str, int] = {}
+    for out in outputs:
+        addr = out.get("address", "")
+        if not feat_mod.is_script_address(addr):
+            continue
+        datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
+        if datum_flag == 0:
+            continue
+        key = _payment_credential(addr)
+        by_script[key] = by_script.get(key, 0) + datum_bytes
+    return by_script
 
 
 class LargeDatumScorer(BaseScorer):
     name = "large_datum"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """Script UTxO with a datum whose byte size exceeds the floor.
+        """Engage scoring when either a single script datum exceeds the
+        per-output floor (canonical DoS shape) OR the sum of datum bytes
+        AT THE SAME SCRIPT crosses ``aggregate_engagement_min``
+        (observability path for multi-output bloat).
 
-        The floor filters out normal Plutus state-carrier outputs whose
-        datums are small enough to never constitute bloat.
+        The per-output predicate is what produces an alert: only when
+        one UTxO's datum saturates do downstream users have to copy
+        bloated state. The aggregate predicate engages the scorer but
+        does NOT contribute to ``max_score`` or band; it exists so the
+        ``max_script_datum_bytes`` sub-score reaches storage when an
+        attacker splits a bloat payload across N outputs of the same
+        contract, each of size ``< min_datum_bytes``. Per-script
+        aggregation prevents benign cross-contract DeFi composition
+        (e.g. DEX-A 3.5KB state + DEX-B 3.5KB state) from engaging.
         """
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
@@ -56,15 +94,24 @@ class LargeDatumScorer(BaseScorer):
             addr = out.get("address", "")
             if not feat_mod.is_script_address(addr):
                 continue
-            datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
-            if datum_flag > 0 and datum_bytes >= _MIN_DATUM_BYTES:
+            _, datum_bytes = feat_mod._extract_datum_info(out)
+            if datum_bytes >= _MIN_DATUM_BYTES:
                 return True
-        return False
+        per_script = _per_script_datum_bytes(outputs)
+        return any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values())
 
     def score(self, features: Dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
+
+        # Per-script aggregate datum bytes. The largest same-script
+        # aggregate is the observability metric: it identifies a single
+        # contract under bloat pressure, not a tx-wide sum across
+        # unrelated scripts. The per-output predicate below still drives
+        # scoring; this is for analyst queries only.
+        per_script = _per_script_datum_bytes(outputs)
+        max_script_datum_bytes = max(per_script.values(), default=0)
 
         best_score = 0.0
         best_sub = {}
@@ -79,22 +126,41 @@ class LargeDatumScorer(BaseScorer):
             if datum_flag == 0 or datum_bytes < _MIN_DATUM_BYTES:
                 continue
 
-            result = self._score_utxo(out, addr, datum_bytes, network)
+            result = self._score_utxo(
+                out, addr, datum_bytes, network, max_script_datum_bytes,
+            )
             if result.score > best_score:
                 best_score = result.score
                 best_sub = result.sub_scores
                 best_reasons = result.reasons
                 best_bl_source = result.baseline_source
 
+        if best_sub:
+            return ScorerResult(
+                score=best_score,
+                sub_scores=best_sub,
+                reasons=best_reasons,
+                baseline_source=best_bl_source,
+            )
+
+        # Aggregate-only engagement path: gate fired because the
+        # per-script aggregate crossed `aggregate_engagement_min`, but no
+        # single output passed the per-output threshold. Surface the
+        # observability metric while returning score=-1 so the engine
+        # does NOT select `large_datum` as `max_class` (-1 is filtered
+        # out by `applicable = {k: v ... if v >= 0}`); writing -1 to the
+        # column matches the existing "scorer didn't produce a finding"
+        # convention.
         return ScorerResult(
-            score=best_score,
-            sub_scores=best_sub,
-            reasons=best_reasons,
-            baseline_source=best_bl_source,
+            score=-1.0,
+            sub_scores={"max_script_datum_bytes": float(max_script_datum_bytes)},
+            reasons=[],
+            baseline_source="missing",
         )
 
     def _score_utxo(
         self, output: Dict, address: str, datum_bytes: int, network: str,
+        max_script_datum_bytes: int,
     ) -> ScorerResult:
         import json
 
@@ -154,6 +220,7 @@ class LargeDatumScorer(BaseScorer):
                 "datum_ratio": round(s_ratio, 4),
                 "value_cbor_bytes_inverted": round(s_value_inv, 4),
                 "sender_recurrence": round(s_recurrence, 4),
+                "max_script_datum_bytes": float(max_script_datum_bytes),
             },
             reasons=reasons,
             baseline_source=bl_source,
