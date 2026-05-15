@@ -3,6 +3,7 @@ import { RedirectIfAuthed, RequireAuth } from "@/components/route-guards";
 import { ArchivePage } from "@/pages/ArchivePage";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AttacksPage } from "@/pages/AttacksPage";
+import { ImportAttackPage } from "@/pages/ImportAttackPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { EmailSentPage } from "@/pages/auth/EmailSentPage";
@@ -33,6 +34,7 @@ export const router = createBrowserRouter([
 						element: <AttackDetailPage archived />,
 					},
 					{ path: "/users", element: <UsersPage /> },
+					{ path: "/import", element: <ImportAttackPage /> },
 				],
 			},
 		],

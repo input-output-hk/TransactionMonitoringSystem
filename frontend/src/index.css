@@ -145,3 +145,16 @@
 		-moz-osx-font-smoothing: grayscale;
 	}
 }
+
+@keyframes tms-progress {
+	from {
+		width: 0%;
+	}
+	to {
+		width: 100%;
+	}
+}
+
+@utility animate-progress-fill {
+	animation: tms-progress 900ms ease-out forwards;
+}

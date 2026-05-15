@@ -92,7 +92,10 @@ export function TopNav() {
 								)}
 								{theme === "dark" ? "Dark Mode On" : "Light Mode On"}
 							</DropdownMenuItem>
-							<DropdownMenuItem className="gap-3">
+							<DropdownMenuItem
+								className="gap-3"
+								onSelect={() => navigate("/import")}
+							>
 								<Upload className="h-4 w-4" />
 								Import Attack
 							</DropdownMenuItem>
