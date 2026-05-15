@@ -8,7 +8,7 @@ export function DonutCard({
 	percent: number;
 }) {
 	return (
-		<div className="border-border bg-muted/30 relative rounded-xl border p-4">
+		<div className="border-border bg-muted relative rounded-md border p-4">
 			<button
 				type="button"
 				title={`${label} score detail`}

@@ -31,7 +31,7 @@ export function TopNav() {
 	const allOnline = systemModules.every((m) => m.online);
 
 	return (
-		<header className="border-border bg-background border-b">
+		<header className="border-border bg-card border-b">
 			<div className="mx-auto flex h-14 max-w-[1400px] items-center justify-between px-6">
 				<nav className="flex items-center gap-1">
 					<span className="text-foreground mr-3 text-base font-extrabold tracking-tight">

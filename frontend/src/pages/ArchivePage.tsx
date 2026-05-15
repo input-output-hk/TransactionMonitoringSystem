@@ -17,7 +17,7 @@ export function ArchivePage() {
 
 	return (
 		<div className="flex flex-col gap-4">
-			<section className="border-border bg-card rounded-xl border">
+			<section className="border-border bg-card rounded-lg border-2">
 				<header className="border-border border-b px-5 py-3">
 					<h2 className="text-foreground text-base font-semibold">
 						Archived Attacks

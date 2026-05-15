@@ -71,7 +71,7 @@ export function AttacksPage() {
 			</div>
 
 			{/* Risk Alerts */}
-			<section className="border-border bg-card rounded-xl border">
+			<section className="border-border bg-card rounded-lg border-2">
 				<header className="border-border flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
 					<h2 className="text-foreground text-base font-semibold">
 						Risk Alerts
@@ -240,7 +240,7 @@ export function AttacksPage() {
 
 function CriticalAlertCard() {
 	return (
-		<div className="border-severity-critical-foreground/40 bg-card ring-severity-critical/20 rounded-xl border p-4 ring-1 md:col-span-2">
+		<div className="border-severity-critical-foreground/40 bg-card ring-severity-critical/20 rounded-lg border-2 p-4 ring-1 md:col-span-2">
 			<div className="text-severity-critical-foreground flex items-center gap-2">
 				<AlertTriangle className="h-4 w-4" />
 				<span className="text-sm font-semibold">New Critical Attack</span>
@@ -261,7 +261,7 @@ function CriticalAlertCard() {
 
 function KpiCard({ label, value }: { label: string; value: string }) {
 	return (
-		<div className="border-border bg-card rounded-xl border p-4">
+		<div className="border-border bg-card rounded-lg border-2 p-4">
 			<div className="text-foreground text-center text-sm font-semibold">
 				{label}
 			</div>
@@ -274,7 +274,7 @@ function KpiCard({ label, value }: { label: string; value: string }) {
 
 function GraphBarCard() {
 	return (
-		<div className="border-border bg-card rounded-xl border p-4">
+		<div className="border-border bg-card rounded-lg border-2 p-4">
 			<div className="text-foreground text-sm font-semibold">Graph Bar</div>
 			<Sparkline className="mt-2 h-10 w-full" />
 		</div>
@@ -314,7 +314,7 @@ type ListRow = {
 
 function LatestList({ title, rows }: { title: string; rows: ListRow[] }) {
 	return (
-		<section className="border-border bg-card rounded-xl border">
+		<section className="border-border bg-card rounded-lg border-2">
 			<header className="border-border border-b px-5 py-3">
 				<h2 className="text-foreground text-base font-semibold">{title}</h2>
 			</header>

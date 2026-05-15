@@ -59,7 +59,7 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 
 	if (!alert) {
 		return (
-			<div className="border-border bg-card rounded-xl border p-8 text-center">
+			<div className="border-border bg-card rounded-lg border-2 p-8 text-center">
 				<h2 className="text-foreground text-lg font-semibold">
 					Attack not found
 				</h2>
@@ -118,7 +118,7 @@ function DetailCard({
 	const analyzed = alert.date;
 
 	return (
-		<section className="border-border bg-card rounded-xl border">
+		<section className="border-border bg-card rounded-lg border-2">
 			{/* Header */}
 			<header className="flex items-center justify-between gap-3 px-5 py-3">
 				<h1 className="text-foreground text-base font-semibold">

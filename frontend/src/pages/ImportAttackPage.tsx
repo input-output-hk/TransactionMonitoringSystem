@@ -62,7 +62,7 @@ export function ImportAttackPage() {
 	const close = () => navigate("/dashboard");
 
 	return (
-		<div className="border-border bg-card relative rounded-xl border p-8 md:p-12">
+		<div className="border-border bg-card relative rounded-lg border-2 p-8 md:p-12">
 			<button
 				type="button"
 				onClick={close}
@@ -80,13 +80,15 @@ export function ImportAttackPage() {
 				onDragLeave={() => setDragOver(false)}
 				onDrop={onDrop}
 				className={cn(
-					"flex min-h-[360px] flex-col items-center justify-center rounded-lg border-2 border-dashed px-6 py-12 transition-colors",
-					dragOver ? "border-brand bg-brand/5" : "border-border bg-transparent",
+					"flex min-h-[460px] flex-col items-center justify-center rounded-md border-2 border-dashed px-6 py-16 transition-colors",
+					dragOver
+						? "border-brand bg-brand/5"
+						: "border-muted-foreground/40 bg-transparent",
 				)}
 			>
 				<CloudUpload
-					className="text-foreground mb-4 h-14 w-14"
-					strokeWidth={1}
+					className="text-foreground mb-5 h-20 w-20"
+					strokeWidth={0.75}
 				/>
 				<p className="text-foreground text-sm">
 					Select a file or drag and drop here
@@ -95,7 +97,7 @@ export function ImportAttackPage() {
 				<Button
 					type="button"
 					variant="outline"
-					className="mt-6"
+					className="mt-8"
 					onClick={() => inputRef.current?.click()}
 				>
 					Select a file
