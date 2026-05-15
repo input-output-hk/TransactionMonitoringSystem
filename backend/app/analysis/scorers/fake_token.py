@@ -45,12 +45,77 @@ T_SIM_MIN = float(_CFG["similarity_threshold"])
 EPSILON = 1e-6
 
 
+# Visual-confusables table. NFKC does not fold cross-script visual
+# lookalikes (Greek capital Nu vs Latin N, Cyrillic Straight U vs Latin
+# Y, etc.) because those are distinct characters under Unicode
+# semantics, not compatibility equivalents. UTR #39 covers them via a
+# separate confusables specification. This is a curated subset focused
+# on capitals commonly used in token tickers, broad enough to catch the
+# observed forge attacks without pulling the full confusables.txt
+# table. Extend when a new homoglyph slips through the gate.
+_CONFUSABLES = str.maketrans({
+    # Greek capitals visually identical to Latin
+    "\u0391": "A",  # \u0391 GREEK CAPITAL LETTER ALPHA
+    "\u0392": "B",  # \u0392 BETA
+    "\u0395": "E",  # \u0395 EPSILON
+    "\u0396": "Z",  # \u0396 ZETA
+    "\u0397": "H",  # \u0397 ETA
+    "\u0399": "I",  # \u0399 IOTA
+    "\u039a": "K",  # \u039a KAPPA
+    "\u039c": "M",  # \u039c MU
+    "\u039d": "N",  # \u039d NU
+    "\u039f": "O",  # \u039f OMICRON
+    "\u03a1": "P",  # \u03a1 RHO
+    "\u03a4": "T",  # \u03a4 TAU
+    "\u03a5": "Y",  # \u03a5 UPSILON
+    "\u03a7": "X",  # \u03a7 CHI
+    # Greek lowercase visually similar to Latin
+    "\u03b1": "a",  # \u03b1 ALPHA
+    "\u03b5": "e",  # \u03b5 EPSILON
+    "\u03b9": "i",  # \u03b9 IOTA
+    "\u03bd": "v",  # \u03bd NU (looks like Latin v)
+    "\u03bf": "o",  # \u03bf OMICRON
+    "\u03c1": "p",  # \u03c1 RHO
+    "\u03c5": "u",  # \u03c5 UPSILON
+    # Cyrillic capitals visually identical to Latin
+    "\u0410": "A",  # \u0410
+    "\u0412": "B",  # \u0412
+    "\u0415": "E",  # \u0415
+    "\u041a": "K",  # \u041a
+    "\u041c": "M",  # \u041c
+    "\u041d": "H",  # \u041d (Cyrillic En, looks like Latin H)
+    "\u041e": "O",  # \u041e
+    "\u0420": "P",  # \u0420
+    "\u0421": "C",  # \u0421
+    "\u0422": "T",  # \u0422
+    "\u0423": "Y",  # \u0423
+    "\u0425": "X",  # \u0425
+    "\u0406": "I",  # \u0406
+    "\u04ae": "Y",  # \u04ae CYRILLIC CAPITAL LETTER STRAIGHT U
+    "\u0408": "J",  # \u0408
+    # Cyrillic lowercase visually similar to Latin
+    "\u0430": "a",  # \u0430
+    "\u0435": "e",  # \u0435
+    "\u043e": "o",  # \u043e
+    "\u0440": "p",  # \u0440
+    "\u0441": "c",  # \u0441
+    "\u0443": "y",  # \u0443
+    "\u0445": "x",  # \u0445
+    "\u0456": "i",  # \u0456
+})
+
+
 def _normalize_token_name(name: str) -> str:
-    """NFKC normalize and strip zero-width characters."""
+    """NFKC normalize, strip zero-width characters, and fold visual
+    confusables to Latin equivalents.
+
+    The confusables fold runs AFTER NFKC because NFKC may decompose
+    some characters into base + combining marks; folding base-character
+    confusables on the decomposed form catches more cases.
+    """
     normalized = unicodedata.normalize("NFKC", name)
-    # Strip zero-width characters
     normalized = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", normalized)
-    return normalized
+    return normalized.translate(_CONFUSABLES)
 
 
 def _compute_tokenname_similarity(name: str, legit_name: str) -> float:
@@ -83,9 +148,13 @@ def _compute_unicode_suspicion(name: str) -> float:
     if len(scripts) > 1:
         score += float(_UNI_SCORES["mixed_scripts"])
 
-    # Check for common homoglyphs (Cyrillic/Greek lookalikes)
-    homoglyphs = set("аеіоруАЕІОРУ" + "αβγδεζηθικλμνξοπρστυφχψω")
-    if any(c in homoglyphs for c in name):
+    # Homoglyph detection. Single source of truth is the keys of
+    # _CONFUSABLES (the same table used by _normalize_token_name to fold
+    # confusables before similarity comparison), so the gate and this
+    # sub-score cannot drift. Any non-Latin character that has a Latin
+    # confusable in the table contributes the configured homoglyph
+    # score; the score caps at 1.0 via the min() return.
+    if any(ord(c) in _CONFUSABLES for c in name):
         score += float(_UNI_SCORES["homoglyphs"])
 
     return min(1.0, score)

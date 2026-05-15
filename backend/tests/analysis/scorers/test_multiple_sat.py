@@ -24,10 +24,10 @@ SCRIPT = "addr_test1wz5fxvalex"
 WALLET = "addr_test1qz5fxvalex"
 
 
-def _features(inputs, outputs=None, redeemers=None, sender_recurrence=0.0):
+def _features(inputs, outputs=None, redeemers=None, sender_recurrence=0.0, network="preprod"):
     return {
         "tx_hash": "ms01",
-        "network": "preprod",
+        "network": network,
         "sender_recurrence": sender_recurrence,
         "raw_data": {
             "inputs": inputs,
@@ -248,10 +248,22 @@ class TestScore:
         ]
         outputs = [{"address": WALLET, "value": {"lovelace": 290_000_000}}]
         redeemers = {"spend:0": {"executionUnits": {"memory": 50000, "cpu": 100000}}}
-        result = scorer.score(_features(inputs, outputs, redeemers))
+        result = scorer.score(_features(inputs, outputs, redeemers, network="mainnet"))
         # s_extraction forced to 0 by allowlist reweight
         assert result.sub_scores["s_extraction"] == 0.0
         assert "allowlisted_batch_script" in result.reasons
+
+    def test_allowlist_is_network_scoped(self, scorer):
+        """A mainnet allowlist entry must not suppress an identical tx on preprod."""
+        batch_addr = "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq_full"
+        inputs = [
+            {"address": batch_addr, "value": {"lovelace": 100_000_000}}
+            for _ in range(3)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 290_000_000}}]
+        redeemers = {"spend:0": {"executionUnits": {"memory": 50000, "cpu": 100000}}}
+        result = scorer.score(_features(inputs, outputs, redeemers, network="preprod"))
+        assert "allowlisted_batch_script" not in result.reasons
 
     def test_allowlisted_score_lower_than_equivalent_non_allowlisted(self, scorer):
         """Compared to a non-allowlisted tx with identical extraction, allowlist lowers score."""
@@ -268,8 +280,8 @@ class TestScore:
         outputs_allow = [{"address": WALLET, "value": {"lovelace": 1_490_000_000}}]
         outputs_non = [{"address": WALLET, "value": {"lovelace": 1_490_000_000}}]
         redeemers = {"spend:0": {"executionUnits": {"memory": 50000, "cpu": 100000}}}
-        r_allow = scorer.score(_features(inputs_allow, outputs_allow, redeemers))
-        r_non = scorer.score(_features(inputs_non, outputs_non, redeemers))
+        r_allow = scorer.score(_features(inputs_allow, outputs_allow, redeemers, network="mainnet"))
+        r_non = scorer.score(_features(inputs_non, outputs_non, redeemers, network="mainnet"))
         assert r_allow.score < r_non.score
 
 
@@ -331,7 +343,9 @@ class TestLazyValidatorBandFloor:
         # DEX settlement script that aggregates orders); the floor must not
         # punish them just because s_exunits_inv saturates.
         from app.analysis.scorers.multiple_sat import _ALLOWLIST
-        allowlisted_addr = _ALLOWLIST[0]
+        mainnet_prefixes = _ALLOWLIST.get("mainnet", ())
+        assert mainnet_prefixes, "test requires at least one mainnet allowlist entry"
+        allowlisted_addr = mainnet_prefixes[0]
         inputs = [
             {"address": allowlisted_addr, "value": {"lovelace": 5_000_000}}
             for _ in range(4)
@@ -342,7 +356,7 @@ class TestLazyValidatorBandFloor:
              "executionUnits": {"memory": 600, "cpu": 100}}
             for i in range(4)
         ]
-        result = scorer.score(_features(inputs, outputs, redeemers))
+        result = scorer.score(_features(inputs, outputs, redeemers, network="mainnet"))
         assert "allowlisted_batch_script" in result.reasons
         assert "lazy_validator_band_floor" not in result.reasons
         assert result.score < 60.0
@@ -442,3 +456,191 @@ class TestWeights:
         assert (bonus_inputs / bonus_recurrence) == pytest.approx(
             _W_INPUTS / _W_RECURRENCE, abs=1e-9,
         )
+
+
+# A bech32-decodable script address whose payment credential resolves
+# to the same 28-byte hash for every input. Using a real-looking preprod
+# address keeps `_payment_credential` on the decode path so the
+# uniform-sweep guard's `_is_decoded_payment_credential` check passes.
+_SWEEP_SCRIPT = (
+    "addr_test1zq3kpwwmyqpppm49huqghuttgda85mkncdps99jne0ad6xed"
+    "anvqr0pyy3ne06uvxkaalx8ds4x55z9gq6znqp5p06xqhwh4ht"
+)
+
+
+def _uniform_spend_redeemers(n: int, payload: str = "d87980"):
+    return [
+        {"validator": {"index": i, "purpose": "spend"},
+         "redeemer": payload,
+         "executionUnits": {"memory": 600, "cpu": 100}}
+        for i in range(n)
+    ]
+
+
+class TestUniformSweepGuard:
+    """Owner-sweep fingerprint suppresses the lazy-validator floor.
+
+    The shape (many script inputs, identical spend redeemers, no script
+    return) is structurally a UTxO consolidation rather than a
+    double-satisfaction exploit. The gate may still fire and the
+    weighted score is unchanged, but the structural band floor that
+    normally lifts lazy-validator hits into High is suppressed.
+    """
+
+    def test_uniform_sweep_suppresses_lazy_validator_floor(self, scorer):
+        n = 12  # > min_inputs=10
+        inputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
+            for _ in range(n)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
+        redeemers = _uniform_spend_redeemers(n)
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.sub_scores["s_exunits_inv"] > 0.8
+        assert "uniform_script_sweep_guard" in result.reasons
+        assert "lazy_validator_band_floor" not in result.reasons
+        assert result.score < 60.0
+
+    def test_below_min_inputs_does_not_engage_guard(self, scorer):
+        # n=4 is the canonical lazy-validator scenario from the existing
+        # floor test; the sweep guard must not engage and the floor
+        # behaviour must be preserved.
+        n = 4
+        inputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_700_000}}
+            for _ in range(n)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 10_000_000}}]
+        redeemers = _uniform_spend_redeemers(n)
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert "uniform_script_sweep_guard" not in result.reasons
+        assert "lazy_validator_band_floor" in result.reasons
+
+    def test_distinct_redeemer_payloads_do_not_engage_guard(self, scorer):
+        n = 12
+        inputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
+            for _ in range(n)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
+        # Two distinct payloads → not a uniform sweep.
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": "d87980" if i % 2 == 0 else "d87a80",
+             "executionUnits": {"memory": 600, "cpu": 100}}
+            for i in range(n)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert "uniform_script_sweep_guard" not in result.reasons
+        assert "lazy_validator_band_floor" in result.reasons
+
+    def test_script_return_disengages_guard(self, scorer):
+        # If any output goes back to the same payment credential, this is
+        # not a sweep (the script still has state); fall back to normal
+        # scoring including the lazy-validator floor.
+        n = 12
+        inputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
+            for _ in range(n)
+        ]
+        outputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 5_000_000}},
+            {"address": WALLET, "value": {"lovelace": 20_000_000}},
+        ]
+        redeemers = _uniform_spend_redeemers(n)
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert "uniform_script_sweep_guard" not in result.reasons
+        assert "lazy_validator_band_floor" in result.reasons
+
+
+class TestLazyValidatorExtractionGate:
+    """The lazy-validator floor must NOT lift state-machine contracts.
+
+    A contract that consumes 2 of its own UTxOs and writes the result
+    back to the same script extracts nothing (``s_extraction = 0``).
+    Cheap execution per input is normal for a state machine, so the
+    floor's lazy-validator predicate is not enough on its own: the
+    extraction-min gate gives it the missing "and value left the
+    script" semantics that double-satisfaction requires.
+    """
+
+    def test_state_machine_with_zero_extraction_is_not_floored(self, scorer):
+        # 2 inputs from the script, 1 output back to the same script
+        # carrying the consolidated value. Nothing escapes the script,
+        # so s_extraction must be 0 and the floor must NOT engage.
+        inputs = [
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
+        ]
+        outputs = [{"address": SCRIPT, "value": {"lovelace": 9_500_000}}]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "executionUnits": {"memory": 600, "cpu": 100}}
+            for i in range(2)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.sub_scores["s_extraction"] == 0.0
+        assert result.sub_scores["s_exunits_inv"] > 0.8
+        assert "lazy_validator_band_floor" not in result.reasons
+        assert result.score < 60.0
+
+    def test_floor_still_fires_on_small_extraction(self, scorer):
+        # The canonical low-value-drain case the floor exists for: the
+        # validator was tricked into approving a small extraction with
+        # near-zero CPU. Even a tiny positive s_extraction must keep the
+        # floor active so CTF-05-shaped exploits land in High.
+        inputs = [
+            {"address": SCRIPT, "value": {"lovelace": 2_700_000}}
+            for _ in range(4)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 10_000_000}}]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "executionUnits": {"memory": 600, "cpu": 100}}
+            for i in range(4)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        # Small but strictly positive lovelace extraction signal.
+        assert result.sub_scores["s_extraction"] > 0.0
+        assert "lazy_validator_band_floor" in result.reasons
+        assert result.score >= 60.0
+
+
+class TestUniformSweepGuardAndAllowlistInteraction:
+    """The Moderate cap on the sweep guard must override the allowlist
+    reweight.
+
+    Regression for the 14 sweep-cluster alerts that initially fired
+    Critical, were dropped to Moderate by ``uniform_script_sweep_guard``,
+    then climbed back to High once the same script was added to
+    ``allowlist_prefixes.preprod``: the allowlist's reweight path moves
+    extraction weight onto ``s_inputs`` (saturated for a 150-input
+    sweep), pushing the weighted score above the High threshold. The
+    cap inside the sweep-guard branch is what keeps the band at
+    Moderate regardless of allowlist path.
+    """
+
+    def test_allowlisted_sweep_caps_at_moderate(self, scorer, monkeypatch):
+        # Inject the sweep script into the preprod allowlist for the
+        # duration of this test so the reweight path activates.
+        from app.analysis.scorers import multiple_sat as ms_mod
+        monkeypatch.setattr(
+            ms_mod, "_ALLOWLIST",
+            {**ms_mod._ALLOWLIST, "preprod": (_SWEEP_SCRIPT,)},
+        )
+        n = 12  # > min_inputs=10
+        inputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
+            for _ in range(n)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
+        redeemers = _uniform_spend_redeemers(n)
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        # Both suppression paths fire: the script is allowlisted AND the
+        # tx is a uniform sweep.
+        assert "allowlisted_batch_script" in result.reasons
+        assert "uniform_script_sweep_guard" in result.reasons
+        # The Moderate cap is what keeps the band correct here. Without
+        # the cap, the reweighted s_inputs (saturated for a 12-input
+        # sweep against p99=10) would climb above the High threshold.
+        assert result.score < 60.0

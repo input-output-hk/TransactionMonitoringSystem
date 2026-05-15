@@ -17,9 +17,14 @@ Sub-scores (Polimi Section 4.1.3):
 import logging
 from typing import Any, Dict
 
-from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.normalise import (
+    BAND_MODERATE_MAX,
+    normalise,
+    normalise_inverted,
+)
 from app.analysis.scorer_config import (
     get as _get_cfg,
+    load_network_map as _load_network_map,
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -32,6 +37,66 @@ _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MIN_TOKEN_COUNT = int(_CFG["gate"]["min_token_count"])
+_DOS_ASSET_MIN = int(_CFG["dos_asset_min"])
+
+
+def _max_assets_per_policy(value: Dict[str, Any]) -> int:
+    """Return the largest count of distinct asset names under any single policy.
+
+    Reported in ``sub_scores`` for observability: lets an analyst see
+    whether a flagged bundle is one-policy-many-names (CTF 06: 80/1),
+    many-policies-few-names (symmetric DoS shape), or evenly distributed.
+    Not used as a gating threshold (total pair count handles both shapes
+    symmetrically; see :data:`_DOS_ASSET_MIN`).
+
+    Ignores the lovelace entry under both Ogmios v5 (``"lovelace"``) and
+    v6 (``"ada"``) shapes.
+    """
+    if not isinstance(value, dict):
+        return 0
+    best = 0
+    for policy, inner in value.items():
+        if policy in ("ada", "lovelace"):
+            continue
+        if isinstance(inner, dict):
+            best = max(best, len(inner))
+    return best
+
+
+_ALLOWLIST_PREFIXES: Dict[str, frozenset] = _load_network_map(
+    _CFG.get("allowlist_prefixes"),
+    scorer="token_dust",
+    field="allowlist_prefixes",
+    collect=frozenset,
+)
+_ALLOWLIST_POLICIES: Dict[str, frozenset] = _load_network_map(
+    _CFG.get("allowlist_policies"),
+    scorer="token_dust",
+    field="allowlist_policies",
+    collect=frozenset,
+)
+
+
+def _is_allowlisted_utxo(address: str, value: Dict[str, Any], network: str) -> bool:
+    """A UTxO is allowlisted when its address matches a network-scoped
+    prefix OR every non-ADA policy in its value is under a network-scoped
+    allowlisted policy.
+
+    The policy-set check requires *all* policies to be allowlisted: a
+    single non-allowlisted policy means the bundle could still carry
+    attacker-controlled dust, so the scorer should run.
+
+    Network scoping prevents a preprod entry (where anyone can register a
+    policy) from suppressing alerts on mainnet under the same hash.
+    """
+    prefixes = _ALLOWLIST_PREFIXES.get(network, frozenset())
+    if address and any(address.startswith(p) for p in prefixes):
+        return True
+    policies_set = _ALLOWLIST_POLICIES.get(network, frozenset())
+    if not policies_set:
+        return False
+    policies = [p for p in value.keys() if p not in ("ada", "lovelace")]
+    return bool(policies) and all(p in policies_set for p in policies)
 
 
 class TokenDustScorer(BaseScorer):
@@ -79,6 +144,12 @@ class TokenDustScorer(BaseScorer):
                 continue
             policy_count, token_count = feat_mod.count_assets(value)
             if token_count < _MIN_TOKEN_COUNT:
+                continue
+            if _is_allowlisted_utxo(addr, value, network):
+                # Known multi-asset protocol UTxO (e.g. lending offer carrying
+                # offer-NFT + reference-NFT + lent-token batch at min-ADA).
+                # Structurally indistinguishable from a value-bloat bundle, so
+                # the scorer must be suppressed by config rather than logic.
                 continue
 
             result = self._score_utxo(out, addr, network, policy_count, token_count)
@@ -144,6 +215,16 @@ class TokenDustScorer(BaseScorer):
         )
         final = finalise_score(raw)
 
+        # Structural discriminator: total distinct (policy, name) pairs
+        # in the bundle. Real value-bloat DoS shapes carry many pairs
+        # (CTF 06: 80); protocol multi-asset UTxOs sit at <=6 across the
+        # cluster observed on 2026-05-15. Gates the composite reason and
+        # the Moderate cap below. Symmetric to "many names under one
+        # policy" vs "many policies x few names" because both shapes
+        # add equivalent CBOR overhead; an observability-only
+        # ``max_assets_per_policy`` is also recorded for analyst review.
+        max_per_policy = _max_assets_per_policy(value)
+
         reasons = []
         if s_bytes > _REASON_T:
             reasons.append("high_value_cbor_bytes")
@@ -152,27 +233,34 @@ class TokenDustScorer(BaseScorer):
         if s_ada > _REASON_T:
             reasons.append("low_lovelace_amount")
         # Composite reason: when all three primary signals saturate at a
-        # script-address output, the shape is the canonical value-bloat DoS
-        # signature, not retail dust spam routed at a contract. Surfacing
-        # this lets the analyst distinguish "bloat the contract so it cannot
-        # be used" from "spray dust at random addresses" without renaming
-        # the class column.
-        #
-        # Convenience composite over the three primary reasons; downstream
-        # could derive the same predicate, but emitting it here keeps the
-        # analyst path uniform.
-        #
-        # Threshold: each sub-signal must clear ``reason_threshold`` (0.5
-        # by default). The composite fires on the *shape*; the score still
-        # conveys severity. Matches the existing pattern used for
-        # ``lazy_validator_band_floor`` in multiple_sat.
+        # script-address output AND the bundle concentrates many names
+        # under one policy, the shape is the canonical value-bloat DoS
+        # signature: an attacker minted many distinct names under a one-
+        # shot policy and forced the contract to carry them forward.
+        # Protocol multi-asset UTxOs (lending offers, DEX pool state)
+        # also saturate the three primary axes but distribute their
+        # names across multiple policies; gating on max_assets_per_policy
+        # discriminates the two without per-protocol allowlists.
         if (
             feat_mod.is_script_address(address)
             and s_bytes > _REASON_T
             and s_assets > _REASON_T
             and s_ada > _REASON_T
+            and token_count >= _DOS_ASSET_MIN
         ):
             reasons.append("script_value_bloat_dos")
+
+        # Band cap for low-asset bundles. The threat model is "many
+        # distinct (policy, name) pairs bloating CBOR every time the
+        # contract is used"; a 4-pair bundle adds ~200 bytes of CBOR
+        # overhead, far below any meaningful fraction of the 16KB tx
+        # limit. The three saturated sub-scores still record severity
+        # in their own right (e.g. anomalously low ADA for the global
+        # baseline), but the band must reflect the structural fact that
+        # this is not an exploitable shape. Symmetric with multiple_sat's
+        # uniform_sweep_guard cap.
+        if token_count < _DOS_ASSET_MIN:
+            final = min(final, BAND_MODERATE_MAX)
 
         return ScorerResult(
             score=final,
@@ -181,6 +269,7 @@ class TokenDustScorer(BaseScorer):
                 "unique_assetclass_count": round(s_assets, 4),
                 "lovelace_inverted": round(s_ada, 4),
                 "sender_recurrence": round(s_recurrence, 4),
+                "max_assets_per_policy": float(max_per_policy),
             },
             reasons=reasons,
             baseline_source=bl_source,

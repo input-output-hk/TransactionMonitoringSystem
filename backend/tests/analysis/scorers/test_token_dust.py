@@ -118,3 +118,125 @@ class TestScore:
         out = _make_output(SCRIPT_ADDR, lovelace=1_000_000_000, policies=policies)
         result = scorer.score(_features([out]))
         assert "script_value_bloat_dos" not in result.reasons
+
+
+class TestNetworkScopedAllowlist:
+    """Allowlist suppression is keyed by network so a preprod entry cannot
+    silently disable mainnet alerts (and vice versa).
+
+    Tests inject allowlist entries via the module's parsed maps rather
+    than mutating YAML; the helper restores the originals to keep test
+    ordering independent.
+    """
+
+    def _patch_allowlist(self, monkeypatch, policies=None, prefixes=None):
+        from app.analysis.scorers import token_dust as tdm
+        if policies is not None:
+            monkeypatch.setattr(tdm, "_ALLOWLIST_POLICIES", policies)
+        if prefixes is not None:
+            monkeypatch.setattr(tdm, "_ALLOWLIST_PREFIXES", prefixes)
+
+    def test_policy_allowlist_suppresses_matching_network(self, scorer, monkeypatch):
+        self._patch_allowlist(
+            monkeypatch,
+            policies={"preprod": frozenset({"protocol_policy"})},
+        )
+        out = _make_output(
+            SCRIPT_ADDR, lovelace=2_000_000,
+            policies={"protocol_policy": {"tok1": 1, "tok2": 1, "tok3": 1}},
+        )
+        result = scorer.score(_features([out]))
+        assert result.score == 0.0
+        assert result.reasons == []
+
+    def test_policy_allowlist_does_not_cross_networks(self, scorer, monkeypatch):
+        # The same policy ID allowlisted on mainnet must NOT suppress a
+        # preprod tx; otherwise a permissionless preprod attacker could
+        # mint under the hash and bypass detection.
+        self._patch_allowlist(
+            monkeypatch,
+            policies={"mainnet": frozenset({"protocol_policy"})},
+        )
+        out = _make_output(
+            SCRIPT_ADDR, lovelace=2_000_000,
+            policies={"protocol_policy": {"tok1": 1, "tok2": 1, "tok3": 1}},
+        )
+        result = scorer.score(_features([out]))
+        # Detection still runs; high asset count + low ADA produces a real score.
+        assert result.score > 0.0
+
+    def test_mixed_policy_bundle_is_not_allowlisted(self, scorer, monkeypatch):
+        # Bundle contains an allowlisted policy AND an attacker-controlled
+        # one; the scorer must continue. Otherwise an attacker could smuggle
+        # dust inside a known-protocol UTxO.
+        self._patch_allowlist(
+            monkeypatch,
+            policies={"preprod": frozenset({"protocol_policy"})},
+        )
+        out = _make_output(
+            SCRIPT_ADDR, lovelace=2_000_000,
+            policies={
+                "protocol_policy": {"tok1": 1, "tok2": 1},
+                "attacker_policy": {"dust_a": 1, "dust_b": 1, "dust_c": 1},
+            },
+        )
+        result = scorer.score(_features([out]))
+        assert result.score > 0.0
+
+
+class TestDosAssetThresholdDiscriminator:
+    """``dos_asset_min`` separates real value-bloat DoS from legitimate
+    multi-asset protocol UTxOs by total distinct (policy, name) pairs.
+
+    Real DoS exploits force the contract to carry many pairs (CTF 06: 80
+    total). Protocol multi-asset UTxOs bundle few pairs by design (Lenfi
+    loan offer: ~4 pairs across 3 policies). The threshold catches the
+    structural difference without relying on per-protocol allowlists or
+    per-script baselines. Robust to both one-policy-many-names and
+    many-policies-few-names DoS shapes because both add equivalent CBOR
+    overhead.
+    """
+
+    def test_high_asset_count_one_policy_fires_composite_reason(self, scorer):
+        # CTF 06 shape: 80 names under a single one-shot policy, low ADA.
+        # Use 1_200_000 (the bootstrap p50) so lovelace_inverted saturates.
+        many_names = {f"asset{i:03d}": 1 for i in range(80)}
+        out = _make_output(
+            SCRIPT_ADDR, lovelace=1_200_000,
+            policies={"oneshot_dos_policy": many_names},
+        )
+        result = scorer.score(_features([out]))
+        assert "script_value_bloat_dos" in result.reasons
+        assert result.sub_scores["max_assets_per_policy"] == 80.0
+        # One-policy shape produces less CBOR overhead than the
+        # many-policies symmetric shape (single policy header instead of
+        # 80), so the bytes axis is partial; High band suffices to
+        # prove the discriminator preserved the alert.
+        assert result.score >= 60.0  # High or Critical
+
+    def test_high_asset_count_many_policies_fires_composite_reason(self, scorer):
+        # Symmetric DoS shape: 80 one-shot policies x 1 name each. Same
+        # CBOR overhead order; the discriminator must catch this too.
+        policies = {f"policy{i:03d}": {"x": 1} for i in range(80)}
+        out = _make_output(SCRIPT_ADDR, lovelace=1_200_000, policies=policies)
+        result = scorer.score(_features([out]))
+        assert "script_value_bloat_dos" in result.reasons
+        assert result.score >= 75.0
+
+    def test_low_asset_count_caps_at_moderate(self, scorer):
+        # Lenfi-style shape: 4 pairs across 3 policies. No structural
+        # ability to bloat tx CBOR. Composite reason must NOT fire;
+        # band capped at Moderate. Low ADA so the other axes saturate
+        # and prove the cap is what stops the band (not weak signals).
+        out = _make_output(
+            SCRIPT_ADDR, lovelace=1_200_000,
+            policies={
+                "policy_a": {"offer_nft": 1, "ref_nft": 1},
+                "policy_b": {"loan_token": 1},
+                "policy_c": {"lend_batch_unit": 50},
+            },
+        )
+        result = scorer.score(_features([out]))
+        assert "script_value_bloat_dos" not in result.reasons
+        assert result.sub_scores["max_assets_per_policy"] == 2.0
+        assert result.score < 60.0  # below High threshold
