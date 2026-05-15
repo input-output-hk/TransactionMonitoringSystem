@@ -100,16 +100,27 @@ async def list_analysis_results(
         raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
     query_network = network or settings.CARDANO_NETWORK
     try:
+        rb = risk_band.value if risk_band else None
         rows = await clickhouse.get_class_scores_list_async(
             network=query_network,
-            risk_band=risk_band.value if risk_band else None,
+            risk_band=rb,
             attack_class=attack_class,
             min_score=min_score,
             sort=sort,
             limit=limit,
             offset=offset,
         )
-        return {"count": len(rows), "data": [_row_to_class_score(r) for r in rows]}
+        total = await clickhouse.count_class_scores_async(
+            network=query_network,
+            risk_band=rb,
+            attack_class=attack_class,
+            min_score=min_score,
+        )
+        return {
+            "count": len(rows),
+            "total": total,
+            "data": [_row_to_class_score(r) for r in rows],
+        }
     except Exception as e:
         logger.error(f"Error listing results: {e}")
         raise HTTPException(status_code=500, detail="Failed to list results")
