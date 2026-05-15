@@ -32,8 +32,11 @@ import {
 	criticalAlertIdLong,
 	latestBlocks,
 	latestTransactions,
+	type AttackType,
+	type Severity,
 } from "@/mocks/attacks";
-import { useActiveAlerts } from "@/lib/archive-store";
+import { useArchiveSnapshot } from "@/lib/archive-store";
+import { useRiskAlerts } from "@/lib/api/analysis";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 
@@ -46,18 +49,35 @@ const SECONDARY_INFOS = [
 
 export function AttacksPage() {
 	const navigate = useNavigate();
-	const activeAlerts = useActiveAlerts();
+	const archivedSlugs = useArchiveSnapshot();
 	const [attackFilter, setAttackFilter] = useState<string>("all");
 	const [severityFilter, setSeverityFilter] = useState<string>("all");
+	const [pageSize, setPageSize] = useState(10);
+	const [page, setPage] = useState(0);
 
-	const filtered = useMemo(() => {
-		return activeAlerts.filter((a) => {
-			if (attackFilter !== "all" && a.attackType !== attackFilter) return false;
-			if (severityFilter !== "all" && a.severity !== severityFilter)
-				return false;
-			return true;
-		});
-	}, [activeAlerts, attackFilter, severityFilter]);
+	const { data, isPending, isError, error } = useRiskAlerts({
+		page,
+		pageSize,
+		attackType:
+			attackFilter !== "all" ? (attackFilter as AttackType) : undefined,
+		severity:
+			severityFilter !== "all" ? (severityFilter as Severity) : undefined,
+	});
+
+	const total = data?.total ?? 0;
+	const visibleRows = useMemo(() => {
+		const archivedSet = new Set(archivedSlugs);
+		return (data?.rows ?? []).filter((a) => !archivedSet.has(a.slug));
+	}, [data, archivedSlugs]);
+
+	const pageCount = Math.max(1, Math.ceil(total / pageSize));
+	const currentPage = Math.min(page, pageCount - 1);
+
+	const onFilterChange = (kind: "attack" | "severity", value: string) => {
+		setPage(0);
+		if (kind === "attack") setAttackFilter(value);
+		else setSeverityFilter(value);
+	};
 
 	return (
 		<div className="flex flex-col gap-4">
@@ -77,7 +97,10 @@ export function AttacksPage() {
 						Risk Alerts
 					</h2>
 					<div className="flex items-center gap-2">
-						<Select value={attackFilter} onValueChange={setAttackFilter}>
+						<Select
+							value={attackFilter}
+							onValueChange={(v) => onFilterChange("attack", v)}
+						>
 							<SelectTrigger className="h-8 w-[160px]">
 								<SelectValue placeholder="Attack Type" />
 							</SelectTrigger>
@@ -90,7 +113,10 @@ export function AttacksPage() {
 								))}
 							</SelectContent>
 						</Select>
-						<Select value={severityFilter} onValueChange={setSeverityFilter}>
+						<Select
+							value={severityFilter}
+							onValueChange={(v) => onFilterChange("severity", v)}
+						>
 							<SelectTrigger className="h-8 w-[160px]">
 								<SelectValue placeholder="Severity Type" />
 							</SelectTrigger>
@@ -115,7 +141,7 @@ export function AttacksPage() {
 						</TableRow>
 					</TableHeader>
 					<TableBody>
-						{filtered.map((a) => {
+						{visibleRows.map((a) => {
 							const Icon = ATTACK_ICON[a.attackType] ?? AlertCircle;
 							return (
 								<TableRow
@@ -156,13 +182,17 @@ export function AttacksPage() {
 								</TableRow>
 							);
 						})}
-						{filtered.length === 0 && (
+						{visibleRows.length === 0 && (
 							<TableRow>
 								<TableCell
 									colSpan={4}
-									className="text-muted-foreground text-center"
+									className="text-muted-foreground py-8 text-center"
 								>
-									No alerts match the current filters.
+									{isPending
+										? "Loading risk alerts…"
+										: isError
+											? `Failed to load: ${error instanceof Error ? error.message : "unknown error"}`
+											: "No alerts match the current filters."}
 								</TableCell>
 							</TableRow>
 						)}
@@ -172,7 +202,13 @@ export function AttacksPage() {
 				<footer className="border-border text-muted-foreground flex flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-xs">
 					<div className="flex items-center gap-2">
 						<span>Show Rows</span>
-						<Select defaultValue="10">
+						<Select
+							value={String(pageSize)}
+							onValueChange={(v) => {
+								setPageSize(Number(v));
+								setPage(0);
+							}}
+						>
 							<SelectTrigger className="h-7 w-[64px] text-xs">
 								<SelectValue />
 							</SelectTrigger>
@@ -183,19 +219,37 @@ export function AttacksPage() {
 							</SelectContent>
 						</Select>
 					</div>
-					<div>Total Risk Alerts Shown: {filtered.length}</div>
+					<div>Total Risk Alerts: {total.toLocaleString()}</div>
 					<div className="flex items-center gap-1">
-						<IconBtn aria-label="First page">
+						<IconBtn
+							aria-label="First page"
+							disabled={currentPage === 0}
+							onClick={() => setPage(0)}
+						>
 							<ChevronsLeft className="h-3.5 w-3.5" />
 						</IconBtn>
-						<IconBtn aria-label="Previous page">
+						<IconBtn
+							aria-label="Previous page"
+							disabled={currentPage === 0}
+							onClick={() => setPage((p) => Math.max(0, p - 1))}
+						>
 							<ChevronLeft className="h-3.5 w-3.5" />
 						</IconBtn>
-						<span className="px-2">Page 1 of 500</span>
-						<IconBtn aria-label="Next page">
+						<span className="px-2">
+							Page {currentPage + 1} of {pageCount}
+						</span>
+						<IconBtn
+							aria-label="Next page"
+							disabled={currentPage >= pageCount - 1}
+							onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+						>
 							<ChevronRight className="h-3.5 w-3.5" />
 						</IconBtn>
-						<IconBtn aria-label="Last page">
+						<IconBtn
+							aria-label="Last page"
+							disabled={currentPage >= pageCount - 1}
+							onClick={() => setPage(pageCount - 1)}
+						>
 							<ChevronsRight className="h-3.5 w-3.5" />
 						</IconBtn>
 					</div>

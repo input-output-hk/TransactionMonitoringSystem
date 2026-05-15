@@ -991,6 +991,55 @@ async def get_class_scores_list_async(
     )
 
 
+def count_class_scores(
+    network: str,
+    risk_band: Optional[str] = None,
+    attack_class: Optional[str] = None,
+    min_score: float = 0.0,
+) -> int:
+    """Total number of class-score rows matching the given filters.
+
+    Mirrors the WHERE clause of ``get_class_scores_list`` so the count is
+    consistent with what would be returned (ignoring LIMIT/OFFSET).
+    """
+    _CLASS_COLS = (
+        "token_dust", "large_value", "large_datum", "multiple_sat",
+        "front_running", "sandwich", "circular", "fake_token", "phishing",
+    )
+    if attack_class and attack_class not in _CLASS_COLS:
+        raise ValueError(f"Invalid attack_class '{attack_class}'")
+
+    conditions = ["network = %(network)s"]
+    params: Dict[str, Any] = {"network": network}
+    if risk_band:
+        conditions.append("lower(risk_band) = %(risk_band)s")
+        params["risk_band"] = risk_band.lower()
+    if attack_class and attack_class in _CLASS_COLS:
+        conditions.append(f"`{attack_class}` >= %(min_score)s")
+        params["min_score"] = min_score
+    elif min_score > 0:
+        conditions.append("max_score >= %(min_score)s")
+        params["min_score"] = min_score
+
+    where = " AND ".join(conditions)
+    rows = _get_client().execute(
+        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}",
+        params,
+    )
+    return int(rows[0][0]) if rows else 0
+
+
+async def count_class_scores_async(
+    network: str, risk_band: Optional[str], attack_class: Optional[str],
+    min_score: float,
+) -> int:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, count_class_scores,
+        network, risk_band, attack_class, min_score,
+    )
+
+
 async def get_class_scores_async(tx_hash: str) -> Optional[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_ch_executor, get_class_scores, tx_hash)
