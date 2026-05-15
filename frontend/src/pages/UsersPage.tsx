@@ -67,7 +67,7 @@ export function UsersPage() {
 
 	return (
 		<div className="flex flex-col gap-4">
-			<section className="border-border bg-card rounded-xl border">
+			<section className="border-border bg-card rounded-lg border-2">
 				<header className="border-border flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
 					<h2 className="text-foreground text-base font-semibold">Users</h2>
 					<div className="flex items-center gap-2">
