@@ -37,15 +37,21 @@ import {
 } from "@/mocks/attacks";
 import { useArchiveSnapshot } from "@/lib/archive-store";
 import { useRiskAlerts } from "@/lib/api/analysis";
+import { useAnalysisStats, useTransactionStats } from "@/lib/api/stats";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 
-const SECONDARY_INFOS = [
-	{ label: "TX / min", value: "12345" },
-	{ label: "Pending", value: "12345" },
-	{ label: "Critical (24h)", value: "12345" },
-	{ label: "Avg Risk", value: "12345" },
-];
+const PLACEHOLDER_KPI = "—";
+
+function computeTxPerMin(
+	totalCount: number | undefined,
+	firstTx: string | undefined,
+): string {
+	if (!totalCount || !firstTx) return PLACEHOLDER_KPI;
+	const elapsedMin = (Date.now() - new Date(firstTx).getTime()) / 60_000;
+	if (!Number.isFinite(elapsedMin) || elapsedMin <= 0) return PLACEHOLDER_KPI;
+	return Math.round(totalCount / elapsedMin).toLocaleString();
+}
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -79,13 +85,44 @@ export function AttacksPage() {
 		else setSeverityFilter(value);
 	};
 
+	// Live KPI cards
+	const { data: analysisStats } = useAnalysisStats();
+	const { data: txStats } = useTransactionStats();
+
+	const kpis = [
+		{
+			label: "TX / min",
+			value: computeTxPerMin(txStats?.total_count, txStats?.first_tx),
+		},
+		{
+			label: "Pending",
+			value:
+				txStats && analysisStats
+					? Math.max(0, txStats.total_count - analysisStats.total).toLocaleString()
+					: PLACEHOLDER_KPI,
+		},
+		{
+			label: "Critical",
+			value: analysisStats
+				? analysisStats.critical_count.toLocaleString()
+				: PLACEHOLDER_KPI,
+		},
+		{
+			label: "Avg Risk",
+			value:
+				analysisStats && analysisStats.avg_max_score !== null
+					? analysisStats.avg_max_score.toFixed(1)
+					: PLACEHOLDER_KPI,
+		},
+	];
+
 	return (
 		<div className="flex flex-col gap-4">
 			{/* Top KPI row */}
 			<div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-7">
 				<CriticalAlertCard />
-				{SECONDARY_INFOS.map((info) => (
-					<KpiCard key={info.label} label={info.label} value={info.value} />
+				{kpis.map((k) => (
+					<KpiCard key={k.label} label={k.label} value={k.value} />
 				))}
 				<GraphBarCard />
 			</div>

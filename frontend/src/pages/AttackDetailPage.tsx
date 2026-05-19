@@ -1,18 +1,14 @@
-import { useMemo, useState } from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
-import {
-	AlertTriangle,
-	ArrowDown,
-	ArrowUp,
-	Copy,
-	ExternalLink,
-	Info,
-	RotateCcw,
-	Trash2,
-	X,
-} from "lucide-react";
+import { DonutCard } from "@/components/attack-detail/donut";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import {
 	Select,
@@ -27,17 +23,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
-import { DonutCard } from "@/components/attack-detail/donut";
-import { ARCHIVE_REASONS, ATTACK_META, getAlertBySlug } from "@/mocks/attacks";
-import type { AttackType, RiskAlert } from "@/mocks/attacks";
+import { useRiskAlert } from "@/lib/api/analysis";
 import {
 	archiveAlert,
 	getArchiveMeta,
@@ -48,16 +34,39 @@ import {
 } from "@/lib/archive-store";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
+import type { AttackType, RiskAlert } from "@/mocks/attacks";
+import { ARCHIVE_REASONS, ATTACK_META, SUB_SCORE_LABELS } from "@/mocks/attacks";
+import {
+	AlertTriangle,
+	ArrowDown,
+	ArrowUp,
+	Copy,
+	ExternalLink,
+	Info,
+	RotateCcw,
+	Trash2,
+	X,
+} from "lucide-react";
+import { useMemo, useState } from "react";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 
 export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 	const navigate = useNavigate();
 	const { id } = useParams<{ id: string }>();
 	// Subscribe to snapshot so the alert + meta re-render on archive changes.
 	useArchiveSnapshot();
-	const alert = id ? getAlertBySlug(id) : undefined;
+	const { data: alert, isPending, isError } = useRiskAlert(id);
 	const archivedHere = id ? isArchived(id) : false;
 
-	if (!alert) {
+	if (isPending) {
+		return (
+			<div className="border-border bg-card text-muted-foreground rounded-lg border-2 p-8 text-center text-sm">
+				Loading attack…
+			</div>
+		);
+	}
+
+	if (isError || !alert) {
 		return (
 			<div className="border-border bg-card rounded-lg border-2 p-8 text-center">
 				<h2 className="text-foreground text-lg font-semibold">
@@ -85,6 +94,7 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 		return <Navigate to={`/attacks/${alert.slug}`} replace />;
 	}
 
+	console.log({ alert, archived, archivedHere });
 	return (
 		<DetailCard
 			alert={alert}
@@ -214,16 +224,7 @@ function DetailCard({
 
 			{/* Sub-scores */}
 			<Section title="Sub-scores">
-				<div
-					className={cn(
-						"grid gap-3",
-						meta.subScores.length === 5 ? "md:grid-cols-5" : "md:grid-cols-4",
-					)}
-				>
-					{meta.subScores.map((s) => (
-						<DonutCard key={s.label} label={s.label} percent={s.percent} />
-					))}
-				</div>
+				<SubScores alert={alert} />
 			</Section>
 
 			{!archived && (
@@ -310,6 +311,36 @@ function RestoreDialog({
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>
+	);
+}
+
+/**
+ * Renders the 4–5 sub-score donuts for an alert. Pulls live values from the
+ * backend (`alert.subScores`, 0..1 normalized) and falls back to the hardcoded
+ * `ATTACK_META.subScores` percentages when a dimension is missing.
+ */
+function SubScores({ alert }: { alert: RiskAlert }) {
+	const labels = SUB_SCORE_LABELS[alert.attackType];
+	const fallback = ATTACK_META[alert.attackType].subScores;
+	const cards = labels.map((entry, i) => {
+		const raw = alert.subScores?.[entry.key];
+		const percent =
+			typeof raw === "number"
+				? Math.round(Math.max(0, Math.min(1, raw)) * 100)
+				: (fallback[i]?.percent ?? 0);
+		return { label: entry.label, percent };
+	});
+	return (
+		<div
+			className={cn(
+				"grid gap-3",
+				cards.length === 5 ? "md:grid-cols-5" : "md:grid-cols-4",
+			)}
+		>
+			{cards.map((c) => (
+				<DonutCard key={c.label} label={c.label} percent={c.percent} />
+			))}
+		</div>
 	);
 }
 

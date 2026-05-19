@@ -17,11 +17,12 @@ type ApiAnalysisResult = {
 	max_score: number;
 	max_class: string;
 	risk_band: ApiRiskBand;
-	sub_scores: Record<string, Record<string, number>>;
+	// Backend mixes 0..1 normalized scores with raw counts and string IDs.
+	sub_scores: Record<string, Record<string, number | string>>;
 	analysis_version: string;
 	analyzed_at: string; // ISO datetime
 	fee: number | null; // lovelace
-	output_count: number;
+	output_count: number | null;
 };
 
 type ApiAnalysisResults = {
@@ -82,6 +83,13 @@ function shortHash(hash: string): string {
 function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	const attackType = ATTACK_CLASS_BY_SNAKE[r.max_class];
 	if (!attackType) return null;
+	// Keep only numeric dimensions — backend mixes 0..1 normalized scores with
+	// raw counts and string IDs (e.g. sandwich.pool_id) under sub_scores.
+	const rawSub = r.sub_scores?.[r.max_class] ?? {};
+	const subScores: Record<string, number> = {};
+	for (const [k, v] of Object.entries(rawSub)) {
+		if (typeof v === "number" && Number.isFinite(v)) subScores[k] = v;
+	}
 	return {
 		slug: r.tx_hash,
 		id: shortHash(r.tx_hash),
@@ -91,7 +99,8 @@ function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 		severity: RISK_BAND_TO_SEVERITY[r.risk_band] ?? "LOW",
 		riskScore: Math.round(r.max_score),
 		feeAda: r.fee !== null ? r.fee / LOVELACE_PER_ADA : 0,
-		outputs: r.output_count,
+		outputs: r.output_count ?? 0,
+		subScores,
 	};
 }
 
@@ -124,14 +133,34 @@ async function fetchRiskAlertsPage(
 	}
 	const json = (await res.json()) as ApiAnalysisResults;
 	return {
-		rows: json.data
-			.map(toRiskAlert)
-			.filter((a): a is RiskAlert => a !== null),
+		rows: json.data.map(toRiskAlert).filter((a): a is RiskAlert => a !== null),
 		total: json.total,
 	};
 }
 
 /* ---------- Hook ---------- */
+
+async function fetchSingleResult(txHash: string): Promise<RiskAlert | null> {
+	const res = await fetch(
+		`/api/analysis/results/${encodeURIComponent(txHash)}`,
+	);
+	if (res.status === 404) return null;
+	if (!res.ok) {
+		throw new Error(`Analysis result request failed: ${res.status}`);
+	}
+	const json = (await res.json()) as ApiAnalysisResult;
+	console.log("Fetched single analysis result:", json);
+	return toRiskAlert(json);
+}
+
+/** Single-alert detail, by tx hash. Returns `null` if unknown. */
+export function useRiskAlert(txHash: string | undefined) {
+	return useQuery({
+		queryKey: ["analysis", "result", txHash],
+		queryFn: () => fetchSingleResult(txHash!),
+		enabled: !!txHash,
+	});
+}
 
 export function useRiskAlerts(
 	params: RiskAlertsParams,

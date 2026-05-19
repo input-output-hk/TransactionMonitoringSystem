@@ -10,8 +10,8 @@ import {
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth";
+import { deriveModules, useHealth } from "@/lib/api/health";
 import { useTheme } from "@/components/theme-context";
-import { systemModules } from "@/mocks/attacks";
 import { cn } from "@/lib/utils";
 
 function initials(name: string | undefined) {
@@ -28,7 +28,15 @@ export function TopNav() {
 	const navigate = useNavigate();
 	const { user, logout } = useAuth();
 	const { theme, toggleTheme } = useTheme();
-	const allOnline = systemModules.every((m) => m.online);
+	const { data: health, isError: healthError } = useHealth();
+	const modules = deriveModules(health);
+	const overall = healthError
+		? "down"
+		: !health
+			? "loading"
+			: modules.every((m) => m.online)
+				? "online"
+				: "warning";
 
 	return (
 		<header className="border-border bg-card border-b">
@@ -49,14 +57,22 @@ export function TopNav() {
 							<span
 								className={cn(
 									"h-2.5 w-2.5 rounded-full",
-									allOnline ? "bg-status-online" : "bg-status-warning",
+									overall === "online" && "bg-status-online",
+									overall === "warning" && "bg-status-warning",
+									overall === "down" && "bg-status-offline",
+									overall === "loading" && "bg-muted-foreground",
 								)}
 							/>
 							System Status
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end">
 							<DropdownMenuLabel>Modules</DropdownMenuLabel>
-							{systemModules.map((m) => (
+							{modules.length === 0 && (
+								<DropdownMenuItem disabled className="gap-3 text-xs">
+									{healthError ? "Backend unreachable" : "Loading…"}
+								</DropdownMenuItem>
+							)}
+							{modules.map((m) => (
 								<DropdownMenuItem key={m.name} className="gap-3">
 									<span
 										className={cn(
@@ -67,6 +83,14 @@ export function TopNav() {
 									{m.name}
 								</DropdownMenuItem>
 							))}
+							{health && (
+								<>
+									<DropdownMenuSeparator />
+									<DropdownMenuItem disabled className="text-muted-foreground gap-3 text-[11px]">
+										Network: {health.network} · Lag {health.ogmios.sync_lag_seconds}s
+									</DropdownMenuItem>
+								</>
+							)}
 						</DropdownMenuContent>
 					</DropdownMenu>
 
