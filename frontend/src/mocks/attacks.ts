@@ -26,6 +26,82 @@ export type RiskAlert = {
 	riskScore: number;
 	feeAda: number;
 	outputs: number;
+	/**
+	 * Backend sub-score breakdown for the winning attack class, keyed by
+	 * dimension name (snake_case). Values are 0..1 normalized. Missing for
+	 * mock alerts (use ATTACK_META.subScores as fallback).
+	 */
+	subScores?: Record<string, number>;
+};
+
+/**
+ * Per-attack-class ordered list of sub-score dimensions to display as donuts.
+ * Keys match the backend's `sub_scores[max_class]` snake_case dimensions;
+ * labels are the human-readable strings from the Figma.
+ */
+export const SUB_SCORE_LABELS: Record<
+	AttackType,
+	Array<{ key: string; label: string }>
+> = {
+	Phishing: [
+		{ key: "domain_suspicion", label: "Suspicious Domain" },
+		{ key: "social_engineering", label: "Social Engineering" },
+		{ key: "url_recurrence", label: "Recurring URL" },
+		{ key: "blacklist", label: "URL Blacklisted" },
+		{ key: "recipients", label: "Many Recipients" },
+	],
+	"Fake Token": [
+		{ key: "tokenname_similarity", label: "Similar Token Name" },
+		{ key: "unicode_suspicion", label: "Suspicious Unicode" },
+		{ key: "policy_age_inverted", label: "New Policy" },
+		{ key: "cip25_similarity", label: "Metadata Match" },
+		{ key: "recipients", label: "Many Recipients" },
+	],
+	Circular: [
+		{ key: "amount_similarity", label: "Value Preserved" },
+		{ key: "speed", label: "Rapid Hops" },
+		{ key: "cycle_recurrence", label: "Repeated Cycle" },
+		{ key: "recipient_entropy_inv", label: "Low Address Diversity" },
+		{ key: "auxiliary", label: "Round Amounts" },
+	],
+	Sandwich: [
+		{ key: "attacker_link", label: "Linked Attacker" },
+		{ key: "swap_rate_delta", label: "Rate Manipulation" },
+		{ key: "price_impact", label: "Price Impact" },
+		{ key: "profit", label: "Profit Captured" },
+		{ key: "attacker_recurrence", label: "Repeated Attacker" },
+	],
+	"Front Running": [
+		{ key: "collision_detected", label: "Collision Detected" },
+		{ key: "fast_mempool_race", label: "Fast Mempool Race" },
+		{ key: "repeated_attacker", label: "Repeated Attacker" },
+		{ key: "similar_structure", label: "Similar Structure" },
+	],
+	"Multiple Sat": [
+		{ key: "s_extraction", label: "Full Drain Detected" },
+		{ key: "s_inputs", label: "Low Redeemer Ratio" },
+		{ key: "s_extraction_lov", label: "Value Extracted" },
+		{ key: "s_exunits_inv", label: "Low Execution Units" },
+		{ key: "s_recurrence", label: "Repeated Sender" },
+	],
+	"Large Datum": [
+		{ key: "datum_bytes", label: "Large Datum Size" },
+		{ key: "datum_ratio", label: "High Datum Ratio" },
+		{ key: "value_cbor_bytes_inverted", label: "Small Value CBOR" },
+		{ key: "sender_recurrence", label: "Repeated Sender" },
+	],
+	"Token Dust": [
+		{ key: "unique_assetclass_count", label: "Many Distinct Tokens" },
+		{ key: "value_cbor_bytes", label: "Large CBOR Payload" },
+		{ key: "lovelace_inverted", label: "Low ADA Amount" },
+		{ key: "sender_recurrence", label: "Repeated Sender" },
+	],
+	"Large Value": [
+		{ key: "quantity_digits", label: "Extreme Quantity" },
+		{ key: "value_cbor_bytes", label: "Large CBOR Payload" },
+		{ key: "lovelace_inverted", label: "Low ADA Amount" },
+		{ key: "sender_recurrence", label: "Repeated Sender" },
+	],
 };
 
 export type LatestTx = {
