@@ -878,6 +878,8 @@ def get_class_scores_list(
     attack_class: Optional[str] = None,
     min_score: float = 0.0,
     sort: str = "score",
+    analyzed_from: Optional[Any] = None,
+    analyzed_to: Optional[Any] = None,
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
@@ -888,6 +890,8 @@ def get_class_scores_list(
     include_archived: when False (default), rows whose (network, tx_hash) is
         present in ``archived_alerts`` are excluded so admin-curated false
         positives stop showing up in "currently dangerous" lists.
+    analyzed_from / analyzed_to: inclusive lower / exclusive upper bound on
+    ``analyzed_at`` (datetime).
     """
     _CLASS_COLS = (
         "token_dust", "large_value", "large_datum", "multiple_sat",
@@ -924,6 +928,12 @@ def get_class_scores_list(
             "SELECT network, tx_hash FROM archived_alerts FINAL"
             ")"
         )
+    if analyzed_from is not None:
+        conditions.append("analyzed_at >= %(analyzed_from)s")
+        params["analyzed_from"] = analyzed_from
+    if analyzed_to is not None:
+        conditions.append("analyzed_at < %(analyzed_to)s")
+        params["analyzed_to"] = analyzed_to
 
     where = " AND ".join(conditions)
     # Query scores first, then batch-fetch tx details separately.
@@ -982,12 +992,13 @@ async def get_class_scores_list_async(
     network: str, risk_band: Optional[str], attack_class: Optional[str],
     min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
     include_archived: bool = False,
+    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _ch_executor, get_class_scores_list,
         network, risk_band, attack_class, min_score, sort, limit, offset,
-        include_archived,
+        include_archived, analyzed_from, analyzed_to,
     )
 
 
@@ -996,6 +1007,8 @@ def count_class_scores(
     risk_band: Optional[str] = None,
     attack_class: Optional[str] = None,
     min_score: float = 0.0,
+    analyzed_from: Optional[Any] = None,
+    analyzed_to: Optional[Any] = None,
 ) -> int:
     """Total number of class-score rows matching the given filters.
 
@@ -1020,6 +1033,12 @@ def count_class_scores(
     elif min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
+    if analyzed_from is not None:
+        conditions.append("analyzed_at >= %(analyzed_from)s")
+        params["analyzed_from"] = analyzed_from
+    if analyzed_to is not None:
+        conditions.append("analyzed_at < %(analyzed_to)s")
+        params["analyzed_to"] = analyzed_to
 
     where = " AND ".join(conditions)
     rows = _get_client().execute(
@@ -1032,11 +1051,13 @@ def count_class_scores(
 async def count_class_scores_async(
     network: str, risk_band: Optional[str], attack_class: Optional[str],
     min_score: float,
+    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
 ) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _ch_executor, count_class_scores,
         network, risk_band, attack_class, min_score,
+        analyzed_from, analyzed_to,
     )
 
 

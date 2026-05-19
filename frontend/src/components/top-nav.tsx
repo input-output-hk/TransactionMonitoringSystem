@@ -13,16 +13,7 @@ import { useAuth } from "@/lib/auth";
 import { deriveModules, useHealth } from "@/lib/api/health";
 import { useTheme } from "@/components/theme-context";
 import { cn } from "@/lib/utils";
-
-function initials(name: string | undefined) {
-	if (!name) return "U";
-	return name
-		.split(/\s+/)
-		.filter(Boolean)
-		.slice(0, 2)
-		.map((p) => p[0]?.toUpperCase())
-		.join("");
-}
+import { initials } from "@/lib/utils/strings";
 
 export function TopNav() {
 	const navigate = useNavigate();
@@ -86,8 +77,12 @@ export function TopNav() {
 							{health && (
 								<>
 									<DropdownMenuSeparator />
-									<DropdownMenuItem disabled className="text-muted-foreground gap-3 text-[11px]">
-										Network: {health.network} · Lag {health.ogmios.sync_lag_seconds}s
+									<DropdownMenuItem
+										disabled
+										className="text-muted-foreground gap-3 text-[11px]"
+									>
+										Network: {health.network} · Lag{" "}
+										{health.ogmios.sync_lag_seconds}s
 									</DropdownMenuItem>
 								</>
 							)}

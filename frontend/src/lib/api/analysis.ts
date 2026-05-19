@@ -5,6 +5,8 @@ import {
 	type RiskAlert,
 	type Severity,
 } from "@/mocks/attacks";
+import { formatAnalyzedAt } from "@/lib/utils/dates";
+import { shortHash } from "@/lib/utils/strings";
 
 /* ---------- Backend types (mirrors OpenAPI) ---------- */
 
@@ -63,23 +65,6 @@ const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntries(
 
 const LOVELACE_PER_ADA = 1_000_000;
 
-function formatAnalyzedAt(iso: string): string {
-	const d = new Date(iso);
-	if (Number.isNaN(d.getTime())) return iso;
-	const dd = String(d.getDate()).padStart(2, "0");
-	const mm = String(d.getMonth() + 1).padStart(2, "0");
-	const yyyy = d.getFullYear();
-	const hh = String(d.getHours()).padStart(2, "0");
-	const mi = String(d.getMinutes()).padStart(2, "0");
-	return `${dd}.${mm}.${yyyy}, ${hh}:${mi}`;
-}
-
-/** Truncate a tx hash like Figma's `xxxx...xxxx` style. */
-function shortHash(hash: string): string {
-	if (hash.length <= 20) return hash;
-	return `${hash.slice(0, 12)}...${hash.slice(-8)}`;
-}
-
 function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	const attackType = ATTACK_CLASS_BY_SNAKE[r.max_class];
 	if (!attackType) return null;
@@ -112,6 +97,10 @@ export type RiskAlertsParams = {
 	attackType?: AttackType;
 	severity?: Severity;
 	sort?: "score" | "date";
+	/** Inclusive lower bound on `analyzed_at` (ISO datetime). */
+	analyzedFrom?: string;
+	/** Exclusive upper bound on `analyzed_at` (ISO datetime). */
+	analyzedTo?: string;
 };
 
 async function fetchRiskAlertsPage(
@@ -127,6 +116,8 @@ async function fetchRiskAlertsPage(
 	qs.set("min_score", "1");
 	if (p.attackType) qs.set("attack_class", SNAKE_BY_ATTACK_TYPE[p.attackType]);
 	if (p.severity) qs.set("risk_band", SEVERITY_TO_RISK_BAND[p.severity]);
+	if (p.analyzedFrom) qs.set("analyzed_from", p.analyzedFrom);
+	if (p.analyzedTo) qs.set("analyzed_to", p.analyzedTo);
 	const res = await fetch(`/api/analysis/results?${qs.toString()}`);
 	if (!res.ok) {
 		throw new Error(`Analysis results request failed: ${res.status}`);
@@ -167,13 +158,15 @@ export function useRiskAlerts(
 	options?: { pollMs?: number },
 ) {
 	const pollMs = options?.pollMs ?? 5_000;
+	// 0 (or negative) disables auto-refetch — used by Reports.
+	const refetchInterval = pollMs > 0 ? pollMs : (false as const);
 
 	return useQuery({
 		queryKey: ["analysis", "results", params],
 		queryFn: () => fetchRiskAlertsPage(params),
-		refetchInterval: pollMs,
+		refetchInterval,
 		refetchIntervalInBackground: false,
-		staleTime: pollMs / 2,
+		staleTime: pollMs > 0 ? pollMs / 2 : 30_000,
 		// Keep the previous page visible while the new one loads — avoids the
 		// loading flash when paging or changing filters.
 		placeholderData: keepPreviousData,

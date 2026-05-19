@@ -39,17 +39,9 @@ import {
 import { USER_ROLES, type ManagedUser, type UserRole } from "@/mocks/users";
 import { addUser, removeUser, useUsers } from "@/lib/users-store";
 import { cn } from "@/lib/utils";
+import { initials } from "@/lib/utils/strings";
 
 const PAGE_SIZE = 9;
-
-function initials(name: string) {
-	return name
-		.split(/\s+/)
-		.filter(Boolean)
-		.slice(0, 1)
-		.map((p) => p[0]?.toUpperCase() ?? "")
-		.join("");
-}
 
 export function UsersPage() {
 	const users = useUsers();
@@ -107,7 +99,7 @@ export function UsersPage() {
 								<TableCell>
 									<div className="flex items-center gap-3">
 										<Avatar>
-											<AvatarFallback>{initials(u.fullName)}</AvatarFallback>
+											<AvatarFallback>{initials(u.fullName, 1)}</AvatarFallback>
 										</Avatar>
 										<span className="text-foreground">{u.fullName}</span>
 									</div>
