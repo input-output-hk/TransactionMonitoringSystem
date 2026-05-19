@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
@@ -87,6 +88,14 @@ async def list_analysis_results(
     ),
     min_score: float = Query(0.0, ge=0.0, le=100.0, description="Minimum score filter"),
     sort: str = Query("score", description="Sort order: 'score' or 'date'"),
+    analyzed_from: Optional[datetime] = Query(
+        None,
+        description="Only include results with analyzed_at >= this ISO timestamp (inclusive).",
+    ),
+    analyzed_to: Optional[datetime] = Query(
+        None,
+        description="Only include results with analyzed_at < this ISO timestamp (exclusive).",
+    ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -107,6 +116,8 @@ async def list_analysis_results(
             attack_class=attack_class,
             min_score=min_score,
             sort=sort,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
             limit=limit,
             offset=offset,
         )
@@ -115,6 +126,8 @@ async def list_analysis_results(
             risk_band=rb,
             attack_class=attack_class,
             min_score=min_score,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
         )
         return {
             "count": len(rows),

@@ -7,6 +7,8 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { formatBytes } from "@/lib/utils/bytes";
+import { isCsv } from "@/lib/utils/mime";
 import { CloudUpload, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -164,22 +166,4 @@ export function ImportAttackPage() {
 			</Dialog>
 		</div>
 	);
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes}B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-const CSV_MIME_TYPES = new Set([
-	"text/csv",
-	"application/csv",
-	"application/vnd.ms-excel", // browser quirk: some OSes label .csv this way
-	"", // some browsers leave it blank — fall back to the extension check
-]);
-
-function isCsv(file: File): boolean {
-	const hasCsvExt = file.name.toLowerCase().endsWith(".csv");
-	return hasCsvExt && CSV_MIME_TYPES.has(file.type);
 }

@@ -35,7 +35,11 @@ import {
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 import type { AttackType, RiskAlert } from "@/mocks/attacks";
-import { ARCHIVE_REASONS, ATTACK_META, SUB_SCORE_LABELS } from "@/mocks/attacks";
+import {
+	ARCHIVE_REASONS,
+	ATTACK_META,
+	SUB_SCORE_LABELS,
+} from "@/mocks/attacks";
 import {
 	AlertTriangle,
 	ArrowDown,

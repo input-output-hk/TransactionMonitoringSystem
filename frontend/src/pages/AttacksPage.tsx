@@ -40,18 +40,7 @@ import { useRiskAlerts } from "@/lib/api/analysis";
 import { useAnalysisStats, useTransactionStats } from "@/lib/api/stats";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
-
-const PLACEHOLDER_KPI = "—";
-
-function computeTxPerMin(
-	totalCount: number | undefined,
-	firstTx: string | undefined,
-): string {
-	if (!totalCount || !firstTx) return PLACEHOLDER_KPI;
-	const elapsedMin = (Date.now() - new Date(firstTx).getTime()) / 60_000;
-	if (!Number.isFinite(elapsedMin) || elapsedMin <= 0) return PLACEHOLDER_KPI;
-	return Math.round(totalCount / elapsedMin).toLocaleString();
-}
+import { PLACEHOLDER_KPI, computeTxPerMin } from "@/lib/utils/numbers";
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -98,7 +87,10 @@ export function AttacksPage() {
 			label: "Pending",
 			value:
 				txStats && analysisStats
-					? Math.max(0, txStats.total_count - analysisStats.total).toLocaleString()
+					? Math.max(
+							0,
+							txStats.total_count - analysisStats.total,
+						).toLocaleString()
 					: PLACEHOLDER_KPI,
 		},
 		{
