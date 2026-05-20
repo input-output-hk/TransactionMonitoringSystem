@@ -9,7 +9,9 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tms_user}"]
       interval: 10s
@@ -98,8 +100,10 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     container_name: tms-app
+    env_file:
+      - .env
+      - .env.${TMS_ENV:-preprod}
     environment:
-      - CARDANO_NETWORK=${CARDANO_NETWORK:-preprod}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER:-tms_user}

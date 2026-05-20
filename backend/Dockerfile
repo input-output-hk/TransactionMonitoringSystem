@@ -10,9 +10,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy config files (e.g., detection.yaml)
+COPY --chown=appuser:appgroup ../config/ ./config/
+
 # Copy application code with correct ownership
 COPY --chown=appuser:appgroup backend/ ./backend/
 WORKDIR /app/backend
+
+# Create /data/raw directory with correct ownership for raw_store
+RUN mkdir -p /data/raw && chown -R appuser:appgroup /data/raw
 
 USER appuser
 
