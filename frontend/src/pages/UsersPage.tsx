@@ -38,8 +38,8 @@ import {
 } from "@/components/ui/table";
 import { USER_ROLES, type ManagedUser, type UserRole } from "@/mocks/users";
 import { addUser, removeUser, useUsers } from "@/lib/users-store";
-import { cn } from "@/lib/utils";
 import { initials } from "@/lib/utils/strings";
+import { PageBtn } from "@/components/ui/page-button";
 
 const PAGE_SIZE = 9;
 
@@ -137,14 +137,14 @@ export function UsersPage() {
 					<PageBtn
 						disabled={currentPage === 0}
 						onClick={() => setPage(0)}
-						label="First page"
+						aria-label="First page"
 					>
 						<ChevronsLeft className="h-3.5 w-3.5" />
 					</PageBtn>
 					<PageBtn
 						disabled={currentPage === 0}
 						onClick={() => setPage((p) => Math.max(0, p - 1))}
-						label="Previous page"
+						aria-label="Previous page"
 					>
 						<ChevronLeft className="h-3.5 w-3.5" />
 					</PageBtn>
@@ -154,14 +154,14 @@ export function UsersPage() {
 					<PageBtn
 						disabled={currentPage >= pageCount - 1}
 						onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-						label="Next page"
+						aria-label="Next page"
 					>
 						<ChevronRight className="h-3.5 w-3.5" />
 					</PageBtn>
 					<PageBtn
 						disabled={currentPage >= pageCount - 1}
 						onClick={() => setPage(pageCount - 1)}
-						label="Last page"
+						aria-label="Last page"
 					>
 						<ChevronsRight className="h-3.5 w-3.5" />
 					</PageBtn>
@@ -186,34 +186,6 @@ export function UsersPage() {
 				}}
 			/>
 		</div>
-	);
-}
-
-function PageBtn({
-	children,
-	onClick,
-	disabled,
-	label,
-}: {
-	children: React.ReactNode;
-	onClick: () => void;
-	disabled?: boolean;
-	label: string;
-}) {
-	return (
-		<button
-			type="button"
-			aria-label={label}
-			onClick={onClick}
-			disabled={disabled}
-			className={cn(
-				"inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors",
-				"hover:bg-accent hover:text-foreground",
-				"disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
-			)}
-		>
-			{children}
-		</button>
 	);
 }
 

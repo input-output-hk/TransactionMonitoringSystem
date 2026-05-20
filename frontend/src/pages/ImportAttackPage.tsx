@@ -1,26 +1,39 @@
+import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { CloudUpload, X } from "lucide-react";
+import Papa from "papaparse";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
 	DialogContent,
+	DialogDescription,
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import { archiveApi, type ArchiveCreateRequest } from "@/lib/api/archive";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/utils/bytes";
 import { isCsv } from "@/lib/utils/mime";
-import { CloudUpload, X } from "lucide-react";
-import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { toast } from "sonner";
+import type { Severity } from "@/mocks/attacks";
 
-type Phase = "idle" | "selected" | "confirming" | "uploading";
+type Phase = "idle" | "parsing" | "parsed" | "confirming" | "uploading";
+
+type InvalidRow = { row: number; reason: string };
+type ParseResult = {
+	valid: ArchiveCreateRequest[];
+	invalid: InvalidRow[];
+};
+
+const SEVERITIES = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
 
 export function ImportAttackPage() {
 	const navigate = useNavigate();
 	const inputRef = useRef<HTMLInputElement>(null);
 	const [phase, setPhase] = useState<Phase>("idle");
 	const [file, setFile] = useState<File | null>(null);
+	const [parsed, setParsed] = useState<ParseResult | null>(null);
 	const [dragOver, setDragOver] = useState(false);
 	// Bumped on each new selection so the CSS animation restarts via `key`.
 	const [selectionId, setSelectionId] = useState(0);
@@ -32,8 +45,32 @@ export function ImportAttackPage() {
 			return;
 		}
 		setFile(f);
-		setPhase("selected");
+		setParsed(null);
+		setPhase("parsing");
 		setSelectionId((n) => n + 1);
+
+		Papa.parse<Record<string, string>>(f, {
+			header: true,
+			skipEmptyLines: true,
+			complete: (results) => {
+				const result = transformRows(results.data);
+				setParsed(result);
+				setPhase("parsed");
+				if (result.valid.length === 0 && result.invalid.length === 0) {
+					toast.warning("CSV is empty.");
+				} else if (result.invalid.length > 0) {
+					toast.warning(
+						`Parsed ${result.valid.length.toLocaleString()} rows · ${result.invalid.length.toLocaleString()} invalid skipped.`,
+					);
+				}
+			},
+			error: (err) => {
+				console.error(err);
+				toast.error("Failed to parse CSV.");
+				setPhase("idle");
+				setFile(null);
+			},
+		});
 	};
 
 	const onDrop = (e: React.DragEvent) => {
@@ -43,25 +80,45 @@ export function ImportAttackPage() {
 		if (f) handleFile(f);
 	};
 
-	const onUploadClick = () => setPhase("confirming");
+	const reset = () => {
+		setPhase("idle");
+		setFile(null);
+		setParsed(null);
+	};
+
+	const onUploadClick = () => {
+		if (!parsed || parsed.valid.length === 0) return;
+		setPhase("confirming");
+	};
 
 	const onConfirm = async () => {
+		if (!parsed) return;
 		setPhase("uploading");
-
-		await new Promise((r) => setTimeout(r, 800));
-		const ok = Math.random() < 0.7;
-		if (ok) {
-			toast.success("Upload successfull.");
-			setFile(null);
-			setPhase("idle");
-			navigate("/dashboard");
-		} else {
-			toast.error("Upload unsuccessful. Please try again.");
-			setPhase("selected");
+		try {
+			const result = await archiveApi.bulk(parsed.valid);
+			const summary = [
+				result.inserted > 0 && `${result.inserted} new`,
+				result.updated > 0 && `${result.updated} updated`,
+				result.skipped > 0 && `${result.skipped} skipped`,
+			]
+				.filter(Boolean)
+				.join(" · ");
+			toast.success(`Import complete. ${summary || "no changes"}.`);
+			reset();
+			navigate("/archive");
+		} catch (e) {
+			console.error(e);
+			toast.error("Import failed. Please try again.");
+			setPhase("parsed");
 		}
 	};
 
-	const close = () => navigate("/dashboard");
+	const close = () => navigate("/archive");
+
+	const validCount = parsed?.valid.length ?? 0;
+	const invalidCount = parsed?.invalid.length ?? 0;
+	const canUpload =
+		phase === "parsed" && validCount > 0 && !["uploading"].includes(phase);
 
 	return (
 		<div className="border-border bg-card relative rounded-lg border-2 p-8 md:p-12">
@@ -95,7 +152,9 @@ export function ImportAttackPage() {
 				<p className="text-foreground text-sm">
 					Select a file or drag and drop here
 				</p>
-				<p className="text-muted-foreground mt-1 text-xs">CSV file</p>
+				<p className="text-muted-foreground mt-1 text-xs">
+					CSV with non-attack alerts to merge into the archive
+				</p>
 				<Button
 					type="button"
 					variant="outline"
@@ -127,14 +186,32 @@ export function ImportAttackPage() {
 							className="bg-brand animate-progress-fill h-full"
 						/>
 					</div>
+					{phase === "parsed" && (
+						<div className="text-muted-foreground mt-2 text-xs">
+							{validCount.toLocaleString()} valid
+							{invalidCount > 0 && (
+								<>
+									{" · "}
+									<span className="text-status-warning">
+										{invalidCount.toLocaleString()} invalid (will be skipped)
+									</span>
+								</>
+							)}
+						</div>
+					)}
 				</div>
 			)}
 
-			<div className="mt-6 flex justify-end">
+			<div className="mt-6 flex justify-end gap-2">
+				{file && phase !== "uploading" && (
+					<Button type="button" variant="outline" onClick={reset}>
+						Clear
+					</Button>
+				)}
 				<Button
 					type="button"
 					variant="outline"
-					disabled={!file || phase === "uploading"}
+					disabled={!canUpload || phase === "uploading"}
 					onClick={onUploadClick}
 				>
 					{phase === "uploading" ? "Uploading…" : "Upload"}
@@ -143,16 +220,21 @@ export function ImportAttackPage() {
 
 			<Dialog
 				open={phase === "confirming"}
-				onOpenChange={(v) => !v && setPhase("selected")}
+				onOpenChange={(v) => !v && setPhase("parsed")}
 			>
 				<DialogContent showClose={false} className="max-w-sm">
 					<DialogHeader>
 						<DialogTitle>
-							Are you sure you want to import this file?
+							Import {validCount.toLocaleString()} non-attacks?
 						</DialogTitle>
+						<DialogDescription>
+							Existing archive entries with the same tx_hash will be updated
+							(last-write-wins). Active alerts referenced here will disappear
+							from the dashboard once archived.
+						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
-						<Button variant="outline" onClick={() => setPhase("selected")}>
+						<Button variant="outline" onClick={() => setPhase("parsed")}>
 							Cancel
 						</Button>
 						<Button
@@ -166,4 +248,36 @@ export function ImportAttackPage() {
 			</Dialog>
 		</div>
 	);
+}
+
+/* ---------- CSV → ArchiveCreateRequest ---------- */
+
+function transformRows(rows: Record<string, string>[]): ParseResult {
+	const valid: ArchiveCreateRequest[] = [];
+	const invalid: InvalidRow[] = [];
+
+	rows.forEach((r, i) => {
+		const lineNo = i + 2; // +1 for header row, +1 to be 1-based
+		const tx_hash = (r.tx_hash ?? "").trim();
+		if (!tx_hash) {
+			invalid.push({ row: lineNo, reason: "missing tx_hash" });
+			return;
+		}
+		const severityRaw = (r.severity_snapshot ?? "").trim().toUpperCase();
+		const severity: Severity = SEVERITIES.has(severityRaw)
+			? (severityRaw as Severity)
+			: "LOW";
+		const riskScore = Number.parseFloat(r.risk_score_snapshot ?? "");
+		valid.push({
+			tx_hash,
+			reason: (r.reason ?? "").trim() || "Other",
+			notes: (r.notes ?? "").trim() || undefined,
+			archived_by: (r.archived_by ?? "").trim() || undefined,
+			attack_type_snapshot: (r.attack_type_snapshot ?? "").trim(),
+			severity_snapshot: severity,
+			risk_score_snapshot: Number.isFinite(riskScore) ? riskScore : 0,
+		});
+	});
+
+	return { valid, invalid };
 }

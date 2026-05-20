@@ -12,6 +12,8 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DateField } from "@/components/ui/date-field";
+import { PageBtn } from "@/components/ui/page-button";
 import {
 	Dialog,
 	DialogContent,
@@ -402,13 +404,11 @@ export function ReportsPage() {
 			<Dialog open={confirmExportOpen} onOpenChange={setConfirmExportOpen}>
 				<DialogContent showClose={false} className="max-w-sm">
 					<DialogHeader>
-						<DialogTitle>
-							Export {total.toLocaleString()} rows?
-						</DialogTitle>
+						<DialogTitle>Export {total.toLocaleString()} rows?</DialogTitle>
 						<DialogDescription>
 							This is more than {EXPORT_CONFIRM_THRESHOLD.toLocaleString()}{" "}
-							rows. The download may take a moment. Narrow the filters first
-							if you don't need the full set.
+							rows. The download may take a moment. Narrow the filters first if
+							you don't need the full set.
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
@@ -428,58 +428,5 @@ export function ReportsPage() {
 				</DialogContent>
 			</Dialog>
 		</div>
-	);
-}
-
-function DateField({
-	id,
-	label,
-	value,
-	onChange,
-}: {
-	id: string;
-	label: string;
-	value: string;
-	onChange: (v: string) => void;
-}) {
-	return (
-		<div className="flex flex-col gap-1.5">
-			<Label htmlFor={id} className="text-foreground text-xs">
-				{label}
-			</Label>
-			<input
-				id={id}
-				type="date"
-				value={value}
-				onChange={(e) => onChange(e.target.value)}
-				className={cn(
-					"border-border bg-input/40 text-foreground flex h-11 w-[180px] items-center rounded-sm border px-3 py-2 text-sm transition-colors",
-					"focus-visible:ring-ring focus-visible:ring-offset-background focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:outline-none",
-				)}
-			/>
-		</div>
-	);
-}
-
-function PageBtn({
-	children,
-	onClick,
-	disabled,
-	...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			disabled={disabled}
-			className={cn(
-				"inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors",
-				"hover:bg-accent hover:text-foreground",
-				"disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
-			)}
-			{...props}
-		>
-			{children}
-		</button>
 	);
 }
