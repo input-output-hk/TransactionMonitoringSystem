@@ -103,12 +103,16 @@ export type RiskAlertsParams = {
 	analyzedTo?: string;
 };
 
-async function fetchRiskAlertsPage(
-	p: RiskAlertsParams,
-): Promise<RiskAlertsPage> {
+/** Shared query-string builder for the list endpoint. */
+function buildResultsQuery(
+	p: Omit<RiskAlertsParams, "page" | "pageSize"> & {
+		limit: number;
+		offset: number;
+	},
+): URLSearchParams {
 	const qs = new URLSearchParams();
-	qs.set("limit", String(p.pageSize));
-	qs.set("offset", String(p.page * p.pageSize));
+	qs.set("limit", String(p.limit));
+	qs.set("offset", String(p.offset));
 	qs.set("sort", p.sort ?? "date");
 	// Only surface transactions that actually triggered an attack class.
 	// Without this, the backend includes scored-but-clean transactions
@@ -118,6 +122,17 @@ async function fetchRiskAlertsPage(
 	if (p.severity) qs.set("risk_band", SEVERITY_TO_RISK_BAND[p.severity]);
 	if (p.analyzedFrom) qs.set("analyzed_from", p.analyzedFrom);
 	if (p.analyzedTo) qs.set("analyzed_to", p.analyzedTo);
+	return qs;
+}
+
+async function fetchRiskAlertsPage(
+	p: RiskAlertsParams,
+): Promise<RiskAlertsPage> {
+	const qs = buildResultsQuery({
+		...p,
+		limit: p.pageSize,
+		offset: p.page * p.pageSize,
+	});
 	const res = await fetch(`/api/analysis/results?${qs.toString()}`);
 	if (!res.ok) {
 		throw new Error(`Analysis results request failed: ${res.status}`);
@@ -127,6 +142,99 @@ async function fetchRiskAlertsPage(
 		rows: json.data.map(toRiskAlert).filter((a): a is RiskAlert => a !== null),
 		total: json.total,
 	};
+}
+
+/* ---------- CSV export ---------- */
+
+export type ExportParams = Omit<RiskAlertsParams, "page" | "pageSize">;
+
+/** Plain-shape record used as a CSV row (one column per key). */
+export type AlertCsvRow = {
+	tx_hash: string;
+	analyzed_at: string;
+	network: string;
+	max_class: string;
+	max_score: number;
+	risk_band: ApiRiskBand;
+	fee_ada: number | "";
+	output_count: number | "";
+	score_token_dust: number;
+	score_large_value: number;
+	score_large_datum: number;
+	score_multiple_sat: number;
+	score_front_running: number;
+	score_sandwich: number;
+	score_circular: number;
+	score_fake_token: number;
+	score_phishing: number;
+	sub_scores: string; // JSON-stringified sub-scores for the winning class
+	analysis_version: string;
+};
+
+function toCsvRow(r: ApiAnalysisResult): AlertCsvRow {
+	return {
+		tx_hash: r.tx_hash,
+		analyzed_at: r.analyzed_at,
+		network: r.network,
+		max_class: r.max_class,
+		max_score: r.max_score,
+		risk_band: r.risk_band,
+		fee_ada: r.fee !== null ? r.fee / LOVELACE_PER_ADA : "",
+		output_count: r.output_count ?? "",
+		score_token_dust: r.scores.token_dust,
+		score_large_value: r.scores.large_value,
+		score_large_datum: r.scores.large_datum,
+		score_multiple_sat: r.scores.multiple_sat,
+		score_front_running: r.scores.front_running,
+		score_sandwich: r.scores.sandwich,
+		score_circular: r.scores.circular,
+		score_fake_token: r.scores.fake_token,
+		score_phishing: r.scores.phishing,
+		sub_scores: JSON.stringify(r.sub_scores?.[r.max_class] ?? {}),
+		analysis_version: r.analysis_version,
+	};
+}
+
+/**
+ * Fetch all alerts matching `params` by paginating through the API.
+ *
+ * - Uses the backend's max `limit=1000` per request.
+ * - Stops at `hardCap` rows (default 50k) to avoid runaway exports.
+ * - Calls `onProgress(fetched, total)` after each page so callers can show
+ *   a progress UI.
+ */
+export async function fetchAlertsForExport(
+	params: ExportParams,
+	options?: {
+		hardCap?: number;
+		onProgress?: (fetched: number, total: number) => void;
+	},
+): Promise<AlertCsvRow[]> {
+	const hardCap = options?.hardCap ?? 50_000;
+	const pageSize = 1000;
+	const all: AlertCsvRow[] = [];
+	let offset = 0;
+	let total = Infinity;
+
+	while (offset < total && all.length < hardCap) {
+		const qs = buildResultsQuery({ ...params, limit: pageSize, offset });
+		const res = await fetch(`/api/analysis/results?${qs.toString()}`);
+		if (!res.ok) {
+			throw new Error(`Export fetch failed: ${res.status}`);
+		}
+		const json = (await res.json()) as ApiAnalysisResults;
+		total = json.total;
+		for (const row of json.data) {
+			if (all.length >= hardCap) break;
+			all.push(toCsvRow(row));
+		}
+		options?.onProgress?.(all.length, total);
+		// Safety: backend ran out of rows before reported total.
+		if (json.data.length < pageSize) break;
+		offset += pageSize;
+	}
+
+	return all;
 }
 
 /* ---------- Hook ---------- */

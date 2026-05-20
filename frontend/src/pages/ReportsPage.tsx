@@ -12,6 +12,14 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import {
 	Select,
@@ -29,16 +37,18 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
-import { useRiskAlerts } from "@/lib/api/analysis";
+import { fetchAlertsForExport, useRiskAlerts } from "@/lib/api/analysis";
 import { useArchiveSnapshot } from "@/lib/archive-store";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
+import { downloadCsv } from "@/lib/utils/csv";
 import {
 	defaultEnd,
 	defaultStart,
 	nextDayISO,
 	startOfDayISO,
 } from "@/lib/utils/dates";
+import { toast } from "sonner";
 
 export function ReportsPage() {
 	const navigate = useNavigate();
@@ -47,8 +57,11 @@ export function ReportsPage() {
 	const [endDate, setEndDate] = useState(defaultEnd());
 	const [attackFilter, setAttackFilter] = useState<string>("all");
 	const [severityFilter, setSeverityFilter] = useState<string>("all");
+	const [sortBy, setSortBy] = useState<"date" | "score">("date");
 	const [pageSize, setPageSize] = useState(10);
 	const [page, setPage] = useState(0);
+	const [exporting, setExporting] = useState(false);
+	const [confirmExportOpen, setConfirmExportOpen] = useState(false);
 
 	const { data, isPending, isError } = useRiskAlerts(
 		{
@@ -60,7 +73,7 @@ export function ReportsPage() {
 				severityFilter !== "all" ? (severityFilter as Severity) : undefined,
 			analyzedFrom: startOfDayISO(startDate),
 			analyzedTo: nextDayISO(endDate),
-			sort: "date",
+			sort: sortBy,
 		},
 		// Reports is a deliberate-query view; no need to auto-poll.
 		{ pollMs: 0 },
@@ -74,6 +87,55 @@ export function ReportsPage() {
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
+
+	/** Ask for confirmation before exporting more than this many rows. */
+	const EXPORT_CONFIRM_THRESHOLD = 1000;
+
+	const onExportClick = () => {
+		if (exporting || total === 0) return;
+		if (total > EXPORT_CONFIRM_THRESHOLD) {
+			setConfirmExportOpen(true);
+		} else {
+			void runExport();
+		}
+	};
+
+	const runExport = async () => {
+		setConfirmExportOpen(false);
+		setExporting(true);
+		const dismiss = toast.loading("Preparing export…");
+		try {
+			const rows = await fetchAlertsForExport(
+				{
+					attackType:
+						attackFilter !== "all" ? (attackFilter as AttackType) : undefined,
+					severity:
+						severityFilter !== "all" ? (severityFilter as Severity) : undefined,
+					analyzedFrom: startOfDayISO(startDate),
+					analyzedTo: nextDayISO(endDate),
+					sort: sortBy,
+				},
+				{
+					onProgress: (fetched, total) => {
+						toast.loading(
+							`Preparing export… ${fetched.toLocaleString()} / ${total.toLocaleString()}`,
+							{ id: dismiss },
+						);
+					},
+				},
+			);
+			const stamp = new Date().toISOString().slice(0, 10);
+			downloadCsv(rows, `risk-alerts-${stamp}.csv`);
+			toast.success(`Exported ${rows.length.toLocaleString()} alerts.`, {
+				id: dismiss,
+			});
+		} catch (e) {
+			console.error(e);
+			toast.error("Export failed. Please try again.", { id: dismiss });
+		} finally {
+			setExporting(false);
+		}
+	};
 
 	const resetPageOnChange = <T,>(setter: (v: T) => void) => {
 		return (v: T) => {
@@ -142,9 +204,36 @@ export function ReportsPage() {
 					</Select>
 				</div>
 
+				<div className="flex flex-col gap-1.5">
+					<Label htmlFor="report-sort" className="text-foreground text-xs">
+						Sort By
+					</Label>
+					<Select
+						value={sortBy}
+						onValueChange={(v) => {
+							setPage(0);
+							setSortBy(v as "date" | "score");
+						}}
+					>
+						<SelectTrigger id="report-sort" className="h-11 w-[180px]">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="date">Most recent</SelectItem>
+							<SelectItem value="score">Highest risk</SelectItem>
+						</SelectContent>
+					</Select>
+				</div>
+
 				<div className="ml-auto pt-[22px]">
-					<Button variant="outline" size="lg" className="h-11 gap-2" disabled>
-						Export
+					<Button
+						variant="outline"
+						size="lg"
+						className="h-11 gap-2"
+						onClick={onExportClick}
+						disabled={exporting || total === 0}
+					>
+						{exporting ? "Exporting…" : "Export"}
 						<ExternalLink className="h-4 w-4" />
 					</Button>
 				</div>
@@ -309,6 +398,35 @@ export function ReportsPage() {
 					Back to Top
 				</button>
 			</div>
+
+			<Dialog open={confirmExportOpen} onOpenChange={setConfirmExportOpen}>
+				<DialogContent showClose={false} className="max-w-sm">
+					<DialogHeader>
+						<DialogTitle>
+							Export {total.toLocaleString()} rows?
+						</DialogTitle>
+						<DialogDescription>
+							This is more than {EXPORT_CONFIRM_THRESHOLD.toLocaleString()}{" "}
+							rows. The download may take a moment. Narrow the filters first
+							if you don't need the full set.
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button
+							variant="outline"
+							onClick={() => setConfirmExportOpen(false)}
+						>
+							Cancel
+						</Button>
+						<Button
+							onClick={runExport}
+							className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
+						>
+							Confirm
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
