@@ -34,10 +34,40 @@ scorers:
       exunits_per_script_input: { p50: 100_000,     p99: 10_000_000 }
       n_inputs_same_script:     { p50: 2,           p99: 10 }
       sender_recurrence:        { p50: 0,           p99: 1 }
+    # Network-scoped to prevent a preprod entry from accidentally suppressing
+    # mainnet alerts (or vice versa). Each leaf is a list of address prefixes
+    # for known batch validators on that network. Missing networks default to
+    # an empty list at the scorer.
     allowlist_prefixes:
-      - "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq"  # SundaeSwap v3 batch
-      - "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz"   # Minswap v2 batch
-      - "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh"   # WingRiders batch
+      mainnet:
+        - "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq"  # SundaeSwap v3 batch
+        - "addr1z8snz7c4974vzdpxu65ruphl3zjdvtxw8strf2c2tmqnxz"   # Minswap v2 batch
+        - "addr1wyx22z2s4kasd3w976pnjf9xdty88epjqfvgkmfnfpcsgh"   # WingRiders batch
+      # Preprod-only seeded entries. Lower attribution bar than mainnet
+      # because preprod is a sandbox, BUT script addresses (unlike policy
+      # IDs) are hashes of validator bytecode + parameters: an attacker
+      # cannot reproduce the same address without controlling the original
+      # validator source. The "permissionless preprod" risk surface is
+      # therefore narrower here than for token_dust.allowlist_policies.
+      # Re-evaluate once per-script baselines on this address mature.
+      preprod:
+        # Operator-controlled state-machine contract observed running
+        # periodic claim operations (2 inputs -> 2 outputs, 1 returning to
+        # script with state, 1 to operator wallet) at ~248 H+Critical
+        # alerts/week across the 2026-05-12 to 2026-05-15 window. Same
+        # operator also runs UTxO-consolidation sweeps from the same script
+        # (uniform_sweep_guard already covers those). 642 total interactions
+        # in 7 days, all flowing to two known operator wallets. Not under
+        # attack; the contract's normal operation produces the
+        # lazy-validator floor signature because its validator is small
+        # (~535k CPU/input, below the bootstrap p99=10M).
+        #
+        # REVIEW BY: 2026-08-12 (or sooner if `baselines` table accumulates
+        # >= 500 per_script samples for this address on preprod, which
+        # would let the natural per-script normalisation handle this
+        # cluster without an explicit allowlist entry).
+        - "addr_test1wzpzd7k0lkpkr3kh460ll6c88r4p5nhqehu3gjtc359a2ds9qpd7c"
+      preview: []
     reason_threshold: 0.5
     # Band floor for "lazy validator" structural confirmation: when the gate
     # has fired (≥2 same-script inputs + spend redeemer) AND s_exunits_inv
@@ -47,6 +77,32 @@ scorers:
     # high_band_cap; here we floor up). Allowlisted scripts are exempt.
     lazy_validator_threshold: 0.8
     lazy_validator_floor: 60.0
+    # Extraction sanity gate on the floor. Double-satisfaction by definition
+    # requires value to leave the script (lovelace or native assets); a
+    # state-machine contract that consumes 2 of its own UTxOs and writes
+    # state back has ``s_extraction = 0`` and is not an exploit even with
+    # cheap execution. The scorer applies the floor only when
+    # ``s_extraction > lazy_validator_extraction_min``. Default 0.0 means
+    # "strict positivity": any non-zero lovelace OR asset extraction passes.
+    # Raise toward CTF 05's small-drain signal (~0.02 on the lovelace axis,
+    # ~0.5 on the asset axis) only if state-machine contracts with trace
+    # extraction (e.g. ledger rounding) keep tripping High.
+    lazy_validator_extraction_min: 0.0
+    # Uniform-sweep guard. A tx that consumes many inputs from a single
+    # script with identical spend redeemers and writes no value back to
+    # that script is structurally a UTxO consolidation (owner sweeping
+    # their own faucet/airdrop drop on preprod, batch redemptions on
+    # mainnet), not double-satisfaction. When this shape is detected the
+    # lazy_validator_floor is suppressed for the affected group: the gate
+    # may still fire and the weighted score is computed normally, but the
+    # structural floor does not lift benign sweeps into the High band.
+    # Allowlisted scripts take the existing reweight path before this
+    # check and are unaffected.
+    uniform_sweep_guard:
+      enabled: true
+      require_uniform_redeemer: true      # all spend redeemer payloads identical
+      require_no_script_return: true      # no output back to the same payment cred
+      min_inputs: 10                      # only kick in above this input count
 
   # ------------------------------------------------------------------
   large_datum:
@@ -55,6 +111,17 @@ scorers:
     # attack candidate. Roughly the p50 of the bootstrap distribution.
     gate:
       min_datum_bytes: 6000
+    # Observability-only engagement threshold for the multi-output
+    # datum-bloat shape (an attacker splits the bloat payload across N
+    # script-address outputs of the same contract, each individually
+    # below `min_datum_bytes`). When the SUM of datum bytes across
+    # outputs at the same payment credential reaches this value, the
+    # scorer engages without producing an alert: the per-output
+    # predicate still drives `max_score` and band, but
+    # `max_script_datum_bytes` is recorded in `sub_scores` for analyst
+    # queries. Set well above `min_datum_bytes` so the engagement is
+    # meaningful (sum of 2x 3KB doesn't engage; 4x 3KB does).
+    aggregate_engagement_min: 12000
     weights:
       datum_bytes: 0.50
       datum_ratio: 0.35
@@ -85,6 +152,70 @@ scorers:
       value_cbor_bytes:    { p50: 100,       p99: 1500 }
       unique_token_count:  { p50: 1,         p99: 20 }
       ada_amount:          { p50: 1_200_000, p99: 2_000_000 }
+    # Allowlists for known multi-asset protocol UTxOs. Lending markets
+    # (Lenfi/Aada) and similar protocols naturally co-locate offer-NFTs,
+    # reference-NFTs and lent-token batches at min-UTxO ADA on every active
+    # position; the value-bloat shape is identical to a DoS bundle and
+    # without an allowlist the scorer fires on normal protocol use.
+    #
+    # A UTxO is skipped when its address starts with an allowlisted prefix
+    # for its network OR every non-ADA asset it carries is under an
+    # allowlisted policy for its network.
+    #
+    # Both blocks are network-scoped: a preprod policy ID can only be
+    # registered on preprod (permissionless), so allowing one globally
+    # would let an attacker reuse the same hash on mainnet to bypass
+    # detection. Address prefixes are network-scoped for the same reason
+    # and because preprod and mainnet use different bech32 HRPs anyway.
+    #
+    # Entries must be tied to a verified protocol before commit. The
+    # 2026-05-15 preprod cluster surfaced four candidate policies
+    # (`31f830c2…`, `def68337…`, `186e32fa…`, `65ba60a6…`); these are
+    # deliberately not seeded here pending protocol attribution.
+    allowlist_prefixes:
+      mainnet: []
+      preprod: []
+      preview: []
+    # Structural discriminator between real value-bloat DoS and protocol
+    # multi-asset UTxOs. Real DoS exploits force the contract to carry
+    # forward many distinct (policy, name) pairs, bloating tx CBOR every
+    # time anyone interacts with the UTxO. Protocol multi-asset UTxOs
+    # bundle a small number of pairs by design (Lenfi loan offer: ~4
+    # pairs across 3 policies; Minswap pool: ~4 pairs across 4 policies).
+    # Real DoS shapes sit at 15+ distinct pairs; observed protocol
+    # shapes on preprod sit at <=6.
+    #
+    # The total-pairs metric is robust to both CTF 06 shape (80 names
+    # under one policy, e.g. minting via a one-shot policy) and the
+    # symmetric shape (80 policies x 1 name each, e.g. multiple one-shot
+    # mints). Both add ~equivalent CBOR overhead; gating on total pairs
+    # catches both.
+    #
+    # `dos_asset_min` controls two effects:
+    #   1. The composite `script_value_bloat_dos` reason fires only when
+    #      the bundle has at least this many distinct pairs AND the three
+    #      primary sub-scores all saturate.
+    #   2. Outputs below this threshold are capped at the top of Moderate
+    #      (BAND_HIGH_THRESHOLD - 1). The three saturated sub-scores
+    #      still record severity in their own right, but the band
+    #      reflects the structural fact that a small bundle cannot
+    #      meaningfully bloat the 16KB tx CBOR limit.
+    #
+    # Defaults: 15 pairs add roughly 400-700 bytes of CBOR overhead,
+    # the lower edge of "meaningful fraction of the 16KB tx limit".
+    # Below this, the contract carry-forward cost is negligible.
+    dos_asset_min: 15
+    allowlist_policies:
+      # Empty by design. The `dos_asset_min` structural discriminator
+      # (above) caps low-asset-count bundles at the top of Moderate
+      # regardless of policy, so per-policy suppression is not needed for
+      # protocol multi-asset shapes (Lenfi/Aada loan offers, DEX pool
+      # state, etc.). Populate only when a verified protocol's UTxOs
+      # carry >= dos_asset_min distinct pairs AND require explicit
+      # whitelisting; this should be rare.
+      mainnet: []
+      preprod: []
+      preview: []
     reason_threshold: 0.5
 
   # ------------------------------------------------------------------
@@ -222,7 +353,16 @@ scorers:
     bootstrap_anchors:
       recipient_count:         { p50: 1,   p99: 100 }
       mint_to_recipient_ratio: { p50: 100, p99: 100_000 }
-    similarity_threshold: 0.80      # min Levenshtein similarity to flag name collision
+    # Min Levenshtein similarity (after Unicode normalization +
+    # confusables fold) to flag a name collision against the legitimate
+    # token registry. Lowered from 0.80 to 0.70 to catch single-char
+    # intra-Latin substitutions (e.g. lowercase L for uppercase I, as in
+    # the INDY homoglyph forge attack) that survive the confusables
+    # fold. Trade-off: more 1-char-typo collisions register; FP rate
+    # should be measured against real mint traffic and the threshold
+    # raised back if benign tokens with one-char distance to legitimate
+    # tickers appear frequently.
+    similarity_threshold: 0.70
     unicode_scores:                 # cumulative unicode_suspicion score increments
       zero_width: 0.4
       mixed_scripts: 0.3

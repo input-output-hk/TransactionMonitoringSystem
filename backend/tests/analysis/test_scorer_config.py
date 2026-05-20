@@ -25,17 +25,29 @@ def _minimal_valid_yaml() -> str:
             bootstrap_anchors: {}
             allowlist_prefixes: []
             reason_threshold: 0.5
+            lazy_validator_threshold: 0.8
+            lazy_validator_floor: 60.0
+            lazy_validator_extraction_min: 0.05
+            uniform_sweep_guard:
+              enabled: true
+              require_uniform_redeemer: true
+              require_no_script_return: true
+              min_inputs: 10
           large_datum:
             gate: {}
             weights: {}
             fixed_anchors: {}
             bootstrap_anchors: {}
+            aggregate_engagement_min: 12000
             reason_threshold: 0.5
           token_dust:
             gate:
               min_token_count: 2
             weights: {}
             bootstrap_anchors: {}
+            allowlist_prefixes: {}
+            allowlist_policies: {}
+            dos_asset_min: 15
             reason_threshold: 0.5
           large_value:
             weights: {}
@@ -111,10 +123,24 @@ class TestValidation:
             _reload_module(monkeypatch, tmp_path, "other_root: {}")
 
     def test_missing_scorer_section_raises_with_path(self, tmp_path, monkeypatch):
-        body = _minimal_valid_yaml().replace(
-            "multiple_sat:\n    weights: {}\n    bootstrap_anchors: {}\n    allowlist_prefixes: []\n    reason_threshold: 0.5\n  ",
-            "",
-        )
+        # Delete the entire multiple_sat block. Built by line-filter rather
+        # than a fragile string replace so additions to the minimal YAML
+        # (extra required keys etc.) do not silently break this test.
+        lines = _minimal_valid_yaml().splitlines(keepends=True)
+        out: list[str] = []
+        in_block = False
+        for line in lines:
+            if line.startswith("  multiple_sat:"):
+                in_block = True
+                continue
+            if in_block:
+                # A new sibling scorer block starts at the same 2-space indent.
+                if line.startswith("  ") and not line.startswith("    ") and line.strip():
+                    in_block = False
+                    out.append(line)
+                continue
+            out.append(line)
+        body = "".join(out)
         with pytest.raises(RuntimeError, match="scorers.multiple_sat"):
             _reload_module(monkeypatch, tmp_path, body)
 

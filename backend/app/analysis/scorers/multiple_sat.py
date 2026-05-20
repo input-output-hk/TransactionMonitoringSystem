@@ -20,7 +20,7 @@ Sub-scores (Polimi §4.4.3), all per-script baselined:
 
 Phase 1 extension to §4.4.3: ``s_extraction`` is value-agnostic. The Polimi
 spec defines extraction in lovelace only, but the canonical real-world cases
-(Vacuumlabs/Invariant0 #1; the 2021-22 Canonical disclosure affecting
+(the 2021-22 NFT-marketplace double-satisfaction disclosures affecting
 jpg.store, SpaceBudz, Genesis, Adapix, Martify) drain native assets while
 the script's lovelace position barely moves. We compute both axes
 independently against per-script baselines and take the max, so either
@@ -31,6 +31,8 @@ Allowlist behaviour (§4.4.4): transactions interacting with known batch
 validators (DEX settlement, staking consolidation, prediction-market
 resolution) have `s_extraction` weight set to 0 and redistributed across
 `s_inputs` and `s_recurrence`, instead of bypassing the scorer entirely.
+The allowlist is network-scoped: a preprod prefix never suppresses
+mainnet alerts.
 
 Band floor for confirmed structural exploitation: when the gate has fired
 and ``s_exunits_inv`` saturates (low CPU per input → "lazy validator"
@@ -42,16 +44,37 @@ operators triage on signal strength rather than dollar impact. Mirrors
 the mechanism in ``front_running`` (where ``high_band_cap`` *caps* scores
 when structural confirmation is weak). Allowlisted scripts are exempt.
 
+Uniform-sweep guard: the floor is also suppressed when the tx
+fingerprint is "owner sweeping their own script UTxOs" (many inputs with
+identical spend redeemers and no value returned to the same script).
+This is a UTxO consolidation, structurally distinct from
+double-satisfaction (which has asymmetric satisfaction arguments). The
+guard is config-gated under ``uniform_sweep_guard`` so each leg
+(uniform-redeemer, no-return, min-inputs) can be loosened independently.
+
+Extraction sanity gate: the floor additionally requires
+``s_extraction > lazy_validator_extraction_min``. Double-satisfaction by
+definition needs value to leave the script; state-machine contracts that
+consume their own UTxOs and write state back have ``s_extraction = 0``
+and are not exploits even when execution is cheap.
+
 All tunable constants live in ``config/detection.yaml`` under the
 ``scorers.multiple_sat`` section.
 """
 
 import logging
+from functools import lru_cache
 from typing import Any, Dict, List, Tuple
 
-from app.analysis.normalise import BAND_HIGH_THRESHOLD, normalise, normalise_inverted
+from app.analysis.normalise import (
+    BAND_HIGH_THRESHOLD,
+    BAND_MODERATE_MAX,
+    normalise,
+    normalise_inverted,
+)
 from app.analysis.scorer_config import (
     get as _get_cfg,
+    load_network_map as _load_network_map,
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -64,10 +87,23 @@ EPSILON = 1e-6
 _CFG = _get_cfg("multiple_sat")
 _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
-_ALLOWLIST: Tuple[str, ...] = tuple(_CFG["allowlist_prefixes"])
+
+
+_ALLOWLIST: Dict[str, Tuple[str, ...]] = _load_network_map(
+    _CFG.get("allowlist_prefixes"),
+    scorer="multiple_sat",
+    field="allowlist_prefixes",
+    collect=tuple,
+)
 _REASON_T: float = float(_CFG["reason_threshold"])
 _LAZY_VALIDATOR_THRESHOLD: float = float(_CFG["lazy_validator_threshold"])
 _LAZY_VALIDATOR_FLOOR: float = float(_CFG["lazy_validator_floor"])
+_LAZY_VALIDATOR_EXTRACTION_MIN: float = float(_CFG["lazy_validator_extraction_min"])
+_SWEEP_GUARD = _CFG["uniform_sweep_guard"]
+_SWEEP_GUARD_ENABLED: bool = bool(_SWEEP_GUARD["enabled"])
+_SWEEP_REQ_UNIFORM_RED: bool = bool(_SWEEP_GUARD["require_uniform_redeemer"])
+_SWEEP_REQ_NO_RETURN: bool = bool(_SWEEP_GUARD["require_no_script_return"])
+_SWEEP_MIN_INPUTS: int = int(_SWEEP_GUARD["min_inputs"])
 
 # The floor's purpose is to guarantee the band lands at High; if config
 # drifts below the High threshold the docstring's promise breaks. Fail
@@ -82,13 +118,79 @@ if _LAZY_VALIDATOR_FLOOR < BAND_HIGH_THRESHOLD:
     )
 
 
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_BECH32_INVERSE = {c: i for i, c in enumerate(_BECH32_CHARSET)}
+_BECH32_CHECKSUM_LEN = 6
+_BECH32_BITS_PER_CHAR = 5
+_PAYMENT_CRED_BYTES = 28  # CIP-19: Blake2b-224 hash size, payment + stake creds
+
+
+@lru_cache(maxsize=4096)
+def _payment_credential(addr: str) -> str:
+    """Return a stable per-script-hash key for a Shelley script address.
+
+    Two addresses sharing the same payment credential (script hash) but
+    differing in stake credential must group together: a validator
+    vulnerability can be exploited by spending multiple UTxOs at the same
+    script with distinct stake credentials, putting them at distinct
+    ``address`` strings but the same script. Grouping by raw address
+    misses the attack (canonical purchase-offer double-satisfaction shape).
+
+    Decodes the bech32 data, drops the network header byte, and returns the
+    first 28 bytes (= payment credential hash) as hex. The 6-char bech32
+    checksum at the tail is *stripped without validation*: callers must not
+    rely on a successful decode meaning the address is well-formed. On any
+    structural failure falls back to the raw address so legacy code paths
+    keep working.
+
+    Cached because each tx triggers up to 3·(N_inputs + N_outputs) calls
+    (grouping + lovelace flow + asset flow) across the same address set.
+    """
+    if not addr or "1" not in addr:
+        return addr
+    try:
+        data_part = addr.rsplit("1", 1)[1].lower()
+        if len(data_part) <= _BECH32_CHECKSUM_LEN:
+            return addr
+        # Strip the trailing checksum without validating it; callers must
+        # not rely on a successful decode meaning the address is well-formed.
+        data_part = data_part[:-_BECH32_CHECKSUM_LEN]
+        bits: List[int] = []
+        for c in data_part:
+            v = _BECH32_INVERSE.get(c)
+            if v is None:
+                return addr
+            # Unpack 5-bit bech32 group MSB-first.
+            for shift in range(_BECH32_BITS_PER_CHAR - 1, -1, -1):
+                bits.append((v >> shift) & 1)
+        # Layout: 1 header byte + 28-byte payment cred + (optional stake cred).
+        header_bits = 8
+        payment_cred_bits = _PAYMENT_CRED_BYTES * 8
+        if len(bits) < header_bits + payment_cred_bits:
+            return addr
+        out = bytearray()
+        for i in range(header_bits, header_bits + payment_cred_bits, 8):
+            byte = 0
+            for b in bits[i : i + 8]:
+                byte = (byte << 1) | b
+            out.append(byte)
+        return out.hex()
+    except Exception:
+        return addr
+
+
 def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
-    """Group transaction inputs by script address."""
+    """Group transaction inputs by script payment credential.
+
+    Keyed by payment credential (not full address) so that script UTxOs at
+    the same validator with different stake credentials group together. See
+    :func:`_payment_credential`.
+    """
     groups: Dict[str, List[Dict]] = {}
     for inp in raw_data.get("inputs", []):
         addr = inp.get("address", "")
         if feat_mod.is_script_address(addr):
-            groups.setdefault(addr, []).append(inp)
+            groups.setdefault(_payment_credential(addr), []).append(inp)
     return groups
 
 
@@ -105,16 +207,19 @@ def _extract_lovelace(val: Any) -> int:
 
 
 def _compute_net_value_out(
-    inputs: List[Dict], outputs: List[Dict], script_addr: str,
+    inputs: List[Dict], outputs: List[Dict], script_key: str,
 ) -> int:
-    """Net lovelace extraction: Σ(inputs from script) − Σ(outputs to script)."""
+    """Net lovelace extraction: Σ(inputs from script) − Σ(outputs to script).
+
+    ``script_key`` is a payment credential (see :func:`_payment_credential`).
+    """
     value_in = sum(
         _extract_lovelace(inp.get("value"))
-        for inp in inputs if inp.get("address", "") == script_addr
+        for inp in inputs if _payment_credential(inp.get("address", "")) == script_key
     )
     value_out = sum(
         _extract_lovelace(out.get("value"))
-        for out in outputs if out.get("address", "") == script_addr
+        for out in outputs if _payment_credential(out.get("address", "")) == script_key
     )
     return max(0, value_in - value_out)
 
@@ -140,7 +245,7 @@ def _iter_assets(val: Any):
 
 
 def _compute_n_assets_out(
-    inputs: List[Dict], outputs: List[Dict], script_addr: str,
+    inputs: List[Dict], outputs: List[Dict], script_key: str,
 ) -> int:
     """Count of distinct native-asset ``(policy, name)`` pairs with positive
     net flow out of the script address.
@@ -149,17 +254,17 @@ def _compute_n_assets_out(
     of pairs whose net is strictly > 0. The metric is *pair count*, not unit
     count: a partial extraction of 50 fungible-token units of one asset
     registers as 1, the same as a single NFT. This matches the canonical
-    Vacuumlabs/Invariant0 NFT-marketplace double-satisfaction shape (N NFTs
-    leaving = N pairs leaving) and is robust to fungible-vs-NFT differences.
+    NFT-marketplace double-satisfaction shape (N NFTs leaving = N pairs
+    leaving) and is robust to fungible-vs-NFT differences.
     """
     flow: Dict[Tuple[str, str], int] = {}
     for inp in inputs:
-        if inp.get("address", "") != script_addr:
+        if _payment_credential(inp.get("address", "")) != script_key:
             continue
         for key, qty in _iter_assets(inp.get("value")):
             flow[key] = flow.get(key, 0) + qty
     for out in outputs:
-        if out.get("address", "") != script_addr:
+        if _payment_credential(out.get("address", "")) != script_key:
             continue
         for key, qty in _iter_assets(out.get("value")):
             flow[key] = flow.get(key, 0) - qty
@@ -179,8 +284,96 @@ def _total_exunits_cpu(raw_data: Dict) -> int:
     return total
 
 
-def _is_allowlisted(script_addr: str) -> bool:
-    return any(script_addr.startswith(p) for p in _ALLOWLIST)
+def _is_allowlisted(script_addr: str, network: str) -> bool:
+    prefixes = _ALLOWLIST.get(network, ())
+    return any(script_addr.startswith(p) for p in prefixes)
+
+
+_PAYMENT_CRED_HEX_LEN = _PAYMENT_CRED_BYTES * 2
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+def _is_decoded_payment_credential(script_key: str) -> bool:
+    """True when ``script_key`` is a well-formed 56-char hex payment cred.
+
+    ``_payment_credential`` falls back to the raw input address on decode
+    failure. Predicates that compare credentials across inputs and outputs
+    cannot be trusted in that case (the raw fallback never matches a
+    properly-decoded output's credential), so callers must gate on this.
+    """
+    return (
+        len(script_key) == _PAYMENT_CRED_HEX_LEN
+        and all(c in _HEX_CHARS for c in script_key)
+    )
+
+
+def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
+    """Return the list of spend-purpose redeemer payloads in the tx.
+
+    Both Ogmios v5 (list) and v6 (dict-or-list) shapes are handled. Entries
+    without a recognisable spend purpose are skipped, matching the way
+    multiple-satisfaction can only be evaluated against script spends.
+    """
+    redeemers = raw_data.get("redeemers")
+    if not redeemers:
+        return []
+    items = redeemers.values() if isinstance(redeemers, dict) else redeemers
+    payloads: List[str] = []
+    for r in items:
+        validator = r.get("validator") or {}
+        purpose = validator.get("purpose") or r.get("purpose")
+        if purpose != "spend":
+            continue
+        payload = r.get("redeemer")
+        if isinstance(payload, str):
+            payloads.append(payload)
+    return payloads
+
+
+def _is_uniform_sweep(
+    script_key: str,
+    n_inputs: int,
+    outputs: List[Dict],
+    spend_redeemer_payloads: List[str],
+) -> bool:
+    """Owner-sweep fingerprint: many script inputs, identical spend
+    redeemers, no value returned to the same script.
+
+    All three predicates are individually weak; together they describe a
+    UTxO consolidation rather than a double-satisfaction exploit. Each leg
+    is independently gated by config so operators can loosen the guard if
+    a real attack happens to share the shape.
+
+    ``spend_redeemer_payloads`` is precomputed once per tx by the caller;
+    recomputing it per script group would re-walk the same redeemer list
+    for every group in a multi-script tx.
+
+    Refuses to suppress when ``script_key`` is not a well-formed payment
+    credential: the no-return predicate relies on credential equality
+    between inputs (the group's key) and outputs (computed afresh), which
+    silently mismatches when bech32 decode falls back to the raw address.
+    """
+    if not _SWEEP_GUARD_ENABLED:
+        return False
+    if n_inputs < _SWEEP_MIN_INPUTS:
+        return False
+    if _SWEEP_REQ_NO_RETURN and not _is_decoded_payment_credential(script_key):
+        return False
+    if _SWEEP_REQ_UNIFORM_RED:
+        # Need at least as many spend redeemers as inputs in this group
+        # (the ledger guarantees one redeemer per script input across the
+        # whole tx; below this count something exotic is happening and we
+        # decline to suppress).
+        if (
+            len(spend_redeemer_payloads) < n_inputs
+            or len(set(spend_redeemer_payloads)) != 1
+        ):
+            return False
+    if _SWEEP_REQ_NO_RETURN:
+        for out in outputs:
+            if _payment_credential(out.get("address", "")) == script_key:
+                return False
+    return True
 
 
 def _reweight_without_extraction() -> Tuple[float, float, float, float]:
@@ -235,16 +428,27 @@ class MultipleSatScorer(BaseScorer):
 
         groups = _group_inputs_by_script(raw_data)
 
+        # Precompute once per tx: the uniform-sweep guard inspects the same
+        # redeemer list for every script group, and the redeemer set only
+        # depends on raw_data.
+        spend_payloads = _spend_redeemer_payloads(raw_data)
+
         best: ScorerResult = ScorerResult()
 
-        for script_addr, inps in groups.items():
+        for script_key, inps in groups.items():
             n_inputs = len(inps)
             if n_inputs < 2:
                 continue
 
+            # Pick the first input's address as the representative for
+            # baseline / allowlist lookups (these are still keyed by full
+            # address). Group membership is already determined by
+            # payment credential.
+            representative_addr = inps[0].get("address", script_key)
             result = self._score_script(
-                script_addr, n_inputs, total_cpu,
+                script_key, representative_addr, n_inputs, total_cpu,
                 raw_data, outputs, sender_recurrence, network,
+                spend_payloads,
             )
             if result.score > best.score:
                 best = result
@@ -253,38 +457,41 @@ class MultipleSatScorer(BaseScorer):
 
     def _score_script(
         self,
-        script_addr: str,
+        script_key: str,
+        representative_addr: str,
         n_inputs: int,
         total_cpu: int,
         raw_data: Dict,
         outputs: List[Dict],
         sender_recurrence: float,
         network: str,
+        spend_redeemer_payloads: List[str],
     ) -> ScorerResult:
         inputs = raw_data.get("inputs", [])
-        net_value = _compute_net_value_out(inputs, outputs, script_addr)
-        n_assets_out = _compute_n_assets_out(inputs, outputs, script_addr)
+        net_value = _compute_net_value_out(inputs, outputs, script_key)
+        n_assets_out = _compute_n_assets_out(inputs, outputs, script_key)
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
-        # Per-script baselines with bootstrap fallbacks.
+        # Per-script baselines still keyed by full address; use the
+        # representative address picked from the group.
         p50_nv, p99_nv, bl_nv = _resolve(
-            "net_value_out_of_script", "per_script", script_addr, network,
+            "net_value_out_of_script", "per_script", representative_addr, network,
             _BOOT, "net_value_out_of_script",
         )
         p50_na, p99_na, bl_na = _resolve(
-            "n_assets_out_of_script", "per_script", script_addr, network,
+            "n_assets_out_of_script", "per_script", representative_addr, network,
             _BOOT, "n_assets_out_of_script",
         )
         p50_ex, p99_ex, bl_ex = _resolve(
-            "exunits_per_script_input", "per_script", script_addr, network,
+            "exunits_per_script_input", "per_script", representative_addr, network,
             _BOOT, "exunits_per_script_input",
         )
         p50_ni, p99_ni, bl_ni = _resolve(
-            "n_inputs_same_script", "per_script", script_addr, network,
+            "n_inputs_same_script", "per_script", representative_addr, network,
             _BOOT, "n_inputs_same_script",
         )
         p50_rc, p99_rc, bl_rc = _resolve(
-            "sender_recurrence", "per_script", script_addr, network,
+            "sender_recurrence", "per_script", representative_addr, network,
             _BOOT, "sender_recurrence",
         )
 
@@ -300,7 +507,11 @@ class MultipleSatScorer(BaseScorer):
         s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
 
         # Allowlisted scripts: neutralise s_extraction and redistribute its weight.
-        allowlisted = _is_allowlisted(script_addr)
+        # Check every address in the group, not just the representative: a known
+        # batcher may publish UTxOs under multiple stake-cred variants, and the
+        # group must be allowlisted if any variant is.
+        group_addrs = {inp.get("address", "") for inp in inputs if _payment_credential(inp.get("address", "")) == script_key}
+        allowlisted = any(_is_allowlisted(a, network) for a in group_addrs)
         if allowlisted:
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
             s_extraction = 0.0
@@ -332,11 +543,42 @@ class MultipleSatScorer(BaseScorer):
         # signal first. Allowlisted scripts are exempt: legitimate batchers
         # often run minimal per-input CPU by design. Threshold and floor
         # tunable via multiple_sat.lazy_validator_threshold / _floor.
+        # Uniform-sweep guard. When the tx fingerprint is "owner sweeping
+        # their own script UTxOs" (many inputs, identical spend redeemers,
+        # no script return), suppress the lazy-validator floor: the gate
+        # has fired and the weighted score still records the structural
+        # signals, but we do not artificially elevate the band. Real
+        # double-satisfaction exploits have asymmetric satisfaction
+        # arguments and write the satisfying value (NFT / payment) to a
+        # distinct address shape that this predicate rejects.
+        uniform_sweep = _is_uniform_sweep(
+            script_key, n_inputs, outputs, spend_redeemer_payloads,
+        )
+
+        # Extraction sanity gate: double-satisfaction requires value to
+        # leave the script. State-machine contracts that consume 2 of
+        # their own UTxOs and write state back have ``s_extraction = 0``
+        # and would otherwise have every cheap iteration floored to High.
+        # The minimum is well below CTF 05's small-drain extraction signal
+        # so genuine low-value exploits still floor.
         floor_applies = (
-            not allowlisted and s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
+            not allowlisted
+            and not uniform_sweep
+            and s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
+            and s_extraction > _LAZY_VALIDATOR_EXTRACTION_MIN
         )
         if floor_applies:
             final = max(final, _LAZY_VALIDATOR_FLOOR)
+
+        # When the sweep guard fires AND the script is also allowlisted,
+        # the allowlist reweight redistributes the extraction weight onto
+        # s_inputs, which is saturated for the very same sweep (n_inputs
+        # large, p99=10). The reweighted score then climbs back above the
+        # High threshold, undoing the guard's intent. Cap the final at the
+        # top of Moderate so the sweep classification stands regardless of
+        # the allowlist path.
+        if uniform_sweep:
+            final = min(final, BAND_MODERATE_MAX)
 
         # The baseline source reported is the "most specific tier actually used"
         # across the four features. Prefer per_script > per_policy > global > bootstrap.
@@ -355,6 +597,8 @@ class MultipleSatScorer(BaseScorer):
             reasons.append("high_n_inputs_same_script")
         if allowlisted:
             reasons.append("allowlisted_batch_script")
+        if uniform_sweep:
+            reasons.append("uniform_script_sweep_guard")
 
         return ScorerResult(
             score=final,

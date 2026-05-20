@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.config import settings
 from app.db import clickhouse, postgres
@@ -275,26 +275,41 @@ def _enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
             logger.debug(f"Cycle detection failed for {row['tx_hash'][:16]}: {e}")
 
 
+# Captured by run_once_async() so that _enrich_collision_features (running on
+# a clickhouse worker thread) can schedule async postgres calls back onto the
+# main event loop. Module-level mutable state assumes a single asyncio loop
+# per process, which matches our production deployment. Tests that drive the
+# engine directly without run_once_async() will see collision enrichment
+# skipped (debug log emitted); call set_main_loop() manually if that path
+# matters for the test.
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    """Test hook: explicitly set or clear the captured main event loop."""
+    global _main_loop
+    _main_loop = loop
+
+
 def _enrich_collision_features(rows: List[Dict[str, Any]], network: str):
     """Enrich rows with mempool collision data for front-running detection.
 
-    Called from the sync run_once() context, uses asyncio to call async postgres.
+    Called from the sync run_once() context (on a clickhouse worker thread),
+    schedules the async postgres call on the main event loop captured by
+    run_once_async().
     """
     if not settings.SCORER_FRONT_RUNNING_ENABLED:
         return
+    loop = _main_loop
+    if loop is None or not loop.is_running():
+        logger.debug("Collision enrichment skipped: main event loop unavailable")
+        return
     tx_hashes = [r["tx_hash"] for r in rows]
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            future = asyncio.run_coroutine_threadsafe(
-                postgres.get_collisions_for_txs(tx_hashes, network), loop
-            )
-            collisions = future.result(timeout=30)
-        else:
-            collisions = loop.run_until_complete(
-                postgres.get_collisions_for_txs(tx_hashes, network)
-            )
+        future = asyncio.run_coroutine_threadsafe(
+            postgres.get_collisions_for_txs(tx_hashes, network), loop
+        )
+        collisions = future.result(timeout=30)
     except Exception as e:
         logger.warning(f"Collision enrichment failed (non-fatal): {e}")
         return
@@ -373,5 +388,7 @@ def run_once(network: str) -> int:
 
 async def run_once_async(network: str) -> int:
     """Non-blocking wrapper: runs run_once on the dedicated ClickHouse executor."""
+    global _main_loop
     loop = asyncio.get_running_loop()
+    _main_loop = loop
     return await loop.run_in_executor(clickhouse._ch_executor, run_once, network)
