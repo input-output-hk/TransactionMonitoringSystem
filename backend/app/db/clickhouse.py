@@ -416,6 +416,28 @@ def execute_schema():
             PARTITION BY toYYYYMMDD(analyzed_at)
         """)
 
+        # Admin-curated archive of flagged transactions known to be false
+        # positives. Additive to tx_class_scores: a row here suppresses the
+        # corresponding score from "currently dangerous" lists at query time.
+        # An entry can exist without a matching tx_class_scores row (cross-
+        # instance CSV import: another admin's archive for a tx this instance
+        # never observed).
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS archived_alerts (
+                tx_hash      String,
+                network      String,
+                note         String,
+                archived_by  String,
+                archived_at  DateTime DEFAULT now(),
+                source       String DEFAULT 'local',
+                INDEX idx_tx_hash    tx_hash     TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_network    network     TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_archived   archived_at TYPE minmax       GRANULARITY 1
+            ) ENGINE = ReplacingMergeTree(archived_at)
+            ORDER BY (network, tx_hash)
+            PARTITION BY toYYYYMM(archived_at)
+        """)
+
         # Per-script / per-policy / global baseline statistics used by the
         # percentile normalisation framework.  Updated daily (or on bootstrap).
         #
@@ -858,10 +880,14 @@ def get_class_scores_list(
     sort: str = "score",
     limit: int = 100,
     offset: int = 0,
+    include_archived: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return multi-class score rows with optional filters.
 
     sort: "score" (default) or "date" (most recent first).
+    include_archived: when False (default), rows whose (network, tx_hash) is
+        present in ``archived_alerts`` are excluded so admin-curated false
+        positives stop showing up in "currently dangerous" lists.
     """
     _CLASS_COLS = (
         "token_dust", "large_value", "large_datum", "multiple_sat",
@@ -889,6 +915,15 @@ def get_class_scores_list(
     elif min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
+    if not include_archived:
+        # Anti-join via subquery: NOT IN against the (network, tx_hash) pairs
+        # currently archived. ClickHouse 26+ disallows FINAL on a table inside
+        # a JOIN clause, so we use a scalar subquery instead.
+        conditions.append(
+            "(network, tx_hash) NOT IN ("
+            "SELECT network, tx_hash FROM archived_alerts FINAL"
+            ")"
+        )
 
     where = " AND ".join(conditions)
     # Query scores first, then batch-fetch tx details separately.
@@ -946,11 +981,13 @@ def get_class_scores_list(
 async def get_class_scores_list_async(
     network: str, risk_band: Optional[str], attack_class: Optional[str],
     min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
+    include_archived: bool = False,
 ) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _ch_executor, get_class_scores_list,
         network, risk_band, attack_class, min_score, sort, limit, offset,
+        include_archived,
     )
 
 
@@ -959,8 +996,12 @@ async def get_class_scores_async(tx_hash: str) -> Optional[Dict[str, Any]]:
     return await loop.run_in_executor(_ch_executor, get_class_scores, tx_hash)
 
 
-def get_class_scores_stats(network: str) -> Dict[str, Any]:
-    """Per-class distribution stats for a network."""
+def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict[str, Any]:
+    """Per-class distribution stats for a network.
+
+    include_archived: when False (default), exclude rows whose (network, tx_hash)
+        has been admin-archived so band counts reflect only currently-flagged txs.
+    """
     _CLASS_COLS = (
         "token_dust", "large_value", "large_datum", "multiple_sat",
         "front_running", "sandwich", "circular", "fake_token", "phishing",
@@ -974,6 +1015,11 @@ def get_class_scores_stats(network: str) -> Dict[str, Any]:
             f"maxIf({col}, {col} >= 0) AS {col}_max"
         )
     agg_sql = ", ".join(agg_parts)
+    archive_clause = (
+        " AND (network, tx_hash) NOT IN ("
+        "SELECT network, tx_hash FROM archived_alerts FINAL)"
+        if not include_archived else ""
+    )
     rows = _get_client().execute(
         f"""
         SELECT count() AS total,
@@ -985,7 +1031,7 @@ def get_class_scores_stats(network: str) -> Dict[str, Any]:
                max(analyzed_at) AS last_analyzed_at,
                {agg_sql}
         FROM tx_class_scores FINAL
-        WHERE network = %(network)s
+        WHERE network = %(network)s{archive_clause}
         """,
         {"network": network},
     )
@@ -1019,9 +1065,13 @@ def get_class_scores_stats(network: str) -> Dict[str, Any]:
     return result
 
 
-async def get_class_scores_stats_async(network: str) -> Dict[str, Any]:
+async def get_class_scores_stats_async(
+    network: str, include_archived: bool = False,
+) -> Dict[str, Any]:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ch_executor, get_class_scores_stats, network)
+    return await loop.run_in_executor(
+        _ch_executor, get_class_scores_stats, network, include_archived,
+    )
 
 
 def get_baselines_for_scope(

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 from app.rate_limit import RateLimitMiddleware, RateLimiter
 from app.db import postgres, clickhouse, raw_store
-from app.api import transactions, entities, lifecycle, analysis
+from app.api import transactions, entities, lifecycle, analysis, archive
 from app.tasks import analysis as analysis_task
 from app.routers import ui, websocket
 
@@ -203,6 +203,7 @@ app.include_router(transactions.router)
 app.include_router(entities.router)
 app.include_router(lifecycle.router)
 app.include_router(analysis.router)
+app.include_router(archive.router)
 
 
 @app.get("/health")
