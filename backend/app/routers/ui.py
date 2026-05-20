@@ -131,6 +131,19 @@ async def root():
             }}
             .copy-btn:hover {{ border-color: #00d4ff; color: #00d4ff; }}
             .copy-btn.copied {{ border-color: #00ff88; color: #00ff88; }}
+            .archive-btn {{
+                background: none; border: 1px solid #3a3f5a; color: #888;
+                border-radius: 4px; padding: 2px 8px; font-size: 11px;
+                cursor: pointer; margin-left: 6px; transition: all 0.15s;
+            }}
+            .archive-btn:hover {{ border-color: #ffab00; color: #ffab00; }}
+            .archive-btn.restore {{ }}
+            .archive-btn.restore:hover {{ border-color: #00c853; color: #00c853; }}
+            .archive-note {{
+                color: #888; font-size: 11px; margin-top: 4px;
+                font-style: italic;
+            }}
+            .panel-header.archive {{ background: #4527a0; color: #fff; }}
 
             /* Risk bands */
             .risk-band {{
@@ -272,6 +285,17 @@ async def root():
                 </div>
                 <div class="panel-body" id="txsPanel">
                     <div class="empty">Waiting for transactions...</div>
+                </div>
+            </div>
+
+            <!-- Archived Alerts -->
+            <div class="panel">
+                <div class="panel-header archive">
+                    Archived (False Positives)
+                    <span class="panel-count" id="archiveCount">0</span>
+                </div>
+                <div class="panel-body" id="archivePanel">
+                    <div class="empty">No archived alerts</div>
                 </div>
             </div>
         </div>
@@ -446,7 +470,7 @@ async def root():
                         <div class="risk-row ${{a.risk_band}}">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button>
+                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn" onclick="archiveAlert('${{a.tx_hash}}','${{a.network}}')">Archive</button>
                                     <span style="color:#888;font-size:11px">Fee: ${{fee}}</span>
                                     <span style="color:#888;font-size:11px">Outputs: ${{outs}}</span>
                                     <span style="color:#666;font-size:11px">${{when}}</span>
@@ -510,9 +534,106 @@ async def root():
                 refreshRiskAlerts();
             }});
 
+            // --- Archive (false-positive curation) ---
+            // Persist the admin label between archive actions so the user
+            // doesn't get prompted for it every time. Keep it in localStorage
+            // so it survives reloads.
+            function getArchivedBy() {{
+                let v = localStorage.getItem("tms_archived_by");
+                if (!v) {{
+                    v = prompt("Your name / email (used as archived_by). Saved locally.") || "";
+                    if (v) localStorage.setItem("tms_archived_by", v);
+                }}
+                return v;
+            }}
+
+            async function archiveAlert(txHash, network) {{
+                const archivedBy = getArchivedBy();
+                if (!archivedBy) return;
+                const note = prompt("Why is this not actually dangerous?");
+                if (note === null) return;       // user cancelled
+                if (!note.trim()) {{ alert("A note is required."); return; }}
+                try {{
+                    const res = await fetch("/api/archive", {{
+                        method: "POST",
+                        headers: {{ "Content-Type": "application/json", ...headers }},
+                        body: JSON.stringify({{
+                            network, tx_hash: txHash,
+                            note: note.trim(), archived_by: archivedBy,
+                        }}),
+                    }});
+                    if (!res.ok) {{
+                        const body = await res.text();
+                        alert("Archive failed: " + res.status + " " + body);
+                        return;
+                    }}
+                    // Refresh both panels: the row leaves risk (server-side
+                    // filter) and appears in archive.
+                    refreshRiskAlerts();
+                    refreshArchive();
+                }} catch(e) {{ alert("Archive failed: " + e); }}
+            }}
+
+            async function restoreAlert(txHash, network) {{
+                if (!confirm("Restore this transaction? It will reappear in the dangerous list.")) return;
+                try {{
+                    const res = await fetch(
+                        `/api/archive/${{encodeURIComponent(txHash)}}?network=${{encodeURIComponent(network)}}`,
+                        {{ method: "DELETE", headers }},
+                    );
+                    if (!res.ok && res.status !== 204) {{
+                        const body = await res.text();
+                        alert("Restore failed: " + res.status + " " + body);
+                        return;
+                    }}
+                    refreshArchive();
+                    refreshRiskAlerts();
+                }} catch(e) {{ alert("Restore failed: " + e); }}
+            }}
+
+            function renderArchive(items) {{
+                const panel = document.getElementById("archivePanel");
+                document.getElementById("archiveCount").textContent = items.length;
+                if (!items.length) {{
+                    panel.innerHTML = '<div class="empty">No archived alerts</div>';
+                    return;
+                }}
+                panel.innerHTML = items.map(a => {{
+                    const when = a.archived_at ? new Date(a.archived_at).toLocaleString() : "-";
+                    const wasClass = a.max_class || "-";
+                    const wasBand = a.risk_band || "-";
+                    const wasScore = a.max_score != null ? a.max_score.toFixed(0) : "-";
+                    const noteHtml = a.note ? `<div class="archive-note">"${{a.note.replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}})[c])}}"</div>` : '';
+                    return `
+                        <div class="risk-row" style="border-left-color:#4527a0">
+                            <div style="flex:1;min-width:0">
+                                <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn restore" onclick="restoreAlert('${{a.tx_hash}}','${{a.network}}')">Restore</button>
+                                    <span style="color:#888;font-size:11px">By: ${{a.archived_by || '-'}}</span>
+                                    <span style="color:#666;font-size:11px">${{when}}</span>
+                                </div>
+                                <div class="risk-sub">Was: ${{wasClass}} (${{wasBand}}, ${{wasScore}}) &middot; source: ${{a.source || 'local'}}</div>
+                                ${{noteHtml}}
+                            </div>
+                        </div>
+                    `;
+                }}).join('');
+            }}
+
+            async function refreshArchive() {{
+                try {{
+                    const res = await fetch("/api/archive?limit=100", {{ headers }});
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    renderArchive(data.data || []);
+                }} catch(e) {{}}
+            }}
+
             // Initial load
             refreshRiskAlerts();
+            refreshArchive();
             setInterval(refreshRiskAlerts, 20000);
+            setInterval(refreshArchive, 30000);
 
             // Load recent confirmed txs on page load
             (async () => {{

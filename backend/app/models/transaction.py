@@ -132,6 +132,14 @@ class ClassScoreResult(BaseModel):
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     fee: Optional[int] = Field(None, description="Transaction fee in lovelace")
     output_count: Optional[int] = Field(None, description="Number of transaction outputs")
+    archived: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Present when an admin has archived this transaction as a known "
+            "false positive. Contains note, archived_by, archived_at, source. "
+            "Absent otherwise."
+        ),
+    )
 
 
 class NormalizedTransaction(BaseModel):

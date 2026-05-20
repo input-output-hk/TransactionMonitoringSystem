@@ -8,8 +8,9 @@ from fastapi import APIRouter, HTTPException, Query, Security
 
 from app.auth import verify_api_key
 from app.config import settings
-from app.db import clickhouse
+from app.db import archive_queries, clickhouse
 from app.models.transaction import ClassScoreResult, NetworkType, RiskBand
+from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,12 @@ def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
 
 @router.get("/results/{tx_hash}", dependencies=[Security(verify_api_key)])
 async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
-    """Full 9-class score vector with sub-score drill-down for a single transaction."""
+    """Full 9-class score vector with sub-score drill-down for a single transaction.
+
+    If the transaction has been admin-archived as a false positive, the score is
+    still returned (for audit context) and the ``archived`` field is populated
+    so the UI can render it differently.
+    """
     try:
         row = await clickhouse.get_class_scores_async(tx_hash)
     except Exception as e:
@@ -54,7 +60,22 @@ async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
         raise HTTPException(status_code=500, detail="Failed to fetch result")
     if not row:
         raise HTTPException(status_code=404, detail=f"No result found for {tx_hash}")
-    return _row_to_class_score(row)
+    result = _row_to_class_score(row)
+    try:
+        archive_meta = await archive_queries.archive_get_async(
+            row["network"], row["tx_hash"],
+        )
+        if archive_meta:
+            result.archived = {
+                "note": archive_meta["note"],
+                "archived_by": archive_meta["archived_by"],
+                "archived_at": format_iso_utc(archive_meta["archived_at"]),
+                "source": archive_meta["source"],
+            }
+    except Exception as e:
+        # Archive enrichment is best-effort; never fail the main fetch.
+        logger.warning(f"Archive enrichment failed for {tx_hash}: {e}")
+    return result
 
 
 @router.get("/results", dependencies=[Security(verify_api_key)])
