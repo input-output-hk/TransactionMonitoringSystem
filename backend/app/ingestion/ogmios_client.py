@@ -572,14 +572,26 @@ class OgmiosClient:
     async def _handle_roll_backward(self, result: dict):
         """Process a chain rollback (rollBackward)."""
         point = result.get("point", {})
-        rollback_slot = point.get("slot", 0)
-        rollback_id = point.get("id", "")
+        # Ogmios v6 returns the literal string "origin" when rolling back past
+        # the volatile chain instead of a {slot, id} object.
+        rolled_back_to_origin = isinstance(point, str)
+        if rolled_back_to_origin:
+            rollback_slot = 0
+            rollback_id = ""
+        else:
+            rollback_slot = point.get("slot", 0)
+            rollback_id = point.get("id", "")
 
         tip = result.get("tip", {})
         if isinstance(tip, dict) and "slot" in tip:
             self._tip_slot = tip["slot"]
 
-        logger.warning(f"Ogmios [chain]: rollback to slot {rollback_slot}")
+        if rolled_back_to_origin:
+            logger.warning(
+                "Ogmios [chain]: rollback to origin (saved sync point past volatile chain)"
+            )
+        else:
+            logger.warning(f"Ogmios [chain]: rollback to slot {rollback_slot}")
 
         try:
             await postgres.mark_lifecycle_rolled_back(rollback_slot, self.network)

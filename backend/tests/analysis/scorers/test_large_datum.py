@@ -67,3 +67,68 @@ class TestScore:
         result = scorer.score(_features([out]))
         for key in ("datum_bytes", "datum_ratio", "value_cbor_bytes_inverted"):
             assert key in result.sub_scores
+
+
+# Two bech32-decodable preprod script addresses with distinct payment
+# credentials. Using real decode-able addresses lets _payment_credential
+# group correctly across stake-cred variants of the same script in tests
+# that exercise the per-script aggregation path.
+_SCRIPT_A = (
+    "addr_test1zq3kpwwmyqpppm49huqghuttgda85mkncdps99jne0ad6xed"
+    "anvqr0pyy3ne06uvxkaalx8ds4x55z9gq6znqp5p06xqhwh4ht"
+)
+_SCRIPT_B = (
+    "addr_test1zpsqdy4efletcs8d6pgzjrxmjq6gg82dr5fyvepn9yv09l"
+    "d285x8fy9ezxxyczxq0rfc3m5rfl6yj6ex3ecxx70xngnsf52z3z"
+)
+
+
+class TestAggregateEngagement:
+    """Multi-output datum-bloat observability path.
+
+    When an attacker splits the bloat payload across N script outputs at
+    the SAME contract, each below the per-output gate, the scorer
+    engages to surface `max_script_datum_bytes` in sub_scores. Per-output
+    scoring does not fire (no DoS alert), and `max_class` does not become
+    `large_datum` (score returned as -1).
+    """
+
+    def test_aggregate_at_same_script_engages_observability(self, scorer):
+        # 4 outputs x 3500 bytes at the same script. Aggregate = 14000B,
+        # crosses the 12000B engagement threshold. No single output
+        # crosses the 6000B per-output predicate.
+        outs = [_out(_SCRIPT_A, datum="aa" * 3500) for _ in range(4)]
+        feats = _features(outs)
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        # Score is negative so the engine does not classify the tx as
+        # large_datum (the default -1 sentinel means "no finding").
+        assert result.score == -1.0
+        assert result.reasons == []
+        assert result.sub_scores == {"max_script_datum_bytes": 14000.0}
+
+    def test_aggregate_across_distinct_scripts_does_not_engage(self, scorer):
+        # 4 outputs of 3500 bytes split 2/2 across two unrelated scripts.
+        # Tx-wide sum = 14000B but no single script aggregates to >= 12000B,
+        # so the gate must NOT engage. This is the regression for finding
+        # #1 of the review: cross-script aggregation was incorrectly
+        # treated as same-script bloat.
+        outs = [
+            _out(_SCRIPT_A, datum="aa" * 3500),
+            _out(_SCRIPT_A, datum="aa" * 3500),
+            _out(_SCRIPT_B, datum="bb" * 3500),
+            _out(_SCRIPT_B, datum="bb" * 3500),
+        ]
+        feats = _features(outs)
+        # Each per-script aggregate is 7000B < 12000B.
+        assert scorer.gate(feats) is False
+
+    def test_per_output_predicate_unchanged_by_aggregate_path(self, scorer):
+        # A 9000B single-output datum still fires the per-output predicate
+        # and produces a real score, with the new sub-score recording the
+        # same-script aggregate (here equal to the single datum size).
+        out = _out(_SCRIPT_A, lovelace=2_000_000, datum="ff" * 9000)
+        result = scorer.score(_features([out]))
+        assert result.score > 0
+        assert "large_datum_bytes" in result.reasons
+        assert result.sub_scores.get("max_script_datum_bytes") == 9000.0
