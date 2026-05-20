@@ -1,90 +1,88 @@
-import { create } from "zustand";
-import { persist } from "zustand/middleware";
-import { riskAlerts, type RiskAlert } from "@/mocks/attacks";
+/**
+ * Archive state hooks, backed by {@link archiveApi}.
+ *
+ * Until Phase 1 this module lived on Zustand + localStorage. Now everything
+ * goes through the API client (real `/api/archive/*` in prod, localStorage
+ * mock shim in dev). React Query handles caching + invalidation, so the
+ * snapshot/list/derived hooks all update reactively after mutations.
+ *
+ * Consumers should not import from `@/lib/api/archive` directly; this module
+ * is the React-facing layer.
+ */
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
+import {
+	archiveApi,
+	type ArchiveCreateRequest,
+	type ArchiveEntry,
+} from "@/lib/api/archive";
 
-export type ArchiveMeta = {
-	reason: string;
-	notes?: string;
-	archivedAt: string;
-};
+/** Re-export of the backend entry type, used by Archive page + Detail page. */
+export type ArchiveMeta = ArchiveEntry;
 
-type State = {
-	/** Archived alert slugs, ordered by archive time desc */
-	order: string[];
-	meta: Record<string, ArchiveMeta>;
-};
+const ARCHIVE_QUERY_KEY = ["archive", "list"] as const;
 
-type Actions = {
-	archiveAlert: (slug: string, reason: string, notes?: string) => void;
-	restoreAlert: (slug: string) => void;
-};
+/** Underlying list query, shared by all read hooks. */
+function useArchiveListQuery() {
+	return useQuery({
+		queryKey: ARCHIVE_QUERY_KEY,
+		// 1000 covers every dev scenario; backend already paginates if needed.
+		queryFn: () => archiveApi.list({ limit: 1000 }),
+		staleTime: 30_000,
+	});
+}
 
-const useArchiveStoreRaw = create<State & Actions>()(
-	persist(
-		(set, get) => ({
-			order: [],
-			meta: {},
-			archiveAlert: (slug, reason, notes) => {
-				const s = get();
-				const archivedAt = s.meta[slug]?.archivedAt ?? new Date().toISOString();
-				set({
-					order: s.order.includes(slug) ? s.order : [slug, ...s.order],
-					meta: { ...s.meta, [slug]: { reason, notes, archivedAt } },
-				});
-			},
-			restoreAlert: (slug) => {
-				const s = get();
-				if (!s.order.includes(slug)) return;
-				const nextMeta = { ...s.meta };
-				delete nextMeta[slug];
-				set({
-					order: s.order.filter((x) => x !== slug),
-					meta: nextMeta,
-				});
-			},
-		}),
-		{
-			name: "tms-archive",
-			partialize: (s) => ({ order: s.order, meta: s.meta }),
+/** Array of archived tx_hashes — for client-side filtering of active lists. */
+export function useArchiveSnapshot(): string[] {
+	const { data } = useArchiveListQuery();
+	return useMemo(() => data?.data.map((e) => e.tx_hash) ?? [], [data]);
+}
+
+/** True when the given tx_hash is currently archived. */
+export function useIsArchived(txHash: string | undefined): boolean {
+	const { data } = useArchiveListQuery();
+	if (!txHash || !data) return false;
+	return data.data.some((e) => e.tx_hash === txHash);
+}
+
+/** Full archive entry for a tx_hash, or undefined if not archived. */
+export function useArchiveMeta(
+	txHash: string | undefined,
+): ArchiveEntry | undefined {
+	const { data } = useArchiveListQuery();
+	if (!txHash) return undefined;
+	return data?.data.find((e) => e.tx_hash === txHash);
+}
+
+/** All archived entries, newest first. */
+export function useArchivedAlerts(): ArchiveEntry[] {
+	const { data } = useArchiveListQuery();
+	return data?.data ?? [];
+}
+
+/**
+ * Mutation: archive an alert (mark as non-attack).
+ *
+ * Callers should supply the snapshot fields from the current alert view so
+ * the entry remains meaningful even after future re-scoring.
+ */
+export function useArchiveMutation() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (input: ArchiveCreateRequest) => archiveApi.create(input),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: ARCHIVE_QUERY_KEY });
 		},
-	),
-);
-
-export const archiveAlert = (slug: string, reason: string, notes?: string) =>
-	useArchiveStoreRaw.getState().archiveAlert(slug, reason, notes);
-
-export const restoreAlert = (slug: string) =>
-	useArchiveStoreRaw.getState().restoreAlert(slug);
-
-export function isArchived(slug: string): boolean {
-	return useArchiveStoreRaw.getState().order.includes(slug);
+	});
 }
 
-export function getArchiveMeta(slug: string): ArchiveMeta | undefined {
-	return useArchiveStoreRaw.getState().meta[slug];
-}
-
-/** Subscribe a component to any archive change. */
-export function useArchiveSnapshot() {
-	return useArchiveStoreRaw((s) => s.order);
-}
-
-/** Hook: alerts not yet archived, original order. */
-export function useActiveAlerts(): RiskAlert[] {
-	const order = useArchiveStoreRaw((s) => s.order);
-	return riskAlerts.filter((a) => !order.includes(a.slug));
-}
-
-/** Hook: archived alerts, most-recently-archived first. */
-export function useArchivedAlerts(): (RiskAlert & ArchiveMeta)[] {
-	const order = useArchiveStoreRaw((s) => s.order);
-	const meta = useArchiveStoreRaw((s) => s.meta);
-	const bySlug = new Map(riskAlerts.map((a) => [a.slug, a]));
-	return order
-		.map((slug) => {
-			const a = bySlug.get(slug);
-			const m = meta[slug];
-			return a && m ? { ...a, ...m } : null;
-		})
-		.filter((x): x is RiskAlert & ArchiveMeta => x !== null);
+/** Mutation: restore an archived alert. */
+export function useRestoreMutation() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (txHash: string) => archiveApi.remove(txHash),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: ARCHIVE_QUERY_KEY });
+		},
+	});
 }

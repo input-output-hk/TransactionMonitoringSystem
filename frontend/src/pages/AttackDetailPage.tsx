@@ -25,11 +25,10 @@ import {
 } from "@/components/ui/tooltip";
 import { useRiskAlert } from "@/lib/api/analysis";
 import {
-	archiveAlert,
-	getArchiveMeta,
-	isArchived,
-	restoreAlert,
-	useArchiveSnapshot,
+	useArchiveMeta,
+	useArchiveMutation,
+	useIsArchived,
+	useRestoreMutation,
 	type ArchiveMeta,
 } from "@/lib/archive-store";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
@@ -57,10 +56,8 @@ import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 	const navigate = useNavigate();
 	const { id } = useParams<{ id: string }>();
-	// Subscribe to snapshot so the alert + meta re-render on archive changes.
-	useArchiveSnapshot();
 	const { data: alert, isPending, isError } = useRiskAlert(id);
-	const archivedHere = id ? isArchived(id) : false;
+	const archivedHere = useIsArchived(id);
 
 	if (isPending) {
 		return (
@@ -127,7 +124,11 @@ function DetailCard({
 	const [restoreOpen, setRestoreOpen] = useState(false);
 	const meta = ATTACK_META[alert.attackType];
 	const Icon = ATTACK_ICON[alert.attackType];
-	const archiveMeta = archived ? getArchiveMeta(alert.slug) : undefined;
+	const archiveMeta = useArchiveMeta(archived ? alert.slug : undefined);
+	const { mutate: archiveAlert, isPending: archivePending } =
+		useArchiveMutation();
+	const { mutate: restoreAlert, isPending: restorePending } =
+		useRestoreMutation();
 
 	const analyzed = alert.date;
 
@@ -235,10 +236,24 @@ function DetailCard({
 				<DeleteDialog
 					open={deleteOpen}
 					onOpenChange={setDeleteOpen}
+					confirmDisabled={archivePending}
 					onConfirm={(reason, notes) => {
-						archiveAlert(alert.slug, reason, notes || undefined);
-						setDeleteOpen(false);
-						onArchived();
+						archiveAlert(
+							{
+								tx_hash: alert.slug,
+								reason,
+								notes,
+								attack_type_snapshot: alert.attackType,
+								severity_snapshot: alert.severity,
+								risk_score_snapshot: alert.riskScore,
+							},
+							{
+								onSuccess: () => {
+									setDeleteOpen(false);
+									onArchived();
+								},
+							},
+						);
 					}}
 				/>
 			)}
@@ -246,10 +261,14 @@ function DetailCard({
 				<RestoreDialog
 					open={restoreOpen}
 					onOpenChange={setRestoreOpen}
+					confirmDisabled={restorePending}
 					onConfirm={() => {
-						restoreAlert(alert.slug);
-						setRestoreOpen(false);
-						onRestored();
+						restoreAlert(alert.slug, {
+							onSuccess: () => {
+								setRestoreOpen(false);
+								onRestored();
+							},
+						});
 					}}
 				/>
 			)}
@@ -289,10 +308,12 @@ function RestoreDialog({
 	open,
 	onOpenChange,
 	onConfirm,
+	confirmDisabled,
 }: {
 	open: boolean;
 	onOpenChange: (v: boolean) => void;
 	onConfirm: () => void;
+	confirmDisabled?: boolean;
 }) {
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
@@ -308,9 +329,10 @@ function RestoreDialog({
 					</Button>
 					<Button
 						onClick={onConfirm}
+						disabled={confirmDisabled}
 						className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
 					>
-						Confirm
+						{confirmDisabled ? "Restoring…" : "Confirm"}
 					</Button>
 				</DialogFooter>
 			</DialogContent>
@@ -999,10 +1021,12 @@ function DeleteDialog({
 	open,
 	onOpenChange,
 	onConfirm,
+	confirmDisabled,
 }: {
 	open: boolean;
 	onOpenChange: (v: boolean) => void;
 	onConfirm: (reason: string, notes: string) => void;
+	confirmDisabled?: boolean;
 }) {
 	const [reason, setReason] = useState<string>("");
 	const [notes, setNotes] = useState<string>("");
@@ -1057,11 +1081,11 @@ function DeleteDialog({
 					</Button>
 					<Button
 						variant="default"
-						disabled={!canConfirm}
+						disabled={!canConfirm || confirmDisabled}
 						onClick={() => onConfirm(reason, notes)}
 						className="text-brand border-border hover:bg-accent hover:text-brand border bg-transparent"
 					>
-						Confirm
+						{confirmDisabled ? "Archiving…" : "Confirm"}
 					</Button>
 				</DialogFooter>
 			</DialogContent>
