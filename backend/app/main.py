@@ -7,8 +7,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List
 
+from pathlib import Path
+
 from fastapi import FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
 
@@ -196,8 +200,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register routers
-app.include_router(ui.router)
+# Register routers. When the built SPA is available at /app/frontend-dist
+# (produced by the Dockerfile's frontend-build stage), it owns "/" and the
+# legacy embedded UI router is skipped. Local dev without a build still
+# falls back to the embedded UI.
+FRONTEND_DIST = Path("/app/frontend-dist")
+_spa_present = FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file()
+
+if not _spa_present:
+    app.include_router(ui.router)
 app.include_router(websocket.router)
 app.include_router(transactions.router)
 app.include_router(entities.router)
@@ -232,3 +243,21 @@ async def health_detail(api_key: str = Security(verify_api_key)):
         result["ogmios"] = ogmios_status
         result["pipeline_state"] = ogmios_status["pipeline_state"]
     return result
+
+
+# SPA mount goes LAST so /api/*, /health, /ws, etc. still match their routes
+# first. Hashed asset filenames are served directly by StaticFiles; any other
+# path (client-side router URL like /attacks/123) falls through to index.html.
+if _spa_present:
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(FRONTEND_DIST / "assets")),
+        name="spa-assets",
+    )
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        candidate = FRONTEND_DIST / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")
