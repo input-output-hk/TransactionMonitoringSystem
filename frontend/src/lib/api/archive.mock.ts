@@ -1,25 +1,37 @@
 /**
  * In-browser mock of the archive API. Stores entries in localStorage under
- * `tms-archive-mock`. Used in dev when the real backend isn't available yet.
+ * `tms-archive-mock` keyed by `${network}:${tx_hash}`. Used in dev when the
+ * real backend isn't available yet.
  *
- * Implements the exact same {@link ArchiveApi} surface as the real client,
- * so callsites are unaffected by the swap. Conflict resolution behavior
- * mirrors the documented backend contract: last-write-wins on bulk upsert.
+ * Mirrors the real backend semantics:
+ *  - `(network, tx_hash)` is the composite identity.
+ *  - Bulk import is **skip-existing**: a local entry is never overwritten
+ *    by a duplicate from the imported batch.
+ *  - List join fields (`max_score`, `max_class`, `risk_band`, `analyzed_at`)
+ *    are always `null` in the mock since we have no `tx_class_scores` here.
  *
  * NOT used in production builds (see `archive.ts` for the switch).
  */
 import type {
 	ArchiveApi,
+	ArchiveBulkEntry,
 	ArchiveBulkResponse,
 	ArchiveCreateRequest,
 	ArchiveEntry,
+	ArchiveExportParams,
 	ArchiveListParams,
 	ArchiveListResponse,
+	Network,
 } from "./archive";
+import { getNetwork } from "./fetch";
 
 const STORAGE_KEY = "tms-archive-mock";
 
 type Store = { entries: Record<string, ArchiveEntry> };
+
+function keyOf(network: string, txHash: string): string {
+	return `${network}:${txHash}`;
+}
 
 function readStore(): Store {
 	if (typeof window === "undefined") return { entries: {} };
@@ -46,33 +58,38 @@ function tick<T>(value: T, ms = 50): Promise<T> {
 	return new Promise((r) => setTimeout(() => r(value), ms));
 }
 
-function toEntry(
-	input: ArchiveCreateRequest,
-	now: string = new Date().toISOString(),
+function makeEntry(
+	input: ArchiveCreateRequest | ArchiveBulkEntry,
+	source: string,
 ): ArchiveEntry {
+	const archivedAt =
+		("archived_at" in input && input.archived_at) || new Date().toISOString();
 	return {
+		network: input.network,
 		tx_hash: input.tx_hash,
-		archived_at: now,
-		reason: input.reason,
-		notes: input.notes ?? "",
-		archived_by: input.archived_by ?? "mock@local",
-		attack_type_snapshot: input.attack_type_snapshot,
-		severity_snapshot: input.severity_snapshot,
-		risk_score_snapshot: input.risk_score_snapshot,
+		note: input.note,
+		archived_by: input.archived_by,
+		archived_at: archivedAt,
+		source,
+		max_score: null,
+		max_class: null,
+		risk_band: null,
+		analyzed_at: null,
 	};
 }
 
 export const archiveApiMock: ArchiveApi = {
 	async list(params: ArchiveListParams): Promise<ArchiveListResponse> {
+		const network = params.network ?? getNetwork();
 		const { entries } = readStore();
-		const all = Object.values(entries);
+		const all = Object.values(entries).filter((e) => e.network === network);
 
-		const from = params.from ? new Date(params.from).getTime() : -Infinity;
-		const to = params.to ? new Date(params.to).getTime() : Infinity;
+		const fromMs = params.from ? new Date(params.from).getTime() : -Infinity;
+		const toMs = params.to ? new Date(params.to).getTime() : Infinity;
 		const filtered = all
 			.filter((e) => {
 				const t = new Date(e.archived_at).getTime();
-				return t >= from && t < to;
+				return t >= fromMs && t <= toMs;
 			})
 			.sort((a, b) => b.archived_at.localeCompare(a.archived_at));
 
@@ -87,58 +104,69 @@ export const archiveApiMock: ArchiveApi = {
 		});
 	},
 
-	async get(txHash: string): Promise<ArchiveEntry | null> {
+	async get(txHash: string, network?: Network): Promise<ArchiveEntry | null> {
 		const { entries } = readStore();
-		return tick(entries[txHash] ?? null);
+		return tick(entries[keyOf(network ?? getNetwork(), txHash)] ?? null);
 	},
 
-	async create(input: ArchiveCreateRequest): Promise<ArchiveEntry> {
+	async create(input: ArchiveCreateRequest): Promise<void> {
 		const store = readStore();
-		const existing = store.entries[input.tx_hash];
-		// Preserve original archived_at on update; only overwrite metadata
-		const archivedAt = existing?.archived_at ?? new Date().toISOString();
-		const entry = toEntry(input, archivedAt);
-		store.entries[input.tx_hash] = entry;
+		const key = keyOf(input.network, input.tx_hash);
+		// Skip on existing — matches backend's 409 (treated as no-op by client).
+		if (store.entries[key]) return tick(undefined);
+		store.entries[key] = makeEntry(input, "local");
 		writeStore(store);
-		return tick(entry);
+		return tick(undefined);
 	},
 
-	async remove(txHash: string): Promise<void> {
+	async remove(txHash: string, network?: Network): Promise<void> {
 		const store = readStore();
-		if (store.entries[txHash]) {
-			delete store.entries[txHash];
+		const key = keyOf(network ?? getNetwork(), txHash);
+		if (store.entries[key]) {
+			delete store.entries[key];
 			writeStore(store);
 		}
 		return tick(undefined);
 	},
 
-	async bulk(inputs: ArchiveCreateRequest[]): Promise<ArchiveBulkResponse> {
+	async bulk(
+		inputs: ArchiveBulkEntry[],
+		sourceLabel: string,
+	): Promise<ArchiveBulkResponse> {
 		const store = readStore();
 		let inserted = 0;
-		let updated = 0;
 		let skipped = 0;
-		const errors: { row: number; reason: string }[] = [];
+		const errors: string[] = [];
 
-		const now = new Date().toISOString();
+		const importSource = `import:${sourceLabel}`;
+		const seenInBatch = new Set<string>();
 		inputs.forEach((input, idx) => {
 			if (!input.tx_hash) {
 				skipped++;
-				errors.push({ row: idx, reason: "missing tx_hash" });
+				errors.push(`row ${idx}: missing tx_hash`);
 				return;
 			}
-			const existing = store.entries[input.tx_hash];
-			if (existing) {
-				// Last-write-wins: only overwrite if the incoming row is newer.
-				// Mock has no source timestamp on the incoming row → always wins.
-				store.entries[input.tx_hash] = toEntry(input, now);
-				updated++;
-			} else {
-				store.entries[input.tx_hash] = toEntry(input, now);
-				inserted++;
+			const key = keyOf(input.network, input.tx_hash);
+			// Skip-existing: never overwrite a local row, never re-insert a
+			// dup within the same batch.
+			if (store.entries[key] || seenInBatch.has(key)) {
+				skipped++;
+				return;
 			}
+			seenInBatch.add(key);
+			store.entries[key] = makeEntry(input, importSource);
+			inserted++;
 		});
 		writeStore(store);
 
-		return tick({ inserted, updated, skipped, errors });
+		return tick({ inserted, skipped, errors });
+	},
+
+	exportUrl(params: ArchiveExportParams): string {
+		const qs = new URLSearchParams();
+		qs.set("network", params.network ?? getNetwork());
+		if (params.from) qs.set("from", params.from);
+		if (params.to) qs.set("to", params.to);
+		return `/api/archive/export?${qs.toString()}`;
 	},
 };

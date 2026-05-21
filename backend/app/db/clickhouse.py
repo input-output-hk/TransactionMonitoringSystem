@@ -6,6 +6,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from typing import List, Optional, Dict, Any
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
@@ -994,11 +995,24 @@ async def get_class_scores_list_async(
     include_archived: bool = False,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
+    # Bind by keyword so a future reorder of the sync signature can't silently
+    # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, get_class_scores_list,
-        network, risk_band, attack_class, min_score, sort, limit, offset,
-        include_archived, analyzed_from, analyzed_to,
+        _ch_executor,
+        partial(
+            get_class_scores_list,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            sort=sort,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            limit=limit,
+            offset=offset,
+            include_archived=include_archived,
+        ),
     )
 
 
@@ -1009,11 +1023,15 @@ def count_class_scores(
     min_score: float = 0.0,
     analyzed_from: Optional[Any] = None,
     analyzed_to: Optional[Any] = None,
+    include_archived: bool = False,
 ) -> int:
     """Total number of class-score rows matching the given filters.
 
     Mirrors the WHERE clause of ``get_class_scores_list`` so the count is
     consistent with what would be returned (ignoring LIMIT/OFFSET).
+    include_archived: when False (default), exclude rows whose
+        ``(network, tx_hash)`` is present in ``archived_alerts`` — keeps the
+        count aligned with the rows actually surfaced by the list query.
     """
     _CLASS_COLS = (
         "token_dust", "large_value", "large_datum", "multiple_sat",
@@ -1039,6 +1057,12 @@ def count_class_scores(
     if analyzed_to is not None:
         conditions.append("analyzed_at < %(analyzed_to)s")
         params["analyzed_to"] = analyzed_to
+    if not include_archived:
+        conditions.append(
+            "(network, tx_hash) NOT IN ("
+            "SELECT network, tx_hash FROM archived_alerts FINAL"
+            ")"
+        )
 
     where = " AND ".join(conditions)
     rows = _get_client().execute(
@@ -1052,12 +1076,21 @@ async def count_class_scores_async(
     network: str, risk_band: Optional[str], attack_class: Optional[str],
     min_score: float,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
+    include_archived: bool = False,
 ) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, count_class_scores,
-        network, risk_band, attack_class, min_score,
-        analyzed_from, analyzed_to,
+        _ch_executor,
+        partial(
+            count_class_scores,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            include_archived=include_archived,
+        ),
     )
 
 

@@ -12,21 +12,19 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { archiveApi, type ArchiveCreateRequest } from "@/lib/api/archive";
+import { archiveApi, type ArchiveBulkEntry } from "@/lib/api/archive";
+import { getNetwork } from "@/lib/api/fetch";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/utils/bytes";
 import { isCsv } from "@/lib/utils/mime";
-import type { Severity } from "@/mocks/attacks";
 
 type Phase = "idle" | "parsing" | "parsed" | "confirming" | "uploading";
 
 type InvalidRow = { row: number; reason: string };
 type ParseResult = {
-	valid: ArchiveCreateRequest[];
+	valid: ArchiveBulkEntry[];
 	invalid: InvalidRow[];
 };
-
-const SEVERITIES = new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
 
 export function ImportAttackPage() {
 	const navigate = useNavigate();
@@ -95,10 +93,12 @@ export function ImportAttackPage() {
 		if (!parsed) return;
 		setPhase("uploading");
 		try {
-			const result = await archiveApi.bulk(parsed.valid);
+			// `source_label` tags the origin of imported rows on the backend
+			// (`source = "import:<label>"`). Constant for now — could be made
+			// configurable per-team if curation across many instances grows.
+			const result = await archiveApi.bulk(parsed.valid, "frontend-csv");
 			const summary = [
 				result.inserted > 0 && `${result.inserted} new`,
-				result.updated > 0 && `${result.updated} updated`,
 				result.skipped > 0 && `${result.skipped} skipped`,
 			]
 				.filter(Boolean)
@@ -117,8 +117,7 @@ export function ImportAttackPage() {
 
 	const validCount = parsed?.valid.length ?? 0;
 	const invalidCount = parsed?.invalid.length ?? 0;
-	const canUpload =
-		phase === "parsed" && validCount > 0 && !["uploading"].includes(phase);
+	const canUpload = phase === "parsed" && validCount > 0;
 
 	return (
 		<div className="border-border bg-card relative rounded-lg border-2 p-8 md:p-12">
@@ -211,7 +210,7 @@ export function ImportAttackPage() {
 				<Button
 					type="button"
 					variant="outline"
-					disabled={!canUpload || phase === "uploading"}
+					disabled={!canUpload}
 					onClick={onUploadClick}
 				>
 					{phase === "uploading" ? "Uploading…" : "Upload"}
@@ -250,32 +249,39 @@ export function ImportAttackPage() {
 	);
 }
 
-/* ---------- CSV → ArchiveCreateRequest ---------- */
+/* ---------- CSV → ArchiveBulkEntry ---------- */
 
+const VALID_NETWORKS = new Set(["mainnet", "preprod", "preview"]);
+
+/**
+ * Map one CSV row (header-driven) to an {@link ArchiveBulkEntry}. Columns
+ * match the backend export format: `network, tx_hash, note, archived_by,
+ * archived_at, source`. Permissive validation: only `tx_hash` is required;
+ * everything else gets a sensible default.
+ */
 function transformRows(rows: Record<string, string>[]): ParseResult {
-	const valid: ArchiveCreateRequest[] = [];
+	const valid: ArchiveBulkEntry[] = [];
 	const invalid: InvalidRow[] = [];
 
 	rows.forEach((r, i) => {
-		const lineNo = i + 2; // +1 for header row, +1 to be 1-based
+		const lineNo = i + 2; // +1 for header, +1 for 1-based
 		const tx_hash = (r.tx_hash ?? "").trim();
 		if (!tx_hash) {
 			invalid.push({ row: lineNo, reason: "missing tx_hash" });
 			return;
 		}
-		const severityRaw = (r.severity_snapshot ?? "").trim().toUpperCase();
-		const severity: Severity = SEVERITIES.has(severityRaw)
-			? (severityRaw as Severity)
-			: "LOW";
-		const riskScore = Number.parseFloat(r.risk_score_snapshot ?? "");
+		const rawNetwork = (r.network ?? "").trim().toLowerCase();
+		const network = (
+			VALID_NETWORKS.has(rawNetwork) ? rawNetwork : getNetwork()
+		) as ArchiveBulkEntry["network"];
+		const archivedAt = (r.archived_at ?? "").trim();
 		valid.push({
+			network,
 			tx_hash,
-			reason: (r.reason ?? "").trim() || "Other",
-			notes: (r.notes ?? "").trim() || undefined,
-			archived_by: (r.archived_by ?? "").trim() || undefined,
-			attack_type_snapshot: (r.attack_type_snapshot ?? "").trim(),
-			severity_snapshot: severity,
-			risk_score_snapshot: Number.isFinite(riskScore) ? riskScore : 0,
+			note: (r.note ?? "").trim() || "Imported",
+			archived_by: (r.archived_by ?? "").trim() || "Unknown",
+			archived_at: archivedAt || undefined,
+			source: (r.source ?? "").trim() || undefined,
 		});
 	});
 

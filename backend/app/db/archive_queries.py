@@ -216,6 +216,91 @@ async def archive_list_async(
     )
 
 
+def _archive_get_enriched(
+    network: str, tx_hash: str,
+) -> Optional[Dict[str, Any]]:
+    """Single archive row with the same detection-record LEFT JOIN as the list.
+
+    Returns ``None`` when no archive row exists for ``(network, tx_hash)``.
+    The detection-record fields (``max_score``, ``max_class``, ``risk_band``,
+    ``analyzed_at``) are ``None`` when the entry was imported from another
+    instance for a tx this one never observed locally.
+    """
+    rows = _get_client().execute(
+        """
+        SELECT a.network, a.tx_hash, a.note, a.archived_by,
+               a.archived_at, a.source,
+               s.max_score, s.max_class, s.risk_band, s.analyzed_at,
+               (s.tx_hash != '') AS has_score
+        FROM archived_alerts AS a FINAL
+        LEFT JOIN (
+            SELECT tx_hash, network, max_score, max_class, risk_band, analyzed_at
+            FROM tx_class_scores FINAL
+        ) AS s
+            ON s.tx_hash = a.tx_hash AND s.network = a.network
+        WHERE a.network = %(network)s AND a.tx_hash = %(tx_hash)s
+        LIMIT 1
+        """,
+        {"network": network, "tx_hash": tx_hash},
+    )
+    if not rows:
+        return None
+    d = dict(zip(_LIST_COLUMNS, rows[0]))
+    if not d.pop("_has_score"):
+        d["max_score"] = None
+        d["max_class"] = None
+        d["risk_band"] = None
+        d["analyzed_at"] = None
+    return d
+
+
+async def archive_get_enriched_async(
+    network: str, tx_hash: str,
+) -> Optional[Dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, _archive_get_enriched, network, tx_hash,
+    )
+
+
+def _archive_count(
+    network: str,
+    date_from: Optional[datetime],
+    date_to: Optional[datetime],
+) -> int:
+    """Total archive rows matching the network + date-range filters.
+
+    Mirrors the WHERE clause of :func:`_archive_list` (without the JOIN with
+    ``tx_class_scores`` since we only need the row count). Used to power
+    paginated list responses without an extra query per page.
+    """
+    conditions = ["network = %(network)s"]
+    params: Dict[str, Any] = {"network": network}
+    if date_from is not None:
+        conditions.append("archived_at >= %(date_from)s")
+        params["date_from"] = date_from
+    if date_to is not None:
+        conditions.append("archived_at <= %(date_to)s")
+        params["date_to"] = date_to
+    where = " AND ".join(conditions)
+    rows = _get_client().execute(
+        f"SELECT count() FROM archived_alerts FINAL WHERE {where}",
+        params,
+    )
+    return int(rows[0][0]) if rows else 0
+
+
+async def archive_count_async(
+    network: str,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> int:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, _archive_count, network, date_from, date_to,
+    )
+
+
 def _existing_pairs(pairs: List[Tuple[str, str]]) -> set:
     """Return the subset of (network, tx_hash) already archived."""
     if not pairs:

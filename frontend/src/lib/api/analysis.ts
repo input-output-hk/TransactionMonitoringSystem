@@ -7,6 +7,7 @@ import {
 } from "@/mocks/attacks";
 import { formatAnalyzedAt } from "@/lib/utils/dates";
 import { shortHash } from "@/lib/utils/strings";
+import { fetchWithAuth, getNetwork } from "./fetch";
 
 /* ---------- Backend types (mirrors OpenAPI) ---------- */
 
@@ -111,6 +112,7 @@ function buildResultsQuery(
 	},
 ): URLSearchParams {
 	const qs = new URLSearchParams();
+	qs.set("network", getNetwork());
 	qs.set("limit", String(p.limit));
 	qs.set("offset", String(p.offset));
 	qs.set("sort", p.sort ?? "date");
@@ -133,7 +135,7 @@ async function fetchRiskAlertsPage(
 		limit: p.pageSize,
 		offset: p.page * p.pageSize,
 	});
-	const res = await fetch(`/api/analysis/results?${qs.toString()}`);
+	const res = await fetchWithAuth(`/api/analysis/results?${qs.toString()}`);
 	if (!res.ok) {
 		throw new Error(`Analysis results request failed: ${res.status}`);
 	}
@@ -218,7 +220,7 @@ export async function fetchAlertsForExport(
 
 	while (offset < total && all.length < hardCap) {
 		const qs = buildResultsQuery({ ...params, limit: pageSize, offset });
-		const res = await fetch(`/api/analysis/results?${qs.toString()}`);
+		const res = await fetchWithAuth(`/api/analysis/results?${qs.toString()}`);
 		if (!res.ok) {
 			throw new Error(`Export fetch failed: ${res.status}`);
 		}
@@ -240,7 +242,7 @@ export async function fetchAlertsForExport(
 /* ---------- Hook ---------- */
 
 async function fetchSingleResult(txHash: string): Promise<RiskAlert | null> {
-	const res = await fetch(
+	const res = await fetchWithAuth(
 		`/api/analysis/results/${encodeURIComponent(txHash)}`,
 	);
 	if (res.status === 404) return null;

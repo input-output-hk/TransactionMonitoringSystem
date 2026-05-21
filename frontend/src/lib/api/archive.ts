@@ -1,18 +1,24 @@
 /**
- * Public entry-point for the archive API.
+ * Public entry-point for the archive API. Mirrors the backend contract in
+ * `backend/app/api/archive.py` + `backend/app/models/archive.py`.
  *
- * Re-exports a single object `archiveApi` implementing {@link ArchiveApi}.
- * The concrete implementation is chosen at module-load time:
+ * Two implementations are wired behind the same {@link ArchiveApi} surface:
  *
- *  - **Production**: always the real HTTP client against `/api/archive`.
- *  - **Dev with `VITE_USE_REAL_ARCHIVE_API=true`**: real HTTP client.
- *  - **Dev otherwise (default)**: a localStorage-backed mock shim, so the
- *    UI works in isolation while the backend endpoints are being built.
+ *  - **Default everywhere**: real HTTP client against `/api/archive/*`
+ *    ({@link archive.client.ts}).
+ *  - **Dev with `VITE_USE_MOCK_ARCHIVE_API=true`**: localStorage-backed mock
+ *    shim ({@link archive.mock.ts}). Opt-in only — used for offline work
+ *    when the backend isn't reachable. Production builds ignore the flag
+ *    and always use the real client.
  *
- * Consumers (React Query hooks, mutations, etc.) should only ever depend on
- * `ArchiveApi` — they don't need to know which implementation is active.
- *
- * See `archive.README.md` for the HTTP contract the backend must honor.
+ * Backend specifics:
+ *  - Archive identity is `(network, tx_hash)` — every call carries `network`.
+ *  - Notes live in a single free-text `note` field. The Delete dialog in the
+ *    Detail page composes its "reason" + free notes into this one string.
+ *  - Bulk import is **skip-existing**: existing rows are never overwritten
+ *    (response shape has `inserted`/`skipped`, no `updated`).
+ *  - Export CSV is **server-side**: callers get a URL via {@link ArchiveApi.exportUrl}
+ *    and let the browser download it — there's no client paginated fetch.
  */
 import { archiveApiClient } from "./archive.client";
 import { archiveApiMock } from "./archive.mock";
@@ -21,46 +27,49 @@ import type { Severity } from "@/mocks/attacks";
 
 /* ---------- Wire format ---------- */
 
-/** Full archive row as returned by the backend (or the mock shim). */
+/** Cardano network identifier. Same enum as the backend `NetworkType`. */
+export type Network = "mainnet" | "preprod" | "preview";
+
+/** Backend response row for `GET /api/archive`. */
 export type ArchiveEntry = {
+	network: Network;
 	tx_hash: string;
-	/** ISO datetime, set by the server when the entry is created/upserted. */
-	archived_at: string;
-	/** Free-text label from `ARCHIVE_REASONS` (or `"Other"`). */
-	reason: string;
-	/** Free-text notes from the analyst. Empty string when absent. */
-	notes: string;
-	/** Email/username of the user that archived. */
+	/** Free-text "reason + notes" composed by the UI on archive. */
+	note: string;
 	archived_by: string;
-	/**
-	 * Snapshot of the alert at archive time. Kept so the entry stays
-	 * meaningful even if the backend later re-scores the transaction
-	 * into a different class.
-	 */
-	attack_type_snapshot: string;
-	severity_snapshot: Severity;
-	risk_score_snapshot: number;
+	/** ISO datetime, set by the server. */
+	archived_at: string;
+	/** Origin tag: `"local"` or `"import:<source_label>"`. */
+	source: string;
+	/* ---- joined from tx_class_scores (null when archive came from CSV import
+	   for a tx this instance has never observed locally) ---- */
+	max_score: number | null;
+	max_class: string | null;
+	risk_band: string | null;
+	analyzed_at: string | null;
 };
 
-/** Payload accepted by `POST /api/archive` and `POST /api/archive/bulk`. */
+/** Payload for `POST /api/archive`. */
 export type ArchiveCreateRequest = {
+	network: Network;
 	tx_hash: string;
-	reason: string;
-	notes?: string;
-	/**
-	 * Optional from the client; backend may overwrite from auth context.
-	 * Today (mock auth) we populate it with the current user's email.
-	 */
-	archived_by?: string;
-	attack_type_snapshot: string;
-	severity_snapshot: Severity;
-	risk_score_snapshot: number;
+	note: string;
+	archived_by: string;
+};
+
+/** Entry inside a bulk-import body. */
+export type ArchiveBulkEntry = ArchiveCreateRequest & {
+	/** Original archive timestamp from the source instance, if known. */
+	archived_at?: string;
+	/** Original `source` tag from the exported CSV (ignored, kept for round-trip). */
+	source?: string;
 };
 
 export type ArchiveListParams = {
+	network?: Network;
 	/** Inclusive lower bound on `archived_at` (ISO datetime). */
 	from?: string;
-	/** Exclusive upper bound on `archived_at` (ISO datetime). */
+	/** Inclusive upper bound on `archived_at` (ISO datetime). */
 	to?: string;
 	limit?: number;
 	offset?: number;
@@ -74,87 +83,63 @@ export type ArchiveListResponse = {
 
 export type ArchiveBulkResponse = {
 	inserted: number;
-	updated: number;
 	skipped: number;
-	errors: { row: number; reason: string }[];
+	errors: string[];
+};
+
+export type ArchiveExportParams = {
+	network?: Network;
+	from?: string;
+	to?: string;
 };
 
 /* ---------- Public contract ---------- */
 
 export interface ArchiveApi {
-	/** Paginated list, filtered by `archived_at` range when provided. */
+	/** Paginated list. Date range bounds are inclusive on both ends. */
 	list(params: ArchiveListParams): Promise<ArchiveListResponse>;
 
 	/** Single entry by tx_hash, `null` if not archived. */
-	get(txHash: string): Promise<ArchiveEntry | null>;
+	get(txHash: string, network?: Network): Promise<ArchiveEntry | null>;
 
-	/** Archive (upsert) one alert. */
-	create(entry: ArchiveCreateRequest): Promise<ArchiveEntry>;
+	/** Archive one alert. Backend returns 409 on duplicate `(network, tx_hash)`. */
+	create(entry: ArchiveCreateRequest): Promise<void>;
 
-	/** Restore (delete archive entry). 204 / 404 mapped to `void`. */
-	remove(txHash: string): Promise<void>;
+	/** Restore (hard-delete) the archive row. 204/404 both map to `void`. */
+	remove(txHash: string, network?: Network): Promise<void>;
 
-	/** Bulk upsert — used by the Import CSV flow. */
-	bulk(entries: ArchiveCreateRequest[]): Promise<ArchiveBulkResponse>;
+	/**
+	 * Bulk-upsert with **skip-existing** semantics (never overwrites).
+	 * `sourceLabel` tags the origin instance on inserted rows.
+	 */
+	bulk(
+		entries: ArchiveBulkEntry[],
+		sourceLabel: string,
+	): Promise<ArchiveBulkResponse>;
+
+	/**
+	 * Build the CSV-download URL for the current params. UI typically just
+	 * navigates to this URL or sets it on an `<a download>` so the browser
+	 * streams the file — there's no client paginated fetch.
+	 */
+	exportUrl(params: ArchiveExportParams): string;
 }
 
 /* ---------- Implementation selection ---------- */
 
-const useReal =
-	import.meta.env.PROD || import.meta.env.VITE_USE_REAL_ARCHIVE_API === "true";
+// Real backend by default. The mock shim is opt-in via env var and only
+// honored in dev builds — production always talks to the real backend so a
+// stray env var can't silently switch a deployment to localStorage.
+const useMock =
+	import.meta.env.DEV &&
+	import.meta.env.VITE_USE_MOCK_ARCHIVE_API === "true";
 
-/**
- * The active archive API. Same shape regardless of whether it talks to the
- * real backend or the localStorage mock.
- */
-export const archiveApi: ArchiveApi = useReal
-	? archiveApiClient
-	: archiveApiMock;
+export const archiveApi: ArchiveApi = useMock
+	? archiveApiMock
+	: archiveApiClient;
 
-export const isUsingMockArchive = !useReal;
+export const isUsingMockArchive = useMock;
 
-/* ---------- Export helper ---------- */
+/* ---------- Type re-exports for downstream consumers ---------- */
 
-export type ArchiveExportParams = Omit<ArchiveListParams, "limit" | "offset">;
-
-/**
- * Fetch all archive entries matching `params` by paginating through the API.
- * Mirrors {@link fetchAlertsForExport} from `analysis.ts`.
- *
- * - Uses `limit=1000` per request (same cap the backend honors).
- * - Stops at `hardCap` entries (default 50k) to avoid runaway exports.
- * - `onProgress(fetched, total)` is called after each page so callers can
- *   show a progress UI.
- */
-export async function fetchArchiveForExport(
-	params: ArchiveExportParams,
-	options?: {
-		hardCap?: number;
-		onProgress?: (fetched: number, total: number) => void;
-	},
-): Promise<ArchiveEntry[]> {
-	const hardCap = options?.hardCap ?? 50_000;
-	const pageSize = 1000;
-	const all: ArchiveEntry[] = [];
-	let offset = 0;
-	let total = Infinity;
-
-	while (offset < total && all.length < hardCap) {
-		const res = await archiveApi.list({
-			...params,
-			limit: pageSize,
-			offset,
-		});
-		total = res.total;
-		for (const e of res.data) {
-			if (all.length >= hardCap) break;
-			all.push(e);
-		}
-		options?.onProgress?.(all.length, total);
-		// Safety: backend ran out of rows before reported total.
-		if (res.data.length < pageSize) break;
-		offset += pageSize;
-	}
-
-	return all;
-}
+export type { Severity };
