@@ -44,7 +44,10 @@ async function fetchTransactionStats(): Promise<TransactionStats> {
 	return (await res.json()) as TransactionStats;
 }
 
-const POLL_MS = 5_000;
+// Stats are aggregates that change slowly relative to the analysis engine
+// cadence (30s). Polling them every 5s was 4x the engine's update rate, with
+// no benefit. 15s keeps the UI fresh without burning rate-limit budget.
+const POLL_MS = 15_000;
 
 export function useAnalysisStats() {
 	return useQuery({
