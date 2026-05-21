@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { fetchWithAuth, getNetwork } from "./fetch";
 
 export type AnalysisStats = {
 	total: number;
@@ -28,13 +29,17 @@ export type TransactionStats = {
 };
 
 async function fetchAnalysisStats(): Promise<AnalysisStats> {
-	const res = await fetch("/api/analysis/stats");
+	const res = await fetchWithAuth(
+		`/api/analysis/stats?network=${getNetwork()}`,
+	);
 	if (!res.ok) throw new Error(`Analysis stats failed: ${res.status}`);
 	return (await res.json()) as AnalysisStats;
 }
 
 async function fetchTransactionStats(): Promise<TransactionStats> {
-	const res = await fetch("/api/transactions/stats/summary");
+	const res = await fetchWithAuth(
+		`/api/transactions/stats/summary?network=${getNetwork()}`,
+	);
 	if (!res.ok) throw new Error(`Transaction stats failed: ${res.status}`);
 	return (await res.json()) as TransactionStats;
 }

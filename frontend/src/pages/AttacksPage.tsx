@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
 	AlertTriangle,
@@ -35,7 +35,6 @@ import {
 	type AttackType,
 	type Severity,
 } from "@/mocks/attacks";
-import { useArchiveSnapshot } from "@/lib/archive-store";
 import { useRiskAlerts } from "@/lib/api/analysis";
 import { useAnalysisStats, useTransactionStats } from "@/lib/api/stats";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
@@ -44,7 +43,6 @@ import { PLACEHOLDER_KPI, computeTxPerMin } from "@/lib/utils/numbers";
 
 export function AttacksPage() {
 	const navigate = useNavigate();
-	const archivedSlugs = useArchiveSnapshot();
 	const [attackFilter, setAttackFilter] = useState<string>("all");
 	const [severityFilter, setSeverityFilter] = useState<string>("all");
 	const [pageSize, setPageSize] = useState(10);
@@ -60,10 +58,9 @@ export function AttacksPage() {
 	});
 
 	const total = data?.total ?? 0;
-	const visibleRows = useMemo(() => {
-		const archivedSet = new Set(archivedSlugs);
-		return (data?.rows ?? []).filter((a) => !archivedSet.has(a.slug));
-	}, [data, archivedSlugs]);
+	// Backend already anti-joins `archived_alerts` from `/api/analysis/results`,
+	// so the rows we get are guaranteed not archived. No client filter needed.
+	const visibleRows = data?.rows ?? [];
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);

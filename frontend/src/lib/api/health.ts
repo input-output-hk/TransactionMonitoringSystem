@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { fetchWithAuth } from "./fetch";
 
 export type HealthState = "OK" | "DEGRADED" | "DOWN" | string;
 
@@ -24,7 +25,7 @@ export type HealthDetail = {
 };
 
 async function fetchHealthDetail(): Promise<HealthDetail> {
-	const res = await fetch("/health/detail");
+	const res = await fetchWithAuth("/health/detail");
 	if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
 	return (await res.json()) as HealthDetail;
 }

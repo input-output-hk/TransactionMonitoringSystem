@@ -24,6 +24,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useRiskAlert } from "@/lib/api/analysis";
+import { getNetwork } from "@/lib/api/fetch";
 import {
 	useArchiveMeta,
 	useArchiveMutation,
@@ -31,6 +32,7 @@ import {
 	useRestoreMutation,
 	type ArchiveMeta,
 } from "@/lib/archive-store";
+import { useAuth } from "@/lib/auth";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 import type { AttackType, RiskAlert } from "@/mocks/attacks";
@@ -59,7 +61,10 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 	const { data: alert, isPending, isError } = useRiskAlert(id);
 	const archivedHere = useIsArchived(id);
 
-	if (isPending) {
+	// `archivedHere === undefined` means the archive lookup is still in flight.
+	// We can't decide the redirect until we know, otherwise a deep link to
+	// `/archive/:id` would briefly bounce to `/attacks/:id` and back.
+	if (isPending || archivedHere === undefined) {
 		return (
 			<div className="border-border bg-card text-muted-foreground rounded-lg border-2 p-8 text-center text-sm">
 				Loading attack…
@@ -129,6 +134,7 @@ function DetailCard({
 		useArchiveMutation();
 	const { mutate: restoreAlert, isPending: restorePending } =
 		useRestoreMutation();
+	const { user } = useAuth();
 
 	const analyzed = alert.date;
 
@@ -238,14 +244,17 @@ function DetailCard({
 					onOpenChange={setDeleteOpen}
 					confirmDisabled={archivePending}
 					onConfirm={(reason, notes) => {
+						// Backend has a single free-text `note` field. The UI keeps the
+						// "Reason" dropdown + "Notes" textarea separate (per Figma) and
+						// we collapse them on submit. Empty notes degrade to just the
+						// reason; empty reason shouldn't happen (dropdown is required).
+						const note = notes.trim() ? `${reason}: ${notes.trim()}` : reason;
 						archiveAlert(
 							{
+								network: getNetwork(),
 								tx_hash: alert.slug,
-								reason,
-								notes,
-								attack_type_snapshot: alert.attackType,
-								severity_snapshot: alert.severity,
-								risk_score_snapshot: alert.riskScore,
+								note,
+								archived_by: user?.email ?? "Unknown",
 							},
 							{
 								onSuccess: () => {
@@ -263,12 +272,15 @@ function DetailCard({
 					onOpenChange={setRestoreOpen}
 					confirmDisabled={restorePending}
 					onConfirm={() => {
-						restoreAlert(alert.slug, {
-							onSuccess: () => {
-								setRestoreOpen(false);
-								onRestored();
+						restoreAlert(
+							{ txHash: alert.slug },
+							{
+								onSuccess: () => {
+									setRestoreOpen(false);
+									onRestored();
+								},
 							},
-						});
+						);
 					}}
 				/>
 			)}
@@ -277,7 +289,13 @@ function DetailCard({
 }
 
 function ArchiveReasonRow({ meta }: { meta: ArchiveMeta }) {
-	const summary = meta.notes ? `${meta.reason}. ${meta.notes}` : meta.reason;
+	// Backend stores a single `note` field. The UI composes it as
+	// "{Reason}: {free-text notes}" on archive — split here so the tooltip
+	// renders the same reason / notes structure that was entered.
+	const splitIdx = meta.note.indexOf(": ");
+	const reason = splitIdx > 0 ? meta.note.slice(0, splitIdx) : meta.note;
+	const notes = splitIdx > 0 ? meta.note.slice(splitIdx + 2) : "";
+
 	return (
 		<div className="flex items-baseline gap-6 px-5 py-3">
 			<span className="text-brand text-sm font-semibold">
@@ -286,17 +304,23 @@ function ArchiveReasonRow({ meta }: { meta: ArchiveMeta }) {
 			<Tooltip>
 				<TooltipTrigger asChild>
 					<span className="text-brand min-w-0 flex-1 cursor-help truncate text-right text-sm">
-						{summary}
+						{meta.note}
 					</span>
 				</TooltipTrigger>
 				<TooltipContent side="bottom" align="end" className="max-w-md">
 					<div className="space-y-1">
-						<div className="text-foreground font-semibold">{meta.reason}</div>
-						{meta.notes && (
+						<div className="text-foreground font-semibold">{reason}</div>
+						{notes && (
 							<div className="text-muted-foreground whitespace-pre-line">
-								{meta.notes}
+								{notes}
 							</div>
 						)}
+						<div className="text-muted-foreground pt-1 text-[11px]">
+							by {meta.archived_by}
+							{meta.source && meta.source !== "local"
+								? ` · ${meta.source}`
+								: ""}
+						</div>
 					</div>
 				</TooltipContent>
 			</Tooltip>

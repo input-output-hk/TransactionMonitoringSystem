@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
 	AlertCircle,
@@ -40,9 +40,7 @@ import {
 } from "@/components/ui/table";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
 import { fetchAlertsForExport, useRiskAlerts } from "@/lib/api/analysis";
-import { useArchiveSnapshot } from "@/lib/archive-store";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
-import { cn } from "@/lib/utils";
 import { downloadCsv } from "@/lib/utils/csv";
 import {
 	defaultEnd,
@@ -54,7 +52,6 @@ import { toast } from "sonner";
 
 export function ReportsPage() {
 	const navigate = useNavigate();
-	const archivedSlugs = useArchiveSnapshot();
 	const [startDate, setStartDate] = useState(defaultStart());
 	const [endDate, setEndDate] = useState(defaultEnd());
 	const [attackFilter, setAttackFilter] = useState<string>("all");
@@ -82,10 +79,8 @@ export function ReportsPage() {
 	);
 
 	const total = data?.total ?? 0;
-	const visibleRows = useMemo(() => {
-		const archivedSet = new Set(archivedSlugs);
-		return (data?.rows ?? []).filter((a) => !archivedSet.has(a.slug));
-	}, [data, archivedSlugs]);
+	// Backend already anti-joins `archived_alerts` from `/api/analysis/results`.
+	const visibleRows = data?.rows ?? [];
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);

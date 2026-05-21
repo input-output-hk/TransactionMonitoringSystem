@@ -1,26 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-	AlertCircle,
-	ArrowUp,
-	ChevronLeft,
-	ChevronRight,
-	ChevronsLeft,
-	ChevronsRight,
-	Copy,
-	ExternalLink,
-} from "lucide-react";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import { DateField } from "@/components/ui/date-field";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
 import { PageBtn } from "@/components/ui/page-button";
 import {
 	Select,
@@ -37,10 +16,10 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { fetchArchiveForExport, type ArchiveEntry } from "@/lib/api/archive";
+import { archiveApi } from "@/lib/api/archive";
 import { useArchivedAlerts } from "@/lib/archive-store";
 import { ATTACK_ICON } from "@/lib/attack-display";
-import { downloadCsv } from "@/lib/utils/csv";
+import { cn } from "@/lib/utils";
 import {
 	formatAnalyzedAt,
 	nDaysAgoISODate,
@@ -50,37 +29,40 @@ import {
 } from "@/lib/utils/dates";
 import { shortHash } from "@/lib/utils/strings";
 import type { AttackType } from "@/mocks/attacks";
-
-/** Confirm-over-N threshold for the export dialog, matches Reports. */
-const EXPORT_CONFIRM_THRESHOLD = 1000;
+import {
+	AlertCircle,
+	ArrowUp,
+	ChevronLeft,
+	ChevronRight,
+	ChevronsLeft,
+	ChevronsRight,
+	Copy,
+	ExternalLink,
+} from "lucide-react";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 export function ArchivePage() {
 	const navigate = useNavigate();
-	const allArchived = useArchivedAlerts();
 	const [startDate, setStartDate] = useState(() => nDaysAgoISODate(60));
 	const [endDate, setEndDate] = useState(todayISODate);
-	const [exporting, setExporting] = useState(false);
-	const [confirmExportOpen, setConfirmExportOpen] = useState(false);
 	const [pageSize, setPageSize] = useState(10);
 	const [page, setPage] = useState(0);
 
-	// Visible list = archived entries within the selected date window.
-	const visible = useMemo(() => {
-		const fromMs = startOfDayMs(startDate);
-		const toMs = nextDayMs(endDate);
-		return allArchived.filter((e) => {
-			const t = new Date(e.archived_at).getTime();
-			return (fromMs == null || t >= fromMs) && (toMs == null || t < toMs);
-		});
-	}, [allArchived, startDate, endDate]);
+	const {
+		data: rows,
+		total,
+		isPending,
+		isError,
+	} = useArchivedAlerts({
+		from: startOfDayISO(startDate),
+		to: nextDayISO(endDate),
+		limit: pageSize,
+		offset: page * pageSize,
+	});
 
-	const total = visible.length;
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
-	const pageRows = useMemo(
-		() => visible.slice(currentPage * pageSize, (currentPage + 1) * pageSize),
-		[visible, currentPage, pageSize],
-	);
 
 	/** Reset page index whenever a filter changes — wraps a date setter. */
 	const onDateChange = (setter: (v: string) => void) => (v: string) => {
@@ -88,46 +70,12 @@ export function ArchivePage() {
 		setter(v);
 	};
 
-	const onExportClick = () => {
-		if (exporting || visible.length === 0) return;
-		if (visible.length > EXPORT_CONFIRM_THRESHOLD) {
-			setConfirmExportOpen(true);
-		} else {
-			void runExport();
-		}
-	};
-
-	const runExport = async () => {
-		setConfirmExportOpen(false);
-		setExporting(true);
-		const dismiss = toast.loading("Preparing archive export…");
-		try {
-			const rows = await fetchArchiveForExport(
-				{
-					from: startOfDayISO(startDate),
-					to: nextDayISO(endDate),
-				},
-				{
-					onProgress: (fetched, total) => {
-						toast.loading(
-							`Preparing archive export… ${fetched.toLocaleString()} / ${total.toLocaleString()}`,
-							{ id: dismiss },
-						);
-					},
-				},
-			);
-			const stamp = todayISODate();
-			downloadCsv(rows.map(toCsvRow), `archived-alerts-${stamp}.csv`);
-			toast.success(`Exported ${rows.length.toLocaleString()} entries.`, {
-				id: dismiss,
-			});
-		} catch (e) {
-			console.error(e);
-			toast.error("Export failed. Please try again.", { id: dismiss });
-		} finally {
-			setExporting(false);
-		}
-	};
+	// Server-streamed CSV export. Setting the anchor's `href` + clicking lets
+	// the browser handle the download without us materializing the file in JS.
+	const exportHref = archiveApi.exportUrl({
+		from: startOfDayISO(startDate),
+		to: nextDayISO(endDate),
+	});
 
 	return (
 		<div className="flex flex-col gap-4">
@@ -146,16 +94,17 @@ export function ArchivePage() {
 					onChange={onDateChange(setEndDate)}
 				/>
 				<div className="ml-auto pt-[22px]">
-					<Button
-						variant="outline"
-						size="lg"
-						className="h-11 gap-2"
-						onClick={onExportClick}
-						disabled={exporting || visible.length === 0}
+					<a
+						href={exportHref}
+						download
+						className={cn(
+							buttonVariants({ variant: "outline", size: "lg" }),
+							"h-11 gap-2",
+						)}
 					>
-						{exporting ? "Exporting…" : "Export"}
+						Export
 						<ExternalLink className="h-4 w-4" />
-					</Button>
+					</a>
 				</div>
 			</div>
 
@@ -176,11 +125,14 @@ export function ArchivePage() {
 						</TableRow>
 					</TableHeader>
 					<TableBody>
-						{pageRows.map((a) => {
+						{rows.map((a) => {
 							const Icon =
-								ATTACK_ICON[a.attack_type_snapshot as AttackType] ??
+								(a.max_class && ATTACK_ICON[snakeToAttackType(a.max_class)]) ||
 								AlertCircle;
 							const displayId = shortHash(a.tx_hash);
+							const displayClass = a.max_class
+								? snakeToAttackType(a.max_class)
+								: "—";
 							return (
 								<TableRow
 									key={a.tx_hash}
@@ -209,22 +161,42 @@ export function ArchivePage() {
 									<TableCell>
 										<div className="text-foreground flex items-center gap-2">
 											<Icon className="text-muted-foreground h-4 w-4" />
-											{a.attack_type_snapshot}
+											{displayClass}
 										</div>
 									</TableCell>
-									<TableCell className="text-foreground">{a.reason}</TableCell>
+									<TableCell className="text-foreground">{a.note}</TableCell>
 								</TableRow>
 							);
 						})}
-						{pageRows.length === 0 && (
+						{!isPending && !isError && rows.length === 0 && (
 							<TableRow>
 								<TableCell
 									colSpan={4}
 									className="text-muted-foreground py-10 text-center"
 								>
-									{allArchived.length === 0
+									{total === 0
 										? "No archived attacks yet."
 										: "No archived attacks in the selected date range."}
+								</TableCell>
+							</TableRow>
+						)}
+						{isPending && (
+							<TableRow>
+								<TableCell
+									colSpan={4}
+									className="text-muted-foreground py-10 text-center"
+								>
+									Loading…
+								</TableCell>
+							</TableRow>
+						)}
+						{isError && (
+							<TableRow>
+								<TableCell
+									colSpan={4}
+									className="text-status-offline py-10 text-center"
+								>
+									Failed to load archive.
 								</TableCell>
 							</TableRow>
 						)}
@@ -300,63 +272,17 @@ export function ArchivePage() {
 					</button>
 				</div>
 			)}
-
-			<Dialog open={confirmExportOpen} onOpenChange={setConfirmExportOpen}>
-				<DialogContent showClose={false} className="max-w-sm">
-					<DialogHeader>
-						<DialogTitle>
-							Export {visible.length.toLocaleString()} entries?
-						</DialogTitle>
-						<DialogDescription>
-							This is more than {EXPORT_CONFIRM_THRESHOLD.toLocaleString()}{" "}
-							entries. The download may take a moment. Narrow the date range
-							first if you don't need the full set.
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button
-							variant="outline"
-							onClick={() => setConfirmExportOpen(false)}
-						>
-							Cancel
-						</Button>
-						<Button
-							onClick={runExport}
-							className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
-						>
-							Confirm
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
 		</div>
 	);
 }
 
 /* ---------- helpers ---------- */
 
-function startOfDayMs(date: string): number | null {
-	if (!date) return null;
-	return new Date(`${date}T00:00:00`).getTime();
-}
-
-function nextDayMs(date: string): number | null {
-	if (!date) return null;
-	const d = new Date(`${date}T00:00:00`);
-	d.setDate(d.getDate() + 1);
-	return d.getTime();
-}
-
-/** Flatten an ArchiveEntry into a CSV-friendly object. Column order matters. */
-function toCsvRow(e: ArchiveEntry): Record<string, string | number> {
-	return {
-		tx_hash: e.tx_hash,
-		archived_at: e.archived_at,
-		reason: e.reason,
-		notes: e.notes,
-		archived_by: e.archived_by,
-		attack_type_snapshot: e.attack_type_snapshot,
-		severity_snapshot: e.severity_snapshot,
-		risk_score_snapshot: e.risk_score_snapshot,
-	};
+/** Backend stores attack class in snake_case (`large_datum`); UI uses Title
+ *  Case (`Large Datum`) for both display and the ATTACK_ICON map. */
+function snakeToAttackType(snake: string): AttackType {
+	return snake
+		.split("_")
+		.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+		.join(" ") as AttackType;
 }
