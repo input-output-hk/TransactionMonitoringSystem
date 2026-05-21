@@ -20,6 +20,7 @@ import {
 import { useMemo } from "react";
 import {
 	archiveApi,
+	type ArchiveBulkEntry,
 	type ArchiveCreateRequest,
 	type ArchiveEntry,
 	type ArchiveListParams,
@@ -156,6 +157,32 @@ export function useRestoreMutation() {
 	return useMutation({
 		mutationFn: ({ txHash, network }: { txHash: string; network?: Network }) =>
 			archiveApi.remove(txHash, network),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: ["archive"] });
+			qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
+		},
+	});
+}
+
+/**
+ * Mutation: bulk-import archived alerts from a CSV.
+ *
+ * Backend uses skip-existing semantics, so the response carries
+ * `{inserted, skipped, errors}`. Wrapping it in `useMutation` ensures the
+ * archive list and analysis queries are invalidated on success — without
+ * this, the Archive page only picks up the new entries after the next
+ * `staleTime` window or a full route remount.
+ */
+export function useBulkImportMutation() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: ({
+			entries,
+			sourceLabel,
+		}: {
+			entries: ArchiveBulkEntry[];
+			sourceLabel: string;
+		}) => archiveApi.bulk(entries, sourceLabel),
 		onSuccess: () => {
 			qc.invalidateQueries({ queryKey: ["archive"] });
 			qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });

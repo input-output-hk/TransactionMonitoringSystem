@@ -31,7 +31,11 @@ async function fetchHealthDetail(): Promise<HealthDetail> {
 }
 
 export function useHealth(options?: { pollMs?: number }) {
-	const pollMs = options?.pollMs ?? 10_000;
+	// 30s: the TopNav is mounted on every authenticated route, so this
+	// poll runs continuously. Pipeline state changes are gradual (sync
+	// lag, circuit breaker state) — sub-30s freshness isn't useful and
+	// just consumes rate-limit budget across all open pages.
+	const pollMs = options?.pollMs ?? 30_000;
 	return useQuery({
 		queryKey: ["health", "detail"],
 		queryFn: fetchHealthDetail,

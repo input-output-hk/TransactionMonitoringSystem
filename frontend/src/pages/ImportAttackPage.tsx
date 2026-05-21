@@ -12,8 +12,9 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { archiveApi, type ArchiveBulkEntry } from "@/lib/api/archive";
+import { type ArchiveBulkEntry } from "@/lib/api/archive";
 import { getNetwork } from "@/lib/api/fetch";
+import { useBulkImportMutation } from "@/lib/archive-store";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/utils/bytes";
 import { isCsv } from "@/lib/utils/mime";
@@ -35,6 +36,7 @@ export function ImportAttackPage() {
 	const [dragOver, setDragOver] = useState(false);
 	// Bumped on each new selection so the CSS animation restarts via `key`.
 	const [selectionId, setSelectionId] = useState(0);
+	const { mutateAsync: bulkImport } = useBulkImportMutation();
 
 	const handleFile = (f: File | null) => {
 		if (!f) return;
@@ -96,7 +98,12 @@ export function ImportAttackPage() {
 			// `source_label` tags the origin of imported rows on the backend
 			// (`source = "import:<label>"`). Constant for now — could be made
 			// configurable per-team if curation across many instances grows.
-			const result = await archiveApi.bulk(parsed.valid, "frontend-csv");
+			// The hook invalidates the archive list + analysis queries on
+			// success so the destination `/archive` page renders fresh data.
+			const result = await bulkImport({
+				entries: parsed.valid,
+				sourceLabel: "frontend-csv",
+			});
 			const summary = [
 				result.inserted > 0 && `${result.inserted} new`,
 				result.skipped > 0 && `${result.skipped} skipped`,

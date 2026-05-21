@@ -94,8 +94,12 @@ class Settings(BaseSettings):
     UVICORN_RELOAD: bool = False
 
     # Rate Limiting
+    # Budget sized for an admin UI: the frontend dashboard polls ~5 widgets,
+    # plus ad-hoc clicks (filters, archive ops, detail navigation). 240/min
+    # = 4 req/sec sustained leaves comfortable headroom; abuse protection
+    # is still meaningful at that ceiling.
     RATE_LIMIT_ENABLED: bool = True
-    RATE_LIMIT_REQUESTS: int = 60   # max requests per window per key/IP
+    RATE_LIMIT_REQUESTS: int = 240  # max requests per window per key/IP
     RATE_LIMIT_WINDOW_SECONDS: int = 60  # sliding window duration in seconds
 
     # Analysis Engine

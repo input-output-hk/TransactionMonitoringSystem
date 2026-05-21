@@ -267,7 +267,12 @@ export function useRiskAlerts(
 	params: RiskAlertsParams,
 	options?: { pollMs?: number },
 ) {
-	const pollMs = options?.pollMs ?? 5_000;
+	// 15s default matches the stats polling cadence. The dashboard mounts
+	// multiple `useRiskAlerts` instances (table + critical-alert banner)
+	// each with its own query key, so faster polling multiplies request
+	// volume against the backend rate limit. Callers that genuinely need
+	// faster updates can override via `pollMs`.
+	const pollMs = options?.pollMs ?? 15_000;
 	// 0 (or negative) disables auto-refetch — used by Reports.
 	const refetchInterval = pollMs > 0 ? pollMs : (false as const);
 

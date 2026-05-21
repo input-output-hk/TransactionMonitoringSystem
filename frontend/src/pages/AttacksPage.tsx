@@ -29,7 +29,6 @@ import {
 } from "@/components/ui/table";
 import {
 	ATTACK_TYPES,
-	criticalAlertIdLong,
 	latestBlocks,
 	latestTransactions,
 	type AttackType,
@@ -318,22 +317,84 @@ export function AttacksPage() {
 	);
 }
 
+/**
+ * Latest CRITICAL alert banner. Pulls the most recent risk_band=Critical
+ * row from `/api/analysis/results` (sorted by date, page size 1) and shares
+ * the table's 5s poll cadence — `useRiskAlerts` uses its `params` as the
+ * query key, so a separate page=0/pageSize=1 request lives independently.
+ *
+ * Three visual states:
+ *  - Loading: muted placeholder, no critical styling yet.
+ *  - Found: full critical theme, clickable, copy button.
+ *  - Empty (no critical alerts at all): neutral border so the red doesn't lie.
+ */
 function CriticalAlertCard() {
+	const navigate = useNavigate();
+	const { data, isPending } = useRiskAlerts({
+		page: 0,
+		pageSize: 1,
+		severity: "CRITICAL",
+		sort: "date",
+	});
+	const latest = data?.rows[0];
+
+	const baseCls =
+		"bg-card rounded-lg border-2 p-4 md:col-span-2 transition-colors";
+	const themedCls = latest
+		? "border-severity-critical-foreground/40 ring-severity-critical/20 ring-1 cursor-pointer hover:bg-accent/50"
+		: "border-border";
+
 	return (
-		<div className="border-severity-critical-foreground/40 bg-card ring-severity-critical/20 rounded-lg border-2 p-4 ring-1 md:col-span-2">
-			<div className="text-severity-critical-foreground flex items-center gap-2">
+		<div
+			className={cn(baseCls, themedCls)}
+			onClick={latest ? () => navigate(`/attacks/${latest.slug}`) : undefined}
+			role={latest ? "button" : undefined}
+			tabIndex={latest ? 0 : undefined}
+			onKeyDown={
+				latest
+					? (e) => {
+							if (e.key === "Enter" || e.key === " ") {
+								e.preventDefault();
+								navigate(`/attacks/${latest.slug}`);
+							}
+						}
+					: undefined
+			}
+		>
+			<div
+				className={cn(
+					"flex items-center gap-2",
+					latest
+						? "text-severity-critical-foreground"
+						: "text-muted-foreground",
+				)}
+			>
 				<AlertTriangle className="h-4 w-4" />
-				<span className="text-sm font-semibold">New Critical Attack</span>
+				<span className="text-sm font-semibold">
+					{latest
+						? "New Critical Attack"
+						: isPending
+							? "Critical Attacks"
+							: "No Critical Attacks"}
+				</span>
 			</div>
 			<div className="text-muted-foreground mt-2 flex items-center gap-2 font-mono text-xs">
-				<span className="truncate">{criticalAlertIdLong}</span>
-				<button
-					type="button"
-					className="text-muted-foreground hover:text-foreground shrink-0"
-					title="Copy"
-				>
-					<Copy className="h-3.5 w-3.5" />
-				</button>
+				<span className="truncate">
+					{latest?.fullHash ?? (isPending ? "Loading…" : "—")}
+				</span>
+				{latest && (
+					<button
+						type="button"
+						className="text-muted-foreground hover:text-foreground shrink-0"
+						title="Copy"
+						onClick={(e) => {
+							e.stopPropagation();
+							navigator.clipboard?.writeText(latest.fullHash);
+						}}
+					>
+						<Copy className="h-3.5 w-3.5" />
+					</button>
+				)}
 			</div>
 		</div>
 	);
