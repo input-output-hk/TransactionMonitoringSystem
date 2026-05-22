@@ -1,15 +1,3 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-	AlertTriangle,
-	ArrowUp,
-	ChevronLeft,
-	ChevronRight,
-	ChevronsLeft,
-	ChevronsRight,
-	Copy,
-	AlertCircle,
-} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,18 +15,31 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import {
-	ATTACK_TYPES,
-	latestBlocks,
-	latestTransactions,
-	type AttackType,
-	type Severity,
-} from "@/mocks/attacks";
 import { useRiskAlerts } from "@/lib/api/analysis";
 import { useAnalysisStats, useTransactionStats } from "@/lib/api/stats";
+import { useLatestTransactions, useRecentBlocks } from "@/lib/api/transactions";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
-import { PLACEHOLDER_KPI, computeTxPerMin } from "@/lib/utils/numbers";
+import { formatTimeAgo } from "@/lib/utils/dates";
+import {
+	PLACEHOLDER_KPI,
+	computeTxPerMin,
+	formatAda,
+} from "@/lib/utils/numbers";
+import { shortHash } from "@/lib/utils/strings";
+import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
+import {
+	AlertCircle,
+	AlertTriangle,
+	ArrowUp,
+	ChevronLeft,
+	ChevronRight,
+	ChevronsLeft,
+	ChevronsRight,
+	Copy,
+} from "lucide-react";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -73,6 +74,10 @@ export function AttacksPage() {
 	// Live KPI cards
 	const { data: analysisStats } = useAnalysisStats();
 	const { data: txStats } = useTransactionStats();
+	const { data: latestTxs, isPending: latestTxsPending } =
+		useLatestTransactions(5);
+	const { data: recentBlocks, isPending: recentBlocksPending } =
+		useRecentBlocks(5);
 
 	const kpis = [
 		{
@@ -285,20 +290,22 @@ export function AttacksPage() {
 			<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
 				<LatestList
 					title="Latest Transactions"
-					rows={latestTransactions.map((t) => ({
-						primary: t.id,
+					isPending={latestTxsPending}
+					rows={(latestTxs ?? []).map((t) => ({
+						primary: shortHash(t.tx_hash),
 						mono: true,
-						middle: t.age,
-						trailing: t.amountAda,
+						middle: formatTimeAgo(t.timestamp),
+						trailing: formatAda(t.total_output_value),
 					}))}
 				/>
 				<LatestList
 					title="Latest Blocks"
-					rows={latestBlocks.map((b) => ({
-						primary: b.height,
+					isPending={recentBlocksPending}
+					rows={(recentBlocks ?? []).map((b) => ({
+						primary: String(b.block_height),
 						mono: false,
-						middle: b.age,
-						trailing: b.amountAda,
+						middle: formatTimeAgo(b.timestamp),
+						trailing: formatAda(b.total_output_value),
 					}))}
 				/>
 			</div>
@@ -453,7 +460,15 @@ type ListRow = {
 	trailing: string;
 };
 
-function LatestList({ title, rows }: { title: string; rows: ListRow[] }) {
+function LatestList({
+	title,
+	rows,
+	isPending,
+}: {
+	title: string;
+	rows: ListRow[];
+	isPending?: boolean;
+}) {
 	return (
 		<section className="border-border bg-card rounded-lg border-2">
 			<header className="border-border border-b px-5 py-3">
@@ -481,6 +496,11 @@ function LatestList({ title, rows }: { title: string; rows: ListRow[] }) {
 						</span>
 					</li>
 				))}
+				{rows.length === 0 && (
+					<li className="text-muted-foreground px-5 py-6 text-center text-sm">
+						{isPending ? "Loading…" : "No data yet."}
+					</li>
+				)}
 			</ul>
 		</section>
 	);

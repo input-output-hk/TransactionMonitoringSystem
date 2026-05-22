@@ -162,11 +162,41 @@ export const archiveApiMock: ArchiveApi = {
 		return tick({ inserted, skipped, errors });
 	},
 
-	exportUrl(params: ArchiveExportParams): string {
-		const qs = new URLSearchParams();
-		qs.set("network", params.network ?? getNetwork());
-		if (params.from) qs.set("from", params.from);
-		if (params.to) qs.set("to", params.to);
-		return `/api/archive/export?${qs.toString()}`;
+	async download(
+		params: ArchiveExportParams,
+	): Promise<{ blob: Blob; filename: string }> {
+		// Mirror the real backend's CSV column order and the same filename
+		// scheme. Source rows live in localStorage; we synthesize the CSV
+		// in-process so dev/offline mode still exercises the download path.
+		// `readStore()` returns `{ entries: Record<key, ArchiveEntry> }`, not a
+		// flat dict — drilling into `.entries` is required for the typed
+		// values to be `ArchiveEntry`, not the Store wrapper.
+		const { entries } = readStore();
+		const net = params.network ?? getNetwork();
+		const fromMs = params.from ? Date.parse(params.from) : -Infinity;
+		const toMs = params.to ? Date.parse(params.to) : Infinity;
+		const rows = Object.values(entries)
+			.filter((e) => e.network === net)
+			.filter((e) => {
+				const t = Date.parse(e.archived_at);
+				return t >= fromMs && t <= toMs;
+			})
+			.sort((a, b) => b.archived_at.localeCompare(a.archived_at));
+
+		const header = "network,tx_hash,note,archived_by,archived_at,source\n";
+		const escape = (v: string) =>
+			/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+		const body = rows
+			.map((r) =>
+				[r.network, r.tx_hash, r.note, r.archived_by, r.archived_at, r.source]
+					.map((v) => escape(String(v)))
+					.join(","),
+			)
+			.join("\n");
+		const blob = new Blob([header + body + (body ? "\n" : "")], {
+			type: "text/csv;charset=utf-8",
+		});
+		const filename = `tms-archive-${net}-${params.from?.slice(0, 10) ?? "all"}-${params.to?.slice(0, 10) ?? "all"}.csv`;
+		return tick({ blob, filename });
 	},
 };

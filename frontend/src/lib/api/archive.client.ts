@@ -105,11 +105,29 @@ export const archiveApiClient: ArchiveApi = {
 		return json<ArchiveBulkResponse>(res);
 	},
 
-	exportUrl(params: ArchiveExportParams): string {
+	async download(
+		params: ArchiveExportParams,
+	): Promise<{ blob: Blob; filename: string }> {
 		const qs = new URLSearchParams();
 		qs.set("network", params.network ?? getNetwork());
 		if (params.from) qs.set("from", params.from);
 		if (params.to) qs.set("to", params.to);
-		return `/api/archive/export?${qs.toString()}`;
+		const res = await fetchWithAuth(`/api/archive/export?${qs.toString()}`);
+		if (!res.ok) {
+			const body = await res.text().catch(() => "");
+			throw new Error(
+				`Archive export ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`,
+			);
+		}
+		const blob = await res.blob();
+		// Try Content-Disposition first; fall back to a sensible default if the
+		// header is missing or the regex doesn't match (e.g. behind a proxy
+		// that strips headers).
+		const cd = res.headers.get("Content-Disposition") ?? "";
+		const match = cd.match(/filename="?([^";]+)"?/i);
+		const filename =
+			match?.[1] ??
+			`tms-archive-${params.network ?? getNetwork()}-${params.from?.slice(0, 10) ?? "all"}-${params.to?.slice(0, 10) ?? "all"}.csv`;
+		return { blob, filename };
 	},
 };
