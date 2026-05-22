@@ -55,3 +55,28 @@ export function formatAnalyzedAt(iso: string): string {
 	const mi = String(d.getMinutes()).padStart(2, "0");
 	return `${dd}.${mm}.${yyyy}, ${hh}:${mi}`;
 }
+
+/**
+ * Compact "time ago" formatter for live widgets — e.g. "17 sec", "3 min",
+ * "2 hr", "5 days".
+ *
+ * Backend datetimes from ClickHouse arrive as naive ISO (no `Z` suffix)
+ * but represent UTC. Plain `new Date("2026-05-22T08:00:18")` would parse
+ * those as LOCAL time, which throws the elapsed calculation off by the
+ * client's UTC offset. We append `Z` when the timezone isn't already
+ * encoded to keep parsing deterministic.
+ */
+export function formatTimeAgo(iso: string | null | undefined): string {
+	if (!iso) return "—";
+	const hasTz = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
+	const d = new Date(hasTz ? iso : `${iso}Z`);
+	if (Number.isNaN(d.getTime())) return iso;
+	const sec = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+	if (sec < 60) return `${sec} sec`;
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min} min`;
+	const hr = Math.floor(min / 60);
+	if (hr < 24) return `${hr} hr`;
+	const day = Math.floor(hr / 24);
+	return `${day} day${day === 1 ? "" : "s"}`;
+}

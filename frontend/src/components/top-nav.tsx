@@ -116,7 +116,7 @@ export function TopNav() {
 								onSelect={() => navigate("/import")}
 							>
 								<Upload className="h-4 w-4" />
-								Import Attack
+								Import Archive
 							</DropdownMenuItem>
 							<DropdownMenuItem
 								className="gap-3"

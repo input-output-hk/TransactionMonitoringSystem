@@ -118,11 +118,18 @@ export interface ArchiveApi {
 	): Promise<ArchiveBulkResponse>;
 
 	/**
-	 * Build the CSV-download URL for the current params. UI typically just
-	 * navigates to this URL or sets it on an `<a download>` so the browser
-	 * streams the file — there's no client paginated fetch.
+	 * Download the CSV for the current params and return it as a Blob plus
+	 * the suggested filename (parsed from the server's Content-Disposition).
+	 *
+	 * MUST go through `fetchWithAuth` so the `TMS-API-Key` header is sent —
+	 * a plain `<a download href>` would issue a header-less GET and 403
+	 * against a backend with `API_KEYS` configured. The page wires this
+	 * blob to a programmatic anchor click to trigger the browser download.
 	 */
-	exportUrl(params: ArchiveExportParams): string;
+	download(params: ArchiveExportParams): Promise<{
+		blob: Blob;
+		filename: string;
+	}>;
 }
 
 /* ---------- Implementation selection ---------- */

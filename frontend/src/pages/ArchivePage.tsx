@@ -70,12 +70,30 @@ export function ArchivePage() {
 		setter(v);
 	};
 
-	// Server-streamed CSV export. Setting the anchor's `href` + clicking lets
-	// the browser handle the download without us materializing the file in JS.
-	const exportHref = archiveApi.exportUrl({
-		from: startOfDayISO(startDate),
-		to: nextDayISO(endDate),
-	});
+	const [exporting, setExporting] = useState(false);
+
+	const handleExport = async () => {
+		if (exporting) return;
+		setExporting(true);
+		try {
+			const { blob, filename } = await archiveApi.download({
+				from: startOfDayISO(startDate),
+				to: nextDayISO(endDate),
+			});
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement("a");
+			a.href = url;
+			a.download = filename;
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+			URL.revokeObjectURL(url);
+		} catch (e) {
+			console.error("Archive export failed:", e);
+		} finally {
+			setExporting(false);
+		}
+	};
 
 	return (
 		<div className="flex flex-col gap-4">
@@ -94,17 +112,18 @@ export function ArchivePage() {
 					onChange={onDateChange(setEndDate)}
 				/>
 				<div className="ml-auto pt-[22px]">
-					<a
-						href={exportHref}
-						download
+					<button
+						type="button"
+						onClick={handleExport}
+						disabled={exporting}
 						className={cn(
 							buttonVariants({ variant: "outline", size: "lg" }),
 							"h-11 gap-2",
 						)}
 					>
-						Export
+						{exporting ? "Exporting…" : "Export"}
 						<ExternalLink className="h-4 w-4" />
-					</a>
+					</button>
 				</div>
 			</div>
 

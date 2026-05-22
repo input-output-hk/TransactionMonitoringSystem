@@ -1,15 +1,23 @@
 import { useAuth, useAuthStore } from "@/lib/auth";
 import { LogIn, LogOut } from "lucide-react";
 
+/**
+ * Floating "Demo" chip with a one-click skip-auth shortcut.
+ *
+ * Auth is currently a client-side mock (Zustand + localStorage), so the
+ * "real" flow is signup → verify-email → dashboard. This bar bypasses
+ * it for convenience. Exposed in BOTH dev and prod for now because we
+ * don't have a real backend-backed login yet — remove the gate the same
+ * day a real auth provider lands.
+ */
 export function DevAuthBar() {
 	const { isAuthenticated } = useAuth();
-	if (!import.meta.env.DEV) return null;
 
 	const skipAuth = () => {
 		useAuthStore.setState({
 			user: {
-				fullName: "Dev User",
-				email: "dev@example.com",
+				fullName: "Demo User",
+				email: "demo@example.com",
 				role: "Admin",
 			},
 			verified: true,
@@ -17,7 +25,7 @@ export function DevAuthBar() {
 		window.location.href = "/dashboard";
 	};
 
-	const devLogout = () => {
+	const quickLogout = () => {
 		useAuthStore.getState().logout();
 		window.location.href = "/signup";
 	};
@@ -25,12 +33,12 @@ export function DevAuthBar() {
 	return (
 		<div className="border-border bg-card/90 text-muted-foreground fixed right-3 bottom-3 z-[60] flex items-center gap-2 rounded-full border px-2 py-1 text-xs shadow-lg backdrop-blur">
 			<span className="bg-brand/15 text-brand rounded-sm px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider uppercase">
-				Dev
+				Demo
 			</span>
 			{isAuthenticated ? (
 				<button
 					type="button"
-					onClick={devLogout}
+					onClick={quickLogout}
 					className="text-foreground hover:bg-accent inline-flex items-center gap-1.5 rounded-full px-2 py-1"
 				>
 					<LogOut className="h-3.5 w-3.5" />
