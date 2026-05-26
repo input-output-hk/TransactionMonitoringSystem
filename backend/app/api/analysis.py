@@ -166,6 +166,23 @@ async def analysis_stats(
         raise HTTPException(status_code=500, detail="Failed to fetch stats")
 
 
+@router.get("/stats/timeseries", dependencies=[Security(verify_api_key)])
+async def analysis_stats_timeseries(
+    network: Optional[NetworkType] = Query(None),
+    days: int = Query(14, ge=1, le=90, description="Trailing window in days"),
+):
+    """Daily High+Critical alert counts over a trailing window, bucketed on
+    on-chain block time. Powers the dashboard sparkline. Returns a list of
+    ``{date, count}`` with zero-filled gaps, oldest first."""
+    query_network = network or settings.CARDANO_NETWORK
+    try:
+        data = await clickhouse.get_alert_timeseries_async(query_network, days)
+        return {"network": query_network, "days": days, "data": data}
+    except Exception as e:
+        logger.error(f"Error fetching timeseries: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch timeseries")
+
+
 @router.get("/baselines/{scope_type}/{scope_id}", dependencies=[Security(verify_api_key)])
 async def get_baselines(
     scope_type: str,
