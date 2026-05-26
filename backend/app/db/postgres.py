@@ -234,6 +234,11 @@ async def execute_schema():
                 ON mempool_collisions(tx_b);
             CREATE INDEX IF NOT EXISTS idx_mempool_collisions_network
                 ON mempool_collisions(network);
+            -- Supports the 24h-window filter in ``get_collisions_for_txs``.
+            -- Without it the conditional-aggregation FILTER does a full
+            -- table scan; cheap on preprod but expensive at mainnet scale.
+            CREATE INDEX IF NOT EXISTS idx_mempool_collisions_created_at
+                ON mempool_collisions(created_at);
         """)
 
         logger.info("PostgreSQL schema initialized")
@@ -520,22 +525,44 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
     counterpart_addrs.discard("")
 
     win_counts: Dict[str, int] = {}
+    win_counts_24h: Dict[str, int] = {}
     if counterpart_addrs:
         async with get_connection() as conn:
+            # Single query covers both the all-time count and the 24-hour
+            # count via conditional aggregation. Halves the Postgres
+            # round-trip vs. running two near-identical UNION ALL queries.
+            #
+            # Semantic note: ``created_at`` is the **mempool detection
+            # time** (when this row was inserted by the ingester),
+            # NOT the outcome confirmation time. So
+            # ``attacker_win_count_24h`` means "wins on collisions first
+            # observed in the last 24 hours" — operationally this tracks
+            # recent attacker-cluster activity in the race window, which
+            # is the signal operators triage on. To filter on
+            # confirmation time instead would require an additional
+            # ``confirmed_at`` column populated by
+            # :func:`update_collision_outcome`.
             win_rows = await conn.fetch("""
-                SELECT addr, COUNT(*) AS cnt FROM (
-                    SELECT tx_a_first_input_addr AS addr
+                SELECT addr,
+                       COUNT(*) AS cnt,
+                       COUNT(*) FILTER (
+                           WHERE created_at >= NOW() - INTERVAL '24 hours'
+                       ) AS cnt_24h
+                FROM (
+                    SELECT tx_a_first_input_addr AS addr, created_at
                     FROM mempool_collisions
                     WHERE network = $1 AND outcome = 'TX_A_CONFIRMED'
                       AND tx_a_first_input_addr = ANY($2)
                     UNION ALL
-                    SELECT tx_b_first_input_addr AS addr
+                    SELECT tx_b_first_input_addr AS addr, created_at
                     FROM mempool_collisions
                     WHERE network = $1 AND outcome = 'TX_B_CONFIRMED'
                       AND tx_b_first_input_addr = ANY($2)
-                ) sub GROUP BY addr
+                ) sub
+                GROUP BY addr
             """, network, list(counterpart_addrs))
             win_counts = {r["addr"]: r["cnt"] for r in win_rows}
+            win_counts_24h = {r["addr"]: r["cnt_24h"] for r in win_rows}
 
     result: Dict[str, Dict[str, Any]] = {}
     for r in rows:
@@ -555,6 +582,7 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
                     "counterpart_ttl": counterpart_ttl or 0,
                     "shares_change_address": my_addr == counterpart_addr and my_addr != "",
                     "attacker_win_count": win_counts.get(counterpart_addr, 0),
+                    "attacker_win_count_24h": win_counts_24h.get(counterpart_addr, 0),
                     "tx_role": "TX_A" if is_a else "TX_B",
                 }
     return result
