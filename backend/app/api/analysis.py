@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
@@ -82,7 +82,13 @@ async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
 @router.get("/results", dependencies=[Security(verify_api_key)])
 async def list_analysis_results(
     network: Optional[NetworkType] = Query(None),
-    risk_band: Optional[RiskBand] = Query(None, description="Filter by risk band"),
+    risk_band: List[RiskBand] = Query(
+        default_factory=list,
+        description=(
+            "Filter by risk band. Repeat the param to OR-match multiple "
+            "values, e.g. `?risk_band=Critical&risk_band=High`."
+        ),
+    ),
     attack_class: Optional[str] = Query(
         None, description="Filter by attack class name (e.g. phishing, sandwich)",
     ),
@@ -109,10 +115,12 @@ async def list_analysis_results(
         raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
     query_network = network or settings.CARDANO_NETWORK
     try:
-        rb = risk_band.value if risk_band else None
+        # Normalize the enum list to plain strings, passing None when the
+        # caller didn't supply any band so the DB layer skips the WHERE.
+        rbs = [b.value for b in risk_band] if risk_band else None
         rows = await clickhouse.get_class_scores_list_async(
             network=query_network,
-            risk_band=rb,
+            risk_band=rbs,
             attack_class=attack_class,
             min_score=min_score,
             sort=sort,
@@ -123,7 +131,7 @@ async def list_analysis_results(
         )
         total = await clickhouse.count_class_scores_async(
             network=query_network,
-            risk_band=rb,
+            risk_band=rbs,
             attack_class=attack_class,
             min_score=min_score,
             analyzed_from=analyzed_from,

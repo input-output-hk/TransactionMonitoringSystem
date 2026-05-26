@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { MultiSelect } from "@/components/ui/multi-select";
 import {
 	Select,
 	SelectContent,
@@ -44,7 +45,15 @@ import { useNavigate } from "react-router-dom";
 export function AttacksPage() {
 	const navigate = useNavigate();
 	const [attackFilter, setAttackFilter] = useState<string>("all");
-	const [severityFilter, setSeverityFilter] = useState<string>("all");
+	// Multi-select: empty array means "no severity filter applied".
+	// Default to High + Critical so the dashboard opens focused on the
+	// actionable alerts. Order matches the MultiSelect option order
+	// (LOW → MEDIUM → HIGH → CRITICAL) so the first user toggle doesn't
+	// cause a no-op reorder → cache miss in React Query.
+	const [severities, setSeverities] = useState<Severity[]>([
+		"HIGH",
+		"CRITICAL",
+	]);
 	const [pageSize, setPageSize] = useState(10);
 	const [page, setPage] = useState(0);
 
@@ -53,8 +62,9 @@ export function AttacksPage() {
 		pageSize,
 		attackType:
 			attackFilter !== "all" ? (attackFilter as AttackType) : undefined,
-		severity:
-			severityFilter !== "all" ? (severityFilter as Severity) : undefined,
+		// Skip the param entirely when nothing is picked so the backend
+		// doesn't see an empty `?risk_band=` and apply a no-op filter.
+		severities: severities.length > 0 ? severities : undefined,
 	});
 
 	const total = data?.total ?? 0;
@@ -65,10 +75,13 @@ export function AttacksPage() {
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
 
-	const onFilterChange = (kind: "attack" | "severity", value: string) => {
+	const onAttackChange = (value: string) => {
 		setPage(0);
-		if (kind === "attack") setAttackFilter(value);
-		else setSeverityFilter(value);
+		setAttackFilter(value);
+	};
+	const onSeveritiesChange = (next: Severity[]) => {
+		setPage(0);
+		setSeverities(next);
 	};
 
 	// Live KPI cards
@@ -127,10 +140,7 @@ export function AttacksPage() {
 						Risk Alerts
 					</h2>
 					<div className="flex items-center gap-2">
-						<Select
-							value={attackFilter}
-							onValueChange={(v) => onFilterChange("attack", v)}
-						>
+						<Select value={attackFilter} onValueChange={onAttackChange}>
 							<SelectTrigger className="h-8 w-[160px]">
 								<SelectValue placeholder="Attack Type" />
 							</SelectTrigger>
@@ -143,21 +153,19 @@ export function AttacksPage() {
 								))}
 							</SelectContent>
 						</Select>
-						<Select
-							value={severityFilter}
-							onValueChange={(v) => onFilterChange("severity", v)}
-						>
-							<SelectTrigger className="h-8 w-[160px]">
-								<SelectValue placeholder="Severity Type" />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="all">All severities</SelectItem>
-								<SelectItem value="LOW">Low</SelectItem>
-								<SelectItem value="MEDIUM">Medium</SelectItem>
-								<SelectItem value="HIGH">High</SelectItem>
-								<SelectItem value="CRITICAL">Critical</SelectItem>
-							</SelectContent>
-						</Select>
+						<MultiSelect<Severity>
+							options={[
+								{ value: "LOW", label: "Low" },
+								{ value: "MEDIUM", label: "Medium" },
+								{ value: "HIGH", label: "High" },
+								{ value: "CRITICAL", label: "Critical" },
+							]}
+							value={severities}
+							onChange={onSeveritiesChange}
+							placeholder="All severities"
+							label="severity"
+							pluralLabel="severities"
+						/>
 					</div>
 				</header>
 
@@ -340,7 +348,7 @@ function CriticalAlertCard() {
 	const { data, isPending } = useRiskAlerts({
 		page: 0,
 		pageSize: 1,
-		severity: "CRITICAL",
+		severities: ["CRITICAL"],
 		sort: "date",
 	});
 	const latest = data?.rows[0];
