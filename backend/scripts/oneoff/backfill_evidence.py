@@ -225,11 +225,34 @@ def main() -> None:
         })
         metadata_by_tx[tx_hash] = (prev_max, prev_class, prev_at)
 
-    # Chunk size for enrichment + scoring. ``_enrich_inputs_with_resolved_addresses``
-    # builds a ``WHERE tx_hash IN (...)`` literal containing every hash in the
-    # batch, so a single-shot run on 14k+ rows exceeds ClickHouse's default
-    # 256KB ``max_query_size``. 500 rows yields ~33KB of hash literals, well
-    # under the cap, while keeping the round-trip count low.
+    # Collision enrichment (front_running) is fetched ONCE for all rows
+    # before the chunk loop. Unlike the ClickHouse input-resolution query,
+    # the Postgres collision query passes tx hashes as a parameterised array
+    # (``ANY($2)``), so it has no query-size limit and doesn't need chunking.
+    # Critically, it must run in a SINGLE ``asyncio.run`` call: that creates
+    # and tears down one event loop, and the asyncpg pool binds to it.
+    # Calling ``asyncio.run`` per chunk would bind the pool to the first
+    # loop, then fail with "Event loop is closed" on every subsequent chunk.
+    if settings.SCORER_FRONT_RUNNING_ENABLED:
+        all_hashes = [r["tx_hash"] for r in feature_rows]
+        try:
+            collisions = asyncio.run(
+                postgres.get_collisions_for_txs(all_hashes, args.network)
+            )
+        except Exception as e:
+            logger.warning(f"Collision enrichment failed (non-fatal): {e}")
+            collisions = {}
+        for fr in feature_rows:
+            collision = collisions.get(fr["tx_hash"])
+            if collision:
+                fr["collision"] = collision
+
+    # Chunk size for the ClickHouse-heavy enrichment + scoring passes.
+    # ``_enrich_inputs_with_resolved_addresses`` builds a ``WHERE tx_hash IN
+    # (...)`` literal containing every hash in the batch, so a single-shot
+    # run on 14k+ rows exceeds ClickHouse's default 256KB ``max_query_size``.
+    # 500 rows yields ~33KB of hash literals, well under the cap, while
+    # keeping the round-trip count low.
     _CHUNK = 500
 
     corrected = []
@@ -244,24 +267,8 @@ def main() -> None:
         # (multiple_sat) see all-empty addresses and silently drop alerts.
         _enrich_inputs_with_resolved_addresses(chunk, args.network)
 
-        # Cross-tx enrichment for front_running / sandwich / circular. Skipping
-        # this would leave those classes' evidence empty even after a re-score,
-        # since their gates depend on collision / sandwich / cycle features
-        # attached out-of-band.
-        if settings.SCORER_FRONT_RUNNING_ENABLED:
-            chunk_hashes = [r["tx_hash"] for r in chunk]
-            try:
-                collisions = asyncio.run(
-                    postgres.get_collisions_for_txs(chunk_hashes, args.network)
-                )
-            except Exception as e:
-                logger.warning(f"Collision enrichment failed (non-fatal): {e}")
-                collisions = {}
-            for fr in chunk:
-                collision = collisions.get(fr["tx_hash"])
-                if collision:
-                    fr["collision"] = collision
-
+        # Cycle / sandwich enrichment issue their own per-row ClickHouse
+        # queries (no giant IN-list), so they're safe to run per chunk.
         _enrich_cycle_features(chunk, args.network)
         _enrich_sandwich_features(chunk, args.network)
 
