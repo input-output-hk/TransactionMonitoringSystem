@@ -9,6 +9,11 @@ export type AnalysisStats = {
 	low_count: number;
 	avg_max_score: number | null;
 	last_analyzed_at: string;
+	// Ingested-but-unscored backlog, computed server-side as a single
+	// like-for-like query (distinct tx_hashes with no score row). Prefer
+	// this over `txStats.total_count - total`, which conflated duplicate
+	// transaction rows and archived alerts into the figure.
+	pending_count: number;
 	per_class: Record<
 		string,
 		{
