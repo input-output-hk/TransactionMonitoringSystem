@@ -22,6 +22,8 @@ type ApiAnalysisResult = {
 	risk_band: ApiRiskBand;
 	// Backend mixes 0..1 normalized scores with raw counts and string IDs.
 	sub_scores: Record<string, Record<string, number | string>>;
+	// Per-class raw evidence (addresses, byte counts, lists) for UI drill-down.
+	evidence?: Record<string, Record<string, unknown>>;
 	analysis_version: string;
 	analyzed_at: string; // ISO datetime
 	fee: number | null; // lovelace
@@ -76,6 +78,7 @@ function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	for (const [k, v] of Object.entries(rawSub)) {
 		if (typeof v === "number" && Number.isFinite(v)) subScores[k] = v;
 	}
+	const evidence = (r.evidence?.[r.max_class] ?? {}) as Record<string, unknown>;
 	return {
 		slug: r.tx_hash,
 		id: shortHash(r.tx_hash),
@@ -87,6 +90,7 @@ function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 		feeAda: r.fee !== null ? r.fee / LOVELACE_PER_ADA : 0,
 		outputs: r.output_count ?? 0,
 		subScores,
+		evidence,
 	};
 }
 
@@ -163,7 +167,17 @@ async function fetchRiskAlertsPage(
 
 export type ExportParams = Omit<RiskAlertsParams, "page" | "pageSize">;
 
-/** Plain-shape record used as a CSV row (one column per key). */
+/**
+ * Plain-shape record used as a CSV row (one column per key).
+ *
+ * The backend per-class `evidence` blob (addresses, hop lists, confusable
+ * pairs, etc.) is intentionally omitted. The distinguishing property is
+ * shape, not size: `sub_scores` is a flat `{string: number}` map that
+ * round-trips cleanly as JSON in a single cell and is useful for ad-hoc
+ * spreadsheet analysis. `evidence` is mixed nested data (lists of
+ * objects, booleans, strings) that does not. Consumers who need the
+ * latter should hit the API directly.
+ */
 export type AlertCsvRow = {
 	tx_hash: string;
 	analyzed_at: string;

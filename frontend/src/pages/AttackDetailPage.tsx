@@ -35,7 +35,7 @@ import {
 import { useAuth } from "@/lib/auth";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
-import type { AttackType, RiskAlert } from "@/mocks/attacks";
+import type { RiskAlert } from "@/mocks/attacks";
 import {
 	ARCHIVE_REASONS,
 	ATTACK_META,
@@ -229,7 +229,7 @@ function DetailCard({
 			<Divider />
 
 			{/* Type-specific section */}
-			<AttackTypeSection type={alert.attackType} />
+			<AttackTypeSection alert={alert} />
 
 			<Divider />
 
@@ -394,46 +394,122 @@ function SubScores({ alert }: { alert: RiskAlert }) {
 	);
 }
 
-function AttackTypeSection({ type }: { type: AttackType }) {
-	switch (type) {
-		case "Phishing":
+const EVIDENCE_PLACEHOLDER = "—";
+
+function ev<T = unknown>(alert: RiskAlert, key: string): T | undefined {
+	const v = alert.evidence?.[key];
+	return v === undefined || v === null ? undefined : (v as T);
+}
+
+function fmtNumber(n: number | undefined): string {
+	if (n === undefined || !Number.isFinite(n)) return EVIDENCE_PLACEHOLDER;
+	return new Intl.NumberFormat("en-US").format(n);
+}
+
+function fmtBytes(n: number | undefined): string {
+	if (n === undefined || !Number.isFinite(n)) return EVIDENCE_PLACEHOLDER;
+	return `${fmtNumber(n)} bytes`;
+}
+
+function fmtLovelaceAsAda(lov: number | undefined, digits = 2): string {
+	if (lov === undefined || !Number.isFinite(lov)) return EVIDENCE_PLACEHOLDER;
+	return `${(lov / 1_000_000).toFixed(digits)} ADA`;
+}
+
+function fmtAddress(addr: string | undefined, head = 12, tail = 8): string {
+	if (!addr) return EVIDENCE_PLACEHOLDER;
+	if (addr.length <= head + tail + 3) return addr;
+	return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
+}
+
+function fmtTxHash(hash: string | undefined): string {
+	return fmtAddress(hash, 8, 8);
+}
+
+function fmtPct(ratio: number | undefined, digits = 1): string {
+	if (ratio === undefined || !Number.isFinite(ratio)) return EVIDENCE_PLACEHOLDER;
+	return `${(ratio * 100).toFixed(digits)}%`;
+}
+
+function fmtBool(b: boolean | undefined): string {
+	if (b === undefined) return EVIDENCE_PLACEHOLDER;
+	return b ? "Yes" : "No";
+}
+
+function fmtAssetName(hex: string | undefined, ascii: string | undefined): string {
+	if (ascii) return ascii;
+	if (hex) return hex.length > 32 ? `${hex.slice(0, 32)}…` : hex;
+	return EVIDENCE_PLACEHOLDER;
+}
+
+function AttackTypeSection({ alert }: { alert: RiskAlert }) {
+	switch (alert.attackType) {
+		case "Phishing": {
+			const urls = (ev<unknown[]>(alert, "urls") ?? []) as Array<{
+				url: string;
+				severity?: string;
+				phishing_tld?: boolean;
+			}>;
+			const severity = ev<string>(alert, "severity") ?? EVIDENCE_PLACEHOLDER;
+			const recipientCount = ev<number>(alert, "recipient_count");
+			const labels = ev<string[]>(alert, "metadata_labels") ?? [];
+			const metadataLabel = labels.length
+				? labels.map((l) => `label ${l}`).join(", ")
+				: EVIDENCE_PLACEHOLDER;
 			return (
 				<Section>
 					<TwoCol
 						left={
 							<Stack title="Extracted URLs">
-								<UrlRow
-									variant="warn"
-									label="SUSPICIOUS"
-									url="https://randomurergtrgtrgrtgrl123............45.it"
-									meta="Domain Age: 3 days"
-								/>
-								<Divider />
-								<UrlRow
-									variant="danger"
-									label="BLACK LISTED"
-									url="https://randomurergtrgtrgrtgrl123............45.it"
-									meta="Domain Age: 1 day"
-								/>
-								<UrlRow
-									url="https://randomurergtrgtrgrtgrl123............45.it"
-									meta="Domain Age: 1 day"
-								/>
+								{urls.length === 0 ? (
+									<div className="text-muted-foreground text-sm">
+										No URLs extracted.
+									</div>
+								) : (
+									urls.map((u, i) => (
+										<div key={`${u.url}-${i}`}>
+											<UrlRow
+												variant={
+													u.severity === "BLACKLISTED"
+														? "danger"
+														: u.severity === "SUSPICIOUS"
+															? "warn"
+															: undefined
+												}
+												label={u.severity}
+												url={u.url}
+												meta={u.phishing_tld ? "Phishing-prone TLD" : undefined}
+											/>
+											{i < urls.length - 1 && <Divider />}
+										</div>
+									))
+								)}
 							</Stack>
 						}
 						right={
 							<Stack title="Delivery Analysis">
-								<KeyVal label="SEVERITY" value="SUSPICIOUS_NEW_DOMAIN" />
-								<KeyVal label="SE TIER" value="Tier 1: Credential harvesting" />
-								<KeyVal label="RECIPIENTS" value="47" />
-								<KeyVal label="METADATA LABEL" value="CIP-20 (label 674)" />
+								<KeyVal label="SEVERITY" value={severity} />
+								<KeyVal label="SE TIER" value={EVIDENCE_PLACEHOLDER} />
+								<KeyVal label="RECIPIENTS" value={fmtNumber(recipientCount)} />
+								<KeyVal label="METADATA LABEL" value={metadataLabel} />
 							</Stack>
 						}
 					/>
 				</Section>
 			);
+		}
 
-		case "Fake Token":
+		case "Fake Token": {
+			const matchedToken = ev<string>(alert, "matched_token") ?? "";
+			const fakePolicyId = ev<string>(alert, "fake_policy_id");
+			const legitPolicies = ev<string[]>(alert, "legit_policy_ids") ?? [];
+			const cip25Sim = ev<number>(alert, "cip25_similarity_raw");
+			const recipientCount = ev<number>(alert, "recipient_count");
+			const confusables =
+				(ev<unknown[]>(alert, "unicode_confusables") ?? []) as Array<{
+					from_char: string;
+					to_char: string;
+				}>;
 			return (
 				<Section>
 					<TwoCol
@@ -442,22 +518,21 @@ function AttackTypeSection({ type }: { type: AttackType }) {
 								<KeyVal
 									label="FAKE TOKEN"
 									value={
-										<span className="flex flex-wrap items-center gap-3">
-											<span>Age: 2 hours</span>
+										<span className="flex flex-wrap items-center justify-end gap-3">
+											<span className="text-muted-foreground">
+												Age: {EVIDENCE_PLACEHOLDER}
+											</span>
 											<span className="font-mono text-sm">
-												a1b2c3d4e5f60718...6e7f80a1
+												{fmtAddress(fakePolicyId)}
 											</span>
 										</span>
 									}
 								/>
 								<KeyVal
-									label="REAL TOKEN"
+									label={`REAL TOKEN${matchedToken ? ` (${matchedToken})` : ""}`}
 									value={
-										<span className="flex flex-wrap items-center gap-3">
-											<span>Established</span>
-											<span className="font-mono text-sm">
-												fcfca39395459c17...3cc7a3ce
-											</span>
+										<span className="font-mono text-sm">
+											{fmtAddress(legitPolicies[0])}
 										</span>
 									}
 								/>
@@ -465,155 +540,306 @@ function AttackTypeSection({ type }: { type: AttackType }) {
 						}
 						right={
 							<Stack title="Distribution">
-								<KeyVal label="CIP-25 METADATA MATCH" value="72%" />
-								<KeyVal label="RECIPIENTS" value="24" />
+								<KeyVal label="CIP-25 METADATA MATCH" value={fmtPct(cip25Sim)} />
+								<KeyVal label="RECIPIENTS" value={fmtNumber(recipientCount)} />
 							</Stack>
 						}
 					/>
 					<div className="mt-6">
 						<Stack title="Unicode Analysis">
-							<div className="grid gap-3 md:grid-cols-2">
-								<UnicodeWarning text="Cyrillic О (O) replacing Latin O" />
-								<UnicodeWarning text="Cyrillic У (Y) replacing Latin Y" />
-							</div>
+							{confusables.length === 0 ? (
+								<div className="text-muted-foreground text-sm">
+									No confusable characters detected.
+								</div>
+							) : (
+								<div className="grid gap-3 md:grid-cols-2">
+									{confusables.map((c, i) => (
+										<UnicodeWarning
+											key={i}
+											text={`'${c.from_char}' replacing '${c.to_char}'`}
+										/>
+									))}
+								</div>
+							)}
 						</Stack>
 					</div>
 				</Section>
 			);
+		}
 
-		case "Circular":
+		case "Circular": {
+			const hops =
+				(ev<unknown[]>(alert, "hops") ?? []) as Array<{
+					address: string;
+					amount_lovelace: number;
+					slot: number;
+				}>;
+			const amountSim = ev<number>(alert, "amount_similarity_raw");
+			const netLoss = ev<number>(alert, "net_loss_ratio");
+			const firstSlot = ev<number>(alert, "first_slot");
+			const cycleLen = ev<number>(alert, "cycle_length");
 			return (
 				<Section>
 					<TwoCol
 						left={
 							<Stack title="Circular Transfer">
-								<FlowChain
-									direction="down"
-									rows={[
-										{
-											label: "HOP 1",
-											amount: "1,250 ADA",
-											address: "a1b2c3d4e5f60718...6e7f80a1",
-										},
-										{
-											label: "HOP 2",
-											amount: "340 ADA",
-											address: "fcfca39395459c17...3cc7a3ce",
-										},
-										{
-											label: "HOP 3",
-											amount: "1,287 ADA",
-											address: "b2c3d4e5f6071829...7f80a1b2",
-										},
-									]}
-								/>
+								{hops.length === 0 ? (
+									<div className="text-muted-foreground text-sm">
+										Hop chain not available.
+									</div>
+								) : (
+									<FlowChain
+										direction="down"
+										rows={hops.map((h, i) => ({
+											label: `HOP ${i + 1}`,
+											amount: fmtLovelaceAsAda(h.amount_lovelace),
+											address: fmtAddress(h.address),
+										}))}
+									/>
+								)}
 							</Stack>
 						}
 						right={
 							<Stack title="Cycle Metrics">
-								<KeyVal label="AMOUNT SIMILARITY" value="96%" />
-								<KeyVal label="NET LOSS" value="0.49 ADA (14%)" />
-								<KeyVal label="TIMING" value="Same block (slot 118,670,944)" />
-								<KeyVal label="CYCLE LENGTH" value="3 HOPS" />
+								<KeyVal label="AMOUNT SIMILARITY" value={fmtPct(amountSim)} />
+								<KeyVal label="NET LOSS" value={fmtPct(netLoss)} />
+								<KeyVal
+									label="FIRST SLOT"
+									value={firstSlot ? fmtNumber(firstSlot) : EVIDENCE_PLACEHOLDER}
+								/>
+								<KeyVal
+									label="CYCLE LENGTH"
+									value={
+										cycleLen !== undefined
+											? `${cycleLen} HOPS`
+											: EVIDENCE_PLACEHOLDER
+									}
+								/>
 							</Stack>
 						}
 					/>
 				</Section>
 			);
+		}
 
-		case "Sandwich":
+		case "Sandwich": {
+			const poolId = ev<string>(alert, "pool_id");
+			const assetPair = ev<string>(alert, "asset_pair");
+			const rateDeltaPct = ev<number>(alert, "rate_delta_pct");
+			const profit = ev<number>(alert, "attacker_profit_lovelace");
+			const slotSpan = ev<number>(alert, "slot_span");
+			const txA = ev<string>(alert, "tx_a_hash");
+			const txB = ev<string>(alert, "tx_b_hash");
+			const swapRateVictim = ev<number>(alert, "swap_rate_victim");
+			const swapRateBaseline = ev<number>(alert, "swap_rate_baseline");
+			const fmtRate = (r: number | undefined) =>
+				r !== undefined && Number.isFinite(r) && r > 0
+					? `rate ${r.toFixed(4)}`
+					: EVIDENCE_PLACEHOLDER;
 			return (
 				<Section>
 					<TwoCol
 						left={
 							<Stack title="Sandwich Attack Flow">
-								<SandwichFlow />
+								<div className="space-y-1">
+									{/* Flow rows render a single signal in the amount
+									    column for consistency: the swap rate at each leg.
+									    Profit (lovelace) sits in "Attack Details" on the
+									    right so we don't mix rates and ADA in one column. */}
+									<Row
+										color="online"
+										label="FRONT RUN (tx_A)"
+										amount={fmtRate(swapRateBaseline)}
+										address={fmtTxHash(txA)}
+									/>
+									<ArrowsRow direction="down" />
+									<Row
+										color="offline"
+										label="VICTIM"
+										amount={fmtRate(swapRateVictim)}
+										address={fmtTxHash(alert.fullHash)}
+									/>
+									<ArrowsRow direction="up" />
+									<Row
+										color="online"
+										label="BACK RUN (tx_B)"
+										amount={EVIDENCE_PLACEHOLDER}
+										address={fmtTxHash(txB)}
+									/>
+								</div>
 							</Stack>
 						}
 						right={
 							<Stack title="Attack Details">
-								<KeyVal label="DEX POOL" value="SundaeSwap ADA/HOSKY" />
-								<KeyVal label="ASSET PAIR" value="ADA / HOSKY" />
-								<KeyVal label="RATE IMPACT" value="-4.2%" />
-								<KeyVal label="ATTACKER PROFIT" value="37 ADA" />
-								<KeyVal label="SLOT SPAN" value="3 SLOTS" />
+								<KeyVal label="DEX POOL" value={fmtAddress(poolId)} />
+								<KeyVal label="ASSET PAIR" value={assetPair || EVIDENCE_PLACEHOLDER} />
+								<KeyVal
+									label="RATE IMPACT"
+									value={
+										rateDeltaPct !== undefined
+											? `${rateDeltaPct.toFixed(2)}%`
+											: EVIDENCE_PLACEHOLDER
+									}
+								/>
+								<KeyVal label="ATTACKER PROFIT" value={fmtLovelaceAsAda(profit)} />
+								<KeyVal
+									label="SLOT SPAN"
+									value={
+										slotSpan !== undefined
+											? `${slotSpan} SLOTS`
+											: EVIDENCE_PLACEHOLDER
+									}
+								/>
 							</Stack>
 						}
 					/>
 				</Section>
 			);
+		}
 
-		case "Front Running":
+		case "Front Running": {
+			const counterpart = ev<string>(alert, "counterpart_tx_hash");
+			const outcome = ev<string>(alert, "outcome");
+			const deltaMs = ev<number>(alert, "delta_ms");
+			const sharedInputs = ev<number>(alert, "shared_input_count");
+			const txFee = ev<number>(alert, "tx_fee");
+			const counterpartFee = ev<number>(alert, "counterpart_fee");
+			const txRole = ev<string>(alert, "tx_role"); // "TX_A" | "TX_B" | ""
+			// `outcome` tells us which side of the collision won; `tx_role`
+			// tells us which side the current alert tx is. Need both to label
+			// winner / loser without flipping the badges 50% of the time.
+			const meWon =
+				(outcome === "TX_A_CONFIRMED" && txRole === "TX_A") ||
+				(outcome === "TX_B_CONFIRMED" && txRole === "TX_B");
+			const decided =
+				(outcome === "TX_A_CONFIRMED" || outcome === "TX_B_CONFIRMED") &&
+				(txRole === "TX_A" || txRole === "TX_B");
+			const winnerHash = decided
+				? meWon
+					? alert.fullHash
+					: counterpart
+				: undefined;
+			const loserHash = decided
+				? meWon
+					? counterpart
+					: alert.fullHash
+				: undefined;
+			const winnerFee = decided ? (meWon ? txFee : counterpartFee) : undefined;
+			const loserFee = decided ? (meWon ? counterpartFee : txFee) : undefined;
 			return (
 				<Section>
 					<TwoCol
 						left={
 							<Stack title="Collision Details">
-								<KeyVal
-									label={<span className="text-status-online">WINNER</span>}
-									value={
-										<span className="text-status-online font-mono text-sm">
-											f6a7b8c9d0e1f2a3...7081923c
-										</span>
-									}
-								/>
-								<KeyVal
-									label={<span className="text-status-online">Winner Fee</span>}
-									value={<span className="text-status-online">0.34 ADA</span>}
-								/>
-								<div className="flex justify-start py-1 pl-1">
-									<ArrowDown className="text-brand h-4 w-4" />
-								</div>
-								<KeyVal
-									label={<span className="text-status-offline">LOOSER</span>}
-									value={
-										<span className="text-status-offline font-mono text-sm">
-											c8d9e0f1a2b3c415...9a3b4c5d
-										</span>
-									}
-								/>
-								<KeyVal
-									label={
-										<span className="text-status-offline">Looser Fee</span>
-									}
-									value={<span className="text-status-offline">0.22 ADA</span>}
-								/>
+								{decided ? (
+									<>
+										<KeyVal
+											label={<span className="text-status-online">WINNER</span>}
+											value={
+												<span className="text-status-online font-mono text-sm">
+													{fmtTxHash(winnerHash)}
+												</span>
+											}
+										/>
+										<KeyVal
+											label={<span className="text-status-online">Winner Fee</span>}
+											value={
+												<span className="text-status-online">
+													{fmtLovelaceAsAda(winnerFee)}
+												</span>
+											}
+										/>
+										<div className="flex justify-start py-1 pl-1">
+											<ArrowDown className="text-brand h-4 w-4" />
+										</div>
+										<KeyVal
+											label={<span className="text-status-offline">LOSER</span>}
+											value={
+												<span className="text-status-offline font-mono text-sm">
+													{fmtTxHash(loserHash)}
+												</span>
+											}
+										/>
+										<KeyVal
+											label={<span className="text-status-offline">Loser Fee</span>}
+											value={
+												<span className="text-status-offline">
+													{fmtLovelaceAsAda(loserFee)}
+												</span>
+											}
+										/>
+									</>
+								) : (
+									<div className="text-muted-foreground text-sm">
+										Outcome undetermined: tx role not recorded yet.
+									</div>
+								)}
 							</Stack>
 						}
 						right={
 							<Stack title="Race Metrics">
-								<KeyVal label="SHARED INPUTS" value="1,450 ADA" />
-								<KeyVal label="MEMPOOL DELTA" value="180 ms" />
-								<KeyVal label="OUTCOME" value="TX_B_CONFIRMED (Attacker Won)" />
-								<KeyVal label="ATTACKER WINS" value="4 (Last 24 hours)" />
+								<KeyVal label="SHARED INPUTS" value={fmtNumber(sharedInputs)} />
+								<KeyVal
+									label="MEMPOOL DELTA"
+									value={
+										deltaMs !== undefined
+											? `${fmtNumber(Math.round(deltaMs))} ms`
+											: EVIDENCE_PLACEHOLDER
+									}
+								/>
+								<KeyVal label="OUTCOME" value={outcome ?? EVIDENCE_PLACEHOLDER} />
+								<KeyVal label="ATTACKER WINS (24h)" value={EVIDENCE_PLACEHOLDER} />
 							</Stack>
 						}
 					/>
 				</Section>
 			);
+		}
 
-		case "Multiple Sat":
+		case "Multiple Sat": {
+			const nInputs = ev<number>(alert, "n_inputs_same_script");
+			const lovelaceFullDrain = ev<boolean>(alert, "lovelace_full_drain");
+			const assetsExtracted = ev<number>(alert, "n_assets_extracted");
+			const redeemerCount = ev<number>(alert, "redeemer_count");
+			const redeemerRatio = ev<number>(alert, "redeemer_input_ratio");
+			const valueExtracted = ev<number>(alert, "value_extracted_lovelace");
+			const valueReturned = ev<number>(alert, "value_returned_lovelace");
+			const cpuTotal = ev<number>(alert, "cpu_units_total");
+			const targetScript = ev<string>(alert, "target_script_address");
 			return (
 				<Section>
 					<TwoCol
 						left={
 							<Stack title="Exploit Pattern">
-								<KeyVal label="SCRIPT INPUTS" value="3" />
-								<KeyVal label="FULL DRAIN" value="Yes" />
-								<KeyVal label="REDEEMERS USED" value="1" />
-								<KeyVal label="REDEEMER RATIO" value="%33" />
+								<KeyVal label="SCRIPT INPUTS" value={fmtNumber(nInputs)} />
+								<KeyVal
+									label="LOVELACE FULL DRAIN"
+									value={fmtBool(lovelaceFullDrain)}
+								/>
+								<KeyVal
+									label="ASSETS EXTRACTED"
+									value={fmtNumber(assetsExtracted)}
+								/>
+								<KeyVal label="REDEEMERS USED" value={fmtNumber(redeemerCount)} />
+								<KeyVal label="REDEEMER RATIO" value={fmtPct(redeemerRatio)} />
 							</Stack>
 						}
 						right={
 							<Stack title="Value Flow">
-								<KeyVal label="VALUE EXTRACTED" value="1,450 ADA" />
-								<KeyVal label="VALUE RETURNED" value="0 ADA" />
-								<KeyVal label="CPU UNITS" value="2,100,000" />
+								<KeyVal
+									label="VALUE EXTRACTED"
+									value={fmtLovelaceAsAda(valueExtracted)}
+								/>
+								<KeyVal
+									label="VALUE RETURNED"
+									value={fmtLovelaceAsAda(valueReturned)}
+								/>
+								<KeyVal label="CPU UNITS" value={fmtNumber(cpuTotal)} />
 								<KeyVal
 									label="TARGET SCRIPT"
 									value={
 										<span className="font-mono text-sm">
-											ADWED34.........8678687TYHRE
+											{fmtAddress(targetScript)}
 										</span>
 									}
 								/>
@@ -622,28 +848,43 @@ function AttackTypeSection({ type }: { type: AttackType }) {
 					/>
 				</Section>
 			);
+		}
 
-		case "Large Datum":
+		case "Large Datum": {
+			const datumBytes = ev<number>(alert, "datum_bytes_raw");
+			const utxoBytes = ev<number>(alert, "utxo_total_bytes");
+			const datumType = ev<string>(alert, "datum_type");
+			const targetScript = ev<string>(alert, "target_script_address");
+			const ratio = ev<number>(alert, "datum_utxo_ratio");
+			const datumPct =
+				ratio !== undefined ? Math.round(ratio * 100) : undefined;
 			return (
 				<Section>
 					<Stack title="Large Datum Details">
 						<TwoCol
 							left={
 								<div className="space-y-3">
-									<KeyVal label="DATUM SIZE" value="5,800 bytes" />
+									<KeyVal label="DATUM SIZE" value={fmtBytes(datumBytes)} />
 									<Divider />
-									<KeyVal label="UTXO SIZE" value="10,000 bytes" />
+									<KeyVal label="UTXO SIZE" value={fmtBytes(utxoBytes)} />
 								</div>
 							}
 							right={
 								<div className="space-y-3">
-									<KeyVal label="DATUM TYPE" value="Inline" />
+									<KeyVal
+										label="DATUM TYPE"
+										value={
+											datumType
+												? datumType[0].toUpperCase() + datumType.slice(1)
+												: EVIDENCE_PLACEHOLDER
+										}
+									/>
 									<Divider />
 									<KeyVal
 										label="TARGET SCRIPT"
 										value={
 											<span className="font-mono text-sm">
-												ADWED34.........8678687TYHRE
+												{fmtAddress(targetScript)}
 											</span>
 										}
 									/>
@@ -651,94 +892,117 @@ function AttackTypeSection({ type }: { type: AttackType }) {
 							}
 						/>
 					</Stack>
-					<div className="mt-6">
-						<Stack title="DATUM/UTXO Ratio">
-							<RatioBar
-								parts={[
-									{ label: "%65 DATUM", percent: 65, tone: "brand" },
-									{ label: "%35 UTXO", percent: 35, tone: "muted" },
-								]}
-							/>
-						</Stack>
-					</div>
+					{datumPct !== undefined && (
+						<div className="mt-6">
+							<Stack title="DATUM/UTXO Ratio">
+								<RatioBar
+									parts={[
+										{
+											label: `${datumPct}% DATUM`,
+											percent: datumPct,
+											tone: "brand",
+										},
+										{
+											label: `${100 - datumPct}% UTXO`,
+											percent: 100 - datumPct,
+											tone: "muted",
+										},
+									]}
+								/>
+							</Stack>
+						</div>
+					)}
 				</Section>
 			);
+		}
 
-		case "Token Dust":
+		case "Token Dust": {
+			const uniqueAssets = ev<number>(alert, "unique_asset_count");
+			const cborBytes = ev<number>(alert, "value_cbor_bytes_raw");
+			const policyCount = ev<number>(alert, "policy_count");
+			const maxPerPolicy = ev<number>(alert, "max_assets_per_policy");
+			const targetScript = ev<string>(alert, "target_script_address");
+			const lovelace = ev<number>(alert, "lovelace_amount");
 			return (
 				<Section>
 					<Stack title="Dust Attack Details">
 						<TwoCol
 							left={
 								<div className="space-y-3">
-									<KeyVal label="UNIQUE ASSETS" value="87" />
+									<KeyVal label="UNIQUE ASSETS" value={fmtNumber(uniqueAssets)} />
 									<Divider />
-									<KeyVal label="CBOR SIZE" value="14,200 bytes" />
+									<KeyVal label="CBOR SIZE" value={fmtBytes(cborBytes)} />
 									<Divider />
-									<KeyVal label="POLICY IDS" value="12" />
+									<KeyVal label="POLICY IDS" value={fmtNumber(policyCount)} />
 								</div>
 							}
 							right={
 								<div className="space-y-3">
 									<KeyVal
-										label="MAX QUANTITY"
-										value="9,223,372,036,854,775,807"
+										label="MAX ASSETS / POLICY"
+										value={fmtNumber(maxPerPolicy)}
 									/>
 									<Divider />
 									<KeyVal
 										label="TARGET SCRIPT"
 										value={
 											<span className="font-mono text-sm">
-												ADWED34.........8678687TYHRE
+												{fmtAddress(targetScript)}
 											</span>
 										}
 									/>
 									<Divider />
-									<KeyVal label="ADA AMOUNT" value="1.8 ADA" />
+									<KeyVal label="ADA AMOUNT" value={fmtLovelaceAsAda(lovelace)} />
 								</div>
 							}
 						/>
 					</Stack>
 				</Section>
 			);
+		}
 
-		case "Large Value":
+		case "Large Value": {
+			const qtyDigits = ev<number>(alert, "quantity_digits_raw");
+			const cborBytes = ev<number>(alert, "value_cbor_bytes_raw");
+			const hex = ev<string>(alert, "asset_name_hex");
+			const ascii = ev<string>(alert, "asset_name_ascii");
+			const maxQty = ev<number>(alert, "max_quantity_raw");
+			const policyId = ev<string>(alert, "policy_id");
+			const lovelace = ev<number>(alert, "lovelace_amount");
 			return (
 				<Section>
 					<Stack title="Large Value Details">
 						<TwoCol
 							left={
 								<div className="space-y-3">
-									<KeyVal label="QUANTITY DIGITS" value="19" />
+									<KeyVal label="QUANTITY DIGITS" value={fmtNumber(qtyDigits)} />
 									<Divider />
-									<KeyVal label="CBOR SIZE" value="8,400 bytes" />
+									<KeyVal label="CBOR SIZE" value={fmtBytes(cborBytes)} />
 									<Divider />
-									<KeyVal label="ASSET NAME" value="Test1234567" />
+									<KeyVal label="ASSET NAME" value={fmtAssetName(hex, ascii)} />
 								</div>
 							}
 							right={
 								<div className="space-y-3">
-									<KeyVal
-										label="MAX QUANTITY"
-										value="9,223,372,036,854,775,807"
-									/>
+									<KeyVal label="MAX QUANTITY" value={fmtNumber(maxQty)} />
 									<Divider />
 									<KeyVal
 										label="POLICY ID"
 										value={
 											<span className="font-mono text-sm">
-												ADWED34.........8678687TYHRE
+												{fmtAddress(policyId)}
 											</span>
 										}
 									/>
 									<Divider />
-									<KeyVal label="ADA AMOUNT" value="2.0 ADA" />
+									<KeyVal label="ADA AMOUNT" value={fmtLovelaceAsAda(lovelace)} />
 								</div>
 							}
 						/>
 					</Stack>
 				</Section>
 			);
+		}
 	}
 }
 
@@ -986,32 +1250,6 @@ function FlowChain({
 	);
 }
 
-function SandwichFlow() {
-	return (
-		<div className="space-y-1">
-			<Row
-				color="online"
-				label="FRONT RUN"
-				amount="1,250 ADA"
-				address="a1b2c3d4e5f60718...6e7f80a1"
-			/>
-			<ArrowsRow direction="down" />
-			<Row
-				color="offline"
-				label="VICTIM"
-				amount="340 ADA"
-				address="fcfca39395459c17...3cc7a3ce"
-			/>
-			<ArrowsRow direction="up" />
-			<Row
-				color="online"
-				label="BACK RUN"
-				amount="1,287 ADA"
-				address="b2c3d4e5f6071829...7f80a1b2"
-			/>
-		</div>
-	);
-}
 
 function Row({
 	color,

@@ -29,6 +29,15 @@ class ScorerResult:
     severity: Optional[str] = None
     """Scorer-specific severity classification (e.g. KNOWN_BAD, SUSPICIOUS_NEW_DOMAIN)."""
 
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    """Raw evidence values for UI drill-down (addresses, byte counts, lists).
+
+    Distinct from ``sub_scores`` (which are normalised [0,1] dimensions
+    powering the donut charts): ``evidence`` carries unnormalised facts about
+    the transaction that the operator should see in plain form, e.g. the
+    target script address, datum byte count, or list of hop addresses.
+    """
+
 
 def finalise_score(raw: float, scale: int = 100, ndigits: int = 2) -> float:
     """Canonical final-score contract: clip to [0, 1], scale, and round.

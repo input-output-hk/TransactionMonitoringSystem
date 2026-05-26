@@ -407,6 +407,7 @@ def execute_schema():
                 max_class        String,
                 risk_band        String,
                 sub_scores       String,
+                evidence         String DEFAULT '{}',
                 analysis_version String,
                 analyzed_at      DateTime,
                 INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
@@ -416,6 +417,10 @@ def execute_schema():
             ORDER BY (network, tx_hash)
             PARTITION BY toYYYYMMDD(analyzed_at)
         """)
+
+        client.execute(
+            "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS evidence String DEFAULT '{}'"
+        )
 
         # Admin-curated archive of flagged transactions known to be false
         # positives. Additive to tx_class_scores: a row here suppresses the
@@ -769,7 +774,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
             tx_hash, network,
             token_dust, large_value, large_datum, multiple_sat,
             front_running, sandwich, circular, fake_token, phishing,
-            max_score, max_class, risk_band, sub_scores,
+            max_score, max_class, risk_band, sub_scores, evidence,
             analysis_version, analyzed_at
         ) VALUES
         """,
@@ -783,6 +788,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
                 r.get("phishing", -1),
                 r["max_score"], r["max_class"], r["risk_band"],
                 json.dumps(r.get("sub_scores", {})),
+                json.dumps(r.get("evidence", {}), default=str),
                 r["analysis_version"], r["analyzed_at"],
             )
             for r in results
@@ -797,7 +803,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
         SELECT tx_hash, network,
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores,
+               max_score, max_class, risk_band, sub_scores, evidence,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE tx_hash = %(tx_hash)s
@@ -811,15 +817,16 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
         "tx_hash", "network",
         "token_dust", "large_value", "large_datum", "multiple_sat",
         "front_running", "sandwich", "circular", "fake_token", "phishing",
-        "max_score", "max_class", "risk_band", "sub_scores",
+        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
         "analysis_version", "analyzed_at",
     )
     result = dict(zip(keys, rows[0]))
-    if isinstance(result["sub_scores"], str):
-        try:
-            result["sub_scores"] = json.loads(result["sub_scores"])
-        except (json.JSONDecodeError, TypeError):
-            result["sub_scores"] = {}
+    for json_key in ("sub_scores", "evidence"):
+        if isinstance(result.get(json_key), str):
+            try:
+                result[json_key] = json.loads(result[json_key])
+            except (json.JSONDecodeError, TypeError):
+                result[json_key] = {}
     return result
 
 
@@ -954,7 +961,7 @@ def get_class_scores_list(
         SELECT tx_hash, network,
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores,
+               max_score, max_class, risk_band, sub_scores, evidence,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE {where}
@@ -966,7 +973,7 @@ def get_class_scores_list(
     score_keys = (
         "tx_hash", "network",
         *_CLASS_COLS,
-        "max_score", "max_class", "risk_band", "sub_scores",
+        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
         "analysis_version", "analyzed_at",
     )
     # Batch-fetch fee/output_count for matched tx_hashes
@@ -990,11 +997,12 @@ def get_class_scores_list(
         detail = tx_details.get(d["tx_hash"], {})
         d["fee"] = detail.get("fee")
         d["output_count"] = detail.get("output_count")
-        if isinstance(d["sub_scores"], str):
-            try:
-                d["sub_scores"] = json.loads(d["sub_scores"])
-            except (json.JSONDecodeError, TypeError):
-                d["sub_scores"] = {}
+        for json_key in ("sub_scores", "evidence"):
+            if isinstance(d.get(json_key), str):
+                try:
+                    d[json_key] = json.loads(d[json_key])
+                except (json.JSONDecodeError, TypeError):
+                    d[json_key] = {}
         results.append(d)
     return results
 

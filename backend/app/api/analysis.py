@@ -25,12 +25,17 @@ _CLASS_NAMES = [
 
 def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
     scores = {name: float(row.get(name, -1)) for name in _CLASS_NAMES}
-    sub_scores = row.get("sub_scores", {})
-    if isinstance(sub_scores, str):
-        try:
-            sub_scores = json.loads(sub_scores)
-        except (json.JSONDecodeError, TypeError):
-            sub_scores = {}
+    def _decode_json_field(key: str) -> Dict[str, Any]:
+        value = row.get(key, {})
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return value or {}
+
+    sub_scores = _decode_json_field("sub_scores")
+    evidence = _decode_json_field("evidence")
     return ClassScoreResult(
         tx_hash=row["tx_hash"],
         network=row["network"],
@@ -39,6 +44,7 @@ def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
         max_class=row["max_class"],
         risk_band=RiskBand(row["risk_band"]),
         sub_scores=sub_scores,
+        evidence=evidence,
         analysis_version=row["analysis_version"],
         analyzed_at=row["analyzed_at"],
         fee=row.get("fee"),
