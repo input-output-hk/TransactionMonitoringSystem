@@ -62,14 +62,18 @@ export function ReportsPage() {
 	const [exporting, setExporting] = useState(false);
 	const [confirmExportOpen, setConfirmExportOpen] = useState(false);
 
+	// ReportsPage keeps the single-select UX but the API now expects an
+	// array of severities, so we wrap the lone selection.
+	const severities: Severity[] | undefined =
+		severityFilter !== "all" ? [severityFilter as Severity] : undefined;
+
 	const { data, isPending, isError } = useRiskAlerts(
 		{
 			page,
 			pageSize,
 			attackType:
 				attackFilter !== "all" ? (attackFilter as AttackType) : undefined,
-			severity:
-				severityFilter !== "all" ? (severityFilter as Severity) : undefined,
+			severities,
 			analyzedFrom: startOfDayISO(startDate),
 			analyzedTo: nextDayISO(endDate),
 			sort: sortBy,
@@ -106,8 +110,7 @@ export function ReportsPage() {
 				{
 					attackType:
 						attackFilter !== "all" ? (attackFilter as AttackType) : undefined,
-					severity:
-						severityFilter !== "all" ? (severityFilter as Severity) : undefined,
+					severities,
 					analyzedFrom: startOfDayISO(startDate),
 					analyzedTo: nextDayISO(endDate),
 					sort: sortBy,

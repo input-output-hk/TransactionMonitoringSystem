@@ -96,7 +96,13 @@ export type RiskAlertsParams = {
 	page: number;
 	pageSize: number;
 	attackType?: AttackType;
-	severity?: Severity;
+	/**
+	 * Severities to OR-match. Empty array or omitted means "no filter".
+	 * The backend `/api/analysis/results` accepts the `risk_band` query param
+	 * repeated multiple times (e.g. `?risk_band=Critical&risk_band=High`) and
+	 * applies a SQL `IN` clause server-side.
+	 */
+	severities?: Severity[];
 	sort?: "score" | "date";
 	/** Inclusive lower bound on `analyzed_at` (ISO datetime). */
 	analyzedFrom?: string;
@@ -121,7 +127,14 @@ function buildResultsQuery(
 	// (max_class="", max_score=0) which aren't really "alerts".
 	qs.set("min_score", "1");
 	if (p.attackType) qs.set("attack_class", SNAKE_BY_ATTACK_TYPE[p.attackType]);
-	if (p.severity) qs.set("risk_band", SEVERITY_TO_RISK_BAND[p.severity]);
+	// Backend expects the `risk_band` param repeated once per selected band.
+	// `URLSearchParams.append` is the right call here (not `set`, which would
+	// overwrite the previous value).
+	if (p.severities?.length) {
+		for (const s of p.severities) {
+			qs.append("risk_band", SEVERITY_TO_RISK_BAND[s]);
+		}
+	}
 	if (p.analyzedFrom) qs.set("analyzed_from", p.analyzedFrom);
 	if (p.analyzedTo) qs.set("analyzed_to", p.analyzedTo);
 	return qs;

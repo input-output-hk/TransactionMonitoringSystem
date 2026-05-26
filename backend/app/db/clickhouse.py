@@ -875,7 +875,7 @@ def insert_baselines(rows: List[tuple]):
 
 def get_class_scores_list(
     network: str,
-    risk_band: Optional[str] = None,
+    risk_band: Optional[List[str]] = None,
     attack_class: Optional[str] = None,
     min_score: float = 0.0,
     sort: str = "score",
@@ -891,6 +891,9 @@ def get_class_scores_list(
     include_archived: when False (default), rows whose (network, tx_hash) is
         present in ``archived_alerts`` are excluded so admin-curated false
         positives stop showing up in "currently dangerous" lists.
+    risk_band: list of risk band values (case-insensitive). When non-empty,
+        results are restricted via an ``IN`` clause; ``None`` or empty list
+        means no filter.
     analyzed_from / analyzed_to: inclusive lower / exclusive upper bound on
     ``analyzed_at`` (datetime).
     """
@@ -911,8 +914,15 @@ def get_class_scores_list(
         "network": network, "limit": limit, "offset": offset,
     }
     if risk_band:
-        conditions.append("lower(risk_band) = %(risk_band)s")
-        params["risk_band"] = risk_band.lower()
+        # Generate one named placeholder per value so the query is fully
+        # parameterized (no string interpolation of user input). clickhouse-
+        # driver doesn't expand a Python list into a SQL list automatically.
+        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
+        conditions.append(
+            f"lower(risk_band) IN ({', '.join(placeholders)})"
+        )
+        for i, rb in enumerate(risk_band):
+            params[f"risk_band_{i}"] = rb.lower()
     if attack_class and attack_class in _CLASS_COLS:
         # Safe: attack_class validated against _CLASS_COLS allowlist above
         conditions.append(f"`{attack_class}` >= %(min_score)s")
@@ -990,7 +1000,9 @@ def get_class_scores_list(
 
 
 async def get_class_scores_list_async(
-    network: str, risk_band: Optional[str], attack_class: Optional[str],
+    network: str,
+    risk_band: Optional[List[str]],
+    attack_class: Optional[str],
     min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
     include_archived: bool = False,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
@@ -1018,7 +1030,7 @@ async def get_class_scores_list_async(
 
 def count_class_scores(
     network: str,
-    risk_band: Optional[str] = None,
+    risk_band: Optional[List[str]] = None,
     attack_class: Optional[str] = None,
     min_score: float = 0.0,
     analyzed_from: Optional[Any] = None,
@@ -1029,6 +1041,8 @@ def count_class_scores(
 
     Mirrors the WHERE clause of ``get_class_scores_list`` so the count is
     consistent with what would be returned (ignoring LIMIT/OFFSET).
+    risk_band: list of bands; ``None`` or empty list means no filter. See
+        ``get_class_scores_list`` for the same semantics.
     include_archived: when False (default), exclude rows whose
         ``(network, tx_hash)`` is present in ``archived_alerts`` — keeps the
         count aligned with the rows actually surfaced by the list query.
@@ -1043,8 +1057,12 @@ def count_class_scores(
     conditions = ["network = %(network)s"]
     params: Dict[str, Any] = {"network": network}
     if risk_band:
-        conditions.append("lower(risk_band) = %(risk_band)s")
-        params["risk_band"] = risk_band.lower()
+        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
+        conditions.append(
+            f"lower(risk_band) IN ({', '.join(placeholders)})"
+        )
+        for i, rb in enumerate(risk_band):
+            params[f"risk_band_{i}"] = rb.lower()
     if attack_class and attack_class in _CLASS_COLS:
         conditions.append(f"`{attack_class}` >= %(min_score)s")
         params["min_score"] = min_score
@@ -1073,7 +1091,9 @@ def count_class_scores(
 
 
 async def count_class_scores_async(
-    network: str, risk_band: Optional[str], attack_class: Optional[str],
+    network: str,
+    risk_band: Optional[List[str]],
+    attack_class: Optional[str],
     min_score: float,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
     include_archived: bool = False,
