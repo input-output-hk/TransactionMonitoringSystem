@@ -85,6 +85,13 @@ export const SUB_SCORE_LABELS: Record<
 				"Distinct recipient addresses receiving this payload. Mass-distribution patterns boost this sub-score; one-to-one messages stay low.",
 		},
 	],
+	// "New Policy" donut (key: policy_age_inverted) intentionally omitted.
+	// The fake_token scorer doesn't have an asset→first-seen index yet, so
+	// it hardcodes ``policy_age_slots = 1`` (most-suspicious) for every tx.
+	// Showing the donut as a permanent 100% misleads operators into
+	// reading it as real signal. See docs/follow-ups/fake_token_policy_age.md
+	// for the implementation plan. Reintroduce this entry once the lookup
+	// table ships.
 	"Fake Token": [
 		{
 			key: "tokenname_similarity",
@@ -97,12 +104,6 @@ export const SUB_SCORE_LABELS: Record<
 			label: "Suspicious Unicode",
 			description:
 				"Presence of visual homoglyphs (Cyrillic O / Greek E), zero-width characters, or mixed scripts in the asset name. Pure-ASCII names score 0%.",
-		},
-		{
-			key: "policy_age_inverted",
-			label: "New Policy",
-			description:
-				"How recently the minting policy first appeared on-chain. Newly minted policies impersonating established tokens are textbook fake-token shape.",
 		},
 		{
 			key: "cip25_similarity",
@@ -519,10 +520,13 @@ export const ATTACK_META: Record<
 	"Fake Token": {
 		description:
 			"Mints a token mimicking a legitimate one — typically via Unicode lookalikes or metadata cloning — to deceive holders.",
+		// Keep index-aligned with SUB_SCORE_LABELS["Fake Token"]: the
+		// "New Policy" donut is hidden until the policy-age lookup ships
+		// (see docs/follow-ups/fake_token_policy_age.md), so it must be
+		// absent here too or the positional fallback in SubScores misaligns.
 		subScores: [
 			{ label: "Similar Token Name", percent: 65 },
 			{ label: "Suspicious Unicode", percent: 72 },
-			{ label: "New Policy", percent: 40 },
 			{ label: "Metadata Match", percent: 40 },
 			{ label: "Many Recipients", percent: 30 },
 		],
