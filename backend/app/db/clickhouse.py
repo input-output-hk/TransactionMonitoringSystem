@@ -1205,6 +1205,72 @@ async def get_class_scores_stats_async(
     )
 
 
+def get_alert_timeseries(
+    network: str, days: int = 14, include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    """Daily count of High+Critical alerts over the last ``days`` days.
+
+    Bucketed on the transaction's on-chain block ``timestamp`` (not
+    ``analyzed_at``) so the trend reflects when attacks actually occurred,
+    not our scoring/backfill cadence. Powers the dashboard sparkline.
+
+    Excludes admin-archived rows by default so the trend matches the
+    Critical KPI card (which also excludes them).
+
+    FINAL is applied inside subqueries rather than on the joined tables
+    directly: ClickHouse 26+ rejects FINAL on a table inside a JOIN.
+    Gaps (days with zero alerts) are filled with 0 via ``WITH FILL`` so
+    the sparkline renders a continuous line instead of collapsing missing
+    days.
+
+    Counts ``DISTINCT s.tx_hash`` rather than join-rows: the ``transactions``
+    table is a plain MergeTree (no dedup), so a tx ingested more than once
+    (chain reorg / re-sync) has duplicate rows that would otherwise fan out
+    the JOIN and inflate the daily count. A tx_hash maps to exactly one
+    block, so distinct-by-hash is the correct unit.
+    """
+    archive_clause = (
+        " AND (network, tx_hash) NOT IN ("
+        "SELECT network, tx_hash FROM archived_alerts FINAL)"
+        if not include_archived else ""
+    )
+    rows = _get_client().execute(
+        f"""
+        SELECT toDate(t.timestamp) AS day, count(DISTINCT s.tx_hash) AS cnt
+        FROM (
+            SELECT tx_hash, network
+            FROM tx_class_scores FINAL
+            WHERE network = %(network)s
+              AND lower(risk_band) IN ('high', 'critical')
+              {archive_clause}
+        ) AS s
+        INNER JOIN (
+            SELECT tx_hash, network, timestamp
+            FROM transactions
+            WHERE network = %(network)s
+              AND timestamp >= toStartOfDay(now() - INTERVAL %(days)s DAY)
+        ) AS t
+          ON s.tx_hash = t.tx_hash AND s.network = t.network
+        GROUP BY day
+        ORDER BY day WITH FILL
+            FROM toDate(now() - INTERVAL %(days)s DAY)
+            TO toDate(now()) + 1
+            STEP 1
+        """,
+        {"network": network, "days": days},
+    )
+    return [{"date": r[0].isoformat(), "count": int(r[1])} for r in rows]
+
+
+async def get_alert_timeseries_async(
+    network: str, days: int = 14, include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, get_alert_timeseries, network, days, include_archived,
+    )
+
+
 def get_baselines_for_scope(
     network: str, scope_type: str, scope_id: str,
 ) -> List[Dict[str, Any]]:

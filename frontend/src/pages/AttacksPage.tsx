@@ -17,7 +17,11 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { useRiskAlerts } from "@/lib/api/analysis";
-import { useAnalysisStats, useTransactionStats } from "@/lib/api/stats";
+import {
+	useAlertTimeseries,
+	useAnalysisStats,
+	useTransactionStats,
+} from "@/lib/api/stats";
 import { useLatestTransactions, useRecentBlocks } from "@/lib/api/transactions";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
@@ -39,8 +43,12 @@ import {
 	ChevronsRight,
 	Copy,
 } from "lucide-react";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useNavigate } from "react-router-dom";
+
+// Recharts (+ its d3/redux transitive deps, ~280 KB gzip) loads as a
+// deferred async chunk so it doesn't bloat the initial dashboard bundle.
+const Sparkline = lazy(() => import("@/components/sparkline"));
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -429,35 +437,40 @@ function KpiCard({ label, value }: { label: string; value: string }) {
 }
 
 function GraphBarCard() {
+	// High+Critical alerts/day over the last 14 days, bucketed on on-chain
+	// block time (see backend get_alert_timeseries). Gives the Critical KPI
+	// a trend so operators can tell a spike from the baseline.
+	const { data, isPending, isError } = useAlertTimeseries(14);
+	const points = data?.data ?? [];
+	const total = points.reduce((sum, p) => sum + p.count, 0);
+
 	return (
 		<div className="border-border bg-card rounded-lg border-2 p-4">
-			<div className="text-foreground text-sm font-semibold">Graph Bar</div>
-			<Sparkline className="mt-2 h-10 w-full" />
+			<div className="flex items-baseline justify-between">
+				<div className="text-foreground text-sm font-semibold">
+					Critical+High
+				</div>
+				<div className="text-muted-foreground text-xs">14d</div>
+			</div>
+			{isPending || isError ? (
+				<div className="text-muted-foreground mt-2 flex h-10 items-center text-xs">
+					{isError ? "Unavailable" : "Loading…"}
+				</div>
+			) : (
+				<Suspense
+					fallback={
+						<div className="text-muted-foreground mt-2 flex h-10 items-center text-xs">
+							Loading…
+						</div>
+					}
+				>
+					<Sparkline points={points} className="mt-2 h-10 w-full" />
+				</Suspense>
+			)}
+			<div className="text-muted-foreground mt-1 text-xs">
+				{total} in last 14 days
+			</div>
 		</div>
-	);
-}
-
-function Sparkline({ className }: { className?: string }) {
-	// Decorative SVG mimicking the figma mini-chart silhouette
-	return (
-		<svg
-			className={className}
-			viewBox="0 0 120 40"
-			fill="none"
-			xmlns="http://www.w3.org/2000/svg"
-			preserveAspectRatio="none"
-		>
-			<path
-				d="M0 32 L15 26 L25 30 L40 14 L55 28 L70 24 L85 8 L100 22 L120 18 L120 40 L0 40 Z"
-				className="fill-brand/30"
-			/>
-			<path
-				d="M0 32 L15 26 L25 30 L40 14 L55 28 L70 24 L85 8 L100 22 L120 18"
-				className="stroke-brand"
-				strokeWidth="1.5"
-				fill="none"
-			/>
-		</svg>
 	);
 }
 

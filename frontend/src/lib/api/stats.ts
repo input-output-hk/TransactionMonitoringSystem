@@ -44,6 +44,22 @@ async function fetchTransactionStats(): Promise<TransactionStats> {
 	return (await res.json()) as TransactionStats;
 }
 
+export type AlertTimeseriesPoint = { date: string; count: number };
+
+export type AlertTimeseries = {
+	network: string;
+	days: number;
+	data: AlertTimeseriesPoint[];
+};
+
+async function fetchAlertTimeseries(days: number): Promise<AlertTimeseries> {
+	const res = await fetchWithAuth(
+		`/api/analysis/stats/timeseries?network=${getNetwork()}&days=${days}`,
+	);
+	if (!res.ok) throw new Error(`Alert timeseries failed: ${res.status}`);
+	return (await res.json()) as AlertTimeseries;
+}
+
 // Stats are aggregates that change slowly relative to the analysis engine
 // cadence (30s). Polling them every 5s was 4x the engine's update rate, with
 // no benefit. 15s keeps the UI fresh without burning rate-limit budget.
@@ -62,6 +78,15 @@ export function useTransactionStats() {
 	return useQuery({
 		queryKey: ["transactions", "stats"],
 		queryFn: fetchTransactionStats,
+		refetchInterval: POLL_MS,
+		staleTime: POLL_MS / 2,
+	});
+}
+
+export function useAlertTimeseries(days = 14) {
+	return useQuery({
+		queryKey: ["analysis", "timeseries", days],
+		queryFn: () => fetchAlertTimeseries(days),
 		refetchInterval: POLL_MS,
 		staleTime: POLL_MS / 2,
 	});
