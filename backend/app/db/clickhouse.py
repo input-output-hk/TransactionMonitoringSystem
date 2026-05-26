@@ -1193,7 +1193,49 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
         }
         idx += 3
     result["per_class"] = per_class
+    result["pending_count"] = get_pending_count(network)
     return result
+
+
+def get_pending_count(network: str) -> int:
+    """Count transactions ingested but not yet scored, on a like-for-like
+    basis.
+
+    The dashboard previously derived "pending" as
+    ``count(transactions) - count(tx_class_scores)``, but those two counts
+    aren't comparable: ``transactions`` is a plain MergeTree counted without
+    FINAL (so re-ingested/reorg duplicates inflate it) while the scores count
+    is FINAL-deduped AND archive-filtered (so every archived alert showed as
+    permanently "pending").
+
+    This computes the real backlog as the difference of two deduped counts:
+    distinct ingested tx_hashes minus distinct scored tx_hashes. Every scored
+    tx_hash is necessarily one we ingested (``scored ⊆ ingested``), so the
+    difference is exactly the unscored set — without the cost of a per-row
+    ``NOT IN`` against the full scored-hash set on every 15s poll.
+
+    Notes:
+      - No archive filter on the scores count: archived txs *were* scored, so
+        they must not count as pending. (Distinct from the band-count stats,
+        which exclude archived.)
+      - ``greatest(0, ...)`` guards the rare case of a score row without a
+        matching transactions row (e.g. cross-instance score import), which
+        would otherwise drive the figure negative.
+      - Input-deferred txs (awaiting transaction_inputs) have no score row yet
+        and are correctly counted as pending.
+    """
+    rows = _get_client().execute(
+        """
+        SELECT greatest(0,
+            (SELECT countDistinct(tx_hash) FROM transactions
+             WHERE network = %(network)s)
+            - (SELECT count() FROM tx_class_scores FINAL
+               WHERE network = %(network)s)
+        )
+        """,
+        {"network": network},
+    )
+    return int(rows[0][0]) if rows else 0
 
 
 async def get_class_scores_stats_async(

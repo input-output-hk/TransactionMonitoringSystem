@@ -2,6 +2,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
 	Select,
 	SelectContent,
 	SelectItem,
@@ -107,13 +112,9 @@ export function AttacksPage() {
 		},
 		{
 			label: "Pending",
-			value:
-				txStats && analysisStats
-					? Math.max(
-							0,
-							txStats.total_count - analysisStats.total,
-						).toLocaleString()
-					: PLACEHOLDER_KPI,
+			value: analysisStats
+				? analysisStats.pending_count.toLocaleString()
+				: PLACEHOLDER_KPI,
 		},
 		{
 			label: "Critical",
@@ -447,9 +448,17 @@ function GraphBarCard() {
 	return (
 		<div className="border-border bg-card rounded-lg border-2 p-4">
 			<div className="flex items-baseline justify-between">
-				<div className="text-foreground text-sm font-semibold">
-					Critical+High
-				</div>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="text-foreground cursor-help text-sm font-semibold underline decoration-dotted underline-offset-4">
+							Severe Alerts
+						</div>
+					</TooltipTrigger>
+					<TooltipContent side="top" className="max-w-xs text-xs">
+						Daily count of Critical + High severity alerts over the last 14
+						days (by on-chain block time).
+					</TooltipContent>
+				</Tooltip>
 				<div className="text-muted-foreground text-xs">14d</div>
 			</div>
 			{isPending || isError ? (
