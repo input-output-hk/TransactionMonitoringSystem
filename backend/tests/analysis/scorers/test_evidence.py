@@ -160,8 +160,13 @@ def test_front_running_evidence():
         "tx_role",
         "counterpart_tx_hash",
         "shared_input_count",
+        "attacker_win_count",
+        "attacker_win_count_24h",
     )
     assert result.evidence["tx_role"] == "TX_B"
+    # The fixture doesn't set ``attacker_win_count_24h`` so the scorer
+    # defaults to 0; the key must still be present for the UI mapping.
+    assert result.evidence["attacker_win_count_24h"] == 0
 
 
 def test_sandwich_evidence():
@@ -277,6 +282,7 @@ def test_phishing_evidence():
     _assert_keys(
         result,
         "severity",
+        "se_tier",
         "urls",
         "url_count",
         "recipient_count",
@@ -286,3 +292,9 @@ def test_phishing_evidence():
     assert result.evidence["recipient_count"] == 2
     assert "674" in result.evidence["metadata_labels"]
     assert result.evidence["urls"], "expected at least one URL extracted"
+    # The fixture contains no Tier-1 / Tier-2 / Tier-3 keywords, so the
+    # tier label should be "None" — confirms the classifier doesn't
+    # default to a positive tier on benign text.
+    assert result.evidence["se_tier"] in {
+        "None", "Tier 2: Urgency language", "Tier 3: Brand impersonation",
+    }

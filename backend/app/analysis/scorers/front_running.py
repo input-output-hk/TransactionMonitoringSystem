@@ -169,5 +169,6 @@ class FrontRunningScorer(BaseScorer):
                 "counterpart_ttl": int(counterpart_ttl or 0),
                 "shares_change_address": bool(collision.get("shares_change_address")),
                 "attacker_win_count": int(win_count),
+                "attacker_win_count_24h": int(collision.get("attacker_win_count_24h", 0)),
             },
         )

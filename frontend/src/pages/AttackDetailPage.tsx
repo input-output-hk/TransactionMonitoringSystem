@@ -460,6 +460,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 				phishing_tld?: boolean;
 			}>;
 			const severity = ev<string>(alert, "severity") ?? EVIDENCE_PLACEHOLDER;
+			const seTier = ev<string>(alert, "se_tier") ?? EVIDENCE_PLACEHOLDER;
 			const recipientCount = ev<number>(alert, "recipient_count");
 			const labels = ev<string[]>(alert, "metadata_labels") ?? [];
 			const metadataLabel = labels.length
@@ -498,7 +499,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 						right={
 							<Stack title="Delivery Analysis">
 								<KeyVal label="SEVERITY" value={severity} />
-								<KeyVal label="SE TIER" value={EVIDENCE_PLACEHOLDER} />
+								<KeyVal label="SE TIER" value={seTier} />
 								<KeyVal label="RECIPIENTS" value={fmtNumber(recipientCount)} />
 								<KeyVal label="METADATA LABEL" value={metadataLabel} />
 							</Stack>
@@ -809,7 +810,12 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 									}
 								/>
 								<KeyVal label="OUTCOME" value={outcome ?? EVIDENCE_PLACEHOLDER} />
-								<KeyVal label="ATTACKER WINS (24h)" value={EVIDENCE_PLACEHOLDER} />
+								<KeyVal
+									label="ATTACKER WINS (24h)"
+									value={fmtNumber(
+										ev<number>(alert, "attacker_win_count_24h"),
+									)}
+								/>
 							</Stack>
 						}
 					/>

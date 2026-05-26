@@ -15,7 +15,7 @@ containing at least one URL.
 
 import re
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import tldextract
 from rapidfuzz import fuzz
@@ -365,7 +365,7 @@ class PhishingScorer(BaseScorer):
         s_domain = self._score_domain_suspicion(urls)
 
         # Sub-score 1c: social engineering score (weight 0.25 of content)
-        s_social = self._score_social_engineering(features)
+        s_social, se_tier = self._classify_social_engineering(features)
 
         content_score = (
             float(_W_CONTENT["blacklist"]) * s_blacklist
@@ -514,6 +514,7 @@ class PhishingScorer(BaseScorer):
             severity=severity,
             evidence={
                 "severity": severity,
+                "se_tier": se_tier,
                 "urls": url_records,
                 "url_count": len(urls),
                 "recipient_count": recipient_count,
@@ -681,15 +682,30 @@ class PhishingScorer(BaseScorer):
 
     def _score_social_engineering(self, features: Dict[str, Any]) -> float:
         """Score tx-level metadata AND inline-datum text for social
-        engineering patterns. Previously only scanned tx-level metadata;
-        CIP-68 phishing hides its message body inside the reference NFT's
-        inline datum, which the metadata-only scan would miss."""
-        # Flatten tx-level metadata first
+        engineering patterns. Thin wrapper that discards the tier label;
+        the actual classification lives in ``_classify_social_engineering``
+        so the evidence path can read it without recomputing.
+        """
+        score, _tier = self._classify_social_engineering(features)
+        return score
+
+    def _classify_social_engineering(
+        self, features: Dict[str, Any],
+    ) -> Tuple[float, str]:
+        """Return ``(normalised_score, tier_label)`` from the social-engineering
+        text scan. The tier label names the highest matching tier and is
+        surfaced in evidence so operators see "Tier 1: Credential harvesting"
+        on the detail page rather than only the donut percentage.
+
+        Tier hierarchy follows Polimi Section 4.9.3:
+          - Tier 1: near-deterministic credential-request phrasing.
+          - Tier 2: urgency language ("act now", "verify immediately").
+          - Tier 3: brand impersonation in suspicious context.
+          - None:   no match.
+        """
         metadata = features.get("metadata") or {}
         text = self._flatten_to_text(metadata).lower()
 
-        # Append any UTF-8 decodable text spans found inside inline datums
-        # on outputs. Same carriers the URL extractor walks.
         raw_data = features.get("raw_data") or {}
         outputs = raw_data.get("outputs") if isinstance(raw_data, dict) else None
         if isinstance(outputs, list):
@@ -703,36 +719,40 @@ class PhishingScorer(BaseScorer):
                     text += " " + span.lower()
 
         if not text:
-            return 0.0
+            return 0.0, "None"
 
-        # Tier 1: credential request patterns (near-deterministic)
+        # Tier 1 short-circuits the rest: a credential-request match is
+        # near-deterministic so we don't bother counting urgency or brand.
         for pattern in external.TIER1_CREDENTIAL_PATTERNS:
             if pattern.lower() in text:
-                return 1.0
+                return 1.0, "Tier 1: Credential harvesting"
 
         score = 0.0
+        tiers_hit: List[str] = []
 
-        # Tier 2: urgency language
-        urgency_matches = 0
-        for pattern in external.TIER2_URGENCY_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
-                urgency_matches += 1
+        urgency_matches = sum(
+            1 for pattern in external.TIER2_URGENCY_PATTERNS
+            if re.search(pattern, text, re.IGNORECASE)
+        )
         if urgency_matches > 0:
             score += min(
                 float(_SE["urgency_cap"]),
                 urgency_matches * float(_SE["urgency_increment"]),
             )
+            tiers_hit.append("Tier 2: Urgency language")
 
-        # Tier 3: brand impersonation in suspicious context
-        brand_matches = 0
-        for brand in external.TIER3_BRAND_NAMES:
-            if brand.lower() in text:
-                brand_matches += 1
+        brand_matches = sum(
+            1 for brand in external.TIER3_BRAND_NAMES
+            if brand.lower() in text
+        )
         if brand_matches > 0:
             score += min(
                 float(_SE["brand_cap"]),
                 brand_matches * float(_SE["brand_increment"]),
             )
+            tiers_hit.append("Tier 3: Brand impersonation")
 
         p50_s, p99_s = _anchor(_FIXED, "social_score")
-        return normalise(score, p50=p50_s, p99=p99_s)
+        normalised_score = normalise(score, p50=p50_s, p99=p99_s)
+        tier_label = " + ".join(tiers_hit) if tiers_hit else "None"
+        return normalised_score, tier_label
