@@ -357,9 +357,28 @@ class FakeTokenScorer(BaseScorer):
         )
         s_ratio = normalise_inverted(mint_ratio, p50=p50_mr, p99=p99_mr)
 
-        # policy_age inverted: newer policies are more suspicious.
-        # Without a policy registry, assume age = 1 slot (most suspicious case).
-        # Safer direction for detection; on-chain lookup is a future enhancement.
+        # policy_age inverted: newer policies are more suspicious. Without
+        # an asset→first-seen index there is no way to compute the real age
+        # at scoring time, so this currently hardcodes 1 slot — i.e. the
+        # most-suspicious value — for every minted policy. The 0.20 weight
+        # on this sub-score (see ``config/detection.yaml``
+        # ``fake_token.weights.distribution.policy_age``) therefore acts as
+        # a constant ~0.20 boost on every fake_token alert's distribution
+        # score; thresholds were tuned empirically with that constant in
+        # place, so changing the value in isolation will drift scores
+        # across all historical alerts.
+        #
+        # When real policy age becomes available (see
+        # ``docs/follow-ups/fake_token_policy_age.md``):
+        #   1. Query the new ``asset_policy_first_seen`` table here.
+        #   2. Compute ``policy_age_slots = current_slot - first_seen_slot``.
+        #   3. Surface the value in the evidence dict for the UI.
+        #   4. Re-enable the "New Policy" donut in SUB_SCORE_LABELS.
+        #   5. Re-run a one-time backfill so historical alerts re-score
+        #      with the now-accurate sub-score.
+        # The "New Policy" donut on the detail page is currently hidden
+        # by the frontend (see ``SUB_SCORE_LABELS["Fake Token"]``) to
+        # avoid showing operators a misleading 100%.
         policy_age_slots = 1
         age_inv = 1.0 / policy_age_slots
         p50_pa, p99_pa = _anchor(_FIXED, "policy_age_inv")

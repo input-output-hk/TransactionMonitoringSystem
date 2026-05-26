@@ -540,16 +540,16 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 					<TwoCol
 						left={
 							<Stack title="Token Comparison">
+								{/* "Age" intentionally omitted: the fake_token scorer
+								    has no minting-history lookup yet, so policy age
+								    isn't real data. See
+								    docs/follow-ups/fake_token_policy_age.md for the
+								    implementation plan. */}
 								<KeyVal
 									label="FAKE TOKEN"
 									value={
-										<span className="flex flex-wrap items-center justify-end gap-3">
-											<span className="text-muted-foreground">
-												Age: {EVIDENCE_PLACEHOLDER}
-											</span>
-											<span className="font-mono text-sm">
-												{fmtAddress(fakePolicyId)}
-											</span>
+										<span className="font-mono text-sm">
+											{fmtAddress(fakePolicyId)}
 										</span>
 									}
 								/>
