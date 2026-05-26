@@ -217,7 +217,7 @@ class LargeDatumScorer(BaseScorer):
             reasons.append("lean_value_field")
 
         datum_type = "inline" if datum_flag == 2 else "hash"
-        lovelace = int(value.get("lovelace", 0) or 0) if isinstance(value, dict) else 0
+        lovelace = feat_mod.extract_lovelace(value)
 
         return ScorerResult(
             score=final,

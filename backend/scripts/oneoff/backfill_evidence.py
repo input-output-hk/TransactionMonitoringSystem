@@ -93,6 +93,15 @@ def main() -> None:
             "size up the work before committing to --apply."
         ),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Re-score rows even if evidence is already populated. Use after "
+            "an evidence-shape fix to refresh existing rows that were "
+            "backfilled with the old (buggy) values."
+        ),
+    )
     args = parser.parse_args()
 
     client = Client(
@@ -128,6 +137,14 @@ def main() -> None:
         band_clause = f"AND s.risk_band IN ({keep_sql})"
     else:
         band_clause = ""
+    # Empty-evidence filter: by default only touch rows that haven't been
+    # backfilled. ``--force`` ignores it so an evidence-shape fix can
+    # refresh rows that were backfilled with the old buggy values.
+    evidence_clause = (
+        ""
+        if args.force
+        else "AND (s.evidence = '' OR s.evidence = '{{}}' OR s.evidence IS NULL)"
+    )
     # Count-only path: cheap COUNT() against tx_class_scores alone,
     # without the JOIN to transactions or the big raw_data payload.
     if args.count_only:
@@ -135,7 +152,7 @@ def main() -> None:
             f"""
             SELECT count() FROM (SELECT * FROM tx_class_scores FINAL) AS s
             WHERE s.network = %(network)s
-              AND (s.evidence = '' OR s.evidence = '{{}}' OR s.evidence IS NULL)
+              {evidence_clause}
               {alert_clause}
               {band_clause}
               {days_clause}
@@ -154,7 +171,7 @@ def main() -> None:
         FROM (SELECT * FROM tx_class_scores FINAL) AS s
         JOIN transactions t ON t.tx_hash = s.tx_hash AND t.network = s.network
         WHERE s.network = %(network)s
-          AND (s.evidence = '' OR s.evidence = '{{}}' OR s.evidence IS NULL)
+          {evidence_clause}
           {alert_clause}
           {band_clause}
           {days_clause}

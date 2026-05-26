@@ -28,6 +28,7 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
+from app.analysis.features import get_cbor2
 
 # No-network tldextract: use the PSL snapshot bundled with the wheel rather
 # than hitting the network on first use. Safer for offline / sandboxed envs.
@@ -117,13 +118,27 @@ _PHISHING_PRONE_TLDS = frozenset({
 })
 
 
+def _url_host(url: str) -> str:
+    """Return the lowercase host portion of ``url``, stripping any
+    ``scheme://`` prefix and trailing ``/path`` / ``?query``. Mirrors what
+    ``tldextract`` would feed its parser, but produced manually so callers
+    can also operate on inputs that tldextract doesn't recognise (e.g.
+    RFC 2606 reserved TLDs like ``.test``).
+    """
+    after_scheme = url.split("://", 1)[-1]
+    return after_scheme.split("/", 1)[0].split("?", 1)[0].lower()
+
+
 def _has_phishing_prone_tld(url: str) -> bool:
     """Return True if ``url``'s registered TLD is in the phishing-prone list."""
     ext = _tld(url)
     if ext.suffix:
         return ext.suffix.lower() in _PHISHING_PRONE_TLDS
-    # Fallback when tldextract doesn't recognise the suffix (reserved TLDs)
-    host = url.split("/", 1)[0].lower()
+    # Fallback when tldextract doesn't recognise the suffix (RFC 2606
+    # reserved TLDs: .test / .example / .invalid / .localhost). The PSL
+    # path above handles every routable TLD; this branch only fires for
+    # placeholders, so the manual host split is safe enough.
+    host = _url_host(url)
     parts = host.split(".")
     return len(parts) >= 2 and parts[-1] in _PHISHING_PRONE_TLDS
 
@@ -150,65 +165,142 @@ def _looks_like_domain(candidate: str) -> bool:
 
 def _decode_datum_strings(datum: Any) -> List[str]:
     """Walk a Plutus-Data inline datum and collect every UTF-8 decodable
-    text span >= 4 bytes. Handles two representations produced by ingestion:
+    text span. Handles two representations produced by ingestion:
 
       - hex-encoded CBOR string (the shape Ogmios v6 emits for most inline
-        datums). Scanned at the byte level so we don't have to parse CBOR
-        structure; UTF-8 strings inside Plutus Data sit contiguously in
-        the blob and pop out as printable-ASCII runs.
+        datums). Decoded via cbor2 so map/list/constructor structure is
+        preserved and each leaf bytes/text value comes out cleanly; a
+        previous byte-scan implementation concatenated adjacent values
+        because CBOR length-prefix bytes (``0x40``-``0x57`` for byte
+        strings) fall in printable ASCII and looked like part of the
+        next text run, producing strings like
+        ``walletEimageTclaim-reward-ada.xyz``.
       - nested dict in Ogmios' Plutus-Data-JSON representation
         (``{"bytes": "..."}``, ``{"list": [...]}``, ``{"map": [...]}``,
         ``{"constructor": n, "fields": [...]}``). Recurse and decode.
     """
     results: List[str] = []
 
+    _MIN_LEN = 4
+
+    def _emit_bytes(blob: bytes) -> None:
+        """Try to UTF-8 decode and emit; fall back to a byte-scan of
+        printable-ASCII runs when the blob isn't valid UTF-8."""
+        try:
+            decoded = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            _scan_bytes_for_strings(blob)
+            return
+        if len(decoded) >= _MIN_LEN:
+            results.append(decoded)
+
     def _scan_bytes_for_strings(blob: bytes) -> None:
+        """Last-resort printable-ASCII scan. Only used when a byte
+        string isn't valid UTF-8 so cbor2 / direct decode can't surface
+        it cleanly."""
         start: Optional[int] = None
         for i, b in enumerate(blob):
-            # Printable ASCII range; URLs are ASCII in practice.
             if 0x20 <= b < 0x7f:
                 if start is None:
                     start = i
             else:
-                if start is not None and i - start >= 4:
+                if start is not None and i - start >= _MIN_LEN:
                     try:
                         results.append(blob[start:i].decode("utf-8"))
                     except UnicodeDecodeError:
                         pass
                 start = None
-        if start is not None and len(blob) - start >= 4:
+        if start is not None and len(blob) - start >= _MIN_LEN:
             try:
                 results.append(blob[start:].decode("utf-8"))
             except UnicodeDecodeError:
                 pass
 
+    def _walk_cbor(node: Any) -> None:
+        """Walk the cbor2-parsed structure. CBOR text strings come out
+        as ``str``, byte strings as ``bytes``, maps as ``dict``, arrays
+        as ``list``, and Plutus-Data constructors as ``cbor2.CBORTag``
+        whose ``.value`` is the fields array."""
+        if isinstance(node, bytes):
+            _emit_bytes(node)
+            return
+        if isinstance(node, str):
+            if len(node) >= _MIN_LEN:
+                results.append(node)
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk_cbor(k)
+                _walk_cbor(v)
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                _walk_cbor(item)
+            return
+        # cbor2.CBORTag has ``.value``; duck-type to avoid an import
+        # dependency at this module's top.
+        inner = getattr(node, "value", None)
+        if inner is not None and not isinstance(node, (int, float, bool)):
+            _walk_cbor(inner)
+
+    def _try_cbor(blob: bytes) -> bool:
+        """Best-effort CBOR parse + structural walk.
+
+        Returns True if cbor2 parsed the blob and the walk completed,
+        regardless of whether any string leaves were appended (a numeric-
+        only blob is still considered "successfully handled" — the byte
+        scan wouldn't find anything either). Returns False if cbor2 is
+        unavailable or the blob isn't valid CBOR, so the caller can fall
+        back to the printable-ASCII scan for untyped payloads.
+        """
+        try:
+            cbor2 = get_cbor2()
+        except Exception:
+            return False
+        try:
+            decoded = cbor2.loads(blob)
+        except Exception:
+            return False
+        _walk_cbor(decoded)
+        return True
+
     def _walk(node: Any) -> None:
         if node is None:
             return
         if isinstance(node, bytes):
-            _scan_bytes_for_strings(node)
+            if not _try_cbor(node):
+                _emit_bytes(node)
             return
         if isinstance(node, str):
-            # Heuristic: long hex strings are typically CBOR-encoded datum
-            # bodies. Decode + byte-scan. Non-hex strings we keep as-is so
-            # plain text in nested dict values isn't lost.
+            # Long hex strings are typically CBOR-encoded datum bodies.
+            # Decode and walk the parsed CBOR so each leaf string comes
+            # out cleanly. Falls back to the byte-scan if cbor2 can't
+            # parse it. Non-hex strings we keep as-is.
             stripped = node.strip()
             if len(stripped) >= 8 and all(c in "0123456789abcdefABCDEF" for c in stripped):
                 try:
-                    _scan_bytes_for_strings(bytes.fromhex(stripped))
-                    return
+                    raw = bytes.fromhex(stripped)
                 except ValueError:
-                    pass
-            results.append(node)
+                    raw = None
+                if raw is not None:
+                    if not _try_cbor(raw):
+                        _emit_bytes(raw)
+                    return
+            if len(node) >= _MIN_LEN:
+                results.append(node)
             return
         if isinstance(node, dict):
-            # Ogmios Plutus-Data-JSON node types
+            # Ogmios Plutus-Data-JSON node types. Inside this shape, a
+            # ``{"bytes": ...}`` node is a *leaf* byte-string already
+            # disentangled from its enclosing CBOR — never re-parse it as
+            # CBOR (cbor2 would happily interpret an ASCII URL like
+            # ``https://...`` as a random text-string + trailing garbage).
             if "bytes" in node and isinstance(node["bytes"], str):
                 try:
                     raw = bytes.fromhex(node["bytes"])
-                    _scan_bytes_for_strings(raw)
                 except ValueError:
-                    pass
+                    return
+                _emit_bytes(raw)
                 return
             if "list" in node and isinstance(node["list"], list):
                 for item in node["list"]:
@@ -489,13 +581,40 @@ class PhishingScorer(BaseScorer):
                 continue
             if _looks_like_domain(cand):
                 validated.append(cand)
-        return validated
+
+        # Collapse bare-domain duplicates that are already represented in
+        # their scheme-prefixed form (CIP-20 messages often carry both
+        # ``https://x.app/path`` AND ``x.app/path`` because the bare regex
+        # also matches the part after the scheme). The operator sees one
+        # URL per real link instead of two.
+        scheme_strip = {
+            u[len("https://"):] if u.lower().startswith("https://")
+            else u[len("http://"):] if u.lower().startswith("http://")
+            else None
+            for u in validated
+        }
+        scheme_strip.discard(None)
+        return [
+            u for u in validated
+            if u.lower().startswith(("http://", "https://"))
+            or u not in scheme_strip
+        ]
 
     def _flatten_to_text(self, obj: Any) -> str:
-        """Recursively flatten a metadata value to a single string."""
+        """Recursively flatten a metadata value to a single string.
+
+        CIP-20 stores long values as arrays of <=64-byte text chunks that the
+        spec defines as concatenated without separators (the chunking is a
+        CBOR-encoding workaround, not a content boundary). When a list is
+        purely strings, join with ``""`` so URLs split across chunks
+        reconstitute correctly; otherwise fall back to space-joining so
+        nested structures still render readably for the SE-tier regex pass.
+        """
         if isinstance(obj, str):
             return obj
         if isinstance(obj, list):
+            if all(isinstance(item, str) for item in obj):
+                return "".join(obj)
             return " ".join(self._flatten_to_text(item) for item in obj)
         if isinstance(obj, dict):
             parts = []

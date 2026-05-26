@@ -79,6 +79,7 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
+from app.analysis.features import extract_lovelace as _extract_lovelace
 
 logger = logging.getLogger(__name__)
 
@@ -192,18 +193,6 @@ def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
         if feat_mod.is_script_address(addr):
             groups.setdefault(_payment_credential(addr), []).append(inp)
     return groups
-
-
-def _extract_lovelace(val: Any) -> int:
-    """Extract lovelace from Ogmios v5 `{"lovelace": N}` or v6 `{"ada": {"lovelace": N}}`."""
-    if isinstance(val, dict):
-        ada = val.get("ada")
-        if isinstance(ada, dict):
-            return int(ada.get("lovelace", 0))
-        return int(val.get("lovelace", 0))
-    if val:
-        return int(val)
-    return 0
 
 
 def _compute_lovelace_flow(
