@@ -392,14 +392,53 @@ class FakeTokenScorer(BaseScorer):
         if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
 
+        # The evidence "confusables" list mirrors what ``_compute_unicode_suspicion``
+        # detects so the operator-facing UI matches the score. Three categories:
+        #   - homoglyph: char has a visual Latin lookalike in ``_CONFUSABLES``.
+        #   - zero-width: invisible characters that hide letters from naive
+        #     string comparison (U+200B/200C/200D, U+FEFF, U+00AD).
+        #   - mixed-script: the asset name mixes Unicode scripts (e.g. Latin
+        #     plus Cyrillic), itself a strong impersonation signal.
         scan_name = hex_decoded or best_candidate["token_name"]
+        _ZW_LABELS = {
+            "​": "ZWSP (U+200B)",
+            "‌": "ZWNJ (U+200C)",
+            "‍": "ZWJ (U+200D)",
+            "﻿": "BOM (U+FEFF)",
+            "­": "SHY (U+00AD)",
+        }
         confusables: List[Dict[str, str]] = []
         for c in dict.fromkeys(scan_name):
             mapped = _CONFUSABLES.get(ord(c))
-            if mapped is None:
-                continue
-            target = chr(mapped) if isinstance(mapped, int) else str(mapped)
-            confusables.append({"from_char": c, "to_char": target})
+            if mapped is not None:
+                target = chr(mapped) if isinstance(mapped, int) else str(mapped)
+                confusables.append({
+                    "kind": "homoglyph",
+                    "from_char": c,
+                    "to_char": target,
+                })
+            elif c in _ZW_LABELS:
+                confusables.append({
+                    "kind": "zero_width",
+                    "from_char": _ZW_LABELS[c],
+                    "to_char": "",
+                })
+        # Mixed-script flag: emit a single summary entry rather than a per-char
+        # row so the UI doesn't list every alpha character. Mirrors the
+        # `mixed_scripts` bump in ``_compute_unicode_suspicion``.
+        scripts = set()
+        for c in scan_name:
+            if c.isalpha():
+                try:
+                    scripts.add(unicodedata.name(c, "").split()[0])
+                except (ValueError, IndexError):
+                    pass
+        if len(scripts) > 1:
+            confusables.append({
+                "kind": "mixed_script",
+                "from_char": ", ".join(sorted(scripts)),
+                "to_char": "",
+            })
 
         return ScorerResult(
             score=final,

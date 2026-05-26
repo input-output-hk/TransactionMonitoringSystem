@@ -507,9 +507,24 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			const recipientCount = ev<number>(alert, "recipient_count");
 			const confusables =
 				(ev<unknown[]>(alert, "unicode_confusables") ?? []) as Array<{
+					kind?: "homoglyph" | "zero_width" | "mixed_script";
 					from_char: string;
 					to_char: string;
 				}>;
+			const describeConfusable = (c: {
+				kind?: string;
+				from_char: string;
+				to_char: string;
+			}): string => {
+				if (c.kind === "zero_width") {
+					return `Zero-width character: ${c.from_char}`;
+				}
+				if (c.kind === "mixed_script") {
+					return `Mixed scripts: ${c.from_char}`;
+				}
+				// Default and ``homoglyph`` kind both read as visual substitution.
+				return `'${c.from_char}' replacing '${c.to_char}'`;
+			};
 			return (
 				<Section>
 					<TwoCol
@@ -554,10 +569,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 							) : (
 								<div className="grid gap-3 md:grid-cols-2">
 									{confusables.map((c, i) => (
-										<UnicodeWarning
-											key={i}
-											text={`'${c.from_char}' replacing '${c.to_char}'`}
-										/>
+										<UnicodeWarning key={i} text={describeConfusable(c)} />
 									))}
 								</div>
 							)}
