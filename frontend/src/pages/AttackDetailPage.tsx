@@ -378,7 +378,11 @@ function SubScores({ alert }: { alert: RiskAlert }) {
 			typeof raw === "number"
 				? Math.round(Math.max(0, Math.min(1, raw)) * 100)
 				: (fallback[i]?.percent ?? 0);
-		return { label: entry.label, percent };
+		return {
+			label: entry.label,
+			percent,
+			description: entry.description,
+		};
 	});
 	return (
 		<div
@@ -388,7 +392,12 @@ function SubScores({ alert }: { alert: RiskAlert }) {
 			)}
 		>
 			{cards.map((c) => (
-				<DonutCard key={c.label} label={c.label} percent={c.percent} />
+				<DonutCard
+					key={c.label}
+					label={c.label}
+					percent={c.percent}
+					description={c.description}
+				/>
 			))}
 		</div>
 	);

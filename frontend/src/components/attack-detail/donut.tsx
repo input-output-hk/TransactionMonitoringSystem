@@ -1,21 +1,43 @@
 import { Info } from "lucide-react";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 export function DonutCard({
 	label,
 	percent,
+	description,
 }: {
 	label: string;
 	percent: number;
+	/**
+	 * Operator-facing explanation of what this sub-score measures.
+	 * Rendered in a hover tooltip behind the info icon. When omitted the
+	 * icon is hidden — keeps unconfigured donuts from showing a dead
+	 * affordance.
+	 */
+	description?: string;
 }) {
 	return (
 		<div className="border-border bg-muted relative rounded-md border p-4">
-			<button
-				type="button"
-				title={`${label} score detail`}
-				className="text-muted-foreground/70 hover:text-foreground absolute top-3 right-3"
-			>
-				<Info className="h-3.5 w-3.5" />
-			</button>
+			{description && (
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							type="button"
+							aria-label={`Info: ${label}`}
+							className="text-muted-foreground/70 hover:text-foreground focus-visible:ring-ring absolute top-3 right-3 rounded focus-visible:ring-2 focus-visible:outline-none"
+						>
+							<Info className="h-3.5 w-3.5" />
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="top" align="end" className="max-w-xs text-xs">
+						{description}
+					</TooltipContent>
+				</Tooltip>
+			)}
 			<div className="text-foreground/90 text-center text-xs font-medium tracking-wide uppercase">
 				{label}
 			</div>
