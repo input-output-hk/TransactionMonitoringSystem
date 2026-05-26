@@ -139,11 +139,14 @@ def main() -> None:
         band_clause = ""
     # Empty-evidence filter: by default only touch rows that haven't been
     # backfilled. ``--force`` ignores it so an evidence-shape fix can
-    # refresh rows that were backfilled with the old buggy values.
+    # refresh rows that were backfilled with the old buggy values. NOTE:
+    # this is a regular string assignment, not an f-string, so the literal
+    # ``{}`` is written with two characters; getting interpolated into the
+    # outer f-string below as a substitution does NOT re-escape braces.
     evidence_clause = (
         ""
         if args.force
-        else "AND (s.evidence = '' OR s.evidence = '{{}}' OR s.evidence IS NULL)"
+        else "AND (s.evidence = '' OR s.evidence = '{}' OR s.evidence IS NULL)"
     )
     # Count-only path: cheap COUNT() against tx_class_scores alone,
     # without the JOIN to transactions or the big raw_data payload.
@@ -222,57 +225,71 @@ def main() -> None:
         })
         metadata_by_tx[tx_hash] = (prev_max, prev_class, prev_at)
 
-    # Resolve input addresses before scoring: raw_data.inputs only carries
-    # (tx_hash, output_index) refs, the actual addresses live in
-    # transaction_inputs. Without this, scorers that group inputs by script
-    # (multiple_sat) see all-empty addresses and silently drop alerts.
-    _enrich_inputs_with_resolved_addresses(feature_rows, args.network)
-
-    # Cross-tx enrichment for front_running / sandwich / circular.
-    # Skipping this would leave those classes' evidence empty even after a
-    # re-score, since their gates depend on collision / sandwich / cycle
-    # features attached out-of-band.
-    if settings.SCORER_FRONT_RUNNING_ENABLED:
-        tx_hashes = [r["tx_hash"] for r in feature_rows]
-        try:
-            collisions = asyncio.run(
-                postgres.get_collisions_for_txs(tx_hashes, args.network)
-            )
-        except Exception as e:
-            logger.warning(f"Collision enrichment failed (non-fatal): {e}")
-            collisions = {}
-        for fr in feature_rows:
-            collision = collisions.get(fr["tx_hash"])
-            if collision:
-                fr["collision"] = collision
-
-    _enrich_cycle_features(feature_rows, args.network)
-    _enrich_sandwich_features(feature_rows, args.network)
+    # Chunk size for enrichment + scoring. ``_enrich_inputs_with_resolved_addresses``
+    # builds a ``WHERE tx_hash IN (...)`` literal containing every hash in the
+    # batch, so a single-shot run on 14k+ rows exceeds ClickHouse's default
+    # 256KB ``max_query_size``. 500 rows yields ~33KB of hash literals, well
+    # under the cap, while keeping the round-trip count low.
+    _CHUNK = 500
 
     corrected = []
     score_drifted = 0
 
-    for feature_row in feature_rows:
-        tx_hash = feature_row["tx_hash"]
-        prev_max, prev_class, prev_at = metadata_by_tx[tx_hash]
+    for chunk_start in range(0, len(feature_rows), _CHUNK):
+        chunk = feature_rows[chunk_start : chunk_start + _CHUNK]
 
-        result = _score_transaction(feature_row, scorers)
-        # Same calendar-day partition as the original row so the
-        # ReplacingMergeTree dedupe kicks in; bump by 1s so the new row
-        # wins max(analyzed_at).
-        result["analyzed_at"] = prev_at + timedelta(seconds=1)
-        corrected.append(result)
+        # Resolve input addresses before scoring: raw_data.inputs only carries
+        # (tx_hash, output_index) refs, the actual addresses live in
+        # transaction_inputs. Without this, scorers that group inputs by script
+        # (multiple_sat) see all-empty addresses and silently drop alerts.
+        _enrich_inputs_with_resolved_addresses(chunk, args.network)
 
-        if (
-            round(float(result["max_score"]), 2) != round(float(prev_max), 2)
-            or result["max_class"] != prev_class
-        ):
-            score_drifted += 1
-            print(
-                f"  drift {tx_hash}: "
-                f"{prev_class or '(none)'} ({prev_max:.2f}) -> "
-                f"{result['max_class'] or '(none)'} ({result['max_score']:.2f})"
-            )
+        # Cross-tx enrichment for front_running / sandwich / circular. Skipping
+        # this would leave those classes' evidence empty even after a re-score,
+        # since their gates depend on collision / sandwich / cycle features
+        # attached out-of-band.
+        if settings.SCORER_FRONT_RUNNING_ENABLED:
+            chunk_hashes = [r["tx_hash"] for r in chunk]
+            try:
+                collisions = asyncio.run(
+                    postgres.get_collisions_for_txs(chunk_hashes, args.network)
+                )
+            except Exception as e:
+                logger.warning(f"Collision enrichment failed (non-fatal): {e}")
+                collisions = {}
+            for fr in chunk:
+                collision = collisions.get(fr["tx_hash"])
+                if collision:
+                    fr["collision"] = collision
+
+        _enrich_cycle_features(chunk, args.network)
+        _enrich_sandwich_features(chunk, args.network)
+
+        for feature_row in chunk:
+            tx_hash = feature_row["tx_hash"]
+            prev_max, prev_class, prev_at = metadata_by_tx[tx_hash]
+
+            result = _score_transaction(feature_row, scorers)
+            # Same calendar-day partition as the original row so the
+            # ReplacingMergeTree dedupe kicks in; bump by 1s so the new row
+            # wins max(analyzed_at).
+            result["analyzed_at"] = prev_at + timedelta(seconds=1)
+            corrected.append(result)
+
+            if (
+                round(float(result["max_score"]), 2) != round(float(prev_max), 2)
+                or result["max_class"] != prev_class
+            ):
+                score_drifted += 1
+                print(
+                    f"  drift {tx_hash}: "
+                    f"{prev_class or '(none)'} ({prev_max:.2f}) -> "
+                    f"{result['max_class'] or '(none)'} ({result['max_score']:.2f})"
+                )
+
+        # Periodic progress line so a 14k-row run doesn't look hung.
+        processed = min(chunk_start + _CHUNK, len(feature_rows))
+        print(f"  ...processed {processed}/{len(feature_rows)} rows", flush=True)
 
     print(
         f"\nProcessed {len(corrected)} rows; "
