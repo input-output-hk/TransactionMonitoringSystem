@@ -13,6 +13,7 @@ Gate condition: metadata must be present with at least one relevant label
 containing at least one URL.
 """
 
+import os
 import re
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,10 +30,33 @@ from app.analysis.scorer_config import (
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
 from app.analysis.features import get_cbor2
+from app.config import settings
 
 # No-network tldextract: use the PSL snapshot bundled with the wheel rather
 # than hitting the network on first use. Safer for offline / sandboxed envs.
-_tld = tldextract.TLDExtract(suffix_list_urls=(), fallback_to_snapshot=True)
+#
+# Cache dir: the container runs as a non-root user with no home directory
+# (Dockerfile uses ``--no-create-home``), so tldextract's default
+# ``~/.cache/python-tldextract`` is unwritable and every init logs a
+# "Permission denied" warning + re-loads the snapshot. Point the cache at
+# a writable dir derived from RAW_STORE_PATH (a mounted, appuser-owned
+# volume in Docker). Best-effort: if the dir can't be created we fall back
+# to ``cache_dir=None`` (snapshot-only, no disk persistence) so the scorer
+# never fails to import over a cache-path problem.
+def _build_tld_extractor() -> tldextract.TLDExtract:
+    try:
+        cache_dir = os.path.join(settings.RAW_STORE_PATH, "tldextract")
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        cache_dir = None
+    return tldextract.TLDExtract(
+        suffix_list_urls=(),
+        fallback_to_snapshot=True,
+        cache_dir=cache_dir,
+    )
+
+
+_tld = _build_tld_extractor()
 
 
 def _registrable_domain(url_or_domain: str) -> Optional[str]:
