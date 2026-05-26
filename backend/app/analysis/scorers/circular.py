@@ -188,6 +188,9 @@ class CircularScorer(BaseScorer):
         if s_speed > _REASON_T:
             reasons.append("rapid_inter_hop_timing")
 
+        hops = cycle.get("hops") or []
+        first_slot = int(hops[0].get("slot", 0)) if hops else 0
+
         return ScorerResult(
             score=final,
             sub_scores={
@@ -201,4 +204,14 @@ class CircularScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "cycle_length": int(cycle.get("cycle_length", 0)),
+                "net_loss_ratio": round(cycle.get("net_loss_ratio", 0), 4),
+                "amount_similarity_raw": round(amt_sim, 4),
+                "hops": hops,
+                "mean_inter_hop_slots": float(cycle.get("mean_inter_hop_delta_slots", 0)),
+                "origin_cluster": cycle.get("origin_cluster", ""),
+                "first_slot": first_slot,
+                "round_amount_flag": bool(cycle.get("round_amount_flag")),
+            },
         )

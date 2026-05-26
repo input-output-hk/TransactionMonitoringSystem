@@ -32,6 +32,12 @@ export type RiskAlert = {
 	 * mock alerts (use ATTACK_META.subScores as fallback).
 	 */
 	subScores?: Record<string, number>;
+	/**
+	 * Backend per-class raw evidence (addresses, byte counts, lists) for the
+	 * winning attack class. Keys are scorer-defined; consumers should treat
+	 * individual fields as optional and fall back gracefully when missing.
+	 */
+	evidence?: Record<string, unknown>;
 };
 
 /**

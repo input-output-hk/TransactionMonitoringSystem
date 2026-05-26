@@ -284,14 +284,33 @@ class PhishingScorer(BaseScorer):
         # ----- Delivery sub-pipeline (weight = 0.35) -----
 
         # Sub-score 2a: recipient_count (weight 0.35 of delivery)
-        # Uses dynamic baselines with bootstrap fallback until Phase 2
-        output_count = features.get("output_count", 0)
+        # Uses dynamic baselines with bootstrap fallback until Phase 2.
+        # Count distinct recipient addresses, not raw output_count: a single
+        # recipient receiving many micro-outputs in one tx inflates
+        # output_count and produced false positives on consolidation /
+        # change-splitting patterns. The evidence panel reads the same
+        # value, so the donut and the drill-down stay aligned.
         network = features.get("network", "")
+        raw_data_field = features.get("raw_data")
+        raw_outputs = (
+            raw_data_field.get("outputs") or []
+            if isinstance(raw_data_field, dict)
+            else []
+        )
+        distinct_recipients = len({
+            o.get("address", "")
+            for o in raw_outputs
+            if isinstance(o, dict) and o.get("address")
+        })
+        # Fall back to output_count when raw_data isn't a dict (e.g. some
+        # ingestion paths persist it as JSON string before normalisation),
+        # so we never score zero recipients on a tx with real outputs.
+        recipient_count = distinct_recipients or int(features.get("output_count", 0) or 0)
         p50, p99, bl_source = _resolve(
             "recipient_count", "global", "__global__", network,
             _BOOT, "recipient_count",
         )
-        s_recipients = normalise(output_count, p50=p50, p99=p99)
+        s_recipients = normalise(recipient_count, p50=p50, p99=p99)
 
         # Sub-score 2b: url_hash_recurrence (weight 0.25 of delivery)
         # Requires cross-tx URL indexing (deferred to mainnet)
@@ -374,12 +393,40 @@ class PhishingScorer(BaseScorer):
         else:
             severity = "SOCIAL_ENGINEERING"
 
+        blacklist_patterns = external.get_phishing_patterns()
+        metadata_labels = sorted(
+            {str(k) for k in (metadata or {}).keys()}
+        ) if isinstance(metadata, dict) else []
+
+        url_records = []
+        for url in urls:
+            is_blacklisted = any(p.search(url) for p in blacklist_patterns)
+            phishing_tld = _has_phishing_prone_tld(url)
+            if is_blacklisted:
+                url_severity = "BLACKLISTED"
+            elif phishing_tld:
+                url_severity = "SUSPICIOUS"
+            else:
+                url_severity = "NORMAL"
+            url_records.append({
+                "url": url,
+                "severity": url_severity,
+                "phishing_tld": phishing_tld,
+            })
+
         return ScorerResult(
             score=final_score,
             sub_scores=sub_scores,
             reasons=reasons,
             baseline_source=bl_source,
             severity=severity,
+            evidence={
+                "severity": severity,
+                "urls": url_records,
+                "url_count": len(urls),
+                "recipient_count": recipient_count,
+                "metadata_labels": metadata_labels,
+            },
         )
 
     # -----------------------------------------------------------------

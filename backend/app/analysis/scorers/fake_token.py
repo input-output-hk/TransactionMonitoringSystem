@@ -392,6 +392,15 @@ class FakeTokenScorer(BaseScorer):
         if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
 
+        scan_name = hex_decoded or best_candidate["token_name"]
+        confusables: List[Dict[str, str]] = []
+        for c in dict.fromkeys(scan_name):
+            mapped = _CONFUSABLES.get(ord(c))
+            if mapped is None:
+                continue
+            target = chr(mapped) if isinstance(mapped, int) else str(mapped)
+            confusables.append({"from_char": c, "to_char": target})
+
         return ScorerResult(
             score=final,
             sub_scores={
@@ -409,4 +418,16 @@ class FakeTokenScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "matched_token": best_legit_name,
+                "matched_similarity": round(best_sim, 4),
+                "fake_policy_id": best_candidate.get("policy_id", ""),
+                "fake_asset_name_hex": best_candidate.get("token_name_hex", ""),
+                "fake_asset_name_ascii": best_candidate.get("token_name", ""),
+                "fake_quantity": int(best_candidate.get("quantity", 0)),
+                "legit_policy_ids": list(legit_tokens.get(best_legit_name, [])),
+                "recipient_count": int(recipient_count),
+                "cip25_similarity_raw": round(cip25_sim, 4),
+                "unicode_confusables": confusables,
+            },
         )

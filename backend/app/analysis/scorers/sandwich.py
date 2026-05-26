@@ -164,4 +164,18 @@ class SandwichScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "pool_id": pool_id,
+                "asset_pair": sw.get("asset_pair", ""),
+                "tx_a_hash": sw.get("tx_a", ""),
+                "tx_b_hash": sw.get("tx_b", ""),
+                "slot_span": int(sw.get("slot_span", 0)),
+                "swap_rate_victim": float(rate_victim),
+                "swap_rate_baseline": float(rate_baseline),
+                "rate_delta_pct": round(rate_delta * 100, 4),
+                "price_impact_raw": float(impact),
+                "attacker_profit_lovelace": int(profit),
+                "attacker_linked": bool(sw.get("attacker_linked")),
+                "attacker_sandwich_count": int(sandwich_count),
+            },
         )

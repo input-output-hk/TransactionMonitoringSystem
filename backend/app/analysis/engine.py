@@ -198,6 +198,7 @@ def _score_transaction(
     # Run each scorer
     scores: Dict[str, float] = {name: -1.0 for name in _CLASS_NAMES}
     sub_scores: Dict[str, Dict[str, float]] = {}
+    evidence: Dict[str, Dict[str, Any]] = {}
 
     for scorer in scorers:
         try:
@@ -205,6 +206,8 @@ def _score_transaction(
                 result = scorer.score(features)
                 scores[scorer.name] = result.score
                 sub_scores[scorer.name] = result.sub_scores
+                if result.evidence:
+                    evidence[scorer.name] = result.evidence
         except Exception:
             logger.exception(f"Scorer {scorer.name} failed on tx {tx_hash}")
 
@@ -227,6 +230,7 @@ def _score_transaction(
         "max_class": max_class,
         "risk_band": risk_band,
         "sub_scores": sub_scores,
+        "evidence": evidence,
         "analysis_version": _VERSION,
         "analyzed_at": now,
     }

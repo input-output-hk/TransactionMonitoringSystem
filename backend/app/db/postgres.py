@@ -555,6 +555,7 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
                     "counterpart_ttl": counterpart_ttl or 0,
                     "shares_change_address": my_addr == counterpart_addr and my_addr != "",
                     "attacker_win_count": win_counts.get(counterpart_addr, 0),
+                    "tx_role": "TX_A" if is_a else "TX_B",
                 }
     return result
 
