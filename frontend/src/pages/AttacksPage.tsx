@@ -37,12 +37,9 @@ import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
 import {
 	AlertCircle,
-	AlertTriangle,
 	ArrowUp,
 	ChevronLeft,
 	ChevronRight,
-	ChevronsLeft,
-	ChevronsRight,
 	Copy,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
@@ -183,10 +180,13 @@ export function AttacksPage() {
 				<Table>
 					<TableHeader>
 						<TableRow className="hover:bg-transparent">
-							<TableHead className="w-[42%]">ID</TableHead>
-							<TableHead>Date</TableHead>
-							<TableHead>Attack Type</TableHead>
-							<TableHead className="pr-6 text-right">Severity</TableHead>
+							{/* Roughly equal-quarter columns (was ID=42% which crammed
+							    the others). Severity is left-aligned to match Figma —
+							    badge sits flush with the "Severity" header text. */}
+							<TableHead className="w-[26%]">ID</TableHead>
+							<TableHead className="w-[24%]">Date</TableHead>
+							<TableHead className="w-[26%]">Attack Type</TableHead>
+							<TableHead className="w-[24%]">Severity</TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>
@@ -199,7 +199,7 @@ export function AttacksPage() {
 									className="cursor-pointer"
 								>
 									<TableCell>
-										<div className="text-foreground flex items-center gap-2 font-mono text-[13px]">
+										<div className="text-foreground flex items-center gap-2 font-mono text-[13px] uppercase">
 											<span>{a.id}</span>
 											<button
 												type="button"
@@ -214,7 +214,7 @@ export function AttacksPage() {
 											</button>
 										</div>
 									</TableCell>
-									<TableCell className="text-muted-foreground">
+									<TableCell className="text-foreground">
 										{a.date}
 									</TableCell>
 									<TableCell>
@@ -223,7 +223,7 @@ export function AttacksPage() {
 											{a.attackType}
 										</div>
 									</TableCell>
-									<TableCell className="pr-6 text-right">
+									<TableCell>
 										<Badge variant={SEVERITY_VARIANT[a.severity]}>
 											{a.severity}
 										</Badge>
@@ -249,7 +249,8 @@ export function AttacksPage() {
 				</Table>
 
 				<footer className="border-border text-muted-foreground flex flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-xs">
-					<div className="flex items-center gap-2">
+					{/* Show Rows — inline pseudo-dropdown, no box, just text + chevron */}
+					<div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
 						<span>Show Rows</span>
 						<Select
 							value={String(pageSize)}
@@ -258,7 +259,11 @@ export function AttacksPage() {
 								setPage(0);
 							}}
 						>
-							<SelectTrigger className="h-7 w-16 text-xs">
+							<SelectTrigger
+								// Override the boxed look — match the Figma's text-only
+								// trigger with a small chevron next to the value.
+								className="text-muted-foreground hover:text-foreground h-auto border-none bg-transparent p-0 text-xs shadow-none focus:ring-0 focus-visible:ring-0"
+							>
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
@@ -268,14 +273,14 @@ export function AttacksPage() {
 							</SelectContent>
 						</Select>
 					</div>
-					<div>Total Risk Alerts: {total.toLocaleString()}</div>
+					<div>Total Risk Alerts Shown: {visibleRows.length}</div>
 					<div className="flex items-center gap-1">
 						<IconBtn
 							aria-label="First page"
 							disabled={currentPage === 0}
 							onClick={() => setPage(0)}
 						>
-							<ChevronsLeft className="h-3.5 w-3.5" />
+							<TriangleLeftIcon className="h-3.5 w-3.5" />
 						</IconBtn>
 						<IconBtn
 							aria-label="Previous page"
@@ -299,7 +304,7 @@ export function AttacksPage() {
 							disabled={currentPage >= pageCount - 1}
 							onClick={() => setPage(pageCount - 1)}
 						>
-							<ChevronsRight className="h-3.5 w-3.5" />
+							<TriangleRightIcon className="h-3.5 w-3.5" />
 						</IconBtn>
 					</div>
 				</footer>
@@ -354,6 +359,84 @@ export function AttacksPage() {
  *  - Found: full critical theme, clickable, copy button.
  *  - Empty (no critical alerts at all): neutral border so the red doesn't lie.
  */
+/** Hollow triangle pointing LEFT — first-page icon (outline only). */
+function TriangleLeftIcon({ className }: { className?: string }) {
+	return (
+		<svg
+			className={className}
+			viewBox="0 0 16 16"
+			fill="none"
+			xmlns="http://www.w3.org/2000/svg"
+			aria-hidden="true"
+		>
+			<polygon
+				points="10,3 4,8 10,13"
+				stroke="currentColor"
+				strokeWidth="1.5"
+				strokeLinejoin="round"
+				strokeLinecap="round"
+				fill="none"
+			/>
+		</svg>
+	);
+}
+
+/** Mirror — last-page icon (outline only). */
+function TriangleRightIcon({ className }: { className?: string }) {
+	return (
+		<svg
+			className={className}
+			viewBox="0 0 16 16"
+			fill="none"
+			xmlns="http://www.w3.org/2000/svg"
+			aria-hidden="true"
+		>
+			<polygon
+				points="6,3 12,8 6,13"
+				stroke="currentColor"
+				strokeWidth="1.5"
+				strokeLinejoin="round"
+				strokeLinecap="round"
+				fill="none"
+			/>
+		</svg>
+	);
+}
+
+/** Inline icon matching the Figma "critical" banner: red filled triangle
+ *  with a white exclamation. Drawn here to avoid the lucide AlertTriangle
+ *  stroke-only look. */
+function CriticalTriangleIcon({ className }: { className?: string }) {
+	return (
+		<svg
+			className={className}
+			viewBox="0 0 24 24"
+			fill="none"
+			xmlns="http://www.w3.org/2000/svg"
+			aria-hidden="true"
+		>
+			<path
+				d="M10.95 3.06a1.2 1.2 0 0 1 2.1 0l9.45 16.74A1.2 1.2 0 0 1 21.45 21.6H2.55a1.2 1.2 0 0 1-1.05-1.8z"
+				fill="#dc2626"
+			/>
+			<path
+				d="M12 9v5"
+				stroke="white"
+				strokeWidth="2"
+				strokeLinecap="round"
+			/>
+			<circle cx="12" cy="17.2" r="1.05" fill="white" />
+		</svg>
+	);
+}
+
+/** Middle-truncate a long string, keeping the start and end visible.
+ *  Matches the Figma look (`dfgsdfsd4rge4resvse....terge4ge4er`). */
+function middleTruncate(s: string, head = 19, tail = 11): string {
+	if (s.length <= head + tail + 4) return s;
+	return `${s.slice(0, head)}....${s.slice(-tail)}`;
+}
+
 function CriticalAlertCard() {
 	const navigate = useNavigate();
 	const { data, isPending } = useRiskAlerts({
@@ -365,14 +448,14 @@ function CriticalAlertCard() {
 	const latest = data?.rows[0];
 
 	const baseCls =
-		"bg-card rounded-lg border-2 p-4 md:col-span-2 transition-colors";
-	const themedCls = latest
-		? "border-severity-critical-foreground/40 ring-severity-critical/20 ring-1 cursor-pointer hover:bg-accent/50"
-		: "border-border";
+		"bg-card border-border flex flex-col justify-center rounded-lg border-2 p-4 md:col-span-2 transition-colors";
+	const interactiveCls = latest
+		? "cursor-pointer hover:bg-accent/50"
+		: "";
 
 	return (
 		<div
-			className={cn(baseCls, themedCls)}
+			className={cn(baseCls, interactiveCls)}
 			onClick={latest ? () => navigate(`/attacks/${latest.slug}`) : undefined}
 			role={latest ? "button" : undefined}
 			tabIndex={latest ? 0 : undefined}
@@ -387,15 +470,8 @@ function CriticalAlertCard() {
 					: undefined
 			}
 		>
-			<div
-				className={cn(
-					"flex items-center gap-2",
-					latest
-						? "text-severity-critical-foreground"
-						: "text-muted-foreground",
-				)}
-			>
-				<AlertTriangle className="h-4 w-4" />
+			<div className="text-foreground flex items-center justify-center gap-2">
+				<CriticalTriangleIcon className="h-5 w-5 shrink-0" />
 				<span className="text-sm font-semibold">
 					{latest
 						? "New Critical Attack"
@@ -404,9 +480,13 @@ function CriticalAlertCard() {
 							: "No Critical Attacks"}
 				</span>
 			</div>
-			<div className="text-muted-foreground mt-2 flex items-center gap-2 font-mono text-xs">
+			<div className="text-foreground mt-2 flex items-center justify-center gap-2 font-mono text-xs">
 				<span className="truncate">
-					{latest?.fullHash ?? (isPending ? "Loading…" : "—")}
+					{latest
+						? middleTruncate(latest.fullHash.toUpperCase())
+						: isPending
+							? "Loading…"
+							: "—"}
 				</span>
 				{latest && (
 					<button
@@ -428,7 +508,7 @@ function CriticalAlertCard() {
 
 function KpiCard({ label, value }: { label: string; value: string }) {
 	return (
-		<div className="border-border bg-card rounded-lg border-2 p-4">
+		<div className="border-border bg-card flex flex-col justify-center rounded-lg border-2 p-4">
 			<div className="text-foreground text-center text-sm font-semibold">
 				{label}
 			</div>
@@ -448,7 +528,7 @@ function GraphBarCard() {
 	const total = points.reduce((sum, p) => sum + p.count, 0);
 
 	return (
-		<div className="border-border bg-card rounded-lg border-2 p-4">
+		<div className="border-border bg-card flex flex-col justify-center rounded-lg border-2 p-4">
 			<div className="flex items-baseline justify-between">
 				<Tooltip>
 					<TooltipTrigger asChild>
@@ -502,7 +582,7 @@ function LatestList({
 	isPending?: boolean;
 }) {
 	return (
-		<section className="border-border bg-card rounded-lg border-2">
+		<section className="border-border bg-background rounded-lg border-2">
 			<header className="border-border border-b px-5 py-3">
 				<h2 className="text-foreground text-base font-semibold">{title}</h2>
 			</header>
@@ -515,17 +595,16 @@ function LatestList({
 						<span
 							className={cn(
 								"text-foreground truncate",
-								r.mono && "font-mono text-[13px]",
+								// IDs (tx_hash) are mono + uppercase to match the Risk
+								// Alerts table styling. Block heights are plain numbers
+								// so the mono flag flips both off.
+								r.mono && "font-mono text-[13px] uppercase",
 							)}
 						>
 							{r.primary}
 						</span>
-						<span className="text-muted-foreground text-center">
-							{r.middle}
-						</span>
-						<span className="text-muted-foreground text-right">
-							{r.trailing}
-						</span>
+						<span className="text-foreground text-center">{r.middle}</span>
+						<span className="text-foreground text-right">{r.trailing}</span>
 					</li>
 				))}
 				{rows.length === 0 && (

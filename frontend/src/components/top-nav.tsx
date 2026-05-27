@@ -44,17 +44,24 @@ export function TopNav() {
 
 				<div className="flex items-center gap-5">
 					<DropdownMenu>
-						<DropdownMenuTrigger className="text-foreground hover:bg-accent focus-visible:ring-ring flex items-center gap-2 rounded-md px-2 py-1 text-sm font-medium transition-colors outline-none focus-visible:ring-2">
+						<DropdownMenuTrigger
+							className="text-foreground hover:bg-accent focus-visible:ring-ring flex shrink-0 items-center gap-2 rounded-md px-2 py-1 text-sm font-medium whitespace-nowrap transition-colors outline-none focus-visible:ring-2"
+							// Keep the dot tappable even when the label is hidden.
+							aria-label="System Status"
+						>
 							<span
 								className={cn(
-									"h-2.5 w-2.5 rounded-full",
+									"h-2.5 w-2.5 shrink-0 rounded-full",
 									overall === "online" && "bg-status-online",
 									overall === "warning" && "bg-status-warning",
 									overall === "down" && "bg-status-offline",
 									overall === "loading" && "bg-muted-foreground",
 								)}
 							/>
-							System Status
+							{/* Label hidden under the `md` breakpoint (~768px) — the
+							    coloured dot keeps signalling status, and the dropdown
+							    stays usable by clicking the dot. */}
+							<span className="hidden md:inline">System Status</span>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end">
 							<DropdownMenuLabel>Modules</DropdownMenuLabel>
@@ -90,8 +97,8 @@ export function TopNav() {
 					</DropdownMenu>
 
 					<DropdownMenu>
-						<DropdownMenuTrigger className="focus-visible:ring-ring focus-visible:ring-offset-background rounded-full outline-none focus-visible:ring-2 focus-visible:ring-offset-2">
-							<Avatar>
+						<DropdownMenuTrigger className="focus-visible:ring-ring focus-visible:ring-offset-background shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-offset-2">
+							<Avatar className="shrink-0">
 								<AvatarFallback>{initials(user?.fullName)}</AvatarFallback>
 							</Avatar>
 						</DropdownMenuTrigger>
