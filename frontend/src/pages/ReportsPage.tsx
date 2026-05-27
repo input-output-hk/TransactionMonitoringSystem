@@ -3,17 +3,13 @@ import { useNavigate } from "react-router-dom";
 import {
 	AlertCircle,
 	ArrowUp,
-	ChevronLeft,
-	ChevronRight,
-	ChevronsLeft,
-	ChevronsRight,
 	Copy,
 	ExternalLink,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DateField } from "@/components/ui/date-field";
-import { PageBtn } from "@/components/ui/page-button";
+import { TableFooter } from "@/components/ui/table-footer";
 import {
 	Dialog,
 	DialogContent,
@@ -331,61 +327,17 @@ export function ReportsPage() {
 					</TableBody>
 				</Table>
 
-				<footer className="border-border text-muted-foreground flex flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-xs">
-					<div className="flex items-center gap-2">
-						<span>Show Rows</span>
-						<Select
-							value={String(pageSize)}
-							onValueChange={(v) => {
-								setPageSize(Number(v));
-								setPage(0);
-							}}
-						>
-							<SelectTrigger className="h-7 w-[64px] text-xs">
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="10">10</SelectItem>
-								<SelectItem value="25">25</SelectItem>
-								<SelectItem value="50">50</SelectItem>
-							</SelectContent>
-						</Select>
-					</div>
-					<div>Total Risk Alerts: {total.toLocaleString()}</div>
-					<div className="flex items-center gap-1">
-						<PageBtn
-							aria-label="First page"
-							disabled={currentPage === 0}
-							onClick={() => setPage(0)}
-						>
-							<ChevronsLeft className="h-3.5 w-3.5" />
-						</PageBtn>
-						<PageBtn
-							aria-label="Previous page"
-							disabled={currentPage === 0}
-							onClick={() => setPage((p) => Math.max(0, p - 1))}
-						>
-							<ChevronLeft className="h-3.5 w-3.5" />
-						</PageBtn>
-						<span className="px-2">
-							Page {currentPage + 1} of {pageCount}
-						</span>
-						<PageBtn
-							aria-label="Next page"
-							disabled={currentPage >= pageCount - 1}
-							onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-						>
-							<ChevronRight className="h-3.5 w-3.5" />
-						</PageBtn>
-						<PageBtn
-							aria-label="Last page"
-							disabled={currentPage >= pageCount - 1}
-							onClick={() => setPage(pageCount - 1)}
-						>
-							<ChevronsRight className="h-3.5 w-3.5" />
-						</PageBtn>
-					</div>
-				</footer>
+				<TableFooter
+					pageSize={pageSize}
+					onPageSizeChange={(n) => {
+						setPageSize(n);
+						setPage(0);
+					}}
+					centerLabel={`Total Risk Alerts: ${total.toLocaleString()}`}
+					page={currentPage}
+					pageCount={pageCount}
+					onPageChange={setPage}
+				/>
 			</section>
 
 			<div className="flex justify-end pt-2">

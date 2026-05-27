@@ -58,12 +58,22 @@ const SEVERITY_TO_RISK_BAND: Record<Severity, ApiRiskBand> = {
 };
 
 // Backend uses snake_case attack class names; map to our Title Case AttackType.
+// Some display names diverge from the auto-generated snake_case (e.g. the
+// UI shows "Multiple Satisfaction" but the backend column is `multiple_sat`),
+// so allow per-type overrides on top of the default lowercase+underscore.
+const SNAKE_OVERRIDES: Partial<Record<AttackType, string>> = {
+	"Multiple Satisfaction": "multiple_sat",
+};
+
+const toSnake = (t: AttackType): string =>
+	SNAKE_OVERRIDES[t] ?? t.toLowerCase().replace(/\s+/g, "_");
+
 const ATTACK_CLASS_BY_SNAKE: Record<string, AttackType> = Object.fromEntries(
-	ATTACK_TYPES.map((t) => [t.toLowerCase().replace(/\s+/g, "_"), t]),
+	ATTACK_TYPES.map((t) => [toSnake(t), t]),
 ) as Record<string, AttackType>;
 
 const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntries(
-	ATTACK_TYPES.map((t) => [t, t.toLowerCase().replace(/\s+/g, "_")]),
+	ATTACK_TYPES.map((t) => [t, toSnake(t)]),
 ) as Record<AttackType, string>;
 
 const LOVELACE_PER_ADA = 1_000_000;

@@ -28,7 +28,7 @@ export const ATTACK_ICON: Record<
 	Sandwich: SandwichIcon,
 	Phishing: PhishingIcon,
 	Circular: CircularIcon,
-	"Multiple Sat": MultipleSatIcon,
+	"Multiple Satisfaction": MultipleSatIcon,
 	"Large Value": LargeValueIcon,
 	"Large Datum": LargeDatumIcon,
 	"Token Dust": TokenDustIcon,

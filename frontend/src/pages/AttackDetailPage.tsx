@@ -32,8 +32,8 @@ import {
 	useRestoreMutation,
 	type ArchiveMeta,
 } from "@/lib/archive-store";
-import { useAuth } from "@/lib/auth";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import type { RiskAlert } from "@/mocks/attacks";
 import {
@@ -52,7 +52,14 @@ import {
 	Trash2,
 	X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+	Children,
+	Fragment,
+	isValidElement,
+	useMemo,
+	useState,
+	type ReactNode,
+} from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 
 export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
@@ -105,7 +112,9 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 		<DetailCard
 			alert={alert}
 			archived={archived}
-			onClose={() => navigate(-1)}
+			// `/dashboard` (not -1) so the close button works even on direct
+			// deep-link / new-tab entry, where history.back() would do nothing.
+			onClose={() => navigate(archived ? "/archive" : "/dashboard")}
 			onArchived={() => navigate("/archive", { replace: true })}
 			onRestored={() => navigate("/dashboard", { replace: true })}
 		/>
@@ -341,20 +350,28 @@ function RestoreDialog({
 }) {
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent showClose={false} className="max-w-sm">
+			<DialogContent
+				showClose={false}
+				className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+			>
 				<DialogHeader>
-					<DialogTitle>
+					<DialogTitle className="text-center text-base font-normal">
 						Are you sure you want to restore this attack?
 					</DialogTitle>
 				</DialogHeader>
-				<DialogFooter>
-					<Button variant="outline" onClick={() => onOpenChange(false)}>
+				<DialogFooter className="flex-row gap-4 sm:justify-between">
+					<Button
+						variant="outline"
+						onClick={() => onOpenChange(false)}
+						className="bg-card flex-1"
+					>
 						Cancel
 					</Button>
 					<Button
+						variant="outline"
 						onClick={onConfirm}
 						disabled={confirmDisabled}
-						className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
+						className="bg-card flex-1"
 					>
 						{confirmDisabled ? "Restoring…" : "Confirm"}
 					</Button>
@@ -436,7 +453,8 @@ function fmtTxHash(hash: string | undefined): string {
 }
 
 function fmtPct(ratio: number | undefined, digits = 1): string {
-	if (ratio === undefined || !Number.isFinite(ratio)) return EVIDENCE_PLACEHOLDER;
+	if (ratio === undefined || !Number.isFinite(ratio))
+		return EVIDENCE_PLACEHOLDER;
 	return `${(ratio * 100).toFixed(digits)}%`;
 }
 
@@ -445,7 +463,10 @@ function fmtBool(b: boolean | undefined): string {
 	return b ? "Yes" : "No";
 }
 
-function fmtAssetName(hex: string | undefined, ascii: string | undefined): string {
+function fmtAssetName(
+	hex: string | undefined,
+	ascii: string | undefined,
+): string {
 	if (ascii) return ascii;
 	if (hex) return hex.length > 32 ? `${hex.slice(0, 32)}…` : hex;
 	return EVIDENCE_PLACEHOLDER;
@@ -497,7 +518,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 							</Stack>
 						}
 						right={
-							<Stack title="Delivery Analysis">
+							<Stack title="Delivery Analysis" dividers>
 								<KeyVal label="SEVERITY" value={severity} />
 								<KeyVal label="SE TIER" value={seTier} />
 								<KeyVal label="RECIPIENTS" value={fmtNumber(recipientCount)} />
@@ -515,12 +536,12 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			const legitPolicies = ev<string[]>(alert, "legit_policy_ids") ?? [];
 			const cip25Sim = ev<number>(alert, "cip25_similarity_raw");
 			const recipientCount = ev<number>(alert, "recipient_count");
-			const confusables =
-				(ev<unknown[]>(alert, "unicode_confusables") ?? []) as Array<{
-					kind?: "homoglyph" | "zero_width" | "mixed_script";
-					from_char: string;
-					to_char: string;
-				}>;
+			const confusables = (ev<unknown[]>(alert, "unicode_confusables") ??
+				[]) as Array<{
+				kind?: "homoglyph" | "zero_width" | "mixed_script";
+				from_char: string;
+				to_char: string;
+			}>;
 			const describeConfusable = (c: {
 				kind?: string;
 				from_char: string;
@@ -539,7 +560,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 				<Section>
 					<TwoCol
 						left={
-							<Stack title="Token Comparison">
+							<Stack title="Token Comparison" dividers>
 								{/* "Age" intentionally omitted: the fake_token scorer
 								    has no minting-history lookup yet, so policy age
 								    isn't real data. See
@@ -564,8 +585,11 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 							</Stack>
 						}
 						right={
-							<Stack title="Distribution">
-								<KeyVal label="CIP-25 METADATA MATCH" value={fmtPct(cip25Sim)} />
+							<Stack title="Distribution" dividers>
+								<KeyVal
+									label="CIP-25 METADATA MATCH"
+									value={fmtPct(cip25Sim)}
+								/>
 								<KeyVal label="RECIPIENTS" value={fmtNumber(recipientCount)} />
 							</Stack>
 						}
@@ -590,12 +614,11 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 		}
 
 		case "Circular": {
-			const hops =
-				(ev<unknown[]>(alert, "hops") ?? []) as Array<{
-					address: string;
-					amount_lovelace: number;
-					slot: number;
-				}>;
+			const hops = (ev<unknown[]>(alert, "hops") ?? []) as Array<{
+				address: string;
+				amount_lovelace: number;
+				slot: number;
+			}>;
 			const amountSim = ev<number>(alert, "amount_similarity_raw");
 			const netLoss = ev<number>(alert, "net_loss_ratio");
 			const firstSlot = ev<number>(alert, "first_slot");
@@ -612,6 +635,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 								) : (
 									<FlowChain
 										direction="down"
+										dividers
 										rows={hops.map((h, i) => ({
 											label: `HOP ${i + 1}`,
 											amount: fmtLovelaceAsAda(h.amount_lovelace),
@@ -622,12 +646,14 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 							</Stack>
 						}
 						right={
-							<Stack title="Cycle Metrics">
+							<Stack title="Cycle Metrics" dividers>
 								<KeyVal label="AMOUNT SIMILARITY" value={fmtPct(amountSim)} />
 								<KeyVal label="NET LOSS" value={fmtPct(netLoss)} />
 								<KeyVal
 									label="FIRST SLOT"
-									value={firstSlot ? fmtNumber(firstSlot) : EVIDENCE_PLACEHOLDER}
+									value={
+										firstSlot ? fmtNumber(firstSlot) : EVIDENCE_PLACEHOLDER
+									}
 								/>
 								<KeyVal
 									label="CYCLE LENGTH"
@@ -662,39 +688,43 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 				<Section>
 					<TwoCol
 						left={
-							<Stack title="Sandwich Attack Flow">
-								<div className="space-y-1">
-									{/* Flow rows render a single signal in the amount
-									    column for consistency: the swap rate at each leg.
-									    Profit (lovelace) sits in "Attack Details" on the
-									    right so we don't mix rates and ADA in one column. */}
-									<Row
-										color="online"
-										label="FRONT RUN (tx_A)"
-										amount={fmtRate(swapRateBaseline)}
-										address={fmtTxHash(txA)}
-									/>
-									<ArrowsRow direction="down" />
-									<Row
-										color="offline"
-										label="VICTIM"
-										amount={fmtRate(swapRateVictim)}
-										address={fmtTxHash(alert.fullHash)}
-									/>
-									<ArrowsRow direction="up" />
-									<Row
-										color="online"
-										label="BACK RUN (tx_B)"
-										amount={EVIDENCE_PLACEHOLDER}
-										address={fmtTxHash(txB)}
-									/>
-								</div>
+							<Stack title="Sandwich Attack Flow" dividers>
+								{/* Direct children of Stack so the `dividers` prop
+								    interleaves a separator between each Row and
+								    ArrowsRow. Flow rows render a single signal in
+								    the amount column for consistency: the swap rate
+								    at each leg. Profit (lovelace) sits in "Attack
+								    Details" on the right so we don't mix rates and
+								    ADA in one column. */}
+								<Row
+									color="online"
+									label="FRONT RUN (tx_A)"
+									amount={fmtRate(swapRateBaseline)}
+									address={fmtTxHash(txA)}
+								/>
+								<ArrowsRow direction="down" />
+								<Row
+									color="offline"
+									label="VICTIM"
+									amount={fmtRate(swapRateVictim)}
+									address={fmtTxHash(alert.fullHash)}
+								/>
+								<ArrowsRow direction="up" />
+								<Row
+									color="online"
+									label="BACK RUN (tx_B)"
+									amount={EVIDENCE_PLACEHOLDER}
+									address={fmtTxHash(txB)}
+								/>
 							</Stack>
 						}
 						right={
-							<Stack title="Attack Details">
+							<Stack title="Attack Details" dividers>
 								<KeyVal label="DEX POOL" value={fmtAddress(poolId)} />
-								<KeyVal label="ASSET PAIR" value={assetPair || EVIDENCE_PLACEHOLDER} />
+								<KeyVal
+									label="ASSET PAIR"
+									value={assetPair || EVIDENCE_PLACEHOLDER}
+								/>
 								<KeyVal
 									label="RATE IMPACT"
 									value={
@@ -703,7 +733,10 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 											: EVIDENCE_PLACEHOLDER
 									}
 								/>
-								<KeyVal label="ATTACKER PROFIT" value={fmtLovelaceAsAda(profit)} />
+								<KeyVal
+									label="ATTACKER PROFIT"
+									value={fmtLovelaceAsAda(profit)}
+								/>
 								<KeyVal
 									label="SLOT SPAN"
 									value={
@@ -763,8 +796,11 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 												</span>
 											}
 										/>
+										<Divider />
 										<KeyVal
-											label={<span className="text-status-online">Winner Fee</span>}
+											label={
+												<span className="text-status-online">Winner Fee</span>
+											}
 											value={
 												<span className="text-status-online">
 													{fmtLovelaceAsAda(winnerFee)}
@@ -774,6 +810,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 										<div className="flex justify-start py-1 pl-1">
 											<ArrowDown className="text-brand h-4 w-4" />
 										</div>
+										<Divider />
 										<KeyVal
 											label={<span className="text-status-offline">LOSER</span>}
 											value={
@@ -782,8 +819,11 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 												</span>
 											}
 										/>
+										<Divider />
 										<KeyVal
-											label={<span className="text-status-offline">Loser Fee</span>}
+											label={
+												<span className="text-status-offline">Loser Fee</span>
+											}
 											value={
 												<span className="text-status-offline">
 													{fmtLovelaceAsAda(loserFee)}
@@ -799,7 +839,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 							</Stack>
 						}
 						right={
-							<Stack title="Race Metrics">
+							<Stack title="Race Metrics" dividers>
 								<KeyVal label="SHARED INPUTS" value={fmtNumber(sharedInputs)} />
 								<KeyVal
 									label="MEMPOOL DELTA"
@@ -809,12 +849,13 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 											: EVIDENCE_PLACEHOLDER
 									}
 								/>
-								<KeyVal label="OUTCOME" value={outcome ?? EVIDENCE_PLACEHOLDER} />
+								<KeyVal
+									label="OUTCOME"
+									value={outcome ?? EVIDENCE_PLACEHOLDER}
+								/>
 								<KeyVal
 									label="ATTACKER WINS (24h)"
-									value={fmtNumber(
-										ev<number>(alert, "attacker_win_count_24h"),
-									)}
+									value={fmtNumber(ev<number>(alert, "attacker_win_count_24h"))}
 								/>
 							</Stack>
 						}
@@ -823,7 +864,7 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			);
 		}
 
-		case "Multiple Sat": {
+		case "Multiple Satisfaction": {
 			const nInputs = ev<number>(alert, "n_inputs_same_script");
 			const lovelaceFullDrain = ev<boolean>(alert, "lovelace_full_drain");
 			const assetsExtracted = ev<number>(alert, "n_assets_extracted");
@@ -836,8 +877,9 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			return (
 				<Section>
 					<TwoCol
+						gapX="wide"
 						left={
-							<Stack title="Exploit Pattern">
+							<Stack title="Exploit Pattern" dividers>
 								<KeyVal label="SCRIPT INPUTS" value={fmtNumber(nInputs)} />
 								<KeyVal
 									label="LOVELACE FULL DRAIN"
@@ -847,12 +889,15 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 									label="ASSETS EXTRACTED"
 									value={fmtNumber(assetsExtracted)}
 								/>
-								<KeyVal label="REDEEMERS USED" value={fmtNumber(redeemerCount)} />
+								<KeyVal
+									label="REDEEMERS USED"
+									value={fmtNumber(redeemerCount)}
+								/>
 								<KeyVal label="REDEEMER RATIO" value={fmtPct(redeemerRatio)} />
 							</Stack>
 						}
 						right={
-							<Stack title="Value Flow">
+							<Stack title="Value Flow" dividers>
 								<KeyVal
 									label="VALUE EXTRACTED"
 									value={fmtLovelaceAsAda(valueExtracted)}
@@ -888,36 +933,33 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			return (
 				<Section>
 					<Stack title="Large Datum Details">
-						<TwoCol
-							left={
-								<div className="space-y-3">
-									<KeyVal label="DATUM SIZE" value={fmtBytes(datumBytes)} />
-									<Divider />
-									<KeyVal label="UTXO SIZE" value={fmtBytes(utxoBytes)} />
-								</div>
-							}
-							right={
-								<div className="space-y-3">
-									<KeyVal
-										label="DATUM TYPE"
-										value={
-											datumType
-												? datumType[0].toUpperCase() + datumType.slice(1)
-												: EVIDENCE_PLACEHOLDER
-										}
-									/>
-									<Divider />
-									<KeyVal
-										label="TARGET SCRIPT"
-										value={
-											<span className="font-mono text-sm">
-												{fmtAddress(targetScript)}
-											</span>
-										}
-									/>
-								</div>
-							}
-						/>
+						{/* Row-major layout so the Divider spans full width across
+						    both columns (no gap caused by TwoCol's gap-x-10). */}
+						<div className="space-y-3">
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="DATUM SIZE" value={fmtBytes(datumBytes)} />
+								<KeyVal
+									label="DATUM TYPE"
+									value={
+										datumType
+											? datumType[0].toUpperCase() + datumType.slice(1)
+											: EVIDENCE_PLACEHOLDER
+									}
+								/>
+							</div>
+							<Divider />
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="UTXO SIZE" value={fmtBytes(utxoBytes)} />
+								<KeyVal
+									label="TARGET SCRIPT"
+									value={
+										<span className="font-mono text-sm">
+											{fmtAddress(targetScript)}
+										</span>
+									}
+								/>
+							</div>
+						</div>
 					</Stack>
 					{datumPct !== undefined && (
 						<div className="mt-6">
@@ -953,36 +995,34 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			return (
 				<Section>
 					<Stack title="Dust Attack Details">
-						<TwoCol
-							left={
-								<div className="space-y-3">
-									<KeyVal label="UNIQUE ASSETS" value={fmtNumber(uniqueAssets)} />
-									<Divider />
-									<KeyVal label="CBOR SIZE" value={fmtBytes(cborBytes)} />
-									<Divider />
-									<KeyVal label="POLICY IDS" value={fmtNumber(policyCount)} />
-								</div>
-							}
-							right={
-								<div className="space-y-3">
-									<KeyVal
-										label="MAX ASSETS / POLICY"
-										value={fmtNumber(maxPerPolicy)}
-									/>
-									<Divider />
-									<KeyVal
-										label="TARGET SCRIPT"
-										value={
-											<span className="font-mono text-sm">
-												{fmtAddress(targetScript)}
-											</span>
-										}
-									/>
-									<Divider />
-									<KeyVal label="ADA AMOUNT" value={fmtLovelaceAsAda(lovelace)} />
-								</div>
-							}
-						/>
+						{/* Row-major so each Divider spans full width — see Large
+						    Datum Details above for the same pattern. */}
+						<div className="space-y-3">
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="UNIQUE ASSETS" value={fmtNumber(uniqueAssets)} />
+								<KeyVal
+									label="MAX ASSETS / POLICY"
+									value={fmtNumber(maxPerPolicy)}
+								/>
+							</div>
+							<Divider />
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="CBOR SIZE" value={fmtBytes(cborBytes)} />
+								<KeyVal
+									label="TARGET SCRIPT"
+									value={
+										<span className="font-mono text-sm">
+											{fmtAddress(targetScript)}
+										</span>
+									}
+								/>
+							</div>
+							<Divider />
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="POLICY IDS" value={fmtNumber(policyCount)} />
+								<KeyVal label="ADA AMOUNT" value={fmtLovelaceAsAda(lovelace)} />
+							</div>
+						</div>
 					</Stack>
 				</Section>
 			);
@@ -999,33 +1039,31 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			return (
 				<Section>
 					<Stack title="Large Value Details">
-						<TwoCol
-							left={
-								<div className="space-y-3">
-									<KeyVal label="QUANTITY DIGITS" value={fmtNumber(qtyDigits)} />
-									<Divider />
-									<KeyVal label="CBOR SIZE" value={fmtBytes(cborBytes)} />
-									<Divider />
-									<KeyVal label="ASSET NAME" value={fmtAssetName(hex, ascii)} />
-								</div>
-							}
-							right={
-								<div className="space-y-3">
-									<KeyVal label="MAX QUANTITY" value={fmtNumber(maxQty)} />
-									<Divider />
-									<KeyVal
-										label="POLICY ID"
-										value={
-											<span className="font-mono text-sm">
-												{fmtAddress(policyId)}
-											</span>
-										}
-									/>
-									<Divider />
-									<KeyVal label="ADA AMOUNT" value={fmtLovelaceAsAda(lovelace)} />
-								</div>
-							}
-						/>
+						{/* Row-major so each Divider spans full width — see Large
+						    Datum Details above for the same pattern. */}
+						<div className="space-y-3">
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="QUANTITY DIGITS" value={fmtNumber(qtyDigits)} />
+								<KeyVal label="MAX QUANTITY" value={fmtNumber(maxQty)} />
+							</div>
+							<Divider />
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="CBOR SIZE" value={fmtBytes(cborBytes)} />
+								<KeyVal
+									label="POLICY ID"
+									value={
+										<span className="font-mono text-sm">
+											{fmtAddress(policyId)}
+										</span>
+									}
+								/>
+							</div>
+							<Divider />
+							<div className="grid gap-x-10 md:grid-cols-2">
+								<KeyVal label="ASSET NAME" value={fmtAssetName(hex, ascii)} />
+								<KeyVal label="ADA AMOUNT" value={fmtLovelaceAsAda(lovelace)} />
+							</div>
+						</div>
 					</Stack>
 				</Section>
 			);
@@ -1045,26 +1083,69 @@ function Section({
 	return (
 		<div className="px-5 py-5">
 			{title && (
-				<h2 className="text-foreground mb-4 text-base font-semibold">
-					{title}
-				</h2>
+				<>
+					<h2 className="text-foreground mb-3 text-base font-semibold">
+						{title}
+					</h2>
+					{/* Separator under the title — matches Figma's section style. */}
+					<div className="mb-4">
+						<Divider />
+					</div>
+				</>
 			)}
 			{children}
 		</div>
 	);
 }
 
+/**
+ * React.Children.toArray treats a `<>…</>` as a single child rather than
+ * walking into it. We want Stack `dividers` to interleave between each
+ * inner KeyVal even when the caller wrapped them in a Fragment, so flatten
+ * recursively here.
+ */
+function flattenChildren(children: ReactNode): ReactNode[] {
+	const out: ReactNode[] = [];
+	Children.forEach(children, (child) => {
+		if (isValidElement(child) && child.type === Fragment) {
+			out.push(
+				...flattenChildren((child.props as { children?: ReactNode }).children),
+			);
+		} else if (child !== null && child !== undefined && child !== false) {
+			out.push(child);
+		}
+	});
+	return out;
+}
+
 function Stack({
 	title,
 	children,
+	dividers = false,
 }: {
 	title: string;
 	children: React.ReactNode;
+	/** Intersperse a horizontal divider between each direct child. */
+	dividers?: boolean;
 }) {
+	const items = flattenChildren(children);
 	return (
 		<div>
-			<h3 className="text-foreground mb-3 text-sm font-semibold">{title}</h3>
-			<div className="space-y-3">{children}</div>
+			<h3 className="text-foreground mb-2 text-sm font-semibold">{title}</h3>
+			{/* Separator under the title — same treatment as Section. */}
+			<div className="mb-3">
+				<Divider />
+			</div>
+			<div className="space-y-3">
+				{dividers
+					? items.map((child, i) => (
+							<Fragment key={i}>
+								{child}
+								{i < items.length - 1 && <Divider />}
+							</Fragment>
+						))
+					: children}
+			</div>
 		</div>
 	);
 }
@@ -1076,12 +1157,22 @@ function Divider() {
 function TwoCol({
 	left,
 	right,
+	gapX = "default",
 }: {
 	left: React.ReactNode;
 	right: React.ReactNode;
+	/** Horizontal gap between the two columns. `wide` (~64px) is used where
+	 *  the two cards feel cramped at the default 40px (e.g. Multiple
+	 *  Satisfaction). */
+	gapX?: "default" | "wide";
 }) {
 	return (
-		<div className="grid gap-x-10 gap-y-6 md:grid-cols-2">
+		<div
+			className={cn(
+				"grid gap-y-6 md:grid-cols-2",
+				gapX === "wide" ? "gap-x-16" : "gap-x-10",
+			)}
+		>
 			<div>{left}</div>
 			<div>{right}</div>
 		</div>
@@ -1095,32 +1186,29 @@ function MetricsTwoCol({
 	left: { label: string; value: string }[];
 	right: { label: string; value: string }[];
 }) {
+	// Build per-row pairs so the Divider spans the FULL width below each row
+	// rather than living inside the columns (where the grid's gap-x-10 made
+	// the two per-column dividers look interrupted in the middle).
+	const rows = Math.max(left.length, right.length);
 	return (
-		<div className="grid gap-x-10 gap-y-3 md:grid-cols-2">
-			<div className="space-y-3">
-				{left.map((m, i) => (
-					<div key={i}>
-						<KeyVal label={m.label} value={m.value} />
-						{i < left.length - 1 && (
-							<div className="mt-3">
-								<Divider />
-							</div>
-						)}
+		<div className="space-y-3">
+			{Array.from({ length: rows }).map((_, i) => (
+				<Fragment key={i}>
+					<div className="grid gap-x-10 md:grid-cols-2">
+						<div>
+							{left[i] && (
+								<KeyVal label={left[i].label} value={left[i].value} />
+							)}
+						</div>
+						<div>
+							{right[i] && (
+								<KeyVal label={right[i].label} value={right[i].value} />
+							)}
+						</div>
 					</div>
-				))}
-			</div>
-			<div className="space-y-3">
-				{right.map((m, i) => (
-					<div key={i}>
-						<KeyVal label={m.label} value={m.value} />
-						{i < right.length - 1 && (
-							<div className="mt-3">
-								<Divider />
-							</div>
-						)}
-					</div>
-				))}
-			</div>
+					{i < rows - 1 && <Divider />}
+				</Fragment>
+			))}
 		</div>
 	);
 }
@@ -1253,14 +1341,17 @@ function ArrowsRow({ direction }: { direction: "down" | "up" }) {
 function FlowChain({
 	rows,
 	direction = "down",
+	dividers = false,
 }: {
 	rows: { label: string; amount: string; address: string }[];
 	direction?: "down" | "up";
+	/** Intersperse a horizontal divider between every row and arrow. */
+	dividers?: boolean;
 }) {
 	return (
-		<div className="space-y-1">
+		<div className={dividers ? "space-y-3" : "space-y-1"}>
 			{rows.map((r, i) => (
-				<div key={i}>
+				<Fragment key={i}>
 					<div className={cn(FLOW_GRID, "text-brand text-sm")}>
 						<span className="min-w-0 justify-self-center font-semibold">
 							{r.label}:
@@ -1270,13 +1361,18 @@ function FlowChain({
 							{r.address}
 						</span>
 					</div>
-					{i < rows.length - 1 && <ArrowsRow direction={direction} />}
-				</div>
+					{i < rows.length - 1 && (
+						<>
+							{dividers && <Divider />}
+							<ArrowsRow direction={direction} />
+							{dividers && <Divider />}
+						</>
+					)}
+				</Fragment>
 			))}
 		</div>
 	);
 }
-
 
 function Row({
 	color,
@@ -1324,7 +1420,13 @@ function DeleteDialog({
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent showClose={false} className="max-w-sm">
+			{/* Figma palette: dialog frame on a slightly bluish-grey (#373D3F),
+			    while the fields and buttons sit on the regular card colour
+			    (#292929) so they read as recessed surfaces inside the frame. */}
+			<DialogContent
+				showClose={false}
+				className="max-w-sm bg-white dark:bg-[#373D3F]"
+			>
 				<DialogHeader>
 					<DialogTitle>Are you sure this is not an attack?</DialogTitle>
 					<DialogDescription>
@@ -1338,7 +1440,7 @@ function DeleteDialog({
 						Reason
 					</Label>
 					<Select value={reason} onValueChange={setReason}>
-						<SelectTrigger id="archive-reason" className="h-11">
+						<SelectTrigger id="archive-reason" className="bg-card h-11">
 							<SelectValue placeholder="Reason" />
 						</SelectTrigger>
 						<SelectContent>
@@ -1361,18 +1463,23 @@ function DeleteDialog({
 						value={notes}
 						onChange={(e) => setNotes(e.target.value)}
 						rows={3}
+						className="bg-card"
 					/>
 				</div>
 
-				<DialogFooter>
-					<Button variant="outline" onClick={() => onOpenChange(false)}>
+				<DialogFooter className="justify-between">
+					<Button
+						variant="outline"
+						onClick={() => onOpenChange(false)}
+						className="bg-card"
+					>
 						Cancel
 					</Button>
 					<Button
 						variant="default"
 						disabled={!canConfirm || confirmDisabled}
 						onClick={() => onConfirm(reason, notes)}
-						className="text-brand border-border hover:bg-accent hover:text-brand border bg-transparent"
+						className="text-brand border-border hover:bg-accent hover:text-brand bg-card border"
 					>
 						{confirmDisabled ? "Archiving…" : "Confirm"}
 					</Button>

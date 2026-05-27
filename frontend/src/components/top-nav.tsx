@@ -1,5 +1,4 @@
-import { NavLink, useNavigate } from "react-router-dom";
-import { Archive, LogOut, Moon, Sun, Upload, User } from "lucide-react";
+import { useTheme } from "@/components/theme-context";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
 	DropdownMenu,
@@ -9,11 +8,12 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useAuth } from "@/lib/auth";
 import { deriveModules, useHealth } from "@/lib/api/health";
-import { useTheme } from "@/components/theme-context";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { initials } from "@/lib/utils/strings";
+import { Archive, LogOut, Moon, Sun, Upload, User } from "lucide-react";
+import { NavLink, useNavigate } from "react-router-dom";
 
 export function TopNav() {
 	const navigate = useNavigate();
@@ -30,8 +30,8 @@ export function TopNav() {
 				: "warning";
 
 	return (
-		<header className="border-border bg-card border-b">
-			<div className="mx-auto flex h-14 max-w-[1400px] items-center justify-between px-6">
+		<header className="border-border bg-card">
+			<div className="mx-auto flex h-14 max-w-350 items-center justify-between px-6">
 				<nav className="flex items-center gap-1">
 					<span className="text-foreground mr-3 text-base font-extrabold tracking-tight">
 						TMS
@@ -102,7 +102,7 @@ export function TopNav() {
 								<AvatarFallback>{initials(user?.fullName)}</AvatarFallback>
 							</Avatar>
 						</DropdownMenuTrigger>
-						<DropdownMenuContent align="end" className="min-w-[14rem]">
+						<DropdownMenuContent align="end" className="min-w-56">
 							<DropdownMenuItem className="gap-3" disabled>
 								<User className="text-brand h-4 w-4" />
 								<span className="text-foreground font-medium">

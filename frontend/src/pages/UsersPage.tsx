@@ -1,14 +1,5 @@
 import { useMemo, useState } from "react";
-import {
-	ChevronLeft,
-	ChevronRight,
-	ChevronsLeft,
-	ChevronsRight,
-	Copy,
-	Minus,
-	Plus,
-	Trash2,
-} from "lucide-react";
+import { Copy, Minus, Plus, Trash2 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,22 +30,21 @@ import {
 import { USER_ROLES, type ManagedUser, type UserRole } from "@/mocks/users";
 import { addUser, removeUser, useUsers } from "@/lib/users-store";
 import { initials } from "@/lib/utils/strings";
-import { PageBtn } from "@/components/ui/page-button";
-
-const PAGE_SIZE = 9;
+import { TableFooter } from "@/components/ui/table-footer";
 
 export function UsersPage() {
 	const users = useUsers();
 	const [page, setPage] = useState(0);
+	const [pageSize, setPageSize] = useState(10);
 	const [removeMode, setRemoveMode] = useState(false);
 	const [addOpen, setAddOpen] = useState(false);
 	const [pendingRemove, setPendingRemove] = useState<ManagedUser | null>(null);
 
-	const pageCount = Math.max(1, Math.ceil(users.length / PAGE_SIZE));
+	const pageCount = Math.max(1, Math.ceil(users.length / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
 	const pageRows = useMemo(
-		() => users.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE),
-		[users, currentPage],
+		() => users.slice(currentPage * pageSize, (currentPage + 1) * pageSize),
+		[users, currentPage, pageSize],
 	);
 
 	return (
@@ -133,39 +123,17 @@ export function UsersPage() {
 					</TableBody>
 				</Table>
 
-				<footer className="border-border text-muted-foreground flex items-center justify-end gap-1 border-t px-5 py-3 text-xs">
-					<PageBtn
-						disabled={currentPage === 0}
-						onClick={() => setPage(0)}
-						aria-label="First page"
-					>
-						<ChevronsLeft className="h-3.5 w-3.5" />
-					</PageBtn>
-					<PageBtn
-						disabled={currentPage === 0}
-						onClick={() => setPage((p) => Math.max(0, p - 1))}
-						aria-label="Previous page"
-					>
-						<ChevronLeft className="h-3.5 w-3.5" />
-					</PageBtn>
-					<span className="px-2">
-						Page {currentPage + 1} of {pageCount}
-					</span>
-					<PageBtn
-						disabled={currentPage >= pageCount - 1}
-						onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-						aria-label="Next page"
-					>
-						<ChevronRight className="h-3.5 w-3.5" />
-					</PageBtn>
-					<PageBtn
-						disabled={currentPage >= pageCount - 1}
-						onClick={() => setPage(pageCount - 1)}
-						aria-label="Last page"
-					>
-						<ChevronsRight className="h-3.5 w-3.5" />
-					</PageBtn>
-				</footer>
+				<TableFooter
+					pageSize={pageSize}
+					onPageSizeChange={(n) => {
+						setPageSize(n);
+						setPage(0);
+					}}
+					centerLabel={`Total Users: ${users.length}`}
+					page={currentPage}
+					pageCount={pageCount}
+					onPageChange={setPage}
+				/>
 			</section>
 
 			<AddUserFlow
@@ -225,7 +193,13 @@ function AddUserFlow({
 			open={open}
 			onOpenChange={(v) => (v ? onOpenChange(true) : close())}
 		>
-			<DialogContent showClose={false} className="max-w-md">
+			{/* Same #373D3F frame as the Delete/Restore dialogs so the modal
+			    family stays consistent. Inputs and buttons sit on bg-card
+			    (#292929) for the recessed look. */}
+			<DialogContent
+				showClose={false}
+				className="max-w-md bg-white dark:bg-[#373D3F]"
+			>
 				{step === "form" ? (
 					<>
 						<DialogHeader>
@@ -274,7 +248,7 @@ function AddUserFlow({
 									setDraft((d) => ({ ...d, role: v as UserRole }))
 								}
 							>
-								<SelectTrigger id="add-role" className="h-11">
+								<SelectTrigger id="add-role" className="bg-card h-11">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>
@@ -287,14 +261,19 @@ function AddUserFlow({
 							</Select>
 						</div>
 
-						<DialogFooter>
-							<Button variant="outline" onClick={close}>
+						{/* Cancel left, Confirm right — same layout as Delete dialog. */}
+						<DialogFooter className="justify-between">
+							<Button
+								variant="outline"
+								onClick={close}
+								className="bg-card"
+							>
 								Cancel
 							</Button>
 							<Button
 								disabled={!canConfirmForm}
 								onClick={() => setStep("link")}
-								className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
+								className="text-brand border-border hover:bg-accent hover:text-brand bg-card border"
 							>
 								Confirm
 							</Button>
@@ -370,13 +349,13 @@ function InvitationLinkStep({
 				</div>
 			</div>
 
-			<DialogFooter>
-				<Button variant="outline" onClick={onCancel}>
+			<DialogFooter className="justify-between">
+				<Button variant="outline" onClick={onCancel} className="bg-card">
 					Cancel
 				</Button>
 				<Button
 					onClick={onSend}
-					className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
+					className="text-brand border-border hover:bg-accent hover:text-brand bg-card border"
 				>
 					Send Invitation
 				</Button>
@@ -407,18 +386,32 @@ function RemoveUserDialog({
 }) {
 	return (
 		<Dialog open={!!user} onOpenChange={onOpenChange}>
-			<DialogContent showClose={false} className="max-w-sm">
+			{/* Same #373D3F frame as the other confirm dialogs (Restore, Delete
+			    Attack, Add User). Title centered, two equal-width buttons. */}
+			<DialogContent
+				showClose={false}
+				className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+			>
 				<DialogHeader>
-					<DialogTitle>Are you sure you want to delete this user?</DialogTitle>
-					<DialogDescription>This action is irreversible.</DialogDescription>
+					<DialogTitle className="text-center text-base font-normal">
+						Are you sure you want to delete this user?
+					</DialogTitle>
+					<DialogDescription className="text-center">
+						This action is irreversible.
+					</DialogDescription>
 				</DialogHeader>
-				<DialogFooter>
-					<Button variant="outline" onClick={() => onOpenChange(false)}>
+				<DialogFooter className="flex-row gap-4 sm:justify-between">
+					<Button
+						variant="outline"
+						onClick={() => onOpenChange(false)}
+						className="bg-card flex-1"
+					>
 						Cancel
 					</Button>
 					<Button
+						variant="outline"
 						onClick={() => user && onConfirm(user.id)}
-						className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
+						className="bg-card flex-1"
 					>
 						Confirm
 					</Button>

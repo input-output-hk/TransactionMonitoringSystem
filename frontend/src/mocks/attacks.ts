@@ -2,7 +2,7 @@ export const ATTACK_TYPES = [
 	"Token Dust",
 	"Large Value",
 	"Large Datum",
-	"Multiple Sat",
+	"Multiple Satisfaction",
 	"Front Running",
 	"Sandwich",
 	"Circular",
@@ -213,7 +213,7 @@ export const SUB_SCORE_LABELS: Record<
 	// NFT-marketplace double-sat exploits drain native assets while the
 	// script's lovelace position barely moves. The combined ``s_extraction``
 	// donut (first slot) still covers both axes via ``max(lov, assets)``.
-	"Multiple Sat": [
+	"Multiple Satisfaction": [
 		{
 			key: "s_extraction",
 			label: "Value Extraction",
@@ -374,7 +374,7 @@ const ROWS: {
 		outputs: 2,
 	},
 	{
-		type: "Multiple Sat",
+		type: "Multiple Satisfaction",
 		sev: "HIGH",
 		riskScore: 68,
 		feeAda: 0.52,
@@ -466,7 +466,7 @@ export const ATTACK_META: Record<
 			{ label: "Round Amounts", percent: 30 },
 		],
 	},
-	"Multiple Sat": {
+	"Multiple Satisfaction": {
 		description:
 			"Uses a single redeemer to satisfy multiple script inputs, draining a contract in one transaction.",
 		subScores: [
