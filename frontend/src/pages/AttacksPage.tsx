@@ -1,5 +1,4 @@
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
 	Select,
@@ -8,6 +7,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { TableFooter } from "@/components/ui/table-footer";
 import {
 	Table,
 	TableBody,
@@ -35,15 +35,14 @@ import { formatTimeAgo } from "@/lib/utils/dates";
 import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
-import {
-	AlertCircle,
-	ArrowUp,
-	ChevronLeft,
-	ChevronRight,
-	Copy,
-} from "lucide-react";
+import { AlertCircle, ArrowUp, Copy } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
+import {
+	Dialog,
+	DialogContent,
+} from "@/components/ui/dialog";
+import { AttackDetailPage } from "@/pages/AttackDetailPage";
 
 // Recharts (+ its d3/redux transitive deps, ~280 KB gzip) loads as a
 // deferred async chunk so it doesn't bloat the initial dashboard bundle.
@@ -51,6 +50,10 @@ const Sparkline = lazy(() => import("@/components/sparkline"));
 
 export function AttacksPage() {
 	const navigate = useNavigate();
+	// `:id` is set only on `/attacks/:id` — same component renders the
+	// dashboard at `/dashboard` (id undefined) and the dashboard + detail
+	// popup at `/attacks/:id`.
+	const { id: detailId } = useParams<{ id?: string }>();
 	const [attackFilter, setAttackFilter] = useState<string>("all");
 	// Multi-select: empty array means "no severity filter applied".
 	// Default to High + Critical so the dashboard opens focused on the
@@ -248,66 +251,17 @@ export function AttacksPage() {
 					</TableBody>
 				</Table>
 
-				<footer className="border-border text-muted-foreground flex flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-xs">
-					{/* Show Rows — inline pseudo-dropdown, no box, just text + chevron */}
-					<div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-						<span>Show Rows</span>
-						<Select
-							value={String(pageSize)}
-							onValueChange={(v) => {
-								setPageSize(Number(v));
-								setPage(0);
-							}}
-						>
-							<SelectTrigger
-								// Override the boxed look — match the Figma's text-only
-								// trigger with a small chevron next to the value.
-								className="text-muted-foreground hover:text-foreground h-auto border-none bg-transparent p-0 text-xs shadow-none focus:ring-0 focus-visible:ring-0"
-							>
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="10">10</SelectItem>
-								<SelectItem value="25">25</SelectItem>
-								<SelectItem value="50">50</SelectItem>
-							</SelectContent>
-						</Select>
-					</div>
-					<div>Total Risk Alerts Shown: {visibleRows.length}</div>
-					<div className="flex items-center gap-1">
-						<IconBtn
-							aria-label="First page"
-							disabled={currentPage === 0}
-							onClick={() => setPage(0)}
-						>
-							<TriangleLeftIcon className="h-3.5 w-3.5" />
-						</IconBtn>
-						<IconBtn
-							aria-label="Previous page"
-							disabled={currentPage === 0}
-							onClick={() => setPage((p) => Math.max(0, p - 1))}
-						>
-							<ChevronLeft className="h-3.5 w-3.5" />
-						</IconBtn>
-						<span className="px-2">
-							Page {currentPage + 1} of {pageCount}
-						</span>
-						<IconBtn
-							aria-label="Next page"
-							disabled={currentPage >= pageCount - 1}
-							onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-						>
-							<ChevronRight className="h-3.5 w-3.5" />
-						</IconBtn>
-						<IconBtn
-							aria-label="Last page"
-							disabled={currentPage >= pageCount - 1}
-							onClick={() => setPage(pageCount - 1)}
-						>
-							<TriangleRightIcon className="h-3.5 w-3.5" />
-						</IconBtn>
-					</div>
-				</footer>
+				<TableFooter
+					pageSize={pageSize}
+					onPageSizeChange={(n) => {
+						setPageSize(n);
+						setPage(0);
+					}}
+					centerLabel={`Total Risk Alerts Shown: ${visibleRows.length}`}
+					page={currentPage}
+					pageCount={pageCount}
+					onPageChange={setPage}
+				/>
 			</section>
 
 			{/* Latest Transactions + Latest Blocks */}
@@ -344,6 +298,27 @@ export function AttacksPage() {
 					Back to Top
 				</button>
 			</div>
+
+			{/* Attack detail popup. Mounted on `/attacks/:id` while the dashboard
+			    behind it stays alive (same component for both routes). Closing
+			    the dialog (X, overlay click, ESC) navigates back to /dashboard,
+			    so the URL stays in sync with what's visible. */}
+			<Dialog
+				open={!!detailId}
+				onOpenChange={(open) => {
+					if (!open) navigate("/dashboard");
+				}}
+			>
+				<DialogContent
+					// Override the default small modal size + padding — we want
+					// the detail card to drive its own layout edge-to-edge inside
+					// the dialog frame, so strip the wrapper styling.
+					className="max-h-[90vh] w-[min(90vw,1100px)] max-w-none overflow-y-auto border-none bg-transparent p-0 shadow-none"
+					showClose={false}
+				>
+					{detailId && <AttackDetailPage />}
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
@@ -359,50 +334,6 @@ export function AttacksPage() {
  *  - Found: full critical theme, clickable, copy button.
  *  - Empty (no critical alerts at all): neutral border so the red doesn't lie.
  */
-/** Hollow triangle pointing LEFT — first-page icon (outline only). */
-function TriangleLeftIcon({ className }: { className?: string }) {
-	return (
-		<svg
-			className={className}
-			viewBox="0 0 16 16"
-			fill="none"
-			xmlns="http://www.w3.org/2000/svg"
-			aria-hidden="true"
-		>
-			<polygon
-				points="10,3 4,8 10,13"
-				stroke="currentColor"
-				strokeWidth="1.5"
-				strokeLinejoin="round"
-				strokeLinecap="round"
-				fill="none"
-			/>
-		</svg>
-	);
-}
-
-/** Mirror — last-page icon (outline only). */
-function TriangleRightIcon({ className }: { className?: string }) {
-	return (
-		<svg
-			className={className}
-			viewBox="0 0 16 16"
-			fill="none"
-			xmlns="http://www.w3.org/2000/svg"
-			aria-hidden="true"
-		>
-			<polygon
-				points="6,3 12,8 6,13"
-				stroke="currentColor"
-				strokeWidth="1.5"
-				strokeLinejoin="round"
-				strokeLinecap="round"
-				fill="none"
-			/>
-		</svg>
-	);
-}
-
 /** Inline icon matching the Figma "critical" banner: red filled triangle
  *  with a white exclamation. Drawn here to avoid the lucide AlertTriangle
  *  stroke-only look. */
@@ -617,19 +548,3 @@ function LatestList({
 	);
 }
 
-function IconBtn({
-	children,
-	...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-	return (
-		<Button
-			type="button"
-			variant="ghost"
-			size="icon"
-			className="text-muted-foreground hover:text-foreground h-7 w-7"
-			{...props}
-		>
-			{children}
-		</Button>
-	);
-}

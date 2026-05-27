@@ -1,8 +1,3 @@
-import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { CloudUpload, X } from "lucide-react";
-import Papa from "papaparse";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -18,6 +13,11 @@ import { useBulkImportMutation } from "@/lib/archive-store";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/utils/bytes";
 import { isCsv } from "@/lib/utils/mime";
+import { CloudUpload, X } from "lucide-react";
+import Papa from "papaparse";
+import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 
 type Phase = "idle" | "parsing" | "parsed" | "confirming" | "uploading";
 
@@ -158,9 +158,7 @@ export function ImportAttackPage() {
 				<p className="text-foreground text-sm">
 					Select a file or drag and drop here
 				</p>
-				<p className="text-muted-foreground mt-1 text-xs">
-					CSV with non-attack alerts to merge into the archive
-				</p>
+				<p className="text-muted-foreground mt-1 text-xs">CSV file</p>
 				<Button
 					type="button"
 					variant="outline"
@@ -228,24 +226,32 @@ export function ImportAttackPage() {
 				open={phase === "confirming"}
 				onOpenChange={(v) => !v && setPhase("parsed")}
 			>
-				<DialogContent showClose={false} className="max-w-sm">
+				<DialogContent
+					showClose={false}
+					className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+				>
 					<DialogHeader>
-						<DialogTitle>
+						<DialogTitle className="text-center text-base font-normal">
 							Import {validCount.toLocaleString()} non-attacks?
 						</DialogTitle>
-						<DialogDescription>
+						<DialogDescription className="text-center">
 							Existing archive entries with the same tx_hash will be updated
 							(last-write-wins). Active alerts referenced here will disappear
 							from the dashboard once archived.
 						</DialogDescription>
 					</DialogHeader>
-					<DialogFooter>
-						<Button variant="outline" onClick={() => setPhase("parsed")}>
+					<DialogFooter className="flex-row gap-4 sm:justify-between">
+						<Button
+							variant="outline"
+							onClick={() => setPhase("parsed")}
+							className="bg-card flex-1"
+						>
 							Cancel
 						</Button>
 						<Button
+							variant="outline"
 							onClick={onConfirm}
-							className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
+							className="bg-card flex-1"
 						>
 							Confirm
 						</Button>

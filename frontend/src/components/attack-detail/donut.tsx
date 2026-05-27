@@ -21,7 +21,7 @@ export function DonutCard({
 	description?: string;
 }) {
 	return (
-		<div className="border-border bg-muted relative rounded-md border p-4">
+		<div className="border-border relative rounded-md border bg-white p-4 dark:bg-[#383838]">
 			{description && (
 				<Tooltip>
 					<TooltipTrigger asChild>
@@ -38,7 +38,9 @@ export function DonutCard({
 					</TooltipContent>
 				</Tooltip>
 			)}
-			<div className="text-foreground/90 text-center text-xs font-medium tracking-wide uppercase">
+			{/* `px-7` reserves room on both sides for the absolute info icon at
+			    top-right; symmetric so the label stays visually centered. */}
+			<div className="text-foreground/90 px-7 text-center text-xs font-medium tracking-wide uppercase">
 				{label}
 			</div>
 			<div className="mt-3 flex justify-center">
@@ -70,7 +72,9 @@ function Donut({ percent, size = 110 }: { percent: number; size?: number }) {
 				fill="none"
 				className="stroke-brand"
 				strokeWidth={stroke}
-				strokeLinecap="round"
+				// `butt` (SVG default — making it explicit) gives the arc
+				// straight squared-off ends, per Figma.
+				strokeLinecap="butt"
 				strokeDasharray={`${dash} ${c - dash}`}
 				transform={`rotate(-90 ${size / 2} ${size / 2})`}
 			/>

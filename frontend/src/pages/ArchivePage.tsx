@@ -1,13 +1,6 @@
 import { buttonVariants } from "@/components/ui/button-variants";
 import { DateField } from "@/components/ui/date-field";
-import { PageBtn } from "@/components/ui/page-button";
-import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
 	Table,
 	TableBody,
@@ -16,6 +9,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import { TableFooter } from "@/components/ui/table-footer";
 import { archiveApi } from "@/lib/api/archive";
 import { useArchivedAlerts } from "@/lib/archive-store";
 import { ATTACK_ICON } from "@/lib/attack-display";
@@ -29,21 +23,17 @@ import {
 } from "@/lib/utils/dates";
 import { shortHash } from "@/lib/utils/strings";
 import type { AttackType } from "@/mocks/attacks";
-import {
-	AlertCircle,
-	ArrowUp,
-	ChevronLeft,
-	ChevronRight,
-	ChevronsLeft,
-	ChevronsRight,
-	Copy,
-	ExternalLink,
-} from "lucide-react";
+import { AttackDetailPage } from "@/pages/AttackDetailPage";
+import { AlertCircle, ArrowUp, Copy, ExternalLink } from "lucide-react";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 export function ArchivePage() {
 	const navigate = useNavigate();
+	// `:id` is set only on `/archive/:id` — same component renders the
+	// archive table at `/archive` (id undefined) and the table + detail
+	// popup at `/archive/:id`, mirroring the dashboard overlay.
+	const { id: detailId } = useParams<{ id?: string }>();
 	const [startDate, setStartDate] = useState(() => nDaysAgoISODate(60));
 	const [endDate, setEndDate] = useState(todayISODate);
 	const [pageSize, setPageSize] = useState(10);
@@ -222,61 +212,17 @@ export function ArchivePage() {
 					</TableBody>
 				</Table>
 
-				<footer className="border-border text-muted-foreground flex flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-xs">
-					<div className="flex items-center gap-2">
-						<span>Show Rows</span>
-						<Select
-							value={String(pageSize)}
-							onValueChange={(v) => {
-								setPageSize(Number(v));
-								setPage(0);
-							}}
-						>
-							<SelectTrigger className="h-7 w-[64px] text-xs">
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="10">10</SelectItem>
-								<SelectItem value="25">25</SelectItem>
-								<SelectItem value="50">50</SelectItem>
-							</SelectContent>
-						</Select>
-					</div>
-					<div>Total Archived: {total.toLocaleString()}</div>
-					<div className="flex items-center gap-1">
-						<PageBtn
-							aria-label="First page"
-							disabled={currentPage === 0}
-							onClick={() => setPage(0)}
-						>
-							<ChevronsLeft className="h-3.5 w-3.5" />
-						</PageBtn>
-						<PageBtn
-							aria-label="Previous page"
-							disabled={currentPage === 0}
-							onClick={() => setPage((p) => Math.max(0, p - 1))}
-						>
-							<ChevronLeft className="h-3.5 w-3.5" />
-						</PageBtn>
-						<span className="px-2">
-							Page {currentPage + 1} of {pageCount}
-						</span>
-						<PageBtn
-							aria-label="Next page"
-							disabled={currentPage >= pageCount - 1}
-							onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-						>
-							<ChevronRight className="h-3.5 w-3.5" />
-						</PageBtn>
-						<PageBtn
-							aria-label="Last page"
-							disabled={currentPage >= pageCount - 1}
-							onClick={() => setPage(pageCount - 1)}
-						>
-							<ChevronsRight className="h-3.5 w-3.5" />
-						</PageBtn>
-					</div>
-				</footer>
+				<TableFooter
+					pageSize={pageSize}
+					onPageSizeChange={(n) => {
+						setPageSize(n);
+						setPage(0);
+					}}
+					centerLabel={`Total Archived: ${total.toLocaleString()}`}
+					page={currentPage}
+					pageCount={pageCount}
+					onPageChange={setPage}
+				/>
 			</section>
 
 			{total > 0 && (
@@ -291,6 +237,20 @@ export function ArchivePage() {
 					</button>
 				</div>
 			)}
+
+			<Dialog
+				open={!!detailId}
+				onOpenChange={(open) => {
+					if (!open) navigate("/archive");
+				}}
+			>
+				<DialogContent
+					className="max-h-[90vh] w-[min(90vw,1100px)] max-w-none overflow-y-auto border-none bg-transparent p-0 shadow-none"
+					showClose={false}
+				>
+					{detailId && <AttackDetailPage archived />}
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
