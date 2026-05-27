@@ -27,7 +27,7 @@ export function EmailSentPage() {
 
 	return (
 		<div className="bg-background flex min-h-screen items-center justify-center px-4">
-			<div className="border-border bg-card w-full max-w-115 rounded-2xl border p-10 shadow-sm">
+			<div className="border-border bg-card w-full max-w-115 rounded-lg border-2 p-10 shadow-sm">
 				<h1
 					onClick={onMockVerify}
 					title="(mock) click to verify"

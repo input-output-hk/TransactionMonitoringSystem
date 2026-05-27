@@ -90,12 +90,16 @@
 
 .dark {
 	color-scheme: dark;
-	/* Dark mode tokens (matched to Figma) */
-	--background: oklch(0.13 0 0);
+	/* Dark mode tokens (matched to Figma).
+	   --background ≈ #1F1F1F, --card ≈ #292929 — confirmed against the
+	   Figma frame; previous values were too dark by ~0.08 L. */
+	--background: oklch(0.22 0 0);
 	--foreground: oklch(0.96 0 0);
-	--card: oklch(0.21 0 0);
+	--card: oklch(0.27 0 0);
 	--card-foreground: oklch(0.96 0 0);
-	--popover: oklch(0.24 0 0);
+	/* #383838 — shared by DropdownMenu (user menu, System Status, severity
+	   multi-select) and Select (Attack Type filter, page size, etc). */
+	--popover: oklch(0.35 0 0);
 	--popover-foreground: oklch(0.96 0 0);
 	--primary: oklch(0.96 0 0);
 	--primary-foreground: oklch(0.19 0 0);
@@ -107,8 +111,11 @@
 	--accent-foreground: oklch(0.96 0 0);
 	--destructive: oklch(0.65 0.22 25);
 	--destructive-foreground: oklch(0.98 0 0);
-	--border: oklch(0.32 0 0);
-	--input: oklch(0.24 0 0);
+	/* Lifted from 0.32/0.24 to 0.50 so borders read clearly against the
+	   --card (0.27) — previously they were almost invisible. Applies to
+	   card outlines, input borders, and outline-variant buttons. */
+	--border: oklch(0.50 0 0);
+	--input: oklch(0.50 0 0);
 	--ring: oklch(0.65 0.15 240);
 
 	--brand: oklch(0.7 0.15 240);
