@@ -4,20 +4,6 @@ export const PLACEHOLDER_KPI = "—";
 const LOVELACE_PER_ADA = 1_000_000;
 
 /**
- * Average transactions per minute since `firstTx`. Returns
- * {@link PLACEHOLDER_KPI} for missing/degenerate inputs.
- */
-export function computeTxPerMin(
-	totalCount: number | undefined,
-	firstTx: string | undefined,
-): string {
-	if (!totalCount || !firstTx) return PLACEHOLDER_KPI;
-	const elapsedMin = (Date.now() - new Date(firstTx).getTime()) / 60_000;
-	if (!Number.isFinite(elapsedMin) || elapsedMin <= 0) return PLACEHOLDER_KPI;
-	return Math.round(totalCount / elapsedMin).toLocaleString();
-}
-
-/**
  * Format a lovelace integer as a compact ADA string with K/M suffixes for
  * readability in tight widgets ("Latest Transactions" rows etc.).
  *

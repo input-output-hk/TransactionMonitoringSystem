@@ -371,3 +371,52 @@ async def get_transaction_stats(
     except Exception as e:
         logger.error(f"Error getting transaction stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get transaction stats")
+
+
+@router.get("/stats/throughput")
+async def get_transaction_throughput(
+    network: Optional[NetworkType] = Query(
+        None,
+        description=(
+            "Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to "
+            "the instance's CARDANO_NETWORK setting."
+        ),
+    ),
+    window_minutes: int = Query(
+        5, ge=1, le=1440,
+        description="Sliding window size in minutes (default 5).",
+    ),
+    api_key: str = Security(verify_api_key),
+):
+    """Recent transaction throughput.
+
+    Counts transactions ingested in the last ``window_minutes`` and returns
+    the implied ``tx/min`` rate. The dashboard's "TX / min" KPI uses this
+    instead of a lifetime average so the value reflects current pipeline
+    activity, not a denominator that grows forever.
+
+    ``subtractMinutes(now(), N)`` lets clickhouse-driver substitute the
+    window safely as a numeric parameter.
+    """
+    try:
+        query_network = network or settings.CARDANO_NETWORK
+        results = await clickhouse.execute_query_async(
+            """
+            SELECT count() AS recent_count
+            FROM transactions
+            WHERE network = %(network)s
+              AND timestamp >= subtractMinutes(now(), %(window_minutes)s)
+            """,
+            {"network": query_network, "window_minutes": window_minutes},
+        )
+        count = int(results[0][0]) if results else 0
+        return {
+            "window_minutes": window_minutes,
+            "count": count,
+            "tx_per_min": count / window_minutes,
+        }
+    except Exception as e:
+        logger.error(f"Error getting transaction throughput: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to get transaction throughput",
+        )
