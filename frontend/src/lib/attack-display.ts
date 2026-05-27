@@ -1,14 +1,14 @@
 import {
-	AlertCircle,
-	Banknote,
-	Coins,
-	Fish,
-	GitFork,
-	Layers,
-	PackageOpen,
-	Repeat,
-	ScrollText,
-} from "lucide-react";
+	CircularIcon,
+	FakeTokenIcon,
+	FrontRunningIcon,
+	LargeDatumIcon,
+	LargeValueIcon,
+	MultipleSatIcon,
+	PhishingIcon,
+	SandwichIcon,
+	TokenDustIcon,
+} from "@/components/attack-icons";
 import type { AttackType, Severity } from "@/mocks/attacks";
 
 export const SEVERITY_VARIANT: Record<
@@ -25,13 +25,13 @@ export const ATTACK_ICON: Record<
 	AttackType,
 	React.ComponentType<{ className?: string }>
 > = {
-	Sandwich: PackageOpen,
-	Phishing: Fish,
-	Circular: Repeat,
-	"Multiple Sat": Layers,
-	"Large Value": Banknote,
-	"Large Datum": ScrollText,
-	"Token Dust": Coins,
-	"Front Running": GitFork,
-	"Fake Token": AlertCircle,
+	Sandwich: SandwichIcon,
+	Phishing: PhishingIcon,
+	Circular: CircularIcon,
+	"Multiple Sat": MultipleSatIcon,
+	"Large Value": LargeValueIcon,
+	"Large Datum": LargeDatumIcon,
+	"Token Dust": TokenDustIcon,
+	"Front Running": FrontRunningIcon,
+	"Fake Token": FakeTokenIcon,
 };

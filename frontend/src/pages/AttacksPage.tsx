@@ -2,11 +2,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
 	Select,
 	SelectContent,
 	SelectItem,
@@ -21,21 +16,23 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useRiskAlerts } from "@/lib/api/analysis";
 import {
 	useAlertTimeseries,
 	useAnalysisStats,
 	useTransactionStats,
+	useTransactionThroughput,
 } from "@/lib/api/stats";
 import { useLatestTransactions, useRecentBlocks } from "@/lib/api/transactions";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 import { formatTimeAgo } from "@/lib/utils/dates";
-import {
-	PLACEHOLDER_KPI,
-	computeTxPerMin,
-	formatAda,
-} from "@/lib/utils/numbers";
+import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
 import {
@@ -100,6 +97,9 @@ export function AttacksPage() {
 	// Live KPI cards
 	const { data: analysisStats } = useAnalysisStats();
 	const { data: txStats } = useTransactionStats();
+	// 5-minute sliding window — matches the backend default and the
+	// 15s poll cadence keeps the value reactive without spamming.
+	const { data: throughput } = useTransactionThroughput(5);
 	const { data: latestTxs, isPending: latestTxsPending } =
 		useLatestTransactions(5);
 	const { data: recentBlocks, isPending: recentBlocksPending } =
@@ -108,7 +108,9 @@ export function AttacksPage() {
 	const kpis = [
 		{
 			label: "TX / min",
-			value: computeTxPerMin(txStats?.total_count, txStats?.first_tx),
+			value: throughput
+				? Math.round(throughput.tx_per_min).toLocaleString()
+				: PLACEHOLDER_KPI,
 		},
 		{
 			label: "Pending",
@@ -150,7 +152,7 @@ export function AttacksPage() {
 					</h2>
 					<div className="flex items-center gap-2">
 						<Select value={attackFilter} onValueChange={onAttackChange}>
-							<SelectTrigger className="h-8 w-[160px]">
+							<SelectTrigger className="h-8 w-40">
 								<SelectValue placeholder="Attack Type" />
 							</SelectTrigger>
 							<SelectContent>
@@ -256,7 +258,7 @@ export function AttacksPage() {
 								setPage(0);
 							}}
 						>
-							<SelectTrigger className="h-7 w-[64px] text-xs">
+							<SelectTrigger className="h-7 w-16 text-xs">
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
@@ -455,8 +457,8 @@ function GraphBarCard() {
 						</div>
 					</TooltipTrigger>
 					<TooltipContent side="top" className="max-w-xs text-xs">
-						Daily count of Critical + High severity alerts over the last 14
-						days (by on-chain block time).
+						Daily count of Critical + High severity alerts over the last 14 days
+						(by on-chain block time).
 					</TooltipContent>
 				</Tooltip>
 				<div className="text-muted-foreground text-xs">14d</div>

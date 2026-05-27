@@ -33,6 +33,12 @@ export type TransactionStats = {
 	last_tx: string;
 };
 
+export type TransactionThroughput = {
+	window_minutes: number;
+	count: number;
+	tx_per_min: number;
+};
+
 async function fetchAnalysisStats(): Promise<AnalysisStats> {
 	const res = await fetchWithAuth(
 		`/api/analysis/stats?network=${getNetwork()}`,
@@ -65,6 +71,16 @@ async function fetchAlertTimeseries(days: number): Promise<AlertTimeseries> {
 	return (await res.json()) as AlertTimeseries;
 }
 
+async function fetchTransactionThroughput(
+	windowMinutes: number,
+): Promise<TransactionThroughput> {
+	const res = await fetchWithAuth(
+		`/api/transactions/stats/throughput?network=${getNetwork()}&window_minutes=${windowMinutes}`,
+	);
+	if (!res.ok) throw new Error(`Transaction throughput failed: ${res.status}`);
+	return (await res.json()) as TransactionThroughput;
+}
+
 // Stats are aggregates that change slowly relative to the analysis engine
 // cadence (30s). Polling them every 5s was 4x the engine's update rate, with
 // no benefit. 15s keeps the UI fresh without burning rate-limit budget.
@@ -92,6 +108,19 @@ export function useAlertTimeseries(days = 14) {
 	return useQuery({
 		queryKey: ["analysis", "timeseries", days],
 		queryFn: () => fetchAlertTimeseries(days),
+		refetchInterval: POLL_MS,
+		staleTime: POLL_MS / 2,
+	});
+}
+/**
+ * Recent throughput (tx/min). Window default = 5 min, smoothed enough to
+ * not swing wildly on a single block but small enough to reflect "now".
+ * Polls on the same cadence as the other KPIs.
+ */
+export function useTransactionThroughput(windowMinutes = 5) {
+	return useQuery({
+		queryKey: ["transactions", "throughput", windowMinutes],
+		queryFn: () => fetchTransactionThroughput(windowMinutes),
 		refetchInterval: POLL_MS,
 		staleTime: POLL_MS / 2,
 	});
