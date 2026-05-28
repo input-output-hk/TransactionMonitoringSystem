@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
 	Select,
@@ -7,7 +8,6 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import { TableFooter } from "@/components/ui/table-footer";
 import {
 	Table,
 	TableBody,
@@ -16,6 +16,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import { TableFooter } from "@/components/ui/table-footer";
 import {
 	Tooltip,
 	TooltipContent,
@@ -34,14 +35,10 @@ import { formatTimeAgo } from "@/lib/utils/dates";
 import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
+import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AlertCircle, ArrowUp, Copy } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import {
-	Dialog,
-	DialogContent,
-} from "@/components/ui/dialog";
-import { AttackDetailPage } from "@/pages/AttackDetailPage";
 
 // Recharts (+ its d3/redux transitive deps, ~280 KB gzip) loads as a
 // deferred async chunk so it doesn't bloat the initial dashboard bundle.
@@ -215,9 +212,7 @@ export function AttacksPage() {
 											</button>
 										</div>
 									</TableCell>
-									<TableCell className="text-foreground">
-										{a.date}
-									</TableCell>
+									<TableCell className="text-foreground">{a.date}</TableCell>
 									<TableCell>
 										<div className="text-foreground flex items-center gap-2">
 											<Icon className="text-muted-foreground h-4 w-4" />
@@ -348,12 +343,7 @@ function CriticalTriangleIcon({ className }: { className?: string }) {
 				d="M10.95 3.06a1.2 1.2 0 0 1 2.1 0l9.45 16.74A1.2 1.2 0 0 1 21.45 21.6H2.55a1.2 1.2 0 0 1-1.05-1.8z"
 				fill="#dc2626"
 			/>
-			<path
-				d="M12 9v5"
-				stroke="white"
-				strokeWidth="2"
-				strokeLinecap="round"
-			/>
+			<path d="M12 9v5" stroke="white" strokeWidth="2" strokeLinecap="round" />
 			<circle cx="12" cy="17.2" r="1.05" fill="white" />
 		</svg>
 	);
@@ -378,9 +368,7 @@ function CriticalAlertCard() {
 
 	const baseCls =
 		"bg-card border-border flex flex-col justify-center rounded-lg border-2 p-4 md:col-span-2 transition-colors";
-	const interactiveCls = latest
-		? "cursor-pointer hover:bg-accent/50"
-		: "";
+	const interactiveCls = latest ? "cursor-pointer hover:bg-accent/50" : "";
 
 	return (
 		<div
@@ -401,7 +389,7 @@ function CriticalAlertCard() {
 		>
 			<div className="text-foreground flex items-center justify-center gap-2">
 				<CriticalTriangleIcon className="h-5 w-5 shrink-0" />
-				<span className="text-sm font-semibold">
+				<span className="text-lg font-semibold">
 					{latest
 						? "New Critical Attack"
 						: isPending
@@ -438,7 +426,7 @@ function CriticalAlertCard() {
 function KpiCard({ label, value }: { label: string; value: string }) {
 	return (
 		<div className="border-border bg-card flex flex-col justify-center rounded-lg border-2 p-4">
-			<div className="text-foreground text-center text-sm font-semibold">
+			<div className="text-foreground text-center text-lg font-semibold">
 				{label}
 			</div>
 			<div className="text-brand mt-2 text-center text-2xl font-bold">
@@ -545,4 +533,3 @@ function LatestList({
 		</section>
 	);
 }
-
