@@ -25,7 +25,6 @@ import { useRiskAlerts } from "@/lib/api/analysis";
 import {
 	useAlertTimeseries,
 	useAnalysisStats,
-	useTransactionStats,
 	useTransactionThroughput,
 } from "@/lib/api/stats";
 import { useLatestTransactions, useRecentBlocks } from "@/lib/api/transactions";
@@ -96,7 +95,6 @@ export function AttacksPage() {
 
 	// Live KPI cards
 	const { data: analysisStats } = useAnalysisStats();
-	const { data: txStats } = useTransactionStats();
 	// 5-minute sliding window — matches the backend default and the
 	// 15s poll cadence keeps the value reactive without spamming.
 	const { data: throughput } = useTransactionThroughput(5);
