@@ -149,7 +149,7 @@ export function ArchivePage() {
 									className="cursor-pointer"
 								>
 									<TableCell>
-										<div className="text-foreground flex items-center gap-2 font-mono text-[13px]">
+										<div className="text-foreground flex items-center gap-2 font-mono text-[13px] uppercase">
 											<span>{displayId}</span>
 											<button
 												type="button"

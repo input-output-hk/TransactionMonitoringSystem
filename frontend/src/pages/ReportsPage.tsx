@@ -262,7 +262,7 @@ export function ReportsPage() {
 									className="cursor-pointer"
 								>
 									<TableCell>
-										<div className="text-foreground flex items-center gap-2 font-mono text-[13px]">
+										<div className="text-foreground flex items-center gap-2 font-mono text-[13px] uppercase">
 											<span>{a.id}</span>
 											<button
 												type="button"
