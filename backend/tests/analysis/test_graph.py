@@ -13,8 +13,11 @@ class TestBuildCycleResult:
             addresses=["addr_a", "addr_b", "addr_c", "addr_a"],
             origin_amount=10_000_000,
             final_amount=9_500_000,
-            hop_amounts=[10_000_000, 9_800_000, 9_500_000],
-            hop_slots=[100, 105, 110],
+            hops=[
+                {"address": "addr_a", "amount_lovelace": 10_000_000, "slot": 100},
+                {"address": "addr_b", "amount_lovelace": 9_800_000, "slot": 105},
+                {"address": "addr_a", "amount_lovelace": 9_500_000, "slot": 110},
+            ],
             origin_addresses={"addr_a"},
         )
         assert result["cycle_length"] == 3
@@ -28,8 +31,10 @@ class TestBuildCycleResult:
             addresses=["a", "b", "a"],
             origin_amount=5_000_000,  # 5 ADA, round
             final_amount=4_800_000,
-            hop_amounts=[5_000_000, 4_800_000],
-            hop_slots=[10, 15],
+            hops=[
+                {"address": "a", "amount_lovelace": 5_000_000, "slot": 10},
+                {"address": "a", "amount_lovelace": 4_800_000, "slot": 15},
+            ],
             origin_addresses={"a"},
         )
         assert result["round_amount_flag"] is True
@@ -40,8 +45,10 @@ class TestBuildCycleResult:
             addresses=["a", "b", "a"],
             origin_amount=5_123_456,
             final_amount=5_000_000,
-            hop_amounts=[5_123_456, 5_000_000],
-            hop_slots=[10, 15],
+            hops=[
+                {"address": "a", "amount_lovelace": 5_123_456, "slot": 10},
+                {"address": "a", "amount_lovelace": 5_000_000, "slot": 15},
+            ],
             origin_addresses={"a"},
         )
         assert result["round_amount_flag"] is False
@@ -52,8 +59,10 @@ class TestBuildCycleResult:
             addresses=["a", "b"],
             origin_amount=0,
             final_amount=0,
-            hop_amounts=[0, 0],
-            hop_slots=[10, 15],
+            hops=[
+                {"address": "a", "amount_lovelace": 0, "slot": 10},
+                {"address": "b", "amount_lovelace": 0, "slot": 15},
+            ],
             origin_addresses={"a"},
         )
         assert result["amount_similarity"] == 0.0

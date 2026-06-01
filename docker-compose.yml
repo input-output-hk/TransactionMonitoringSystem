@@ -99,6 +99,12 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        # Baked into the SPA bundle at build time. Use a single API key
+        # for both the backend's API_KEYS allowlist and the frontend's
+        # outgoing TMS-API-Key header so they always match.
+        VITE_TMS_API_KEY: ${VITE_TMS_API_KEY:-}
+        VITE_NETWORK: ${VITE_NETWORK:-preprod}
     container_name: tms-app
     env_file:
       - .env
@@ -118,7 +124,9 @@ services:
       - RAW_STORE_PATH=/data/raw
       - RAW_STORE_ENABLED=${RAW_STORE_ENABLED:-true}
     ports:
-      - "${API_PORT:-8000}:8000"
+      # Bind to loopback only — public exposure happens via Cloudflare Tunnel
+      # (or similar) which terminates TLS in front of the app.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
       - raw_store_data:/data/raw
     depends_on:

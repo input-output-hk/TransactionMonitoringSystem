@@ -9,7 +9,7 @@ import logging
 import math
 import statistics
 from collections import Counter
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
@@ -22,6 +22,19 @@ _CYCLE_CFG = _CIRCULAR_CFG["cycle"]
 _MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
 _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
+
+
+def _first_sorted(addresses) -> str:
+    """Pick a deterministic representative address from an iterable.
+
+    Set iteration order is unstable across Python processes (string hash
+    randomization), so picking via ``next(iter(...))`` produces different
+    representatives on the same input across runs. Sorting by bech32 string
+    gives a stable, meaningless-to-the-operator default.
+    """
+    if not addresses:
+        return ""
+    return sorted(addresses)[0]
 
 
 def detect_cycle(
@@ -88,8 +101,16 @@ def detect_cycle(
     # Step 3: Bounded BFS forward
     visited_addresses: Set[str] = set(origin_addresses) | set(current_addresses)
     all_cycle_addresses: List[str] = list(origin_addresses)
-    hop_slots: List[int] = [origin_slot]
-    hop_amounts: List[int] = [origin_amount]
+    # ``hops`` is the single source of truth for per-step amounts/slots.
+    # The stats math in ``_build_cycle_result`` derives ``hop_amounts`` and
+    # ``hop_slots`` from this list, so they never get out of sync.
+    # ``_first_sorted`` picks a deterministic representative address per
+    # step: set iteration order varies across processes (string hash
+    # randomization) and would otherwise make evidence non-reproducible.
+    origin_repr = _first_sorted(origin_addresses)
+    hops: List[Dict[str, Any]] = [
+        {"address": origin_repr, "amount_lovelace": origin_amount, "slot": origin_slot}
+    ]
 
     for hop in range(1, max_hops + 1):
         if not current_addresses:
@@ -143,16 +164,16 @@ def detect_cycle(
                 # Cycle found
                 all_cycle_addresses.extend(list(current_addresses))
                 all_cycle_addresses.append(out_addr)
-                hop_amounts.append(out_amt)
-                hop_slots.append(slot)
+                hops.append(
+                    {"address": out_addr, "amount_lovelace": out_amt, "slot": slot}
+                )
 
                 return _build_cycle_result(
                     cycle_length=hop + 1,
                     addresses=all_cycle_addresses,
                     origin_amount=origin_amount,
                     final_amount=out_amt,
-                    hop_amounts=hop_amounts,
-                    hop_slots=hop_slots,
+                    hops=hops,
                     origin_addresses=origin_addresses,
                     tx_hash=tx_hash,
                     network=network,
@@ -163,8 +184,10 @@ def detect_cycle(
                 hop_amount += out_amt
 
         all_cycle_addresses.extend(list(current_addresses))
-        hop_amounts.append(hop_amount)
-        hop_slots.append(hop_slot)
+        hop_repr = _first_sorted(current_addresses)
+        hops.append(
+            {"address": hop_repr, "amount_lovelace": hop_amount, "slot": hop_slot}
+        )
         visited_addresses |= next_addresses
         current_addresses = next_addresses
 
@@ -225,13 +248,23 @@ def _build_cycle_result(
     addresses: List[str],
     origin_amount: int,
     final_amount: int,
-    hop_amounts: List[int],
-    hop_slots: List[int],
+    hops: List[Dict[str, Any]],
     origin_addresses: Set[str],
     tx_hash: str = "",
     network: str = "",
 ) -> Dict:
-    """Build the cycle dict expected by the CircularScorer."""
+    """Build the cycle dict expected by the CircularScorer.
+
+    ``hops`` is the single source of truth for per-step amounts and slots;
+    we derive ``hop_amounts`` / ``hop_slots`` from it for the stats math
+    below. ``addresses`` is kept as a separate parameter because the
+    entropy calculation needs the full per-step address list (which may
+    include duplicates and is longer than ``hops`` when a step had
+    multiple recipients), not just the per-hop representative.
+    """
+    hop_amounts = [int(h.get("amount_lovelace", 0)) for h in hops]
+    hop_slots = [int(h.get("slot", 0)) for h in hops]
+
     # Amount similarity: 1 - CV(hop_amounts) (coefficient of variation)
     if len(hop_amounts) >= 2:
         mean_amt = statistics.mean(hop_amounts)
@@ -288,6 +321,7 @@ def _build_cycle_result(
     return {
         "cycle_length": cycle_length,
         "addresses": list(set(addresses))[:20],
+        "hops": hops,
         "amount_similarity": round(amount_similarity, 4),
         "net_loss_ratio": round(net_loss_ratio, 4),
         "recurrence_count": _count_origin_recurrence(

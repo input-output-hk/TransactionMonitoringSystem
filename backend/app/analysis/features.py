@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _cbor2 = None
 
 
-def _get_cbor2():
+def get_cbor2():
     global _cbor2
     if _cbor2 is None:
         import cbor2
@@ -100,6 +100,27 @@ def is_script_address(address: str) -> bool:
 # UTxO-level feature extraction
 # ---------------------------------------------------------------------------
 
+def extract_lovelace(value: Any) -> int:
+    """Lovelace out of an Ogmios value dict, handling both schema versions.
+
+    Ogmios v5 emits ``{"lovelace": N, <policy>: {...}}`` at the top level.
+    Ogmios v6 nests ADA: ``{"ada": {"lovelace": N}, <policy>: {...}}``.
+    A bare int is also accepted for callers that flatten the value upstream.
+    Returns ``0`` on anything unrecognised so callers can default safely.
+    """
+    if isinstance(value, dict):
+        ada = value.get("ada")
+        if isinstance(ada, dict):
+            return int(ada.get("lovelace", 0) or 0)
+        return int(value.get("lovelace", 0) or 0)
+    if value:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
     """Estimate the CBOR byte size of an Ogmios output value dict.
 
@@ -107,7 +128,7 @@ def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
     We re-encode a simplified structure to CBOR to approximate the on-chain size.
     """
     try:
-        cbor2 = _get_cbor2()
+        cbor2 = get_cbor2()
         # Build a structure similar to the on-chain CBOR encoding:
         # - If only lovelace: just an integer
         # - If multi-asset: (lovelace, {policy_bytes: {asset_bytes: qty}})

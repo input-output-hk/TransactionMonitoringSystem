@@ -185,6 +185,31 @@ class TestBareDomainAndDatum:
         }
         assert scorer.gate(_features(metadata=None, raw_data=raw_data)) is True
 
+    def test_cbor_tagged_map_yields_clean_leaves(self):
+        # Regression: a previous byte-scan implementation concatenated
+        # adjacent CBOR map values because the byte-string length-prefix
+        # bytes (0x40-0x57 = ASCII A-W) fall in printable ASCII and looked
+        # like part of the next text run. The classic shape this produced
+        # was a CIP-25-style map ``{name, image, url}`` collapsing into a
+        # single garbled string like
+        # ``walletEimageTclaim-reward-ada.xyzCurlTclaim-reward-ada.xyz``,
+        # which then fooled the URL regex (it caught the host but lost
+        # the leading ``E``/``T``/``C`` length prefixes' boundary).
+        import cbor2
+        from app.analysis.scorers.phishing import _decode_datum_strings
+
+        datum = cbor2.CBORTag(121, [{
+            b"name": b"wallet",
+            b"image": b"claim-reward-ada.xyz",
+            b"url": b"claim-reward-ada.xyz",
+        }])
+        leaves = _decode_datum_strings(cbor2.dumps(datum).hex())
+        # Each value (and each key) comes out as a separate entry; no
+        # leaf carries the adjacent value's length-prefix byte.
+        assert "wallet" in leaves
+        assert "claim-reward-ada.xyz" in leaves
+        assert not any("Eimage" in s or "Curl" in s or "Timage" in s for s in leaves), leaves
+
     def test_bare_domain_requires_valid_tld(self, scorer):
         # '3.14' matches the bare-domain regex but has no real TLD; the
         # PSL-backed filter should reject it.

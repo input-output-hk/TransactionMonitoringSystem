@@ -134,6 +134,7 @@ class TokenDustScorer(BaseScorer):
         best_sub = {}
         best_reasons = []
         best_bl_source = "missing"
+        best_evidence: Dict[str, Any] = {}
 
         for out in outputs:
             addr = out.get("address", "")
@@ -158,12 +159,14 @@ class TokenDustScorer(BaseScorer):
                 best_sub = result.sub_scores
                 best_reasons = result.reasons
                 best_bl_source = result.baseline_source
+                best_evidence = result.evidence
 
         return ScorerResult(
             score=best_score,
             sub_scores=best_sub,
             reasons=best_reasons,
             baseline_source=best_bl_source,
+            evidence=best_evidence,
         )
 
     def _score_utxo(
@@ -273,4 +276,12 @@ class TokenDustScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "unique_asset_count": int(token_count),
+                "policy_count": int(policy_count),
+                "value_cbor_bytes_raw": int(value_cbor),
+                "max_assets_per_policy": int(max_per_policy),
+                "lovelace_amount": int(ada_amount),
+                "target_script_address": address,
+            },
         )

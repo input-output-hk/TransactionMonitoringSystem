@@ -3,6 +3,11 @@
 All routes are mounted under ``/api/archive`` and guarded by ``verify_api_key``.
 See ``app.models.archive`` for request/response shapes and ``app.db.archive_queries``
 for the ClickHouse access layer.
+
+ROUTE ORDER MATTERS: FastAPI matches routes in registration order. Static-
+segment routes (``/bulk``, ``/export``) must be declared BEFORE the path-
+parameter routes (``/{tx_hash}``), otherwise ``GET /api/archive/export`` is
+captured by ``get_archived`` with ``tx_hash="export"`` and returns 404.
 """
 
 import csv
@@ -32,6 +37,12 @@ router = APIRouter(prefix="/api/archive", tags=["archive"])
 
 # Canonical CSV column order, used by both export and bulk import parsing.
 CSV_COLUMNS = ("network", "tx_hash", "note", "archived_by", "archived_at", "source")
+
+
+# ---------------------------------------------------------------------------
+# Collection routes (no path param) — registered first so that static
+# sub-paths like /bulk and /export are matched before /{tx_hash}.
+# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -76,30 +87,6 @@ async def archive_alert(entry: ArchiveEntry) -> dict:
     }
 
 
-@router.delete(
-    "/{tx_hash}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Security(verify_api_key)],
-)
-async def restore_alert(
-    tx_hash: str,
-    network: Optional[NetworkType] = Query(None),
-) -> Response:
-    """Restore a transaction by hard-deleting its archive row."""
-    query_network = network or settings.CARDANO_NETWORK
-    try:
-        deleted = await archive_queries.archive_delete_async(query_network, tx_hash)
-    except Exception as e:
-        logger.error(f"Error restoring {tx_hash}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to restore alert")
-    if deleted == 0:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No archive entry found for {tx_hash} on {query_network}",
-        )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
 @router.get("", dependencies=[Security(verify_api_key)])
 async def list_archived(
     network: Optional[NetworkType] = Query(None),
@@ -117,18 +104,25 @@ async def list_archived(
     """List archived alerts enriched with the original detection record."""
     query_network = network or settings.CARDANO_NETWORK
     try:
+        from_naive = to_naive_utc(date_from)
+        to_naive = to_naive_utc(date_to)
         rows = await archive_queries.archive_list_async(
             network=query_network,
-            date_from=to_naive_utc(date_from),
-            date_to=to_naive_utc(date_to),
+            date_from=from_naive,
+            date_to=to_naive,
             limit=limit,
             offset=offset,
+        )
+        total = await archive_queries.archive_count_async(
+            network=query_network,
+            date_from=from_naive,
+            date_to=to_naive,
         )
     except Exception as e:
         logger.error(f"Error listing archive: {e}")
         raise HTTPException(status_code=500, detail="Failed to list archive")
     data = [ArchiveEntryEnriched(**r) for r in rows]
-    return {"count": len(data), "data": data}
+    return {"count": len(data), "total": total, "data": data}
 
 
 @router.post("/bulk", dependencies=[Security(verify_api_key)])
@@ -200,3 +194,62 @@ async def export_csv(
     )
 
 
+# ---------------------------------------------------------------------------
+# Item routes (path param). Declared LAST so /bulk and /export above
+# aren't shadowed by /{tx_hash}.
+# ---------------------------------------------------------------------------
+
+
+@router.delete(
+    "/{tx_hash}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Security(verify_api_key)],
+)
+async def restore_alert(
+    tx_hash: str,
+    network: Optional[NetworkType] = Query(None),
+) -> Response:
+    """Restore a transaction by hard-deleting its archive row."""
+    query_network = network or settings.CARDANO_NETWORK
+    try:
+        deleted = await archive_queries.archive_delete_async(query_network, tx_hash)
+    except Exception as e:
+        logger.error(f"Error restoring {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to restore alert")
+    if deleted == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No archive entry found for {tx_hash} on {query_network}",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/{tx_hash}",
+    response_model=ArchiveEntryEnriched,
+    dependencies=[Security(verify_api_key)],
+)
+async def get_archived(
+    tx_hash: str,
+    network: Optional[NetworkType] = Query(None),
+) -> ArchiveEntryEnriched:
+    """Single archive entry enriched with the original detection record.
+
+    Returns 404 when ``(network, tx_hash)`` is not archived. Lets the UI
+    fetch one row without paginating the whole list — useful for deep links
+    into ``/archive/{tx_hash}``.
+    """
+    query_network = network or settings.CARDANO_NETWORK
+    try:
+        row = await archive_queries.archive_get_enriched_async(
+            query_network, tx_hash,
+        )
+    except Exception as e:
+        logger.error(f"Error fetching archive entry {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch archive entry")
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No archive entry for {tx_hash} on {query_network}",
+        )
+    return ArchiveEntryEnriched(**row)

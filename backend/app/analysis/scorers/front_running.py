@@ -157,4 +157,18 @@ class FrontRunningScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "delta_ms": round(delta_ms, 1),
+                "outcome": outcome,
+                "tx_role": collision.get("tx_role", ""),
+                "counterpart_tx_hash": collision.get("counterpart_tx", ""),
+                "shared_input_count": int(collision.get("shared_inputs", 0)),
+                "tx_fee": int(fee or 0),
+                "counterpart_fee": int(counterpart_fee or 0),
+                "ttl": int(ttl or 0),
+                "counterpart_ttl": int(counterpart_ttl or 0),
+                "shares_change_address": bool(collision.get("shares_change_address")),
+                "attacker_win_count": int(win_count),
+                "attacker_win_count_24h": int(collision.get("attacker_win_count_24h", 0)),
+            },
         )

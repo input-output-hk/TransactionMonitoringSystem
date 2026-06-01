@@ -2,7 +2,8 @@
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
@@ -24,12 +25,17 @@ _CLASS_NAMES = [
 
 def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
     scores = {name: float(row.get(name, -1)) for name in _CLASS_NAMES}
-    sub_scores = row.get("sub_scores", {})
-    if isinstance(sub_scores, str):
-        try:
-            sub_scores = json.loads(sub_scores)
-        except (json.JSONDecodeError, TypeError):
-            sub_scores = {}
+    def _decode_json_field(key: str) -> Dict[str, Any]:
+        value = row.get(key, {})
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return value or {}
+
+    sub_scores = _decode_json_field("sub_scores")
+    evidence = _decode_json_field("evidence")
     return ClassScoreResult(
         tx_hash=row["tx_hash"],
         network=row["network"],
@@ -38,6 +44,7 @@ def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
         max_class=row["max_class"],
         risk_band=RiskBand(row["risk_band"]),
         sub_scores=sub_scores,
+        evidence=evidence,
         analysis_version=row["analysis_version"],
         analyzed_at=row["analyzed_at"],
         fee=row.get("fee"),
@@ -81,12 +88,26 @@ async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
 @router.get("/results", dependencies=[Security(verify_api_key)])
 async def list_analysis_results(
     network: Optional[NetworkType] = Query(None),
-    risk_band: Optional[RiskBand] = Query(None, description="Filter by risk band"),
+    risk_band: List[RiskBand] = Query(
+        default_factory=list,
+        description=(
+            "Filter by risk band. Repeat the param to OR-match multiple "
+            "values, e.g. `?risk_band=Critical&risk_band=High`."
+        ),
+    ),
     attack_class: Optional[str] = Query(
         None, description="Filter by attack class name (e.g. phishing, sandwich)",
     ),
     min_score: float = Query(0.0, ge=0.0, le=100.0, description="Minimum score filter"),
     sort: str = Query("score", description="Sort order: 'score' or 'date'"),
+    analyzed_from: Optional[datetime] = Query(
+        None,
+        description="Only include results with analyzed_at >= this ISO timestamp (inclusive).",
+    ),
+    analyzed_to: Optional[datetime] = Query(
+        None,
+        description="Only include results with analyzed_at < this ISO timestamp (exclusive).",
+    ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -100,16 +121,33 @@ async def list_analysis_results(
         raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
     query_network = network or settings.CARDANO_NETWORK
     try:
+        # Normalize the enum list to plain strings, passing None when the
+        # caller didn't supply any band so the DB layer skips the WHERE.
+        rbs = [b.value for b in risk_band] if risk_band else None
         rows = await clickhouse.get_class_scores_list_async(
             network=query_network,
-            risk_band=risk_band.value if risk_band else None,
+            risk_band=rbs,
             attack_class=attack_class,
             min_score=min_score,
             sort=sort,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
             limit=limit,
             offset=offset,
         )
-        return {"count": len(rows), "data": [_row_to_class_score(r) for r in rows]}
+        total = await clickhouse.count_class_scores_async(
+            network=query_network,
+            risk_band=rbs,
+            attack_class=attack_class,
+            min_score=min_score,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+        )
+        return {
+            "count": len(rows),
+            "total": total,
+            "data": [_row_to_class_score(r) for r in rows],
+        }
     except Exception as e:
         logger.error(f"Error listing results: {e}")
         raise HTTPException(status_code=500, detail="Failed to list results")
@@ -126,6 +164,23 @@ async def analysis_stats(
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch stats")
+
+
+@router.get("/stats/timeseries", dependencies=[Security(verify_api_key)])
+async def analysis_stats_timeseries(
+    network: Optional[NetworkType] = Query(None),
+    days: int = Query(14, ge=1, le=90, description="Trailing window in days"),
+):
+    """Daily High+Critical alert counts over a trailing window, bucketed on
+    on-chain block time. Powers the dashboard sparkline. Returns a list of
+    ``{date, count}`` with zero-filled gaps, oldest first."""
+    query_network = network or settings.CARDANO_NETWORK
+    try:
+        data = await clickhouse.get_alert_timeseries_async(query_network, days)
+        return {"network": query_network, "days": days, "data": data}
+    except Exception as e:
+        logger.error(f"Error fetching timeseries: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch timeseries")
 
 
 @router.get("/baselines/{scope_type}/{scope_id}", dependencies=[Security(verify_api_key)])

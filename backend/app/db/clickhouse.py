@@ -6,6 +6,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from typing import List, Optional, Dict, Any
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
@@ -406,6 +407,7 @@ def execute_schema():
                 max_class        String,
                 risk_band        String,
                 sub_scores       String,
+                evidence         String DEFAULT '{}',
                 analysis_version String,
                 analyzed_at      DateTime,
                 INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
@@ -415,6 +417,10 @@ def execute_schema():
             ORDER BY (network, tx_hash)
             PARTITION BY toYYYYMMDD(analyzed_at)
         """)
+
+        client.execute(
+            "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS evidence String DEFAULT '{}'"
+        )
 
         # Admin-curated archive of flagged transactions known to be false
         # positives. Additive to tx_class_scores: a row here suppresses the
@@ -768,7 +774,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
             tx_hash, network,
             token_dust, large_value, large_datum, multiple_sat,
             front_running, sandwich, circular, fake_token, phishing,
-            max_score, max_class, risk_band, sub_scores,
+            max_score, max_class, risk_band, sub_scores, evidence,
             analysis_version, analyzed_at
         ) VALUES
         """,
@@ -782,6 +788,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
                 r.get("phishing", -1),
                 r["max_score"], r["max_class"], r["risk_band"],
                 json.dumps(r.get("sub_scores", {})),
+                json.dumps(r.get("evidence", {}), default=str),
                 r["analysis_version"], r["analyzed_at"],
             )
             for r in results
@@ -796,7 +803,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
         SELECT tx_hash, network,
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores,
+               max_score, max_class, risk_band, sub_scores, evidence,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE tx_hash = %(tx_hash)s
@@ -810,15 +817,16 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
         "tx_hash", "network",
         "token_dust", "large_value", "large_datum", "multiple_sat",
         "front_running", "sandwich", "circular", "fake_token", "phishing",
-        "max_score", "max_class", "risk_band", "sub_scores",
+        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
         "analysis_version", "analyzed_at",
     )
     result = dict(zip(keys, rows[0]))
-    if isinstance(result["sub_scores"], str):
-        try:
-            result["sub_scores"] = json.loads(result["sub_scores"])
-        except (json.JSONDecodeError, TypeError):
-            result["sub_scores"] = {}
+    for json_key in ("sub_scores", "evidence"):
+        if isinstance(result.get(json_key), str):
+            try:
+                result[json_key] = json.loads(result[json_key])
+            except (json.JSONDecodeError, TypeError):
+                result[json_key] = {}
     return result
 
 
@@ -874,10 +882,12 @@ def insert_baselines(rows: List[tuple]):
 
 def get_class_scores_list(
     network: str,
-    risk_band: Optional[str] = None,
+    risk_band: Optional[List[str]] = None,
     attack_class: Optional[str] = None,
     min_score: float = 0.0,
     sort: str = "score",
+    analyzed_from: Optional[Any] = None,
+    analyzed_to: Optional[Any] = None,
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
@@ -888,6 +898,11 @@ def get_class_scores_list(
     include_archived: when False (default), rows whose (network, tx_hash) is
         present in ``archived_alerts`` are excluded so admin-curated false
         positives stop showing up in "currently dangerous" lists.
+    risk_band: list of risk band values (case-insensitive). When non-empty,
+        results are restricted via an ``IN`` clause; ``None`` or empty list
+        means no filter.
+    analyzed_from / analyzed_to: inclusive lower / exclusive upper bound on
+    ``analyzed_at`` (datetime).
     """
     _CLASS_COLS = (
         "token_dust", "large_value", "large_datum", "multiple_sat",
@@ -906,13 +921,24 @@ def get_class_scores_list(
         "network": network, "limit": limit, "offset": offset,
     }
     if risk_band:
-        conditions.append("lower(risk_band) = %(risk_band)s")
-        params["risk_band"] = risk_band.lower()
+        # Generate one named placeholder per value so the query is fully
+        # parameterized (no string interpolation of user input). clickhouse-
+        # driver doesn't expand a Python list into a SQL list automatically.
+        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
+        conditions.append(
+            f"lower(risk_band) IN ({', '.join(placeholders)})"
+        )
+        for i, rb in enumerate(risk_band):
+            params[f"risk_band_{i}"] = rb.lower()
     if attack_class and attack_class in _CLASS_COLS:
-        # Safe: attack_class validated against _CLASS_COLS allowlist above
-        conditions.append(f"`{attack_class}` >= %(min_score)s")
-        params["min_score"] = min_score
-    elif min_score > 0:
+        # Filter by the DOMINANT class (max_class), not just "this class has
+        # a non-zero sub-score". The list view shows one row per tx with its
+        # dominant attack type, so a stricter filter keeps the UI labelling
+        # honest — otherwise a Phishing tx with a small `circular` score
+        # would appear under the "Circular" filter labelled "Phishing".
+        conditions.append("max_class = %(attack_class)s")
+        params["attack_class"] = attack_class
+    if min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
     if not include_archived:
@@ -924,6 +950,12 @@ def get_class_scores_list(
             "SELECT network, tx_hash FROM archived_alerts FINAL"
             ")"
         )
+    if analyzed_from is not None:
+        conditions.append("analyzed_at >= %(analyzed_from)s")
+        params["analyzed_from"] = analyzed_from
+    if analyzed_to is not None:
+        conditions.append("analyzed_at < %(analyzed_to)s")
+        params["analyzed_to"] = analyzed_to
 
     where = " AND ".join(conditions)
     # Query scores first, then batch-fetch tx details separately.
@@ -933,7 +965,7 @@ def get_class_scores_list(
         SELECT tx_hash, network,
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores,
+               max_score, max_class, risk_band, sub_scores, evidence,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE {where}
@@ -945,7 +977,7 @@ def get_class_scores_list(
     score_keys = (
         "tx_hash", "network",
         *_CLASS_COLS,
-        "max_score", "max_class", "risk_band", "sub_scores",
+        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
         "analysis_version", "analyzed_at",
     )
     # Batch-fetch fee/output_count for matched tx_hashes
@@ -969,25 +1001,130 @@ def get_class_scores_list(
         detail = tx_details.get(d["tx_hash"], {})
         d["fee"] = detail.get("fee")
         d["output_count"] = detail.get("output_count")
-        if isinstance(d["sub_scores"], str):
-            try:
-                d["sub_scores"] = json.loads(d["sub_scores"])
-            except (json.JSONDecodeError, TypeError):
-                d["sub_scores"] = {}
+        for json_key in ("sub_scores", "evidence"):
+            if isinstance(d.get(json_key), str):
+                try:
+                    d[json_key] = json.loads(d[json_key])
+                except (json.JSONDecodeError, TypeError):
+                    d[json_key] = {}
         results.append(d)
     return results
 
 
 async def get_class_scores_list_async(
-    network: str, risk_band: Optional[str], attack_class: Optional[str],
+    network: str,
+    risk_band: Optional[List[str]],
+    attack_class: Optional[str],
     min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
     include_archived: bool = False,
+    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
+    # Bind by keyword so a future reorder of the sync signature can't silently
+    # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, get_class_scores_list,
-        network, risk_band, attack_class, min_score, sort, limit, offset,
-        include_archived,
+        _ch_executor,
+        partial(
+            get_class_scores_list,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            sort=sort,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            limit=limit,
+            offset=offset,
+            include_archived=include_archived,
+        ),
+    )
+
+
+def count_class_scores(
+    network: str,
+    risk_band: Optional[List[str]] = None,
+    attack_class: Optional[str] = None,
+    min_score: float = 0.0,
+    analyzed_from: Optional[Any] = None,
+    analyzed_to: Optional[Any] = None,
+    include_archived: bool = False,
+) -> int:
+    """Total number of class-score rows matching the given filters.
+
+    Mirrors the WHERE clause of ``get_class_scores_list`` so the count is
+    consistent with what would be returned (ignoring LIMIT/OFFSET).
+    risk_band: list of bands; ``None`` or empty list means no filter. See
+        ``get_class_scores_list`` for the same semantics.
+    include_archived: when False (default), exclude rows whose
+        ``(network, tx_hash)`` is present in ``archived_alerts`` — keeps the
+        count aligned with the rows actually surfaced by the list query.
+    """
+    _CLASS_COLS = (
+        "token_dust", "large_value", "large_datum", "multiple_sat",
+        "front_running", "sandwich", "circular", "fake_token", "phishing",
+    )
+    if attack_class and attack_class not in _CLASS_COLS:
+        raise ValueError(f"Invalid attack_class '{attack_class}'")
+
+    conditions = ["network = %(network)s"]
+    params: Dict[str, Any] = {"network": network}
+    if risk_band:
+        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
+        conditions.append(
+            f"lower(risk_band) IN ({', '.join(placeholders)})"
+        )
+        for i, rb in enumerate(risk_band):
+            params[f"risk_band_{i}"] = rb.lower()
+    if attack_class and attack_class in _CLASS_COLS:
+        # Mirror the list query's filter: filter by max_class so the count
+        # reflects what would actually be returned (see get_class_scores_list).
+        conditions.append("max_class = %(attack_class)s")
+        params["attack_class"] = attack_class
+    if min_score > 0:
+        conditions.append("max_score >= %(min_score)s")
+        params["min_score"] = min_score
+    if analyzed_from is not None:
+        conditions.append("analyzed_at >= %(analyzed_from)s")
+        params["analyzed_from"] = analyzed_from
+    if analyzed_to is not None:
+        conditions.append("analyzed_at < %(analyzed_to)s")
+        params["analyzed_to"] = analyzed_to
+    if not include_archived:
+        conditions.append(
+            "(network, tx_hash) NOT IN ("
+            "SELECT network, tx_hash FROM archived_alerts FINAL"
+            ")"
+        )
+
+    where = " AND ".join(conditions)
+    rows = _get_client().execute(
+        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}",
+        params,
+    )
+    return int(rows[0][0]) if rows else 0
+
+
+async def count_class_scores_async(
+    network: str,
+    risk_band: Optional[List[str]],
+    attack_class: Optional[str],
+    min_score: float,
+    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
+    include_archived: bool = False,
+) -> int:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor,
+        partial(
+            count_class_scores,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            include_archived=include_archived,
+        ),
     )
 
 
@@ -1062,7 +1199,49 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
         }
         idx += 3
     result["per_class"] = per_class
+    result["pending_count"] = get_pending_count(network)
     return result
+
+
+def get_pending_count(network: str) -> int:
+    """Count transactions ingested but not yet scored, on a like-for-like
+    basis.
+
+    The dashboard previously derived "pending" as
+    ``count(transactions) - count(tx_class_scores)``, but those two counts
+    aren't comparable: ``transactions`` is a plain MergeTree counted without
+    FINAL (so re-ingested/reorg duplicates inflate it) while the scores count
+    is FINAL-deduped AND archive-filtered (so every archived alert showed as
+    permanently "pending").
+
+    This computes the real backlog as the difference of two deduped counts:
+    distinct ingested tx_hashes minus distinct scored tx_hashes. Every scored
+    tx_hash is necessarily one we ingested (``scored ⊆ ingested``), so the
+    difference is exactly the unscored set — without the cost of a per-row
+    ``NOT IN`` against the full scored-hash set on every 15s poll.
+
+    Notes:
+      - No archive filter on the scores count: archived txs *were* scored, so
+        they must not count as pending. (Distinct from the band-count stats,
+        which exclude archived.)
+      - ``greatest(0, ...)`` guards the rare case of a score row without a
+        matching transactions row (e.g. cross-instance score import), which
+        would otherwise drive the figure negative.
+      - Input-deferred txs (awaiting transaction_inputs) have no score row yet
+        and are correctly counted as pending.
+    """
+    rows = _get_client().execute(
+        """
+        SELECT greatest(0,
+            (SELECT countDistinct(tx_hash) FROM transactions
+             WHERE network = %(network)s)
+            - (SELECT count() FROM tx_class_scores FINAL
+               WHERE network = %(network)s)
+        )
+        """,
+        {"network": network},
+    )
+    return int(rows[0][0]) if rows else 0
 
 
 async def get_class_scores_stats_async(
@@ -1071,6 +1250,72 @@ async def get_class_scores_stats_async(
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _ch_executor, get_class_scores_stats, network, include_archived,
+    )
+
+
+def get_alert_timeseries(
+    network: str, days: int = 14, include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    """Daily count of High+Critical alerts over the last ``days`` days.
+
+    Bucketed on the transaction's on-chain block ``timestamp`` (not
+    ``analyzed_at``) so the trend reflects when attacks actually occurred,
+    not our scoring/backfill cadence. Powers the dashboard sparkline.
+
+    Excludes admin-archived rows by default so the trend matches the
+    Critical KPI card (which also excludes them).
+
+    FINAL is applied inside subqueries rather than on the joined tables
+    directly: ClickHouse 26+ rejects FINAL on a table inside a JOIN.
+    Gaps (days with zero alerts) are filled with 0 via ``WITH FILL`` so
+    the sparkline renders a continuous line instead of collapsing missing
+    days.
+
+    Counts ``DISTINCT s.tx_hash`` rather than join-rows: the ``transactions``
+    table is a plain MergeTree (no dedup), so a tx ingested more than once
+    (chain reorg / re-sync) has duplicate rows that would otherwise fan out
+    the JOIN and inflate the daily count. A tx_hash maps to exactly one
+    block, so distinct-by-hash is the correct unit.
+    """
+    archive_clause = (
+        " AND (network, tx_hash) NOT IN ("
+        "SELECT network, tx_hash FROM archived_alerts FINAL)"
+        if not include_archived else ""
+    )
+    rows = _get_client().execute(
+        f"""
+        SELECT toDate(t.timestamp) AS day, count(DISTINCT s.tx_hash) AS cnt
+        FROM (
+            SELECT tx_hash, network
+            FROM tx_class_scores FINAL
+            WHERE network = %(network)s
+              AND lower(risk_band) IN ('high', 'critical')
+              {archive_clause}
+        ) AS s
+        INNER JOIN (
+            SELECT tx_hash, network, timestamp
+            FROM transactions
+            WHERE network = %(network)s
+              AND timestamp >= toStartOfDay(now() - INTERVAL %(days)s DAY)
+        ) AS t
+          ON s.tx_hash = t.tx_hash AND s.network = t.network
+        GROUP BY day
+        ORDER BY day WITH FILL
+            FROM toDate(now() - INTERVAL %(days)s DAY)
+            TO toDate(now()) + 1
+            STEP 1
+        """,
+        {"network": network, "days": days},
+    )
+    return [{"date": r[0].isoformat(), "count": int(r[1])} for r in rows]
+
+
+async def get_alert_timeseries_async(
+    network: str, days: int = 14, include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, get_alert_timeseries, network, days, include_archived,
     )
 
 
