@@ -931,10 +931,14 @@ def get_class_scores_list(
         for i, rb in enumerate(risk_band):
             params[f"risk_band_{i}"] = rb.lower()
     if attack_class and attack_class in _CLASS_COLS:
-        # Safe: attack_class validated against _CLASS_COLS allowlist above
-        conditions.append(f"`{attack_class}` >= %(min_score)s")
-        params["min_score"] = min_score
-    elif min_score > 0:
+        # Filter by the DOMINANT class (max_class), not just "this class has
+        # a non-zero sub-score". The list view shows one row per tx with its
+        # dominant attack type, so a stricter filter keeps the UI labelling
+        # honest — otherwise a Phishing tx with a small `circular` score
+        # would appear under the "Circular" filter labelled "Phishing".
+        conditions.append("max_class = %(attack_class)s")
+        params["attack_class"] = attack_class
+    if min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
     if not include_archived:
@@ -1072,9 +1076,11 @@ def count_class_scores(
         for i, rb in enumerate(risk_band):
             params[f"risk_band_{i}"] = rb.lower()
     if attack_class and attack_class in _CLASS_COLS:
-        conditions.append(f"`{attack_class}` >= %(min_score)s")
-        params["min_score"] = min_score
-    elif min_score > 0:
+        # Mirror the list query's filter: filter by max_class so the count
+        # reflects what would actually be returned (see get_class_scores_list).
+        conditions.append("max_class = %(attack_class)s")
+        params["attack_class"] = attack_class
+    if min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
     if analyzed_from is not None:
