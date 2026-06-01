@@ -24,7 +24,7 @@ task.  Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.normalise import normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -160,22 +160,37 @@ class CircularScorer(BaseScorer):
         net_loss = cycle.get("net_loss_ratio", 0.0)
         expected_fee = _estimate_fee_ratio(cycle.get("cycle_length", 2))
 
-        # Structural-only cap: amount_similarity + cycle_recurrence alone sum
-        # to 0.60 in weights, which tips a plain A->script->A Plutus
-        # interaction into the High band. Require the corroborating axes
-        # (entropy / auxiliary / speed) to clear the configured floor;
-        # otherwise cap at Moderate. This cuts the common Plutus
-        # false-positive pattern without weakening detection of real
-        # layering (low recipient entropy + temporal concentration).
-        # Floor magnitude tunable via circular.structural_corroboration_floor.
+        # Structural-only suppression: amount_similarity + cycle_recurrence
+        # alone sum to 0.60 in weights, which tips a plain A->script->A Plutus
+        # interaction (pool swap, state machine) into an alerting band. When the
+        # corroborating axes (entropy / auxiliary / speed) all fall below the
+        # configured floor, the cycle is structurally indistinguishable from
+        # benign DeFi composition and carries no evidence of deliberate
+        # layering, so it is suppressed entirely (score -1, no finding) rather
+        # than surfaced at a capped Moderate. A real wash/layering cycle has
+        # low recipient entropy and/or tight temporal concentration and is not
+        # structural-only, so it is unaffected. Floor tunable via
+        # circular.structural_corroboration_floor.
         structural_only = (
             s_entropy + s_auxiliary + s_speed
         ) < _STRUCTURAL_CORROBORATION_FLOOR
+        if structural_only:
+            return ScorerResult.no_finding(
+                sub_scores={
+                    "amount_similarity": round(s_amount, 4),
+                    "cycle_recurrence": round(s_recurrence, 4),
+                    "recipient_entropy_inv": round(s_entropy, 4),
+                    "auxiliary": round(s_auxiliary, 4),
+                    "speed": round(s_speed, 4),
+                    "cycle_length": cycle.get("cycle_length", 0),
+                },
+                baseline_source=bl_source,
+            )
 
-        if final > _MODERATE_CAP and (
-            structural_only
-            or net_loss > expected_fee * FEE_TOLERANCE_STRICT
-        ):
+        # Fee-ratio cap: a corroborated cycle that still loses more than the
+        # strict fee-only threshold may be incidental layering rather than a
+        # tight wash, so cap it at Moderate instead of letting it reach High.
+        if final > _MODERATE_CAP and net_loss > expected_fee * FEE_TOLERANCE_STRICT:
             final = _MODERATE_CAP
 
         reasons = []

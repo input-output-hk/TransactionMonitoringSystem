@@ -67,23 +67,60 @@ def _count_attacker_history(
     return rows[0][0] if rows else 0
 
 
-def detect_sandwich_pattern(
-    tx_hash: str,
+def _attacker_net_ada(
+    client: Any,
+    attacker_addr: str,
+    leg_hashes: List[str],
     network: str,
-    slot: int,
-) -> Optional[Dict]:
-    """Check if tx_hash is the victim in a structural sandwich pattern.
+) -> int:
+    """Net lovelace the attacker wallet gained across the front + back legs.
 
-    Looks for 3+ txs within _SLOT_WINDOW slots interacting with the same
-    script address, where two share a first-input address cluster.
+    ``profit = sum(attacker outputs) - sum(attacker spent inputs)`` over the
+    two attacker legs. A real sandwich round-trips a position and ends with
+    more ADA than it put in; a coincidental structural triple nets <= 0.
+    Collateral and reference inputs are excluded. Computed generically from
+    the ingested input/output amounts, no DEX redeemer or pool-datum parsing.
+    Token-denominated profit is not captured (ADA-only); see the blind-spot
+    note in detection.yaml (sandwich.min_profit_lovelace).
+
+    The intermediate UTxO the attacker returns to itself in the front leg is
+    spent again in the back leg, so it appears in both the outputs and the
+    inputs sums and cancels: the net therefore reflects only externally gained
+    ADA, not the round-tripped position. Input value is resolved from the
+    referenced output (``coalesce(o.amount, ti.amount)``) because a minority of
+    ``transaction_inputs`` rows carry an unresolved ``amount`` of 0; falling
+    back to the join keeps an unresolved input from understating cost and
+    overstating profit.
     """
-    if not slot:
-        return None
+    out_rows = client.execute(
+        """
+        SELECT sum(amount) FROM transaction_outputs
+        WHERE tx_hash IN %(hashes)s AND network = %(network)s
+          AND address = %(addr)s AND is_collateral = 0
+        """,
+        {"hashes": leg_hashes, "network": network, "addr": attacker_addr},
+    )
+    in_rows = client.execute(
+        """
+        SELECT sum(coalesce(o.amount, ti.amount))
+        FROM transaction_inputs ti
+        LEFT JOIN transaction_outputs o
+          ON o.tx_hash = ti.input_tx_hash
+         AND o.output_index = ti.input_index_in_tx
+         AND o.network = ti.network
+        WHERE ti.tx_hash IN %(hashes)s AND ti.network = %(network)s
+          AND ti.address = %(addr)s AND ti.is_collateral = 0 AND ti.is_reference = 0
+        """,
+        {"hashes": leg_hashes, "network": network, "addr": attacker_addr},
+    )
+    out_amt = int(out_rows[0][0] or 0) if out_rows else 0
+    in_amt = int(in_rows[0][0] or 0) if in_rows else 0
+    return out_amt - in_amt
 
-    client = clickhouse._get_client()
 
-    # Get script addresses this tx interacts with (via outputs)
-    script_rows = client.execute(
+def _pool_script_addresses(client: Any, tx_hash: str, network: str) -> List[str]:
+    """Script addresses this tx pays into: the candidate pool/venue addresses."""
+    rows = client.execute(
         """
         SELECT DISTINCT address
         FROM transaction_outputs
@@ -93,15 +130,15 @@ def detect_sandwich_pattern(
         """,
         {"tx_hash": tx_hash, "network": network},
     )
-    if not script_rows:
-        return None
+    return [r[0] for r in rows if _is_script_address(r[0])]
 
-    addresses = [r[0] for r in script_rows if _is_script_address(r[0])]
-    if not addresses:
-        return None
 
-    # Find other txs in the slot window that share any of these addresses
-    neighbor_rows = client.execute(
+def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: int):
+    """Txs paying into the same pool addresses within +/- _SLOT_WINDOW slots.
+
+    Returns rows of (tx_hash, slot, fee) ordered by slot, capped at 20.
+    """
+    return client.execute(
         """
         SELECT DISTINCT o.tx_hash, t.slot, t.fee
         FROM transaction_outputs o
@@ -121,12 +158,12 @@ def detect_sandwich_pattern(
         },
     )
 
-    if len(neighbor_rows) < 3:
-        return None
 
-    # Get first input address for each neighbor tx (address cluster proxy)
-    neighbor_hashes = [r[0] for r in neighbor_rows]
-    input_rows = client.execute(
+def _first_input_addresses(
+    client: Any, tx_hashes: List[str], network: str,
+) -> Dict[str, str]:
+    """Map each tx to its first-input address (the address-cluster proxy)."""
+    rows = client.execute(
         """
         SELECT tx_hash, address
         FROM transaction_inputs
@@ -137,9 +174,39 @@ def detect_sandwich_pattern(
           AND address != ''
           AND input_index = 0
         """,
-        {"hashes": neighbor_hashes, "network": network},
+        {"hashes": tx_hashes, "network": network},
     )
-    first_input_addr = {r[0]: r[1] for r in input_rows}
+    return {r[0]: r[1] for r in rows}
+
+
+def detect_sandwich_pattern(
+    tx_hash: str,
+    network: str,
+    slot: int,
+) -> Optional[Dict]:
+    """Check if tx_hash is the victim in a structural sandwich pattern.
+
+    Looks for 3+ txs within _SLOT_WINDOW slots interacting with the same
+    script address, where two share a first-input address cluster.
+    """
+    if not slot:
+        return None
+
+    client = clickhouse._get_client()
+
+    # Script addresses this tx pays into (the candidate pools/venues).
+    addresses = _pool_script_addresses(client, tx_hash, network)
+    if not addresses:
+        return None
+
+    # Other txs sharing those addresses within the slot window.
+    neighbor_rows = _neighbors_in_window(client, addresses, network, slot)
+    if len(neighbor_rows) < 3:
+        return None
+
+    # First-input address per neighbor tx (the address-cluster proxy).
+    neighbor_hashes = [r[0] for r in neighbor_rows]
+    first_input_addr = _first_input_addresses(client, neighbor_hashes, network)
 
     # Group by first input address to find linked tx pairs
     addr_to_txs: Dict[str, List[str]] = {}
@@ -150,34 +217,47 @@ def detect_sandwich_pattern(
     # Look for an address cluster with 2+ txs (potential attacker front+back)
     victim_addr = first_input_addr.get(tx_hash, "")
     for cluster_addr, cluster_txs in addr_to_txs.items():
-        if len(cluster_txs) >= 2 and cluster_addr != victim_addr:
-            # Found a structural sandwich pattern
-            tx_slots = {r[0]: r[1] for r in neighbor_rows}
-            tx_fees = {r[0]: r[2] for r in neighbor_rows}
+        if len(cluster_txs) < 2 or cluster_addr == victim_addr:
+            continue
+        # A sandwich attacker controls a wallet (payment key). A script-address
+        # cluster is the pool/batcher venue moving its own funds, which is the
+        # dominant structural false positive on eUTxO DEXs (the batcher nets
+        # ADA from fees, not from sandwiching). Skip it and keep looking for a
+        # genuine wallet attacker. Blind spot: a script-based sandwich bot.
+        if _is_script_address(cluster_addr):
+            continue
 
-            # Sort attacker txs by slot to identify front and back
-            cluster_txs.sort(key=lambda h: tx_slots.get(h, 0))
-            tx_a = cluster_txs[0]  # front
-            tx_b = cluster_txs[-1]  # back
+        # Found a structural sandwich pattern with a wallet attacker.
+        tx_slots = {r[0]: r[1] for r in neighbor_rows}
 
-            slot_span = abs(tx_slots.get(tx_b, slot) - tx_slots.get(tx_a, slot))
+        # Sort attacker txs by slot to identify front and back
+        cluster_txs.sort(key=lambda h: tx_slots.get(h, 0))
+        tx_a = cluster_txs[0]  # front
+        tx_b = cluster_txs[-1]  # back
 
-            # Historical attacker recurrence: count prior sandwich-like
-            # patterns from the same first-input address cluster.
-            hist_count = _count_attacker_history(client, cluster_addr, network, slot)
+        slot_span = abs(tx_slots.get(tx_b, slot) - tx_slots.get(tx_a, slot))
 
-            return {
-                "tx_a": tx_a,
-                "tx_b": tx_b,
-                "pool_id": addresses[0] if addresses else "",
-                "asset_pair": "unknown",
-                "attacker_linked": True,
-                "swap_rate_victim": 0.0,
-                "swap_rate_baseline": 0.0,
-                "price_impact_a": 0.0,
-                "profit_b": 0.0,
-                "attacker_sandwich_count": hist_count,
-                "slot_span": slot_span,
-            }
+        # Historical attacker recurrence: count prior sandwich-like
+        # patterns from the same first-input address cluster.
+        hist_count = _count_attacker_history(client, cluster_addr, network, slot)
+
+        # Economic confirmation: attacker net ADA across the two legs. The
+        # scorer suppresses the candidate entirely when this is below the
+        # configured profit floor (a zero-profit triple is not a sandwich).
+        profit = _attacker_net_ada(client, cluster_addr, [tx_a, tx_b], network)
+
+        return {
+            "tx_a": tx_a,
+            "tx_b": tx_b,
+            "pool_id": addresses[0] if addresses else "",
+            "asset_pair": "unknown",
+            "attacker_linked": True,
+            "swap_rate_victim": 0.0,
+            "swap_rate_baseline": 0.0,
+            "price_impact_a": 0.0,
+            "profit_b": float(profit),
+            "attacker_sandwich_count": hist_count,
+            "slot_span": slot_span,
+        }
 
     return None

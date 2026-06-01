@@ -19,6 +19,9 @@ def _reload_module(monkeypatch, tmp_path, yaml_body: str):
 def _minimal_valid_yaml() -> str:
     """YAML that satisfies every scorer's required keys (empty-but-present values)."""
     return textwrap.dedent("""\
+        protocol_limits:
+          max_value_size_bytes: 5000
+          max_tx_size_bytes: 16384
         scorers:
           multiple_sat:
             weights: {}
@@ -53,6 +56,7 @@ def _minimal_valid_yaml() -> str:
             weights: {}
             bootstrap_anchors: {}
             reason_threshold: 0.5
+            min_digits_subscore: 0.05
           front_running:
             weights: {}
             fixed_anchors: {}
@@ -69,7 +73,6 @@ def _minimal_valid_yaml() -> str:
             link_scores: {}
             window_slots: 5
             min_profit_lovelace: 200000
-            high_band_cap: 79.0
             reason_thresholds: {}
           circular:
             weights: {}
@@ -163,10 +166,23 @@ class TestValidation:
         with pytest.raises(RuntimeError, match="scorers.token_dust.gate.min_token_count"):
             _reload_module(monkeypatch, tmp_path, body)
 
+    def test_missing_protocol_limits_raises(self, tmp_path, monkeypatch):
+        # Strip the protocol_limits block from the otherwise-valid minimal YAML.
+        body = "\n".join(
+            line for line in _minimal_valid_yaml().splitlines()
+            if not line.startswith("protocol_limits")
+            and "max_value_size_bytes" not in line
+            and "max_tx_size_bytes" not in line
+        )
+        with pytest.raises(RuntimeError, match="top-level 'protocol_limits' mapping"):
+            _reload_module(monkeypatch, tmp_path, body)
+
     def test_non_dict_scorer_section_raises(self, tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="must be a mapping"):
             _reload_module(
                 monkeypatch, tmp_path,
+                "protocol_limits:\n  max_value_size_bytes: 5000\n"
+                "  max_tx_size_bytes: 16384\n"
                 "scorers:\n  multiple_sat: 'not a mapping'\n",
             )
 

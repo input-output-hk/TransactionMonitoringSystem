@@ -12,6 +12,8 @@ ClickHouse insertion.
 
 import json
 import logging
+import math
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -215,6 +217,44 @@ def _extract_datum_info(output: Dict[str, Any]) -> Tuple[int, int]:
         return 1, 0  # hash present but datum bytes unknown without indexer
 
     return 0, 0
+
+
+# Maximum possible Shannon entropy for byte data (log2(256)); used as the
+# "not assessable / not padding" default so the bloat check never fires on a
+# datum we cannot measure.
+_MAX_BYTE_ENTROPY_BITS = 8.0
+
+
+def datum_shannon_entropy_bits(output: Dict[str, Any]) -> float:
+    """Shannon entropy (bits/byte) of an inline datum's raw bytes.
+
+    A datum-bloat DoS pads the datum with repetitive, low-information bytes to
+    inflate its size cheaply, which yields near-zero entropy (observed CTF
+    bloat: ~0.3-1.5 bits/byte). A legitimate large datum carries structured
+    contract state with entropy near the 8-bit ceiling (~7 bits/byte observed).
+    Absolute datum size cannot separate the two (a real ~7KB attack overlaps a
+    benign ~7KB contract), so entropy is the discriminator.
+
+    Returns ``_MAX_BYTE_ENTROPY_BITS`` (treated as "not padding") when there is
+    no hex inline datum to assess (object datum, datum-hash-only, or absent),
+    so the bloat check only fires on a measured low-entropy hex datum.
+
+    Limitation: an adaptive attacker could pad with random (high-entropy) bytes
+    to evade this; per-script size baselines / recurrence are the complementary
+    defence (deferred, see large_datum recurrence stub).
+    """
+    datum = output.get("datum")
+    if not isinstance(datum, str) or len(datum) < 2:
+        return _MAX_BYTE_ENTROPY_BITS
+    try:
+        raw = bytes.fromhex(datum)
+    except ValueError:
+        return _MAX_BYTE_ENTROPY_BITS
+    n = len(raw)
+    if n == 0:
+        return _MAX_BYTE_ENTROPY_BITS
+    counts = Counter(raw)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
 def extract_utxo_features(

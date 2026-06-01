@@ -118,12 +118,13 @@ BAND_CRITICAL_THRESHOLD = 80.0
 BAND_HIGH_THRESHOLD = 60.0
 BAND_MODERATE_THRESHOLD = 31.0
 
-# Convenience constant: the highest score that still lands at Moderate.
-# Used by scorers that cap a score at "top of Moderate" so their band
-# does not climb to High (e.g. multiple_sat's uniform_sweep_guard,
-# token_dust's dos_asset_min cap). Encapsulates the off-by-one that
-# would otherwise show up at every cap site.
+# Convenience constants: the highest score that still lands in a given band.
+# Used by scorers that cap a score at "top of band X" so their band does not
+# climb (e.g. multiple_sat's uniform_sweep_guard and token_dust's dos_asset_min
+# cap use BAND_MODERATE_MAX; large_value's digits-floor cap uses BAND_LOW_MAX).
+# Encapsulates the off-by-one that would otherwise show up at every cap site.
 BAND_MODERATE_MAX = BAND_HIGH_THRESHOLD - 1.0
+BAND_LOW_MAX = BAND_MODERATE_THRESHOLD - 1.0
 
 
 def score_to_band(score: float) -> str:
