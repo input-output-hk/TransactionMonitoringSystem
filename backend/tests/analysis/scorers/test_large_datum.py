@@ -1,5 +1,7 @@
 """Unit tests for the Large Datum scorer (Class 3)."""
 
+import os
+
 import pytest
 from app.analysis.normalise import BAND_CRITICAL_THRESHOLD
 from app.analysis.scorers.large_datum import LargeDatumScorer, _MIN_DATUM_BYTES
@@ -71,6 +73,26 @@ class TestGate:
         # a consuming tx could no longer fit. This is the defence against the
         # high-entropy evasion of the entropy gate.
         assert scorer.gate(_features([_out(SCRIPT, datum=_high_entropy_datum(13000))])) is True
+
+    def test_high_entropy_single_leaf_padding_gates(self, scorer):
+        # The exact entropy-gate evasion: a single CBOR ByteArray of ~9KB random
+        # (high-entropy) padding, below the size backstop. The entropy branch
+        # misses it, but leaf-concentration (~1.0) catches it structurally.
+        cbor2 = pytest.importorskip("cbor2")
+        datum = cbor2.dumps(os.urandom(9000)).hex()  # one giant leaf
+        feats = _features([_out(SCRIPT, datum=datum)])
+        assert len(datum) // 2 < 12288  # below the backstop, so concentration is the trigger
+        assert scorer.gate(feats) is True
+
+    def test_high_entropy_structured_datum_not_gated(self, scorer):
+        # A registry-like large datum: 250 distinct 32-byte random leaves. High
+        # entropy AND low concentration (~0.004) -> not bloat. Confirms the
+        # concentration trigger does not false-positive on rich nested state.
+        cbor2 = pytest.importorskip("cbor2")
+        datum = cbor2.dumps([os.urandom(32) for _ in range(250)]).hex()
+        feats = _features([_out(SCRIPT, datum=datum)])
+        assert 6000 <= len(datum) // 2 < 12288  # above floor, below backstop
+        assert scorer.gate(feats) is False
 
     def test_ctf04_sized_low_entropy_datum_gates(self, scorer):
         # Recall anchor: CTF-04's tipjar bloat was a ~7.3 KB datum of repeated
