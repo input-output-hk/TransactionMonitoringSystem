@@ -114,7 +114,7 @@ def main() -> None:
 
     limit_clause = f"LIMIT {int(args.limit)}" if args.limit > 0 else ""
     days_clause = (
-        f"AND s.analyzed_at >= now() - INTERVAL {int(args.days)} DAY"
+        f"AND analyzed_at >= now() - INTERVAL {int(args.days)} DAY"
         if args.days > 0
         else ""
     )
@@ -125,7 +125,7 @@ def main() -> None:
     alert_clause = (
         ""
         if args.all_rows
-        else "AND s.max_class != '' AND s.max_score >= 1"
+        else "AND max_class != '' AND max_score >= 1"
     )
     # Risk-band filter via the in-table column. Bands are an ordered enum
     # (Low < Moderate < High < Critical); we encode the order in a fixed
@@ -134,7 +134,7 @@ def main() -> None:
     if args.min_band:
         keep = [b for b, n in _BAND_ORDER.items() if n >= _BAND_ORDER[args.min_band]]
         keep_sql = ", ".join(f"'{b}'" for b in keep)
-        band_clause = f"AND s.risk_band IN ({keep_sql})"
+        band_clause = f"AND risk_band IN ({keep_sql})"
     else:
         band_clause = ""
     # Empty-evidence filter: by default only touch rows that haven't been
@@ -146,15 +146,15 @@ def main() -> None:
     evidence_clause = (
         ""
         if args.force
-        else "AND (s.evidence = '' OR s.evidence = '{}' OR s.evidence IS NULL)"
+        else "AND (evidence = '' OR evidence = '{}' OR evidence IS NULL)"
     )
     # Count-only path: cheap COUNT() against tx_class_scores alone,
     # without the JOIN to transactions or the big raw_data payload.
     if args.count_only:
         count_rows = client.execute(
             f"""
-            SELECT count() FROM (SELECT * FROM tx_class_scores FINAL) AS s
-            WHERE s.network = %(network)s
+            SELECT count() FROM tx_class_scores FINAL
+            WHERE network = %(network)s
               {evidence_clause}
               {alert_clause}
               {band_clause}
@@ -171,13 +171,15 @@ def main() -> None:
         SELECT s.tx_hash, s.network, s.max_score, s.max_class, s.analyzed_at,
                t.fee, t.input_count, t.output_count, t.total_output_value,
                t.addresses, t.metadata, t.raw_data, t.slot, t.block_height, t.timestamp
-        FROM (SELECT * FROM tx_class_scores FINAL) AS s
+        FROM (
+            SELECT * FROM tx_class_scores FINAL
+            WHERE network = %(network)s
+              {evidence_clause}
+              {alert_clause}
+              {band_clause}
+              {days_clause}
+        ) AS s
         JOIN transactions t ON t.tx_hash = s.tx_hash AND t.network = s.network
-        WHERE s.network = %(network)s
-          {evidence_clause}
-          {alert_clause}
-          {band_clause}
-          {days_clause}
         ORDER BY s.analyzed_at DESC, s.tx_hash ASC
         {limit_clause}
         """,
