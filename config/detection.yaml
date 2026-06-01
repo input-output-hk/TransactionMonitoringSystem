@@ -10,6 +10,16 @@
 # ClickHouse has fewer than BASELINE_MIN_SAMPLES rows. Real baselines, once
 # populated, supersede bootstraps automatically.
 
+# Cardano ledger protocol parameters (mainnet and preprod share these values
+# as of the Conway era, 2026). Sourced from the on-chain protocol parameters
+# (cardano.org parameter guide). Detection thresholds that encode a resource-
+# exhaustion threat model reference these named limits rather than repeating
+# the raw byte counts, so a single edit propagates and there are no magic
+# numbers buried in scorer code.
+protocol_limits:
+  max_value_size_bytes: 5000    # maxValueSize: per-output serialized Value CBOR cap
+  max_tx_size_bytes: 16384      # maxTxSize: per-transaction serialized size cap
+
 scorers:
 
   # ------------------------------------------------------------------
@@ -106,11 +116,32 @@ scorers:
 
   # ------------------------------------------------------------------
   large_datum:
-    # Gate: only score script UTxOs whose datum exceeds this byte floor.
-    # Below this, the output is a normal Plutus state-carrier, not a bloat
-    # attack candidate. Roughly the p50 of the bootstrap distribution.
+    # Gate: a script datum is a bloat-DoS candidate only when it is BOTH large
+    # (>= min_datum_bytes) AND low-information (Shannon entropy of its bytes
+    # <= bloat_entropy_max bits/byte). Absolute size alone cannot separate a
+    # real attack from benign state: an observed CTF datum-bloat attack carries
+    # a 7.3 KB datum, overlapping a benign protocol contract's ~6.9 KB datum.
+    # The discriminator is content entropy: a bloat attack pads with repetitive
+    # bytes (observed ~0.3-1.5 bits/byte) to inflate size cheaply, while a
+    # legitimate large datum holds structured state (~7 bits/byte). The 4.0
+    # threshold sits in the wide empty gap between the two populations.
+    # Limitation: random high-entropy padding would evade this; per-script
+    # size baselines / recurrence are the complementary defence (deferred).
     gate:
       min_datum_bytes: 6000
+      bloat_entropy_max: 4.0
+      # Absolute-size backstop. A datum at this fraction of
+      # protocol_limits.max_tx_size_bytes (0.75 * 16384 = 12288 bytes) is
+      # flagged unconditionally, IGNORING entropy: once the datum plus a minimal
+      # consuming tx's inputs/outputs/redeemers/witnesses approaches the 16384
+      # tx-size ceiling, the UTxO cannot be spent regardless of what the padding
+      # bytes are. This catches a high-entropy (random-padded) bloat attack that
+      # would otherwise evade the entropy gate. Sits above the observed
+      # legitimate maximum (benign per-script p99 ~7.4 KB) with margin. Lower it
+      # to catch more high-entropy bloat, at the cost of false positives on
+      # large legitimate datums. Mid-range (6-12 KB) high-entropy datums that
+      # overlap legitimate state remain a known gap (needs recurrence/semantics).
+      size_backstop_fraction: 0.75
     # Observability-only engagement threshold for the multi-output
     # datum-bloat shape (an attacker splits the bloat payload across N
     # script-address outputs of the same contract, each individually
@@ -123,10 +154,14 @@ scorers:
     # meaningful (sum of 2x 3KB doesn't engage; 4x 3KB does).
     aggregate_engagement_min: 12000
     weights:
+      # The entropy gate (above) is what removes the false positives, so the
+      # score axes can keep their original shape: a confirmed bloat datum is
+      # both large (datum_bytes) and occupies most of the UTxO (datum_ratio).
+      # Both saturate for a genuine padding attack, driving it to Critical.
       datum_bytes: 0.50
       datum_ratio: 0.35
       value_cbor_inv: 0.05
-      recurrence: 0.10
+      recurrence: 0.10      # stubbed to 0 in code (entity clustering deferred)
     fixed_anchors:
       datum_ratio: { p50: 0.70, p99: 0.97 }
     bootstrap_anchors:
@@ -143,6 +178,17 @@ scorers:
       # outputs carry 0-1 assets) saturate the assets axis on any NFT deposit.
       # Set to 2 to require a real bundle. Raise if false positives persist.
       min_token_count: 2
+    # Engagement discriminator. A bundle only enters scoring when it is a
+    # plausible value-bloat DoS: either it carries >= dos_asset_min distinct
+    # (policy, name) pairs, OR its serialized Value CBOR reaches
+    # dos_value_cbor_fraction of protocol_limits.max_value_size_bytes (5000).
+    # The byte branch is what makes the gate robust to the long-asset-name
+    # evasion (few pairs, long names => high CBOR). Normal protocol multi-asset
+    # UTxOs (2-6 pairs) sit at <=0.5 KB of Value CBOR and well under both
+    # thresholds, so they produce no finding at all (not even Low). At 0.20 the
+    # byte floor is 1000 bytes: observed benign bundles on preprod top out at
+    # ~0.5 KB, genuine high-pair DoS at ~1.9-2.5 KB.
+    dos_value_cbor_fraction: 0.20
     weights:
       bytes: 0.35
       assets: 0.35
@@ -240,6 +286,15 @@ scorers:
       value_cbor_bytes:  { p50: 100,       p99: 1500 }
       ada_amount:        { p50: 1_200_000, p99: 2_000_000 }
     reason_threshold: 0.5
+    # Digits is the only reliable signal for this class (see weights). When the
+    # quantity-digits sub-score is at or below this floor the quantity is at or
+    # below the median normal supply (p50 = 13 digits, ~10^13), i.e. not a
+    # large-quantity outlier; the score is then capped at the top of Low so the
+    # secondary axes (inverted-ADA, value-CBOR) cannot alone push a normal
+    # min-ADA token UTxO into Moderate. A genuine overflow toward the 19-digit
+    # int64 ceiling has a high digits sub-score and is unaffected. Set just
+    # above 0 so any above-median supply (>= 14 digits) still scores normally.
+    min_digits_subscore: 0.05
 
   # ------------------------------------------------------------------
   front_running:
@@ -288,8 +343,16 @@ scorers:
     link_scores:
       linked: 1.0                # attacker_linked flag present
       unlinked: 0.2              # triplet present but no linkage evidence
-    min_profit_lovelace: 200_000 # score capped at high_band_cap below this
-    high_band_cap: 79.0
+    # Below this attacker net-ADA profit the candidate is suppressed entirely
+    # (score -1, no finding), not merely band-capped: a sandwich that extracts
+    # no value is not an attack. Net profit is computed in dex.py from the
+    # attacker wallet's input/output ADA across the front and back legs. The
+    # detector also requires the attacker cluster to be a non-script (wallet)
+    # address, which excludes pool/batcher self-interaction (the dominant
+    # structural false positive). Blind spot: a sandwich whose profit is in a
+    # non-ADA token nets ~0 ADA and is missed; price-impact confirmation needs
+    # DEX datum parsing and is out of scope.
+    min_profit_lovelace: 200_000
     reason_thresholds:
       link: 0.8
       rate: 0.5

@@ -85,11 +85,11 @@ class TestScore:
                      "auxiliary", "speed"):
             assert key in result.sub_scores
 
-    def test_structural_only_cap(self, scorer):
-        """amount_similarity + cycle_recurrence alone must not push score
-        above the Moderate cap. Entropy/auxiliary/speed being near-zero means
-        there's no corroborating evidence; a plain Plutus user->script->user
-        interaction shouldn't tip into the High band."""
+    def test_structural_only_suppressed(self, scorer):
+        """amount_similarity + cycle_recurrence alone, with no corroborating
+        evidence (entropy/auxiliary/speed all near-zero), is a plain Plutus
+        user->script->user interaction. It must be suppressed entirely (score
+        -1, no finding), not surfaced at a capped Moderate."""
         structural_only = {
             "cycle_length": 2,
             "amount_similarity": 1.0,       # ceiling
@@ -102,8 +102,8 @@ class TestScore:
             "origin_cluster": "c",
         }
         result = scorer.score(_features(cycle=structural_only))
-        assert result.score <= 59.0, (
-            f"structural-only should cap at Moderate; got {result.score}"
+        assert result.score == -1.0, (
+            f"structural-only cycle should be suppressed; got {result.score}"
         )
 
     def test_structural_plus_signal_uncapped(self, scorer):

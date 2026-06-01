@@ -17,7 +17,11 @@ Sub-scores (Polimi Section 4.2.3):
 import logging
 from typing import Any, Dict, Tuple
 
-from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.normalise import (
+    BAND_LOW_MAX,
+    normalise,
+    normalise_inverted,
+)
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -32,6 +36,7 @@ _CFG = _get_cfg("large_value")
 _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
+_MIN_DIGITS_SUBSCORE = float(_CFG["min_digits_subscore"])
 
 
 def _max_quantity_digits(value: Dict[str, Any]) -> int:
@@ -223,6 +228,15 @@ class LargeValueScorer(BaseScorer):
             + float(_W["recurrence"]) * s_recurrence
         )
         final = finalise_score(raw)
+
+        # Primary-signal gate: a quantity at or below the median normal supply
+        # (digits sub-score ~0) is not a large-value outlier, regardless of how
+        # lean its ADA or how heavy its Value CBOR. Hold such findings to the
+        # top of Low so the secondary axes cannot alone raise a normal min-ADA
+        # token UTxO to Moderate. A genuine overflow toward the int64 ceiling
+        # has a high digits sub-score and is unaffected.
+        if s_digits < _MIN_DIGITS_SUBSCORE:
+            final = min(final, BAND_LOW_MAX)
 
         reasons = []
         if s_digits > _REASON_T:
