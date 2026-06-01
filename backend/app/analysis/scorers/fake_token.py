@@ -357,9 +357,28 @@ class FakeTokenScorer(BaseScorer):
         )
         s_ratio = normalise_inverted(mint_ratio, p50=p50_mr, p99=p99_mr)
 
-        # policy_age inverted: newer policies are more suspicious.
-        # Without a policy registry, assume age = 1 slot (most suspicious case).
-        # Safer direction for detection; on-chain lookup is a future enhancement.
+        # policy_age inverted: newer policies are more suspicious. Without
+        # an asset→first-seen index there is no way to compute the real age
+        # at scoring time, so this currently hardcodes 1 slot — i.e. the
+        # most-suspicious value — for every minted policy. The 0.20 weight
+        # on this sub-score (see ``config/detection.yaml``
+        # ``fake_token.weights.distribution.policy_age``) therefore acts as
+        # a constant ~0.20 boost on every fake_token alert's distribution
+        # score; thresholds were tuned empirically with that constant in
+        # place, so changing the value in isolation will drift scores
+        # across all historical alerts.
+        #
+        # When real policy age becomes available (see
+        # ``docs/follow-ups/fake_token_policy_age.md``):
+        #   1. Query the new ``asset_policy_first_seen`` table here.
+        #   2. Compute ``policy_age_slots = current_slot - first_seen_slot``.
+        #   3. Surface the value in the evidence dict for the UI.
+        #   4. Re-enable the "New Policy" donut in SUB_SCORE_LABELS.
+        #   5. Re-run a one-time backfill so historical alerts re-score
+        #      with the now-accurate sub-score.
+        # The "New Policy" donut on the detail page is currently hidden
+        # by the frontend (see ``SUB_SCORE_LABELS["Fake Token"]``) to
+        # avoid showing operators a misleading 100%.
         policy_age_slots = 1
         age_inv = 1.0 / policy_age_slots
         p50_pa, p99_pa = _anchor(_FIXED, "policy_age_inv")
@@ -392,6 +411,54 @@ class FakeTokenScorer(BaseScorer):
         if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
 
+        # The evidence "confusables" list mirrors what ``_compute_unicode_suspicion``
+        # detects so the operator-facing UI matches the score. Three categories:
+        #   - homoglyph: char has a visual Latin lookalike in ``_CONFUSABLES``.
+        #   - zero-width: invisible characters that hide letters from naive
+        #     string comparison (U+200B/200C/200D, U+FEFF, U+00AD).
+        #   - mixed-script: the asset name mixes Unicode scripts (e.g. Latin
+        #     plus Cyrillic), itself a strong impersonation signal.
+        scan_name = hex_decoded or best_candidate["token_name"]
+        _ZW_LABELS = {
+            "​": "ZWSP (U+200B)",
+            "‌": "ZWNJ (U+200C)",
+            "‍": "ZWJ (U+200D)",
+            "﻿": "BOM (U+FEFF)",
+            "­": "SHY (U+00AD)",
+        }
+        confusables: List[Dict[str, str]] = []
+        for c in dict.fromkeys(scan_name):
+            mapped = _CONFUSABLES.get(ord(c))
+            if mapped is not None:
+                target = chr(mapped) if isinstance(mapped, int) else str(mapped)
+                confusables.append({
+                    "kind": "homoglyph",
+                    "from_char": c,
+                    "to_char": target,
+                })
+            elif c in _ZW_LABELS:
+                confusables.append({
+                    "kind": "zero_width",
+                    "from_char": _ZW_LABELS[c],
+                    "to_char": "",
+                })
+        # Mixed-script flag: emit a single summary entry rather than a per-char
+        # row so the UI doesn't list every alpha character. Mirrors the
+        # `mixed_scripts` bump in ``_compute_unicode_suspicion``.
+        scripts = set()
+        for c in scan_name:
+            if c.isalpha():
+                try:
+                    scripts.add(unicodedata.name(c, "").split()[0])
+                except (ValueError, IndexError):
+                    pass
+        if len(scripts) > 1:
+            confusables.append({
+                "kind": "mixed_script",
+                "from_char": ", ".join(sorted(scripts)),
+                "to_char": "",
+            })
+
         return ScorerResult(
             score=final,
             sub_scores={
@@ -409,4 +476,16 @@ class FakeTokenScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "matched_token": best_legit_name,
+                "matched_similarity": round(best_sim, 4),
+                "fake_policy_id": best_candidate.get("policy_id", ""),
+                "fake_asset_name_hex": best_candidate.get("token_name_hex", ""),
+                "fake_asset_name_ascii": best_candidate.get("token_name", ""),
+                "fake_quantity": int(best_candidate.get("quantity", 0)),
+                "legit_policy_ids": list(legit_tokens.get(best_legit_name, [])),
+                "recipient_count": int(recipient_count),
+                "cip25_similarity_raw": round(cip25_sim, 4),
+                "unicode_confusables": confusables,
+            },
         )

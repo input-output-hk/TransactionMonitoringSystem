@@ -269,6 +269,59 @@ async def get_transactions_by_address(
     return await get_transactions(network=network, address=address, limit=limit, before=before, api_key=api_key)
 
 
+@router.get("/blocks/recent")
+async def get_recent_blocks(
+    network: Optional[NetworkType] = Query(
+        None,
+        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
+    ),
+    limit: int = Query(5, ge=1, le=50),
+    api_key: str = Security(verify_api_key),
+):
+    """Recent blocks aggregated from the transactions table.
+
+    The schema has no dedicated ``blocks`` table, so we derive blocks by
+    grouping transactions on ``(block_height, block_hash)``. Consequence:
+    empty blocks (zero txs) never appear here. For a "Latest Blocks"
+    dashboard widget that's the desired behavior anyway — empty blocks
+    aren't interesting.
+
+    Note: this is a multi-segment path (`/blocks/recent`), so it doesn't
+    collide with `GET /{tx_hash}` regardless of registration order.
+    """
+    query_network = network or settings.CARDANO_NETWORK
+    try:
+        rows = await clickhouse.execute_query_async(
+            """
+            SELECT
+                block_height,
+                block_hash,
+                min(timestamp) AS timestamp,
+                count() AS tx_count,
+                sum(total_output_value) AS total_output_value
+            FROM transactions
+            WHERE network = %(network)s AND block_height IS NOT NULL
+            GROUP BY block_height, block_hash
+            ORDER BY timestamp DESC
+            LIMIT %(limit)s
+            """,
+            {"network": query_network, "limit": limit},
+        )
+    except Exception as e:
+        logger.error(f"Error fetching recent blocks: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch recent blocks")
+    return [
+        {
+            "block_height": r[0],
+            "block_hash": r[1],
+            "timestamp": r[2].isoformat() if r[2] else None,
+            "tx_count": r[3],
+            "total_output_value": r[4],
+        }
+        for r in rows
+    ]
+
+
 @router.get("/stats/summary")
 async def get_transaction_stats(
     network: Optional[NetworkType] = Query(
@@ -318,3 +371,52 @@ async def get_transaction_stats(
     except Exception as e:
         logger.error(f"Error getting transaction stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get transaction stats")
+
+
+@router.get("/stats/throughput")
+async def get_transaction_throughput(
+    network: Optional[NetworkType] = Query(
+        None,
+        description=(
+            "Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to "
+            "the instance's CARDANO_NETWORK setting."
+        ),
+    ),
+    window_minutes: int = Query(
+        5, ge=1, le=1440,
+        description="Sliding window size in minutes (default 5).",
+    ),
+    api_key: str = Security(verify_api_key),
+):
+    """Recent transaction throughput.
+
+    Counts transactions ingested in the last ``window_minutes`` and returns
+    the implied ``tx/min`` rate. The dashboard's "TX / min" KPI uses this
+    instead of a lifetime average so the value reflects current pipeline
+    activity, not a denominator that grows forever.
+
+    ``subtractMinutes(now(), N)`` lets clickhouse-driver substitute the
+    window safely as a numeric parameter.
+    """
+    try:
+        query_network = network or settings.CARDANO_NETWORK
+        results = await clickhouse.execute_query_async(
+            """
+            SELECT count() AS recent_count
+            FROM transactions
+            WHERE network = %(network)s
+              AND timestamp >= subtractMinutes(now(), %(window_minutes)s)
+            """,
+            {"network": query_network, "window_minutes": window_minutes},
+        )
+        count = int(results[0][0]) if results else 0
+        return {
+            "window_minutes": window_minutes,
+            "count": count,
+            "tx_per_min": count / window_minutes,
+        }
+    except Exception as e:
+        logger.error(f"Error getting transaction throughput: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to get transaction throughput",
+        )

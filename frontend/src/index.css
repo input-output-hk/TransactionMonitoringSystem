@@ -1,0 +1,167 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	--color-severity-low: var(--severity-low);
+	--color-severity-low-foreground: var(--severity-low-foreground);
+	--color-severity-medium: var(--severity-medium);
+	--color-severity-medium-foreground: var(--severity-medium-foreground);
+	--color-severity-high: var(--severity-high);
+	--color-severity-high-foreground: var(--severity-high-foreground);
+	--color-severity-critical: var(--severity-critical);
+	--color-severity-critical-foreground: var(--severity-critical-foreground);
+
+	--color-status-online: var(--status-online);
+	--color-status-warning: var(--status-warning);
+	--color-status-offline: var(--status-offline);
+
+	--color-brand: var(--brand);
+
+	--radius-sm: calc(var(--radius) - 2px);
+	--radius-md: calc(var(--radius) - 1px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 2px);
+
+	--font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+	--radius: 0.25rem;
+	color-scheme: light;
+
+	/* Light mode tokens (from Figma light dashboard) */
+	--background: oklch(0.96 0 0);
+	--foreground: oklch(0.18 0.01 250);
+	--card: oklch(1 0 0);
+	--card-foreground: oklch(0.18 0.01 250);
+	--popover: oklch(1 0 0);
+	--popover-foreground: oklch(0.18 0.01 250);
+	--primary: oklch(0.22 0.01 250);
+	--primary-foreground: oklch(0.98 0 0);
+	--secondary: oklch(0.94 0 0);
+	--secondary-foreground: oklch(0.22 0.01 250);
+	--muted: oklch(0.94 0 0);
+	--muted-foreground: oklch(0.48 0.01 250);
+	--accent: oklch(0.94 0 0);
+	--accent-foreground: oklch(0.22 0.01 250);
+	--destructive: oklch(0.6 0.22 25);
+	--destructive-foreground: oklch(0.98 0 0);
+	--border: oklch(0.88 0 0);
+	--input: oklch(0.92 0 0);
+	--ring: oklch(0.6 0.15 240);
+
+	--brand: oklch(0.6 0.15 240);
+
+	--severity-low: oklch(0.92 0.13 145);
+	--severity-low-foreground: oklch(0.38 0.18 145);
+	--severity-medium: oklch(0.9 0.12 230);
+	--severity-medium-foreground: oklch(0.4 0.18 240);
+	--severity-high: oklch(0.92 0.13 45);
+	--severity-high-foreground: oklch(0.5 0.2 35);
+	--severity-critical: oklch(0.92 0.16 25);
+	--severity-critical-foreground: oklch(0.5 0.22 25);
+
+	--status-online: oklch(0.7 0.18 145);
+	--status-warning: oklch(0.78 0.17 65);
+	--status-offline: oklch(0.6 0.22 25);
+}
+
+.dark {
+	color-scheme: dark;
+	/* Dark mode tokens (matched to Figma).
+	   --background ≈ #1F1F1F, --card ≈ #292929 — confirmed against the
+	   Figma frame; previous values were too dark by ~0.08 L. */
+	--background: oklch(0.22 0 0);
+	--foreground: oklch(0.96 0 0);
+	--card: oklch(0.27 0 0);
+	--card-foreground: oklch(0.96 0 0);
+	/* #383838 — shared by DropdownMenu (user menu, System Status, severity
+	   multi-select) and Select (Attack Type filter, page size, etc). */
+	--popover: oklch(0.35 0 0);
+	--popover-foreground: oklch(0.96 0 0);
+	--primary: oklch(0.96 0 0);
+	--primary-foreground: oklch(0.19 0 0);
+	--secondary: oklch(0.24 0 0);
+	--secondary-foreground: oklch(0.96 0 0);
+	--muted: oklch(0.28 0 0);
+	--muted-foreground: oklch(0.7 0 0);
+	--accent: oklch(0.26 0 0);
+	--accent-foreground: oklch(0.96 0 0);
+	--destructive: oklch(0.65 0.22 25);
+	--destructive-foreground: oklch(0.98 0 0);
+	/* Lifted from 0.32/0.24 to 0.50 so borders read clearly against the
+	   --card (0.27) — previously they were almost invisible. Applies to
+	   card outlines, input borders, and outline-variant buttons. */
+	--border: oklch(0.50 0 0);
+	--input: oklch(0.50 0 0);
+	--ring: oklch(0.65 0.15 240);
+
+	--brand: oklch(0.7 0.15 240);
+
+	--severity-low: oklch(0.32 0.1 145);
+	--severity-low-foreground: oklch(0.88 0.18 145);
+	--severity-medium: oklch(0.32 0.1 230);
+	--severity-medium-foreground: oklch(0.85 0.16 230);
+	--severity-high: oklch(0.32 0.12 45);
+	--severity-high-foreground: oklch(0.85 0.18 45);
+	--severity-critical: oklch(0.32 0.14 25);
+	--severity-critical-foreground: oklch(0.85 0.2 25);
+
+	--status-online: oklch(0.7 0.18 145);
+	--status-warning: oklch(0.78 0.17 65);
+	--status-offline: oklch(0.65 0.22 25);
+}
+
+@layer base {
+	* {
+		border-color: var(--border);
+	}
+	html,
+	body,
+	#root {
+		height: 100%;
+	}
+	body {
+		margin: 0;
+		background: var(--background);
+		color: var(--foreground);
+		font-family: var(--font-sans);
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+}
+
+@keyframes tms-progress {
+	from {
+		width: 0%;
+	}
+	to {
+		width: 100%;
+	}
+}
+
+@utility animate-progress-fill {
+	animation: tms-progress 900ms ease-out forwards;
+}

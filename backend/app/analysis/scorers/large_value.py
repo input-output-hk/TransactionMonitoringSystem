@@ -15,7 +15,7 @@ Sub-scores (Polimi Section 4.2.3):
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from app.analysis.normalise import normalise, normalise_inverted
 from app.analysis.scorer_config import (
@@ -71,6 +71,48 @@ def _primary_policy_id(value: Dict[str, Any]) -> str:
     return best_policy
 
 
+def _primary_asset(value: Dict[str, Any]) -> Tuple[str, str, int]:
+    """Return ``(policy_id, asset_name_hex, quantity)`` for the largest asset.
+
+    Returns empty strings and 0 when the value has no native assets.
+    """
+    best = ("", "", 0)
+    for key, val in value.items():
+        if key in ("lovelace", "ada"):
+            continue
+        if isinstance(val, dict):
+            for name, qty in val.items():
+                q = abs(int(qty)) if qty else 0
+                if q > best[2]:
+                    best = (key, name, q)
+        else:
+            q = abs(int(val)) if val else 0
+            if q > best[2]:
+                best = (key, "", q)
+    return best
+
+
+def _hex_to_ascii(hex_str: str) -> str:
+    """Decode an asset-name hex string to 7-bit ASCII printable, else empty.
+
+    The restriction is deliberate: this string is rendered in operator UI
+    alongside the policy id. A name containing non-ASCII characters could
+    carry confusables / zero-width characters that visually impersonate a
+    legitimate ticker. Surfacing only the safe ASCII form forces operators
+    to look at the hex whenever the name is non-trivial, which is the right
+    default on a risk surface. The hex is always shown beside it.
+    """
+    if not hex_str:
+        return ""
+    try:
+        decoded = bytes.fromhex(hex_str).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if all(32 <= ord(c) < 127 for c in decoded):
+        return decoded
+    return ""
+
+
 class LargeValueScorer(BaseScorer):
     name = "large_value"
 
@@ -101,6 +143,7 @@ class LargeValueScorer(BaseScorer):
         best_sub = {}
         best_reasons = []
         best_bl_source = "missing"
+        best_evidence: Dict[str, Any] = {}
 
         for out in outputs:
             addr = out.get("address", "")
@@ -119,12 +162,14 @@ class LargeValueScorer(BaseScorer):
                 best_sub = result.sub_scores
                 best_reasons = result.reasons
                 best_bl_source = result.baseline_source
+                best_evidence = result.evidence
 
         return ScorerResult(
             score=best_score,
             sub_scores=best_sub,
             reasons=best_reasons,
             baseline_source=best_bl_source,
+            evidence=best_evidence,
         )
 
     def _score_utxo(
@@ -141,7 +186,8 @@ class LargeValueScorer(BaseScorer):
             ada_amount = int(value.get("lovelace", 0))
         value_cbor = feat_mod._estimate_value_cbor_bytes(value)
         qty_digits = _max_quantity_digits(value)
-        policy_id = _primary_policy_id(value)
+        policy_id, asset_name_hex, max_quantity = _primary_asset(value)
+        asset_name_ascii = _hex_to_ascii(asset_name_hex)
 
         # quantity_digits: per-policy baseline (Polimi Section 4.2.3).
         # When the UTxO has no policy id, skip baseline lookup and jump
@@ -196,4 +242,14 @@ class LargeValueScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "policy_id": policy_id,
+                "asset_name_hex": asset_name_hex,
+                "asset_name_ascii": asset_name_ascii,
+                "max_quantity_raw": int(max_quantity),
+                "quantity_digits_raw": int(qty_digits),
+                "value_cbor_bytes_raw": int(value_cbor),
+                "lovelace_amount": int(ada_amount),
+                "target_script_address": address,
+            },
         )

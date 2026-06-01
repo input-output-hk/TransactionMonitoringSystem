@@ -128,6 +128,10 @@ class ClassScoreResult(BaseModel):
         default_factory=dict,
         description="Per-class sub-score breakdown for drill-down",
     )
+    evidence: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Per-class raw evidence (addresses, byte counts, lists) for UI drill-down",
+    )
     analysis_version: str = ""
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     fee: Optional[int] = Field(None, description="Transaction fee in lovelace")

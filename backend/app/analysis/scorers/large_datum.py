@@ -117,6 +117,7 @@ class LargeDatumScorer(BaseScorer):
         best_sub = {}
         best_reasons = []
         best_bl_source = "missing"
+        best_evidence: Dict[str, Any] = {}
 
         for out in outputs:
             addr = out.get("address", "")
@@ -127,13 +128,14 @@ class LargeDatumScorer(BaseScorer):
                 continue
 
             result = self._score_utxo(
-                out, addr, datum_bytes, network, max_script_datum_bytes,
+                out, addr, datum_bytes, datum_flag, network, max_script_datum_bytes,
             )
             if result.score > best_score:
                 best_score = result.score
                 best_sub = result.sub_scores
                 best_reasons = result.reasons
                 best_bl_source = result.baseline_source
+                best_evidence = result.evidence
 
         if best_sub:
             return ScorerResult(
@@ -141,6 +143,7 @@ class LargeDatumScorer(BaseScorer):
                 sub_scores=best_sub,
                 reasons=best_reasons,
                 baseline_source=best_bl_source,
+                evidence=best_evidence,
             )
 
         # Aggregate-only engagement path: gate fired because the
@@ -159,8 +162,8 @@ class LargeDatumScorer(BaseScorer):
         )
 
     def _score_utxo(
-        self, output: Dict, address: str, datum_bytes: int, network: str,
-        max_script_datum_bytes: int,
+        self, output: Dict, address: str, datum_bytes: int, datum_flag: int,
+        network: str, max_script_datum_bytes: int,
     ) -> ScorerResult:
         import json
 
@@ -213,6 +216,9 @@ class LargeDatumScorer(BaseScorer):
         if s_value_inv > _REASON_T:
             reasons.append("lean_value_field")
 
+        datum_type = "inline" if datum_flag == 2 else "hash"
+        lovelace = feat_mod.extract_lovelace(value)
+
         return ScorerResult(
             score=final,
             sub_scores={
@@ -224,4 +230,13 @@ class LargeDatumScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "datum_bytes_raw": int(datum_bytes),
+                "utxo_total_bytes": int(utxo_total),
+                "datum_type": datum_type,
+                "datum_utxo_ratio": round(datum_ratio, 4),
+                "target_script_address": address,
+                "value_cbor_bytes_raw": int(value_cbor),
+                "lovelace_amount": lovelace,
+            },
         )

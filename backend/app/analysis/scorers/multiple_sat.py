@@ -79,6 +79,7 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
+from app.analysis.features import extract_lovelace as _extract_lovelace
 
 logger = logging.getLogger(__name__)
 
@@ -194,24 +195,13 @@ def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
     return groups
 
 
-def _extract_lovelace(val: Any) -> int:
-    """Extract lovelace from Ogmios v5 `{"lovelace": N}` or v6 `{"ada": {"lovelace": N}}`."""
-    if isinstance(val, dict):
-        ada = val.get("ada")
-        if isinstance(ada, dict):
-            return int(ada.get("lovelace", 0))
-        return int(val.get("lovelace", 0))
-    if val:
-        return int(val)
-    return 0
-
-
-def _compute_net_value_out(
+def _compute_lovelace_flow(
     inputs: List[Dict], outputs: List[Dict], script_key: str,
-) -> int:
-    """Net lovelace extraction: Σ(inputs from script) − Σ(outputs to script).
+) -> Tuple[int, int]:
+    """Return ``(lovelace_in_at_script, lovelace_out_at_script)``.
 
     ``script_key`` is a payment credential (see :func:`_payment_credential`).
+    Callers that only need the net extraction can take ``max(0, in - out)``.
     """
     value_in = sum(
         _extract_lovelace(inp.get("value"))
@@ -221,6 +211,18 @@ def _compute_net_value_out(
         _extract_lovelace(out.get("value"))
         for out in outputs if _payment_credential(out.get("address", "")) == script_key
     )
+    return value_in, value_out
+
+
+def _compute_net_value_out(
+    inputs: List[Dict], outputs: List[Dict], script_key: str,
+) -> int:
+    """Net lovelace extraction: ``max(0, in - out)`` over the script.
+
+    Kept as a thin wrapper over :func:`_compute_lovelace_flow` so existing
+    call sites (and tests) don't have to change.
+    """
+    value_in, value_out = _compute_lovelace_flow(inputs, outputs, script_key)
     return max(0, value_in - value_out)
 
 
@@ -468,7 +470,10 @@ class MultipleSatScorer(BaseScorer):
         spend_redeemer_payloads: List[str],
     ) -> ScorerResult:
         inputs = raw_data.get("inputs", [])
-        net_value = _compute_net_value_out(inputs, outputs, script_key)
+        lovelace_in_at_script, lovelace_out_at_script = _compute_lovelace_flow(
+            inputs, outputs, script_key,
+        )
+        net_value = max(0, lovelace_in_at_script - lovelace_out_at_script)
         n_assets_out = _compute_n_assets_out(inputs, outputs, script_key)
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
@@ -600,6 +605,11 @@ class MultipleSatScorer(BaseScorer):
         if uniform_sweep:
             reasons.append("uniform_script_sweep_guard")
 
+        # ``lovelace_in_at_script`` / ``lovelace_out_at_script`` are already
+        # computed at the top of this method via _compute_lovelace_flow; reuse
+        # them here instead of re-iterating inputs/outputs.
+        redeemer_count = len(spend_redeemer_payloads)
+
         return ScorerResult(
             score=final,
             sub_scores={
@@ -614,6 +624,29 @@ class MultipleSatScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
+            evidence={
+                "n_inputs_same_script": int(n_inputs),
+                "redeemer_count": int(redeemer_count),
+                "redeemer_input_ratio": round(redeemer_count / max(1, n_inputs), 4),
+                "cpu_units_total": int(total_cpu),
+                "cpu_units_per_input": int(exunits_per_input),
+                "value_extracted_lovelace": int(net_value),
+                "value_returned_lovelace": int(lovelace_out_at_script),
+                "value_input_lovelace": int(lovelace_in_at_script),
+                "n_assets_extracted": int(n_assets_out),
+                "target_script_address": representative_addr,
+                # ``lovelace_full_drain`` is deliberately narrow: it records
+                # only that no lovelace was returned to the script. The
+                # canonical NFT-marketplace double-sat exploits drain native
+                # assets while the script's lovelace position barely moves;
+                # those show ``lovelace_full_drain=False`` but
+                # ``n_assets_extracted > 0``. The UI should reference both.
+                "lovelace_full_drain": bool(
+                    lovelace_out_at_script == 0 and lovelace_in_at_script > 0
+                ),
+                "allowlisted": bool(allowlisted),
+                "uniform_sweep": bool(uniform_sweep),
+            },
         )
 
 
