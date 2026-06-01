@@ -45,6 +45,10 @@ _MIN_DATUM_BYTES = int(_CFG["gate"]["min_datum_bytes"])
 # content check is what suppresses benign large datums without losing a real
 # (size-overlapping) bloat attack. See features.datum_shannon_entropy_bits.
 _BLOAT_ENTROPY_MAX = float(_CFG["gate"]["bloat_entropy_max"])
+# A datum is bloat when one CBOR leaf holds at least this fraction of its bytes
+# (single-leaf padding). Structural, so it catches high-entropy random padding
+# that the entropy gate misses; legitimate nested datums sit far below it.
+_LEAF_CONCENTRATION_MAX = float(_CFG["gate"]["leaf_concentration_max"])
 # Absolute-size backstop: a datum at or above this many bytes is flagged
 # regardless of entropy, because it approaches the point where a consuming tx
 # can no longer fit under maxTxSize. Robust against a high-entropy (random)
@@ -58,18 +62,22 @@ _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
 def _is_bloat_datum(output: Dict[str, Any], datum_bytes: int) -> bool:
     """True when an output's datum is a bloat-DoS candidate.
 
-    Two independent triggers:
+    Triggers (any one):
       - absolute backstop: ``datum_bytes >= _SIZE_BACKSTOP`` flags regardless of
-        content, catching high-entropy padding that nears the tx-size limit;
+        content, catching extreme bloat that nears the tx-size limit;
       - content gate: a smaller-but-large datum (``>= _MIN_DATUM_BYTES``) is a
-        candidate only when it is low-entropy padding
-        (``<= _BLOAT_ENTROPY_MAX``), not structured state.
+        candidate when it is either low-entropy padding
+        (``<= _BLOAT_ENTROPY_MAX``) OR structurally concentrated in one CBOR
+        leaf (``>= _LEAF_CONCENTRATION_MAX``). The concentration branch catches
+        single-leaf padding even when the padding bytes are high-entropy.
     """
     if datum_bytes >= _SIZE_BACKSTOP:
         return True
+    if datum_bytes < _MIN_DATUM_BYTES:
+        return False
     return (
-        datum_bytes >= _MIN_DATUM_BYTES
-        and feat_mod.datum_shannon_entropy_bits(output) <= _BLOAT_ENTROPY_MAX
+        feat_mod.datum_shannon_entropy_bits(output) <= _BLOAT_ENTROPY_MAX
+        or feat_mod.datum_leaf_concentration(output) >= _LEAF_CONCENTRATION_MAX
     )
 
 

@@ -130,6 +130,16 @@ scorers:
     gate:
       min_datum_bytes: 6000
       bloat_entropy_max: 4.0
+      # Structural bloat trigger, OR-ed with the entropy gate. A datum-bloat
+      # attack concentrates its bytes in one oversized CBOR leaf (a giant
+      # ByteArray): largest-leaf / total-datum-bytes near 1.0. Legitimate large
+      # PlutusData spreads bytes across many small nested leaves (observed
+      # ~0.005). Unlike entropy this is structural, so it catches a single leaf
+      # padded with RANDOM (high-entropy) bytes, the evasion the entropy gate
+      # misses. Observed gap is wide (attack 0.96 vs legit 0.005); 0.5 sits
+      # safely between. Does NOT separate a flat list of many distinct
+      # high-entropy elements from a legitimate registry; that needs provenance.
+      leaf_concentration_max: 0.5
       # Absolute-size backstop. A datum at this fraction of
       # protocol_limits.max_tx_size_bytes (0.75 * 16384 = 12288 bytes) is
       # flagged unconditionally, IGNORING entropy: once the datum plus a minimal

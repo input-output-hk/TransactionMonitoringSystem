@@ -257,6 +257,69 @@ def datum_shannon_entropy_bits(output: Dict[str, Any]) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
+def _max_primitive_leaf_bytes(obj: Any) -> int:
+    """Largest single primitive leaf (bytes/text/int) in a decoded PlutusData tree.
+
+    Walks iteratively (an explicit stack, not recursion, so a maliciously deep
+    datum cannot blow the Python stack). cbor2 represents a Plutus Constr as a
+    CBORTag whose ``.value`` holds the fields; lists/maps are containers.
+    """
+    best = 0
+    stack = [obj]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, (bytes, bytearray)):
+            best = max(best, len(o))
+        elif isinstance(o, str):
+            best = max(best, len(o.encode()))
+        elif isinstance(o, bool):
+            continue  # bool is an int subclass; contributes nothing meaningful
+        elif isinstance(o, int):
+            best = max(best, (o.bit_length() + 7) // 8 or 1)
+        elif isinstance(o, (list, tuple)):
+            stack.extend(o)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                stack.append(k)
+                stack.append(v)
+        elif hasattr(o, "value"):  # cbor2 CBORTag (Plutus Constr / wrapped value)
+            stack.append(o.value)
+    return best
+
+
+def datum_leaf_concentration(output: Dict[str, Any]) -> float:
+    """Fraction of total datum bytes held by the single largest CBOR leaf.
+
+    A datum-bloat attack concentrates its bytes in one oversized primitive leaf
+    (a giant ByteArray), giving a ratio near 1.0; legitimate large state is
+    bounded heterogeneous nesting that spreads bytes across many small leaves,
+    giving a ratio near 0 (observed ~0.005). Unlike entropy, this is a
+    STRUCTURAL signal: padding the leaf with random (high-entropy) bytes does not
+    lower it, so it catches the high-entropy single-leaf bloat that the entropy
+    gate misses.
+
+    Returns 0.0 ("not concentrated / not assessable") when there is no hex inline
+    datum, the hex is malformed, or the CBOR cannot be decoded, so the bloat
+    check only fires on a measured high concentration and degrades safely (the
+    entropy gate and size backstop still apply) when cbor2 is unavailable.
+    """
+    datum = output.get("datum")
+    if not isinstance(datum, str) or len(datum) < 2:
+        return 0.0
+    try:
+        raw = bytes.fromhex(datum)
+    except ValueError:
+        return 0.0
+    n = len(raw)
+    if n == 0:
+        return 0.0
+    try:
+        obj = get_cbor2().loads(raw)
+    except Exception:
+        return 0.0
+    return _max_primitive_leaf_bytes(obj) / n
+
+
 def extract_utxo_features(
     tx_hash: str,
     network: str,
