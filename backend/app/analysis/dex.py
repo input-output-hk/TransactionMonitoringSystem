@@ -136,18 +136,21 @@ def _pool_script_addresses(client: Any, tx_hash: str, network: str) -> List[str]
 def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: int):
     """Txs paying into the same pool addresses within +/- _SLOT_WINDOW slots.
 
-    Returns rows of (tx_hash, slot, fee) ordered by slot, capped at 20.
+    Returns rows of (tx_hash, slot, block_index, fee) ordered by
+    (slot, block_index), capped at 20. block_index is the tx's position within
+    its block, giving intra-block ordering so a same-slot front/victim/back can
+    be sequenced; coalesced to 0 for rows ingested before the column existed.
     """
     return client.execute(
         """
-        SELECT DISTINCT o.tx_hash, t.slot, t.fee
+        SELECT DISTINCT o.tx_hash, t.slot, coalesce(t.block_index, 0) AS block_index, t.fee
         FROM transaction_outputs o
         JOIN transactions t ON o.tx_hash = t.tx_hash AND o.network = t.network
         WHERE o.network = %(network)s
           AND o.address IN %(addresses)s
           AND t.slot BETWEEN %(min_slot)s AND %(max_slot)s
           AND o.is_collateral = 0
-        ORDER BY t.slot ASC
+        ORDER BY t.slot ASC, block_index ASC
         LIMIT 20
         """,
         {
@@ -179,6 +182,23 @@ def _first_input_addresses(
     return {r[0]: r[1] for r in rows}
 
 
+def _tx_position(client: Any, tx_hash: str, network: str):
+    """The ``(slot, block_index)`` ordering key for a tx, or None if unknown.
+
+    Used to place the victim relative to the attacker legs when the victim falls
+    outside the capped neighbour window. block_index is coalesced to 0 (matching
+    _neighbors_in_window) for rows ingested before the column existed.
+    """
+    rows = client.execute(
+        "SELECT slot, coalesce(block_index, 0) FROM transactions "
+        "WHERE tx_hash = %(h)s AND network = %(n)s LIMIT 1",
+        {"h": tx_hash, "n": network},
+    )
+    if rows and rows[0][0] is not None:
+        return (int(rows[0][0]), int(rows[0][1]))
+    return None
+
+
 def detect_sandwich_pattern(
     tx_hash: str,
     network: str,
@@ -186,8 +206,10 @@ def detect_sandwich_pattern(
 ) -> Optional[Dict]:
     """Check if tx_hash is the victim in a structural sandwich pattern.
 
-    Looks for 3+ txs within _SLOT_WINDOW slots interacting with the same
-    script address, where two share a first-input address cluster.
+    Looks for 3+ txs within _SLOT_WINDOW slots interacting with the same script
+    address, where a wallet cluster has at least one leg ordered BEFORE the
+    victim and one AFTER it (temporal bracketing by ``(slot, block_index)``) --
+    the defining front-run/back-run shape of a sandwich.
     """
     if not slot:
         return None
@@ -227,15 +249,25 @@ def detect_sandwich_pattern(
         if _is_script_address(cluster_addr):
             continue
 
-        # Found a structural sandwich pattern with a wallet attacker.
-        tx_slots = {r[0]: r[1] for r in neighbor_rows}
-
-        # Sort attacker txs by slot to identify front and back
-        cluster_txs.sort(key=lambda h: tx_slots.get(h, 0))
-        tx_a = cluster_txs[0]  # front
-        tx_b = cluster_txs[-1]  # back
-
-        slot_span = abs(tx_slots.get(tx_b, slot) - tx_slots.get(tx_a, slot))
+        # Temporal bracketing: a sandwich front-runs BEFORE the victim and
+        # back-runs AFTER it. Order by (slot, block_index) so the front/back
+        # ordering is established even within a single block. The attacker
+        # cluster must have at least one leg positioned before the victim AND
+        # one after; co-occurring legs that don't straddle the victim are not a
+        # sandwich (the dominant arbitrage/batcher false positive).
+        pos = {r[0]: (r[1], r[2]) for r in neighbor_rows}
+        victim_pos = pos.get(tx_hash) or _tx_position(client, tx_hash, network)
+        if victim_pos is None:
+            continue
+        cluster_pos = [(pos[h], h) for h in cluster_txs if h in pos]
+        before = sorted(p for p in cluster_pos if p[0] < victim_pos)
+        after = sorted(p for p in cluster_pos if p[0] > victim_pos)
+        if not before or not after:
+            continue  # legs do not bracket the victim -> not a sandwich
+        # Closest leg on each side: last before the victim, first after.
+        front_pos, tx_a = before[-1]
+        back_pos, tx_b = after[0]
+        slot_span = abs(back_pos[0] - front_pos[0])
 
         # Historical attacker recurrence: count prior sandwich-like
         # patterns from the same first-input address cluster.
