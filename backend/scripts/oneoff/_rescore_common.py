@@ -1,28 +1,19 @@
-"""Shared helpers for the tx_class_scores re-score one-offs.
+"""Shared helpers for the tx_class_scores re-score / re-classify one-offs.
 
-Both ``rescore_alert_tuning_*.py`` scripts fetch alert rows, recompute a subset
-of the nine class scores, preserve the rest, and write corrected rows back. The
-correctness-critical pieces, aggregate recompute, sub_scores/evidence merge, and
-the ReplacingMergeTree re-insert + per-partition OPTIMIZE, live here so the two
-scripts cannot drift. Per-script differences (which scorers re-run, the row
-scope, any enrichment) stay in each script.
+Used by ``reclassify_for_tuning_2026_06_01.py`` (full re-analysis) and
+``migrate_risk_band_low_to_informational.py``. Centralises the settings-based
+ClickHouse connection, tolerant JSON parsing, the re-score summary print, and
+the ReplacingMergeTree re-insert + per-partition OPTIMIZE, so callers cannot
+drift on the correctness-critical write path.
 """
 
 import json
-import sys
 from collections import Counter
-from datetime import timedelta
 
 from clickhouse_driver import Client
 
-from app.analysis.normalise import score_to_band
 from app.config import settings
 from app.db import clickhouse
-
-CLASS_NAMES = (
-    "token_dust", "large_value", "large_datum", "multiple_sat",
-    "front_running", "sandwich", "circular", "fake_token", "phishing",
-)
 
 
 def connect() -> Client:
@@ -45,53 +36,6 @@ def loads(value, default):
         except Exception:
             return default
     return default
-
-
-def run_scorer(scorer, features):
-    """Return ``(score, sub_scores, evidence)``; ``-1`` when the gate is closed."""
-    try:
-        if scorer.gate(features):
-            r = scorer.score(features)
-            return r.score, r.sub_scores, r.evidence
-    except Exception as exc:  # pragma: no cover - defensive, logged to stderr
-        print(f"  scorer {scorer.name} failed on {features.get('tx_hash')}: {exc}",
-              file=sys.stderr)
-    return -1.0, None, None
-
-
-def merge_class(sub_scores, evidence, name, score, sub, evd):
-    """Apply one re-run class result onto the preserved sub_scores/evidence dicts."""
-    if score < 0:
-        sub_scores.pop(name, None)
-        evidence.pop(name, None)
-        return
-    if sub is not None:
-        sub_scores[name] = sub
-    if evd:
-        evidence[name] = evd
-
-
-def recompute_aggregate(scores):
-    """(max_score, max_class, risk_band) over the applicable (>=0) class scores."""
-    applicable = {k: v for k, v in scores.items() if v >= 0}
-    if applicable:
-        max_class = max(applicable, key=applicable.get)
-        max_score = applicable[max_class]
-    else:
-        max_class, max_score = "", 0.0
-    return round(max_score, 2), max_class, score_to_band(max_score)
-
-
-def corrected_row(tx_hash, network, scores, sub_scores, evidence, version, prev_at):
-    """Build an insert-ready row with the aggregate recomputed and analyzed_at
-    bumped +1s so the ReplacingMergeTree supersedes the old row in-partition."""
-    max_score, max_class, risk_band = recompute_aggregate(scores)
-    return {
-        "tx_hash": tx_hash, "network": network, **scores,
-        "max_score": max_score, "max_class": max_class, "risk_band": risk_band,
-        "sub_scores": sub_scores, "evidence": evidence,
-        "analysis_version": version, "analyzed_at": prev_at + timedelta(seconds=1),
-    }
 
 
 def report(corrected, prev_classes):
