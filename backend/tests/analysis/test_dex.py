@@ -152,3 +152,21 @@ def test_victim_outside_neighbour_window_uses_position_fallback(_patch_client):
     sw = dex.detect_sandwich_pattern("victim", "preprod", 100)
     assert sw is not None
     assert sw["tx_a"] == "legA" and sw["tx_b"] == "legB"
+
+
+# ---- _bracketing_legs (pure: no DB) ----
+
+def test_bracketing_legs_straddles_victim():
+    pos = {"a": (100, 0), "v": (100, 1), "b": (100, 2)}
+    assert dex._bracketing_legs(["a", "b"], pos, victim_pos=(100, 1)) == ("a", "b", 0)
+
+
+def test_bracketing_legs_picks_closest_on_each_side():
+    pos = {"a0": (98, 0), "a1": (99, 0), "v": (100, 0), "b1": (101, 0), "b2": (102, 0)}
+    # closest front = a1 (99), closest back = b1 (101), span = 2
+    assert dex._bracketing_legs(["a0", "a1", "b1", "b2"], pos, (100, 0)) == ("a1", "b1", 2)
+
+
+def test_bracketing_legs_no_straddle_returns_none():
+    pos = {"a": (98, 0), "b": (99, 0), "v": (100, 0)}
+    assert dex._bracketing_legs(["a", "b"], pos, (100, 0)) is None
