@@ -643,3 +643,101 @@ class TestUniformSweepGuardAndAllowlistInteraction:
         # never reaches scoring).
         assert result.sub_scores["uniform_sweep"] is True
         assert result.score == -1.0
+
+
+# A script address that groups consistently by payment credential. Distinct from
+# SCRIPT so per-script baselines planted in these tests are unambiguous.
+_EXTRACT_SCRIPT = "addr_test1wq3pw00c65cg"
+
+
+def _two_asset_extraction_features():
+    """A CTF-01-shaped double-sat: 2 script inputs each carrying a distinct
+    native asset, both assets (and the lovelace) leave to a wallet. Heavy CPU
+    per input so the lazy-validator floor does NOT engage (the validator did
+    real work) and the score is driven purely by the extraction axis. Not a
+    uniform sweep (2 inputs) and nothing returns to the script, so it reaches
+    scoring rather than the sweep/return suppression.
+    """
+    inputs = [
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": 5_000_000, "pol1": {"nft1": 1}}},
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": 5_000_000, "pol2": {"nft2": 1}}},
+    ]
+    outputs = [{"address": WALLET, "value": {
+        "lovelace": 9_500_000, "pol1": {"nft1": 1}, "pol2": {"nft2": 1}}}]
+    redeemers = [
+        {"validator": {"index": i, "purpose": "spend"},
+         "executionUnits": {"memory": 5_000_000, "cpu": 10_000_000}}
+        for i in range(2)
+    ]
+    return _features(inputs, outputs, redeemers)
+
+
+def _plant_baselines(monkeypatch, rows, calls=None):
+    """Patch the baseline lookup with a fixed ``(scope_type, feature) -> row`` map.
+
+    ``rows`` values are baseline dicts; absent keys resolve to None (missing).
+    Patches the module object that ``normalise.resolve_baseline`` calls, so the
+    whole multiple_sat -> scorer_config -> normalise resolve chain sees it.
+    """
+    from app.analysis import normalise as norm
+
+    def _fn(network, scope_type, scope_id, feature):
+        if calls is not None:
+            calls.append((scope_type, feature))
+        row = rows.get((scope_type, feature))
+        return dict(row) if row else None
+
+    monkeypatch.setattr(norm.clickhouse, "get_baseline", _fn)
+
+
+class TestPerScriptExtractionBaseline:
+    """The extraction axis resolves per_script -> bootstrap, never global.
+
+    Established high-volume contracts are de-saturated against their own norm;
+    rare/novel scripts (where one-shot double-sat exploits live, e.g. CTF-01)
+    stay on the conservative bootstrap. The global tier is never consulted,
+    because the global value/asset-extraction distribution is dominated by
+    legitimate batchers and would silence detection on rare scripts.
+    """
+
+    def test_ctf01_rare_script_stays_on_bootstrap(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # No baselines at all -> bootstrap (n_assets p99=2): a 2-asset
+        # extraction saturates -> Moderate. This is the CTF-01 recall anchor.
+        _plant_baselines(monkeypatch, {})
+        result = scorer.score(_two_asset_extraction_features())
+        assert result.sub_scores["n_assets_out_of_script"] == 2.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+        assert result.baseline_source == "bootstrap"
+
+    def test_global_baseline_ignored_for_extraction(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # A usable GLOBAL n_assets baseline (p99=5) exists that WOULD
+        # de-saturate a 2-asset extraction to Low if consulted. The per_script
+        # restriction must skip it, so the score stays Moderate on bootstrap.
+        rows = {("global", "n_assets_out_of_script"):
+                {"p50": 1.0, "p99": 5.0, "sample_count": 5000}}
+        calls = []
+        _plant_baselines(monkeypatch, rows, calls)
+        result = scorer.score(_two_asset_extraction_features())
+        assert result.score >= BAND_MODERATE_THRESHOLD
+        assert result.baseline_source != "global"
+        # The regression lock: global was never even queried for the axis.
+        assert ("global", "n_assets_out_of_script") not in calls
+
+    def test_per_script_baseline_desaturates_high_volume(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # A high-volume contract's own baseline: 2 assets / 10 ADA is its norm,
+        # so its routine spend de-saturates below Moderate. A genuine spike
+        # above its own p99 would still fire.
+        rows = {
+            ("per_script", "n_assets_out_of_script"):
+                {"p50": 2.0, "p99": 4.0, "sample_count": 300},
+            ("per_script", "net_value_out_of_script"):
+                {"p50": 10_000_000.0, "p99": 100_000_000.0, "sample_count": 300},
+        }
+        _plant_baselines(monkeypatch, rows)
+        result = scorer.score(_two_asset_extraction_features())
+        assert result.sub_scores["s_extraction"] == 0.0
+        assert result.score < BAND_MODERATE_THRESHOLD
+        assert result.baseline_source == "per_script"
