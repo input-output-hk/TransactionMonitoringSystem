@@ -384,7 +384,12 @@ scorers:
     bootstrap_anchors:
       attacker_recurrence: { p50: 0, p99: 5 }
     cycle:
-      min_length: 2                     # gate: minimum cycle hop count
+      # Minimum cycle hop count to alert. A 2-hop "cycle" is a round-trip
+      # (A -> script -> A): a deposit/withdraw or swap-and-change, not circular
+      # layering. Real laundering moves value through >= 3 distinct hops to
+      # obscure it, so 2-hop round-trips (the dominant false positive) are not
+      # alerted. The detector still finds them; the gate filters them out.
+      min_length: 3                     # gate: minimum cycle hop count
       max_length: 6                     # gate: maximum cycle hop count
       fee_tolerance_multiplier: 4.0     # max allowed net_loss / expected_fee at gate
       fee_tolerance_strict: 2.0         # above which score is capped at moderate_cap

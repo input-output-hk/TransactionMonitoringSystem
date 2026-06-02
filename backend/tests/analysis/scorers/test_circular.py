@@ -25,6 +25,12 @@ class TestGate:
     def test_cycle_too_short(self, scorer):
         assert scorer.gate(_features(cycle={"cycle_length": 1, "net_loss_ratio": 0.01})) is False
 
+    def test_two_hop_roundtrip_rejected(self, scorer):
+        # A 2-hop "cycle" (A -> script -> A) is a deposit/withdraw round-trip,
+        # not circular layering; min_length is 3, so the gate rejects it. This
+        # is the dominant former false positive.
+        assert scorer.gate(_features(cycle={"cycle_length": 2, "net_loss_ratio": 0.01})) is False
+
     def test_cycle_too_long(self, scorer):
         assert scorer.gate(_features(cycle={"cycle_length": 7, "net_loss_ratio": 0.01})) is False
 
