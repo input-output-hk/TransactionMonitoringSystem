@@ -3,7 +3,7 @@ of the 2026-06-01 detection tuning at once. Meant to be run on the server.
 
 Today's changes (all in the live scorers/config already):
   - token_dust:  gate suppresses sub-dos_asset_min bundles;
-  - large_value: digits-floor cap holds normal-supply UTxOs to Low;
+  - large_value: digits-floor cap holds normal-supply UTxOs to Informational;
   - large_datum: entropy + leaf-concentration + size-backstop gate replaces the
                  raw byte gate;
   - sandwich:    net-ADA-profit + non-script-attacker suppression;
@@ -17,9 +17,9 @@ on the server.
 
 Scope: currently Moderate-or-above rows (the alert surface). Every tuning change
 is suppressive (it only lowers scores; the large_datum gate is strictly more
-selective than the original byte gate), so a Low/none row cannot become an alert
-and does not need re-scoring. Pass --all-bands to also re-score Low/none rows
-(cosmetic; much slower).
+selective than the original byte gate), so an Informational/none row cannot
+become an alert and does not need re-scoring. Pass --all-bands to also re-score
+Informational/none rows (cosmetic; much slower).
 
 tx_class_scores is a ReplacingMergeTree keyed on (network, tx_hash) deduped by
 max(analyzed_at); re-inserting with analyzed_at bumped +1s supersedes the old
@@ -56,7 +56,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--network", default=settings.CARDANO_NETWORK)
     ap.add_argument("--all-bands", action="store_true",
-                    help="also re-score Low/none rows (cosmetic, slower)")
+                    help="also re-score Informational/none rows (cosmetic, slower)")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (smoke test)")
     ap.add_argument("--apply", action="store_true", help="insert corrected rows")
     ap.add_argument("--count-only", action="store_true", help="print the row count and exit")
