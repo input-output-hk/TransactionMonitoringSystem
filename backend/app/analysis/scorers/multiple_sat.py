@@ -64,7 +64,7 @@ All tunable constants live in ``config/detection.yaml`` under the
 
 import logging
 from functools import lru_cache
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
@@ -106,6 +106,36 @@ _BOOT = _CFG["bootstrap_anchors"]
 # maximally lazy against itself and spuriously floor it to High. n_inputs is
 # likewise left on the default resolution.
 _PER_SCRIPT_ONLY = ("per_script",)
+
+# The baselines _score_script draws on, as (feature, scope_types_allowed). The
+# value-extraction axis is per_script-only (see _PER_SCRIPT_ONLY above); the
+# structural / lazy-validator axes use the default per_script->global->bootstrap
+# (scope_types_allowed=None). Keeping the policy here, declaratively, is the one
+# place that says "which signals are calibrated per-script and which are absolute".
+_BASELINE_SPECS: Tuple[Tuple[str, Optional[Tuple[str, ...]]], ...] = (
+    ("net_value_out_of_script", _PER_SCRIPT_ONLY),
+    ("n_assets_out_of_script", _PER_SCRIPT_ONLY),
+    ("exunits_per_script_input", None),
+    ("n_inputs_same_script", None),
+    ("sender_recurrence", None),
+)
+
+
+def _resolve_baselines(
+    representative_addr: str, network: str,
+) -> Dict[str, Tuple[float, float, str]]:
+    """Resolve every baseline in ``_BASELINE_SPECS`` for one script group.
+
+    Returns ``feature -> (p50, p99, source)``. Each feature's per-script vs
+    absolute resolution policy comes from its ``scope_types_allowed`` entry.
+    """
+    return {
+        feature: _resolve(
+            feature, "per_script", representative_addr, network,
+            _BOOT, feature, scope_types_allowed=allowed,
+        )
+        for feature, allowed in _BASELINE_SPECS
+    }
 
 
 _ALLOWLIST: Dict[str, Tuple[str, ...]] = _load_network_map(
@@ -503,30 +533,14 @@ class MultipleSatScorer(BaseScorer):
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
         # Per-script baselines still keyed by full address; use the
-        # representative address picked from the group.
-        p50_nv, p99_nv, bl_nv = _resolve(
-            "net_value_out_of_script", "per_script", representative_addr, network,
-            _BOOT, "net_value_out_of_script", scope_types_allowed=_PER_SCRIPT_ONLY,
-        )
-        p50_na, p99_na, bl_na = _resolve(
-            "n_assets_out_of_script", "per_script", representative_addr, network,
-            _BOOT, "n_assets_out_of_script", scope_types_allowed=_PER_SCRIPT_ONLY,
-        )
-        # exunits + n_inputs keep the original per_script->global->bootstrap
-        # resolution. exunits is an absolute lazy-validator signal (see
-        # _PER_SCRIPT_ONLY) and must NOT be calibrated per-script.
-        p50_ex, p99_ex, bl_ex = _resolve(
-            "exunits_per_script_input", "per_script", representative_addr, network,
-            _BOOT, "exunits_per_script_input",
-        )
-        p50_ni, p99_ni, bl_ni = _resolve(
-            "n_inputs_same_script", "per_script", representative_addr, network,
-            _BOOT, "n_inputs_same_script",
-        )
-        p50_rc, p99_rc, bl_rc = _resolve(
-            "sender_recurrence", "per_script", representative_addr, network,
-            _BOOT, "sender_recurrence",
-        )
+        # representative address picked from the group. Per-feature resolution
+        # policy (per_script-only vs absolute) lives in _BASELINE_SPECS.
+        bl = _resolve_baselines(representative_addr, network)
+        p50_nv, p99_nv, bl_nv = bl["net_value_out_of_script"]
+        p50_na, p99_na, bl_na = bl["n_assets_out_of_script"]
+        p50_ex, p99_ex, bl_ex = bl["exunits_per_script_input"]
+        p50_ni, p99_ni, bl_ni = bl["n_inputs_same_script"]
+        p50_rc, p99_rc, bl_rc = bl["sender_recurrence"]
 
         # Extraction is value-agnostic: take the stronger of the lovelace and
         # the native-asset axis. NFT-marketplace double-sat exploits drain
