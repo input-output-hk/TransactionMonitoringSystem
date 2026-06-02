@@ -31,6 +31,7 @@ def _minimal_valid_yaml() -> str:
             lazy_validator_threshold: 0.8
             lazy_validator_floor: 60.0
             lazy_validator_extraction_min: 0.05
+            per_script_extraction_headroom: 3.0
             uniform_sweep_guard:
               enabled: true
               require_uniform_redeemer: true
@@ -115,7 +116,6 @@ class TestLoader:
 
     def test_env_override_honoured(self, tmp_path, monkeypatch):
         sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
-        from pathlib import Path
         # The resolved config_dir must match our tmp_path.
         assert sc._config_dir() == tmp_path / "config"
 

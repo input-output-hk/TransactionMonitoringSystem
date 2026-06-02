@@ -53,10 +53,12 @@ guard is config-gated under ``uniform_sweep_guard`` so each leg
 (uniform-redeemer, no-return, min-inputs) can be loosened independently.
 
 Extraction sanity gate: the floor additionally requires
-``s_extraction > lazy_validator_extraction_min``. Double-satisfaction by
-definition needs value to leave the script; state-machine contracts that
-consume their own UTxOs and write state back have ``s_extraction = 0``
-and are not exploits even when execution is cheap.
+``s_extraction_floor > lazy_validator_extraction_min`` (the UN-widened
+extraction, so the per-script headroom in ``_extraction_anchor`` cannot weaken
+this high-confidence path). Double-satisfaction by definition needs value to
+leave the script; state-machine contracts that consume their own UTxOs and
+write state back have ``s_extraction_floor = 0`` and are not exploits even when
+execution is cheap.
 
 All tunable constants live in ``config/detection.yaml`` under the
 ``scorers.multiple_sat`` section.
@@ -88,6 +90,9 @@ EPSILON = 1e-6
 _CFG = _get_cfg("multiple_sat")
 _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
+# Per-script headroom for the value-extraction axis. See _extraction_anchor and
+# config/detection.yaml multiple_sat.per_script_extraction_headroom.
+_HEADROOM = float(_CFG["per_script_extraction_headroom"])
 
 # The VALUE-extraction axis (net_value / n_assets out of the script) resolves
 # per-script then drops straight to the bootstrap anchor, NEVER the global tier.
@@ -136,6 +141,24 @@ def _resolve_baselines(
         )
         for feature, allowed in _BASELINE_SPECS
     }
+
+
+def _extraction_anchor(p50: float, p99: float, source: str) -> float:
+    """Upper normalise() anchor for a value-extraction feature, with per-script
+    headroom.
+
+    The extraction features are discrete and low-cardinality, so a per-script
+    p99 often sits ~1 above p50 (e.g. n_assets p50=2, p99=3) and normalise()
+    saturates on the contract's common upper-normal value. When a per-script
+    baseline is in use, widen the saturation point to
+    ``p50 + (p99 - p50) * _HEADROOM`` so only extraction well above the
+    contract's own normal range scores. Bootstrap/global anchors are returned
+    unchanged, keeping rare/novel scripts on the conservative floor (CTF-01
+    recall). Degenerate p99 <= p50 is left as-is for normalise() to handle.
+    """
+    if source == "per_script" and p99 > p50:
+        return p50 + (p99 - p50) * _HEADROOM
+    return p99
 
 
 _ALLOWLIST: Dict[str, Tuple[str, ...]] = _load_network_map(
@@ -546,9 +569,24 @@ class MultipleSatScorer(BaseScorer):
         # the native-asset axis. NFT-marketplace double-sat exploits drain
         # native assets while the script's lovelace position barely moves;
         # taking max lets either axis carry the signal without dilution.
-        s_extraction_lov = normalise(net_value, p50=p50_nv, p99=p99_nv)
-        s_extraction_assets = normalise(float(n_assets_out), p50=p50_na, p99=p99_na)
+        # Per-script anchors get headroom (see _extraction_anchor) so an
+        # established contract's normal upper-range extraction does not saturate;
+        # bootstrap anchors are used as-is.
+        s_extraction_lov = normalise(
+            net_value, p50=p50_nv, p99=_extraction_anchor(p50_nv, p99_nv, bl_nv),
+        )
+        s_extraction_assets = normalise(
+            float(n_assets_out), p50=p50_na, p99=_extraction_anchor(p50_na, p99_na, bl_na),
+        )
         s_extraction = max(s_extraction_lov, s_extraction_assets)
+        # Un-widened extraction for the lazy-validator floor gate only, so the
+        # High-confidence floor's recall is independent of the per-script
+        # headroom (a cheap-validator low-value exploit must still floor even on
+        # an established contract).
+        s_extraction_floor = max(
+            normalise(net_value, p50=p50_nv, p99=p99_nv),
+            normalise(float(n_assets_out), p50=p50_na, p99=p99_na),
+        )
         s_exunits_inv = normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex)
         s_inputs = normalise(float(n_inputs), p50=p50_ni, p99=p99_ni)
         s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
@@ -564,6 +602,9 @@ class MultipleSatScorer(BaseScorer):
             s_extraction = 0.0
             s_extraction_lov = 0.0
             s_extraction_assets = 0.0
+            # s_extraction_floor is intentionally NOT zeroed: it feeds only the
+            # lazy-validator floor, whose gate begins with `not allowlisted`, so
+            # it is never consulted for an allowlisted script anyway.
         else:
             w_ex = float(_W["extraction"])
             w_eu = float(_W["exunits_inv"])
@@ -612,7 +653,9 @@ class MultipleSatScorer(BaseScorer):
             not allowlisted
             and not uniform_sweep
             and s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
-            and s_extraction > _LAZY_VALIDATOR_EXTRACTION_MIN
+            # Un-widened extraction: the floor is the high-confidence lazy-
+            # validator path; the per-script headroom must not weaken it.
+            and s_extraction_floor > _LAZY_VALIDATOR_EXTRACTION_MIN
         )
         if floor_applies:
             final = max(final, _LAZY_VALIDATOR_FLOOR)
