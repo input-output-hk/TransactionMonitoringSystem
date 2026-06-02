@@ -342,7 +342,7 @@ def test_archive_accepts_valid_api_key(client, monkeypatch):
 
 def test_list_filters_by_date_range(client, auth_open, store):
     """The from/to query params must constrain archived_at on the list."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
     older = datetime(2026, 1, 1)
     newer = datetime(2026, 4, 1)
     store.rows[("preprod", VALID_HASH)] = {
@@ -474,6 +474,50 @@ def test_class_scores_list_sql_includes_archived_when_requested():
 
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_list(network="preprod", include_archived=True)
+
+    assert "archived_alerts" not in captured["queries"][0]
+
+
+def test_count_class_scores_sql_excludes_archived_by_default():
+    """count_class_scores shares the list query's WHERE builder, so it must
+    apply the same archive anti-join — otherwise pagination totals would count
+    archived rows the list itself drops."""
+    from unittest.mock import patch
+    from app.db import clickhouse
+
+    captured = {"queries": []}
+
+    class FakeClient:
+        def execute(self, query, params=None):
+            captured["queries"].append(query)
+            return [(0,)]
+
+    with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
+        clickhouse.count_class_scores(
+            network="preprod", risk_band=None, attack_class=None, min_score=0.0,
+        )
+
+    count_sql = captured["queries"][0]
+    assert "archived_alerts" in count_sql
+    assert "NOT IN" in count_sql
+
+
+def test_count_class_scores_sql_includes_archived_when_requested():
+    from unittest.mock import patch
+    from app.db import clickhouse
+
+    captured = {"queries": []}
+
+    class FakeClient:
+        def execute(self, query, params=None):
+            captured["queries"].append(query)
+            return [(0,)]
+
+    with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
+        clickhouse.count_class_scores(
+            network="preprod", risk_band=None, attack_class=None, min_score=0.0,
+            include_archived=True,
+        )
 
     assert "archived_alerts" not in captured["queries"][0]
 
