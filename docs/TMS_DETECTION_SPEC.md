@@ -8,7 +8,7 @@ All scoring uses the continuous 0-100 risk score framework from PolimiDocs (weig
 
 | Score | Risk | Action |
 |-------|------|--------|
-| 0-30 | Low | No action, retained for baseline calibration |
+| 0-30 | Informational | No action, scored-but-not-alerting baseline (renamed from "Low" 2026-06; legacy values still parsed) |
 | 31-59 | Moderate | Flagged for periodic review |
 | 60-79 | High | Queued for analyst review |
 | 80-100 | Critical | Immediate alert |

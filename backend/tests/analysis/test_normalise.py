@@ -47,9 +47,10 @@ class TestNormaliseInverted:
 
 
 class TestScoreToBand:
-    def test_low(self):
-        assert score_to_band(0) == "Low"
-        assert score_to_band(30) == "Low"
+    def test_informational(self):
+        # 0-30 is the "Informational" band (renamed from "Low" 2026-06).
+        assert score_to_band(0) == "Informational"
+        assert score_to_band(30) == "Informational"
 
     def test_moderate(self):
         assert score_to_band(31) == "Moderate"
@@ -143,3 +144,27 @@ class TestResolveScopeTypesAllowed:
         )
         assert source == "global"
         assert (p50, p99) == (1.0, 5.0)
+
+
+class TestRiskBandLegacyAlias:
+    """The 0-30 band was renamed "Low" -> "Informational" (2026-06).
+
+    RiskBand must still parse the legacy "Low" so reads of un-migrated rows
+    don't raise, regardless of deploy/migration ordering.
+    """
+
+    def test_current_label_parses(self):
+        from app.models.transaction import RiskBand
+        assert RiskBand("Informational") is RiskBand.INFORMATIONAL
+
+    def test_legacy_low_maps_to_informational(self):
+        from app.models.transaction import RiskBand
+        assert RiskBand("Low") is RiskBand.INFORMATIONAL
+        # value is the new canonical label, so API responses serialise consistently
+        assert RiskBand("Low").value == "Informational"
+
+    def test_unknown_still_raises(self):
+        import pytest
+        from app.models.transaction import RiskBand
+        with pytest.raises(ValueError):
+            RiskBand("Nonexistent")

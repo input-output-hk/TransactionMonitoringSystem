@@ -136,16 +136,25 @@ BAND_MODERATE_THRESHOLD = 31.0
 # climb (e.g. multiple_sat's uniform_sweep_guard and token_dust's dos_asset_min
 # cap use BAND_MODERATE_MAX; large_value's digits-floor cap uses BAND_LOW_MAX).
 # Encapsulates the off-by-one that would otherwise show up at every cap site.
+# BAND_LOW_MAX is the top of the bottom (Informational) band; the name is kept
+# for the numeric "top of bottom band" role (the client-facing label is set in
+# score_to_band).
 BAND_MODERATE_MAX = BAND_HIGH_THRESHOLD - 1.0
 BAND_LOW_MAX = BAND_MODERATE_THRESHOLD - 1.0
 
 
 def score_to_band(score: float) -> str:
-    """Map a 0-100 score to the interpretive risk band."""
+    """Map a 0-100 score to the interpretive risk band.
+
+    The bottom band (0-30) is "Informational": no action, the scored-but-not-
+    alerting baseline. It was historically labelled "Low", which clients read as
+    a low-grade threat; "Informational" reads as "nothing to act on". Renamed
+    2026-06; legacy "Low" values are still parsed by RiskBand._missing_.
+    """
     if score >= BAND_CRITICAL_THRESHOLD:
         return "Critical"
     if score >= BAND_HIGH_THRESHOLD:
         return "High"
     if score >= BAND_MODERATE_THRESHOLD:
         return "Moderate"
-    return "Low"
+    return "Informational"

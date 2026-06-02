@@ -6,7 +6,7 @@ export type AnalysisStats = {
 	critical_count: number;
 	high_count: number;
 	moderate_count: number;
-	low_count: number;
+	informational_count: number;
 	avg_max_score: number | null;
 	last_analyzed_at: string;
 	// Ingested-but-unscored backlog, computed server-side as a single
