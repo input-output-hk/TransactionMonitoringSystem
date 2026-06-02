@@ -89,6 +89,24 @@ _CFG = _get_cfg("multiple_sat")
 _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
 
+# The VALUE-extraction axis (net_value / n_assets out of the script) resolves
+# per-script then drops straight to the bootstrap anchor, NEVER the global tier.
+# The global distribution of value/assets leaving a script is dominated by
+# legitimate high-volume asset-movers (DEX/marketplace batchers), so a global
+# baseline would learn "extracting 2+ assets is normal" and de-sensitise
+# detection on the rare/novel scripts where one-shot double-satisfaction
+# exploits live (the CTF-01 anchor extracts 2 assets on a 3-tx script).
+# per_script -> bootstrap keeps established contracts judged against their own
+# norm while rare scripts stay on the conservative default.
+#
+# This is applied ONLY to the value axis. exunits_per_script_input feeds the
+# INVERTED lazy-validator signal: "lazy" means near-zero CPU in absolute terms,
+# so it must stay on the absolute bootstrap. A per-script exunits baseline would
+# make a script that consistently does heavy work (its median CPU) look
+# maximally lazy against itself and spuriously floor it to High. n_inputs is
+# likewise left on the default resolution.
+_PER_SCRIPT_ONLY = ("per_script",)
+
 
 _ALLOWLIST: Dict[str, Tuple[str, ...]] = _load_network_map(
     _CFG.get("allowlist_prefixes"),
@@ -488,12 +506,15 @@ class MultipleSatScorer(BaseScorer):
         # representative address picked from the group.
         p50_nv, p99_nv, bl_nv = _resolve(
             "net_value_out_of_script", "per_script", representative_addr, network,
-            _BOOT, "net_value_out_of_script",
+            _BOOT, "net_value_out_of_script", scope_types_allowed=_PER_SCRIPT_ONLY,
         )
         p50_na, p99_na, bl_na = _resolve(
             "n_assets_out_of_script", "per_script", representative_addr, network,
-            _BOOT, "n_assets_out_of_script",
+            _BOOT, "n_assets_out_of_script", scope_types_allowed=_PER_SCRIPT_ONLY,
         )
+        # exunits + n_inputs keep the original per_script->global->bootstrap
+        # resolution. exunits is an absolute lazy-validator signal (see
+        # _PER_SCRIPT_ONLY) and must NOT be calibrated per-script.
         p50_ex, p99_ex, bl_ex = _resolve(
             "exunits_per_script_input", "per_script", representative_addr, network,
             _BOOT, "exunits_per_script_input",

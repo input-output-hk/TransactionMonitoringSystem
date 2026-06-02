@@ -880,6 +880,74 @@ def insert_baselines(rows: List[tuple]):
     )
 
 
+# Baseline feature name -> the multiple_sat evidence JSON key that carries its
+# per-tx value. Only the VALUE-extraction axis is per-script-calibrated (see
+# baselines._MULTIPLE_SAT_PER_SCRIPT_FEATURES for why exunits/n_inputs are
+# excluded). These are computed only at scoring time (they need resolved
+# inputs), so they are not in any ingestion feature table; their values are read
+# back out of the persisted ``tx_class_scores.evidence``. Keys are a fixed
+# allowlist (no user input) so they are safe to interpolate.
+_MULTIPLE_SAT_EVIDENCE_KEYS = (
+    ("net_value_out_of_script", "value_extracted_lovelace"),
+    ("n_assets_out_of_script", "n_assets_extracted"),
+)
+
+
+def query_multiple_sat_extraction_percentiles(
+    network: str, window_days: int, min_samples: int,
+) -> List[Dict[str, Any]]:
+    """Per-script p50/p99 of the multiple_sat extraction features.
+
+    Aggregates the already-persisted ``tx_class_scores.evidence`` over scored
+    (``multiple_sat >= 0``) rows, grouped by the evidence's
+    ``target_script_address``, within the trailing ``window_days``. Only scripts
+    with at least ``min_samples`` scored spends are returned.
+
+    Returns one dict per qualifying script::
+
+        {"script": str, "sample_count": int,
+         "<feature>": (p50, p99), ...}   # one entry per _MULTIPLE_SAT_EVIDENCE_KEYS
+
+    ``quantileExact`` is used for determinism (idempotent recomputes).
+    """
+    # Build the per-feature percentile projections from the fixed key allowlist.
+    select_parts = []
+    for feature, key in _MULTIPLE_SAT_EVIDENCE_KEYS:
+        col = f"JSONExtractInt(evidence, 'multiple_sat', '{key}')"
+        select_parts.append(f"quantileExact(0.50)(toFloat64({col})) AS {feature}_p50")
+        select_parts.append(f"quantileExact(0.99)(toFloat64({col})) AS {feature}_p99")
+    projections = ",\n                ".join(select_parts)
+
+    rows = _get_client().execute(
+        f"""
+        SELECT
+            JSONExtractString(evidence, 'multiple_sat', 'target_script_address') AS script,
+            count() AS cnt,
+            {projections}
+        FROM tx_class_scores FINAL
+        WHERE network = %(network)s
+          AND multiple_sat >= 0
+          AND analyzed_at >= now() - INTERVAL %(days)s DAY
+          AND JSONExtractString(evidence, 'multiple_sat', 'target_script_address') != ''
+        GROUP BY script
+        HAVING cnt >= %(min_samples)s
+        """,
+        {"network": network, "days": window_days, "min_samples": min_samples},
+    )
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        script, cnt = row[0], int(row[1])
+        rec: Dict[str, Any] = {"script": script, "sample_count": cnt}
+        # Remaining columns are (p50, p99) pairs in _MULTIPLE_SAT_EVIDENCE_KEYS order.
+        for i, (feature, _key) in enumerate(_MULTIPLE_SAT_EVIDENCE_KEYS):
+            p50 = float(row[2 + i * 2])
+            p99 = float(row[2 + i * 2 + 1])
+            rec[feature] = (p50, p99)
+        results.append(rec)
+    return results
+
+
 def get_class_scores_list(
     network: str,
     risk_band: Optional[List[str]] = None,
@@ -994,7 +1062,6 @@ def get_class_scores_list(
         )
         for dr in detail_rows:
             tx_details[dr[0]] = {"fee": dr[1], "output_count": dr[2]}
-    keys = (*score_keys, "fee", "output_count")
     results = []
     for row in rows:
         d = dict(zip(score_keys, row))

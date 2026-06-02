@@ -11,7 +11,7 @@ file and the key path, not a deep ``KeyError`` from inside a scorer module.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import logging
 import os
 
@@ -247,6 +247,7 @@ def resolved_or_bootstrap(
     network: str,
     bootstrap: Dict[str, Any],
     bootstrap_key: str,
+    scope_types_allowed: Optional[List[str]] = None,
 ) -> Tuple[float, float, str]:
     """Resolve a baseline, falling back to the scorer's configured bootstrap anchor.
 
@@ -256,13 +257,20 @@ def resolved_or_bootstrap(
     the source as ``"bootstrap"``.
 
     Parameters mirror ``resolve_baseline`` plus:
-        bootstrap:      the scorer's ``bootstrap_anchors`` config sub-dict.
-        bootstrap_key:  the key inside ``bootstrap`` to read when falling back.
+        bootstrap:            the scorer's ``bootstrap_anchors`` config sub-dict.
+        bootstrap_key:        the key inside ``bootstrap`` to read when falling back.
+        scope_types_allowed:  forwarded to ``resolve_baseline`` to restrict which
+                              baseline tiers may be consulted. With
+                              ``["per_script"]`` the global tier is skipped, so a
+                              per-script miss drops straight to ``bootstrap``.
 
     Returns ``(p50, p99, source)`` where ``source`` is one of
     ``"per_script" | "per_policy" | "global" | "bootstrap"``.
     """
-    p50, p99, source = resolve_baseline(feature, scope_type, scope_id, network)
+    p50, p99, source = resolve_baseline(
+        feature, scope_type, scope_id, network,
+        scope_types_allowed=scope_types_allowed,
+    )
     if source == "missing":
         p50, p99 = anchor(bootstrap, bootstrap_key)
         source = "bootstrap"
