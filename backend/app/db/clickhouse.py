@@ -952,6 +952,15 @@ def query_multiple_sat_extraction_percentiles(
     return results
 
 
+# The nine attack-class score columns on tx_class_scores, in canonical order.
+# Shared by the score-query builders below (filter validation, score_keys, and
+# the per-class stats aggregation) so the list stays defined in one place.
+_CLASS_COLS = (
+    "token_dust", "large_value", "large_datum", "multiple_sat",
+    "front_running", "sandwich", "circular", "fake_token", "phishing",
+)
+
+
 def _score_filter_conditions(
     network: str,
     risk_band: Optional[List[str]],
@@ -967,10 +976,13 @@ def _score_filter_conditions(
     Both ``get_class_scores_list`` and ``count_class_scores`` must apply the
     exact same filter, or pagination totals drift from the rows actually shown.
     Keeping the clause in one place guarantees they stay in sync. ``attack_class``
-    is assumed already validated against ``_CLASS_COLS`` by the caller. Returns
-    ``(conditions, params)``; the caller joins with " AND " and adds any
-    query-specific params (e.g. limit/offset).
+    is validated against ``_CLASS_COLS`` here (ValueError on an unknown value),
+    so callers cannot inject an unvalidated class. Returns ``(conditions,
+    params)``; the caller joins with " AND " and adds any query-specific params
+    (e.g. limit/offset).
     """
+    if attack_class and attack_class not in _CLASS_COLS:
+        raise ValueError(f"Invalid attack_class '{attack_class}'")
     conditions = ["network = %(network)s"]
     params: Dict[str, Any] = {"network": network}
     if risk_band:
@@ -1033,17 +1045,11 @@ def get_class_scores_list(
     analyzed_from / analyzed_to: inclusive lower / exclusive upper bound on
     ``analyzed_at`` (datetime).
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
     _ALLOWED_SORTS = {
         "score": "max_score DESC, analyzed_at DESC",
         "date": "analyzed_at DESC, max_score DESC",
     }
     order_clause = _ALLOWED_SORTS.get(sort, _ALLOWED_SORTS["score"])
-    if attack_class and attack_class not in _CLASS_COLS:
-        raise ValueError(f"Invalid attack_class '{attack_class}'")
 
     conditions, params = _score_filter_conditions(
         network, risk_band, attack_class, min_score,
@@ -1153,13 +1159,6 @@ def count_class_scores(
         ``(network, tx_hash)`` is present in ``archived_alerts`` — keeps the
         count aligned with the rows actually surfaced by the list query.
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
-    if attack_class and attack_class not in _CLASS_COLS:
-        raise ValueError(f"Invalid attack_class '{attack_class}'")
-
     conditions, params = _score_filter_conditions(
         network, risk_band, attack_class, min_score,
         analyzed_from, analyzed_to, include_archived,
@@ -1208,10 +1207,6 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
     include_archived: when False (default), exclude rows whose (network, tx_hash)
         has been admin-archived so band counts reflect only currently-flagged txs.
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
     # Build per-class aggregation: count of scored (>= 0), avg, max
     agg_parts = []
     for col in _CLASS_COLS:
