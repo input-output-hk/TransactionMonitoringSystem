@@ -1,7 +1,6 @@
 """Unit tests for the analysis engine orchestrator."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from app.analysis.engine import _score_transaction, _build_scorers, _CLASS_NAMES
 
 
@@ -38,7 +37,7 @@ class TestScoreTransaction:
         result = _score_transaction(row, _build_scorers())
         assert result["max_score"] == 0.0
         assert result["max_class"] == ""
-        assert result["risk_band"] == "Low"
+        assert result["risk_band"] == "Informational"
 
     def test_metadata_dict_parsed(self):
         """Dict metadata should be usable by scorers."""

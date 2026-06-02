@@ -11,7 +11,7 @@ import { fetchWithAuth, getNetwork } from "./fetch";
 
 /* ---------- Backend types (mirrors OpenAPI) ---------- */
 
-type ApiRiskBand = "Low" | "Moderate" | "High" | "Critical";
+type ApiRiskBand = "Informational" | "Moderate" | "High" | "Critical";
 
 type ApiAnalysisResult = {
 	tx_hash: string;
@@ -44,14 +44,14 @@ export type RiskAlertsPage = {
 /* ---------- Mapping helpers ---------- */
 
 const RISK_BAND_TO_SEVERITY: Record<ApiRiskBand, Severity> = {
-	Low: "LOW",
+	Informational: "INFORMATIONAL",
 	Moderate: "MEDIUM",
 	High: "HIGH",
 	Critical: "CRITICAL",
 };
 
 const SEVERITY_TO_RISK_BAND: Record<Severity, ApiRiskBand> = {
-	LOW: "Low",
+	INFORMATIONAL: "Informational",
 	MEDIUM: "Moderate",
 	HIGH: "High",
 	CRITICAL: "Critical",
@@ -95,7 +95,7 @@ function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 		fullHash: r.tx_hash,
 		date: formatAnalyzedAt(r.analyzed_at),
 		attackType,
-		severity: RISK_BAND_TO_SEVERITY[r.risk_band] ?? "LOW",
+		severity: RISK_BAND_TO_SEVERITY[r.risk_band] ?? "INFORMATIONAL",
 		riskScore: Math.round(r.max_score),
 		feeAda: r.fee !== null ? r.fee / LOVELACE_PER_ADA : 0,
 		outputs: r.output_count ?? 0,

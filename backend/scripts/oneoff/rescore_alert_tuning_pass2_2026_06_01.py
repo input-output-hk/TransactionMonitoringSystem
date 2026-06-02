@@ -67,10 +67,11 @@ def main() -> None:
     # Scope: only rows the three re-run scorers can move, plus large_datum
     # resurrection candidates (every tx carrying a sizeable inline datum, found
     # via raw_data length, regardless of current max_class). Everything else is
-    # provably unchanged and skipped. large_value/token_dust Low-max rows are
-    # excluded because capping/suppressing a Low score cannot change its band.
+    # provably unchanged and skipped. large_value/token_dust bottom-band rows are
+    # excluded because capping/suppressing a bottom-band score cannot change its
+    # band. ('Low' is the pre-2026-06 label for the Informational band.)
     scope = """network=%(n)s AND (
-        (max_class IN ('large_value','token_dust') AND risk_band != 'Low')
+        (max_class IN ('large_value','token_dust') AND risk_band NOT IN ('Informational', 'Low'))
         OR max_class IN ('circular','large_datum')
         OR tx_hash IN (
             SELECT tx_hash FROM transactions

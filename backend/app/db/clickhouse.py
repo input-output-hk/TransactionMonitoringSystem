@@ -1234,7 +1234,9 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
                countIf(lower(risk_band) = 'critical') AS critical_count,
                countIf(lower(risk_band) = 'high') AS high_count,
                countIf(lower(risk_band) = 'moderate') AS moderate_count,
-               countIf(lower(risk_band) = 'low') AS low_count,
+               -- 'low' is the pre-2026-06 label for the Informational band;
+               -- counted here too so the stat stays correct mid-migration.
+               countIf(lower(risk_band) IN ('informational', 'low')) AS informational_count,
                avg(max_score) AS avg_max_score,
                max(analyzed_at) AS last_analyzed_at,
                {agg_sql}
@@ -1259,7 +1261,7 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
     result: Dict[str, Any] = {
         "total": row[idx], "critical_count": row[idx+1],
         "high_count": row[idx+2], "moderate_count": row[idx+3],
-        "low_count": row[idx+4], "avg_max_score": _safe(row[idx+5]),
+        "informational_count": row[idx+4], "avg_max_score": _safe(row[idx+5]),
         "last_analyzed_at": row[idx+6],
     }
     idx = 7

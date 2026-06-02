@@ -71,7 +71,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--min-band",
-        choices=["Low", "Moderate", "High", "Critical"],
+        choices=["Informational", "Moderate", "High", "Critical"],
         default=None,
         help=(
             "Restrict to rows at or above this risk band. Useful when you "
@@ -128,9 +128,9 @@ def main() -> None:
         else "AND max_class != '' AND max_score >= 1"
     )
     # Risk-band filter via the in-table column. Bands are an ordered enum
-    # (Low < Moderate < High < Critical); we encode the order in a fixed
-    # dict so a future band rename is a one-line change.
-    _BAND_ORDER = {"Low": 0, "Moderate": 1, "High": 2, "Critical": 3}
+    # (Informational < Moderate < High < Critical); we encode the order in a
+    # fixed dict so a future band rename is a one-line change.
+    _BAND_ORDER = {"Informational": 0, "Moderate": 1, "High": 2, "Critical": 3}
     if args.min_band:
         keep = [b for b, n in _BAND_ORDER.items() if n >= _BAND_ORDER[args.min_band]]
         keep_sql = ", ".join(f"'{b}'" for b in keep)

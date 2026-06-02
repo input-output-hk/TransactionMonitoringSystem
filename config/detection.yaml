@@ -299,7 +299,8 @@ scorers:
     # Digits is the only reliable signal for this class (see weights). When the
     # quantity-digits sub-score is at or below this floor the quantity is at or
     # below the median normal supply (p50 = 13 digits, ~10^13), i.e. not a
-    # large-quantity outlier; the score is then capped at the top of Low so the
+    # large-quantity outlier; the score is then capped at the top of the
+    # Informational band so the
     # secondary axes (inverted-ADA, value-CBOR) cannot alone push a normal
     # min-ADA token UTxO into Moderate. A genuine overflow toward the 19-digit
     # int64 ceiling has a high digits sub-score and is unaffected. Set just
