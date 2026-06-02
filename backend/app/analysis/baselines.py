@@ -53,9 +53,13 @@ _TX_FEATURES = [
 # does heavy work look "lazy" relative to its own median and spuriously floor it
 # to High. n_inputs is left on the absolute bootstrap for the same reason. Both
 # stay on the original per_script->global->bootstrap resolution.
+#
+# Derived from clickhouse._MULTIPLE_SAT_EVIDENCE_KEYS, the single source of truth
+# for which value features are per-script-calibrated (and which evidence JSON key
+# carries each). Deriving rather than re-listing means the percentile query and
+# this emitter cannot drift out of sync.
 _MULTIPLE_SAT_PER_SCRIPT_FEATURES = [
-    "net_value_out_of_script",
-    "n_assets_out_of_script",
+    feature for feature, _evidence_key in clickhouse._MULTIPLE_SAT_EVIDENCE_KEYS
 ]
 
 # Allowed table names and column names for SQL identifier interpolation
@@ -140,6 +144,13 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
     BASELINE_MIN_SAMPLES are skipped by the query, so rare/novel scripts (where
     one-shot double-sat exploits live) keep falling back to the conservative
     bootstrap anchor.
+
+    Cold-start note: the source (evidence) is produced BY scoring, which consumes
+    these baselines, so on a fresh DB the correct order is reclassify (populate
+    evidence on bootstrap) -> recompute baselines (this) -> reclassify (apply the
+    per-script de-saturation). It is stable across cycles: an asset-extracting
+    spend keeps scoring >= 0 and so keeps emitting evidence even after it
+    de-saturates, so the per-script population does not collapse.
     """
     now = datetime.now(timezone.utc)
     per_script = clickhouse.query_multiple_sat_extraction_percentiles(

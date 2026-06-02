@@ -908,7 +908,11 @@ def query_multiple_sat_extraction_percentiles(
         {"script": str, "sample_count": int,
          "<feature>": (p50, p99), ...}   # one entry per _MULTIPLE_SAT_EVIDENCE_KEYS
 
-    ``quantileExact`` is used for determinism (idempotent recomputes).
+    ``quantileExact`` is used for determinism (idempotent recomputes). It holds
+    each per-script group's values in memory; the 90-day window + daily-batch
+    cadence keep that bounded. If a single hot mainnet script ever makes this a
+    memory concern, switch to a deterministic approximate quantile (preserving
+    idempotency) rather than a tighter window.
     """
     # Build the per-feature percentile projections from the fixed key allowlist.
     select_parts = []
