@@ -484,11 +484,14 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
     from unittest.mock import patch
     from app.db import clickhouse
 
-    captured = {}
+    captured = {"queries": []}
 
     class FakeClient:
         def execute(self, query, params=None):
-            captured["query"] = query
+            # Capture every query: get_class_scores_stats issues the stats query
+            # first, then get_pending_count issues its own. Asserting on the
+            # stats query (the first) avoids checking the unrelated pending one.
+            captured["queries"].append(query)
             # Return a single row matching the schema the parser expects.
             zero_per_class = [0, 0.0, 0.0] * 9
             return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
@@ -496,23 +499,26 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod")
 
-    assert "archived_alerts" in captured["query"]
-    assert "NOT IN" in captured["query"]
+    stats_query = captured["queries"][0]
+    assert "archived_alerts" in stats_query
+    assert "NOT IN" in stats_query
 
 
 def test_class_scores_stats_sql_skips_filter_when_include_archived():
     from unittest.mock import patch
     from app.db import clickhouse
 
-    captured = {}
+    captured = {"queries": []}
 
     class FakeClient:
         def execute(self, query, params=None):
-            captured["query"] = query
+            captured["queries"].append(query)
             zero_per_class = [0, 0.0, 0.0] * 9
             return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
 
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod", include_archived=True)
 
-    assert "archived_alerts" not in captured["query"]
+    # The stats query (first) must omit the archive clause; the later
+    # get_pending_count query is unrelated.
+    assert "archived_alerts" not in captured["queries"][0]
