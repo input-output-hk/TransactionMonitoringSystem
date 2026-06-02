@@ -364,7 +364,7 @@ const ROWS: {
 	feeAda: number;
 	outputs: number;
 }[] = [
-	{ type: "Sandwich", sev: "INFORMATIONAL", riskScore: 38, feeAda: 0.23, outputs: 2 },
+	{ type: "Sandwich", sev: "MEDIUM", riskScore: 38, feeAda: 0.23, outputs: 2 },
 	{ type: "Phishing", sev: "HIGH", riskScore: 74, feeAda: 0.23, outputs: 47 },
 	{
 		type: "Circular",
@@ -387,10 +387,10 @@ const ROWS: {
 		feeAda: 0.21,
 		outputs: 1,
 	},
-	{ type: "Token Dust", sev: "INFORMATIONAL", riskScore: 32, feeAda: 0.21, outputs: 1 },
+	{ type: "Token Dust", sev: "MEDIUM", riskScore: 32, feeAda: 0.21, outputs: 1 },
 	{
 		type: "Front Running",
-		sev: "INFORMATIONAL",
+		sev: "MEDIUM",
 		riskScore: 41,
 		feeAda: 0.34,
 		outputs: 2,
@@ -409,7 +409,7 @@ const ROWS: {
 		feeAda: 0.21,
 		outputs: 1,
 	},
-	{ type: "Circular", sev: "INFORMATIONAL", riskScore: 36, feeAda: 0.18, outputs: 2 },
+	{ type: "Circular", sev: "MEDIUM", riskScore: 36, feeAda: 0.18, outputs: 2 },
 ];
 
 export const riskAlerts: RiskAlert[] = ROWS.map((r, i) => ({
