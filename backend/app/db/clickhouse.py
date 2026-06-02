@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
 
@@ -952,6 +952,63 @@ def query_multiple_sat_extraction_percentiles(
     return results
 
 
+def _score_filter_conditions(
+    network: str,
+    risk_band: Optional[List[str]],
+    attack_class: Optional[str],
+    min_score: float,
+    analyzed_from: Optional[Any],
+    analyzed_to: Optional[Any],
+    include_archived: bool,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Build the shared WHERE conditions + params for the class-scores list and
+    count queries.
+
+    Both ``get_class_scores_list`` and ``count_class_scores`` must apply the
+    exact same filter, or pagination totals drift from the rows actually shown.
+    Keeping the clause in one place guarantees they stay in sync. ``attack_class``
+    is assumed already validated against ``_CLASS_COLS`` by the caller. Returns
+    ``(conditions, params)``; the caller joins with " AND " and adds any
+    query-specific params (e.g. limit/offset).
+    """
+    conditions = ["network = %(network)s"]
+    params: Dict[str, Any] = {"network": network}
+    if risk_band:
+        # One named placeholder per value so the query is fully parameterized
+        # (no string interpolation of user input); clickhouse-driver does not
+        # expand a Python list into a SQL list automatically.
+        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
+        conditions.append(f"lower(risk_band) IN ({', '.join(placeholders)})")
+        for i, rb in enumerate(risk_band):
+            params[f"risk_band_{i}"] = rb.lower()
+    if attack_class:
+        # Filter by the DOMINANT class (max_class), not "this class has a
+        # non-zero sub-score", so the list view's one-row-per-tx labelling stays
+        # honest (a Phishing tx with a small circular score must not appear under
+        # the Circular filter labelled Phishing).
+        conditions.append("max_class = %(attack_class)s")
+        params["attack_class"] = attack_class
+    if min_score > 0:
+        conditions.append("max_score >= %(min_score)s")
+        params["min_score"] = min_score
+    if analyzed_from is not None:
+        conditions.append("analyzed_at >= %(analyzed_from)s")
+        params["analyzed_from"] = analyzed_from
+    if analyzed_to is not None:
+        conditions.append("analyzed_at < %(analyzed_to)s")
+        params["analyzed_to"] = analyzed_to
+    if not include_archived:
+        # Anti-join via scalar subquery against currently-archived
+        # (network, tx_hash) pairs. ClickHouse 26+ disallows FINAL on a table
+        # inside a JOIN, so a subquery is used instead of a join.
+        conditions.append(
+            "(network, tx_hash) NOT IN ("
+            "SELECT network, tx_hash FROM archived_alerts FINAL"
+            ")"
+        )
+    return conditions, params
+
+
 def get_class_scores_list(
     network: str,
     risk_band: Optional[List[str]] = None,
@@ -988,46 +1045,12 @@ def get_class_scores_list(
     if attack_class and attack_class not in _CLASS_COLS:
         raise ValueError(f"Invalid attack_class '{attack_class}'")
 
-    conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {
-        "network": network, "limit": limit, "offset": offset,
-    }
-    if risk_band:
-        # Generate one named placeholder per value so the query is fully
-        # parameterized (no string interpolation of user input). clickhouse-
-        # driver doesn't expand a Python list into a SQL list automatically.
-        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
-        conditions.append(
-            f"lower(risk_band) IN ({', '.join(placeholders)})"
-        )
-        for i, rb in enumerate(risk_band):
-            params[f"risk_band_{i}"] = rb.lower()
-    if attack_class and attack_class in _CLASS_COLS:
-        # Filter by the DOMINANT class (max_class), not just "this class has
-        # a non-zero sub-score". The list view shows one row per tx with its
-        # dominant attack type, so a stricter filter keeps the UI labelling
-        # honest — otherwise a Phishing tx with a small `circular` score
-        # would appear under the "Circular" filter labelled "Phishing".
-        conditions.append("max_class = %(attack_class)s")
-        params["attack_class"] = attack_class
-    if min_score > 0:
-        conditions.append("max_score >= %(min_score)s")
-        params["min_score"] = min_score
-    if not include_archived:
-        # Anti-join via subquery: NOT IN against the (network, tx_hash) pairs
-        # currently archived. ClickHouse 26+ disallows FINAL on a table inside
-        # a JOIN clause, so we use a scalar subquery instead.
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
-    if analyzed_from is not None:
-        conditions.append("analyzed_at >= %(analyzed_from)s")
-        params["analyzed_from"] = analyzed_from
-    if analyzed_to is not None:
-        conditions.append("analyzed_at < %(analyzed_to)s")
-        params["analyzed_to"] = analyzed_to
+    conditions, params = _score_filter_conditions(
+        network, risk_band, attack_class, min_score,
+        analyzed_from, analyzed_to, include_archived,
+    )
+    params["limit"] = limit
+    params["offset"] = offset
 
     where = " AND ".join(conditions)
     # Query scores first, then batch-fetch tx details separately.
@@ -1137,35 +1160,10 @@ def count_class_scores(
     if attack_class and attack_class not in _CLASS_COLS:
         raise ValueError(f"Invalid attack_class '{attack_class}'")
 
-    conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {"network": network}
-    if risk_band:
-        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
-        conditions.append(
-            f"lower(risk_band) IN ({', '.join(placeholders)})"
-        )
-        for i, rb in enumerate(risk_band):
-            params[f"risk_band_{i}"] = rb.lower()
-    if attack_class and attack_class in _CLASS_COLS:
-        # Mirror the list query's filter: filter by max_class so the count
-        # reflects what would actually be returned (see get_class_scores_list).
-        conditions.append("max_class = %(attack_class)s")
-        params["attack_class"] = attack_class
-    if min_score > 0:
-        conditions.append("max_score >= %(min_score)s")
-        params["min_score"] = min_score
-    if analyzed_from is not None:
-        conditions.append("analyzed_at >= %(analyzed_from)s")
-        params["analyzed_from"] = analyzed_from
-    if analyzed_to is not None:
-        conditions.append("analyzed_at < %(analyzed_to)s")
-        params["analyzed_to"] = analyzed_to
-    if not include_archived:
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
+    conditions, params = _score_filter_conditions(
+        network, risk_band, attack_class, min_score,
+        analyzed_from, analyzed_to, include_archived,
+    )
 
     where = " AND ".join(conditions)
     rows = _get_client().execute(
