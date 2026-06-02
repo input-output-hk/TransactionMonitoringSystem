@@ -9,7 +9,7 @@ are set to 0 (structural detection only).
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.scorer_config import get as _get_cfg
 from app.db import clickhouse
@@ -199,6 +199,33 @@ def _tx_position(client: Any, tx_hash: str, network: str):
     return None
 
 
+def _bracketing_legs(
+    cluster_txs: List[str],
+    pos: Dict[str, Tuple[int, int]],
+    victim_pos: Tuple[int, int],
+) -> Optional[Tuple[str, str, int]]:
+    """Closest attacker leg before the victim and after it, by (slot, block_index).
+
+    Returns ``(tx_a, tx_b, slot_span)`` when the cluster's legs straddle the
+    victim (front before, back after) -- the defining sandwich shape -- or None
+    when they don't (co-occurrence, not a sandwich). ``pos`` maps each neighbour
+    tx_hash to its ``(slot, block_index)`` ordering key.
+
+    Caveat: legacy rows predating the block_index column carry block_index 0
+    (coalesced upstream), so a same-slot group of such rows shares one position
+    and cannot be ordered -- those same-slot sandwiches stay unconfirmable (as
+    before block_index existed), rather than being mis-bracketed.
+    """
+    cluster_pos = [(pos[h], h) for h in cluster_txs if h in pos]
+    before = sorted(p for p in cluster_pos if p[0] < victim_pos)
+    after = sorted(p for p in cluster_pos if p[0] > victim_pos)
+    if not before or not after:
+        return None
+    front_pos, tx_a = before[-1]   # last leg before the victim
+    back_pos, tx_b = after[0]      # first leg after the victim
+    return tx_a, tx_b, abs(back_pos[0] - front_pos[0])
+
+
 def detect_sandwich_pattern(
     tx_hash: str,
     network: str,
@@ -250,24 +277,18 @@ def detect_sandwich_pattern(
             continue
 
         # Temporal bracketing: a sandwich front-runs BEFORE the victim and
-        # back-runs AFTER it. Order by (slot, block_index) so the front/back
-        # ordering is established even within a single block. The attacker
-        # cluster must have at least one leg positioned before the victim AND
-        # one after; co-occurring legs that don't straddle the victim are not a
-        # sandwich (the dominant arbitrage/batcher false positive).
+        # back-runs AFTER it, ordered by (slot, block_index) so the sequence is
+        # established even within a single block. Co-occurring legs that don't
+        # straddle the victim are not a sandwich (the dominant arbitrage/batcher
+        # false positive).
         pos = {r[0]: (r[1], r[2]) for r in neighbor_rows}
         victim_pos = pos.get(tx_hash) or _tx_position(client, tx_hash, network)
         if victim_pos is None:
             continue
-        cluster_pos = [(pos[h], h) for h in cluster_txs if h in pos]
-        before = sorted(p for p in cluster_pos if p[0] < victim_pos)
-        after = sorted(p for p in cluster_pos if p[0] > victim_pos)
-        if not before or not after:
+        legs = _bracketing_legs(cluster_txs, pos, victim_pos)
+        if legs is None:
             continue  # legs do not bracket the victim -> not a sandwich
-        # Closest leg on each side: last before the victim, first after.
-        front_pos, tx_a = before[-1]
-        back_pos, tx_b = after[0]
-        slot_span = abs(back_pos[0] - front_pos[0])
+        tx_a, tx_b, slot_span = legs
 
         # Historical attacker recurrence: count prior sandwich-like
         # patterns from the same first-input address cluster.
