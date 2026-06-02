@@ -741,3 +741,76 @@ class TestPerScriptExtractionBaseline:
         assert result.sub_scores["s_extraction"] == 0.0
         assert result.score < BAND_MODERATE_THRESHOLD
         assert result.baseline_source == "per_script"
+
+
+def _extraction_features(n_assets, lovelace_in_per_input=2_400_000, cpu=10_000_000):
+    """2 script inputs carrying ``n_assets`` distinct native assets that all
+    leave to a wallet, so ``n_assets_out == n_assets`` while inputs stay low
+    (not a uniform sweep). Lovelace nets ~p50 of the planted net_value baseline,
+    so the asset axis drives the score. ``cpu`` per input controls whether the
+    lazy-validator floor engages (low cpu -> lazy).
+    """
+    assets = {f"pol{i}": {f"nft{i}": 1} for i in range(n_assets)}
+    inputs = [
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": lovelace_in_per_input, **assets}},
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": lovelace_in_per_input}},
+    ]
+    out_value = {"lovelace": int(lovelace_in_per_input * 2 * 0.95), **assets}
+    outputs = [{"address": WALLET, "value": out_value}]
+    redeemers = [
+        {"validator": {"index": i, "purpose": "spend"},
+         "executionUnits": {"memory": 5_000_000, "cpu": cpu}}
+        for i in range(2)
+    ]
+    return _features(inputs, outputs, redeemers)
+
+
+# Established-contract baseline: normal extraction is 2-3 assets / ~4.8-9.6 ADA.
+_EST_BASELINES = {
+    ("per_script", "n_assets_out_of_script"): {"p50": 2.0, "p99": 3.0, "sample_count": 1893},
+    ("per_script", "net_value_out_of_script"): {"p50": 4_800_000.0, "p99": 9_600_000.0, "sample_count": 1893},
+}
+
+
+class TestPerScriptExtractionHeadroom:
+    """Per-script extraction anchors get headroom so an established contract's
+    normal upper-range extraction (its common p99 value) does not saturate;
+    rare/novel scripts on the bootstrap anchor stay conservative (CTF-01 recall).
+    """
+
+    def test_per_script_normal_upper_desaturates(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        _plant_baselines(monkeypatch, _EST_BASELINES)
+        # 3 assets == the contract's p99 (its common upper-normal value). With
+        # headroom (anchor 2 + (3-2)*3 = 5) this no longer saturates.
+        result = scorer.score(_extraction_features(3))
+        assert result.sub_scores["s_extraction_assets"] < 1.0
+        assert result.score < BAND_MODERATE_THRESHOLD   # Informational, not an alert
+        assert result.baseline_source == "per_script"
+
+    def test_per_script_anomaly_still_fires(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        _plant_baselines(monkeypatch, _EST_BASELINES)
+        # 8 assets is well above the contract's norm (p99=3) -> saturates -> fires.
+        result = scorer.score(_extraction_features(8))
+        assert result.sub_scores["s_extraction_assets"] == 1.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+
+    def test_bootstrap_unaffected_by_headroom(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # No per-script baseline -> bootstrap (n_assets p99=2). The 2-asset
+        # CTF-01 shape must still saturate; headroom must NOT touch bootstrap.
+        _plant_baselines(monkeypatch, {})
+        result = scorer.score(_extraction_features(2))
+        assert result.sub_scores["s_extraction"] == 1.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+        assert result.baseline_source == "bootstrap"
+
+    def test_lazy_validator_floor_independent_of_headroom(self, scorer, monkeypatch):
+        # Per-script baseline + near-zero CPU (lazy validator) + extraction: the
+        # floor must still fire to High, because its gate uses the un-widened
+        # extraction (headroom must not weaken the high-confidence path).
+        _plant_baselines(monkeypatch, _EST_BASELINES)
+        result = scorer.score(_extraction_features(3, cpu=1))
+        assert "lazy_validator_band_floor" in result.reasons
+        assert result.score >= 60.0

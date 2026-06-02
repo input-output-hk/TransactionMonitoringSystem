@@ -29,6 +29,7 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold",
                       "lazy_validator_threshold", "lazy_validator_floor",
                       "lazy_validator_extraction_min",
+                      "per_script_extraction_headroom",
                       "uniform_sweep_guard.enabled",
                       "uniform_sweep_guard.require_uniform_redeemer",
                       "uniform_sweep_guard.require_no_script_return",

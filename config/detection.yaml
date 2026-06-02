@@ -32,6 +32,18 @@ scorers:
       exunits_inv: 0.28    # exunits_per_script_input, inverted
       inputs: 0.16         # n_inputs_same_script
       recurrence: 0.14     # sender_recurrence
+    # Headroom multiplier applied to the upper anchor of the VALUE-extraction
+    # axis (net_value / n_assets) when, and only when, a PER-SCRIPT baseline is
+    # used. The extraction features are discrete and low-cardinality, so a
+    # per-script p99 often sits ~1 above p50 (e.g. n_assets p50=2, p99=3);
+    # normalise() then saturates on the contract's COMMON upper-normal value
+    # (a 3-asset spend), flagging routine activity. Widening the saturation
+    # point to p50 + (p99-p50)*headroom means only extraction well above the
+    # contract's own normal range scores, while rare/novel scripts on the
+    # conservative bootstrap anchor are unaffected (preserving CTF-01-class
+    # recall). Tune against the per-script extraction distribution; raise to be
+    # more permissive on established contracts, lower to alert sooner.
+    per_script_extraction_headroom: 3.0
     bootstrap_anchors:
       net_value_out_of_script:  { p50: 5_000_000,   p99: 500_000_000 }
       # Distinct native-asset (policy, name) pairs net-leaving the script.
