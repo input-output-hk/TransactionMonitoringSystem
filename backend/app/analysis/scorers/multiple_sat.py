@@ -435,7 +435,11 @@ class MultipleSatScorer(BaseScorer):
         # depends on raw_data.
         spend_payloads = _spend_redeemer_payloads(raw_data)
 
-        best: ScorerResult = ScorerResult()
+        # Start at the "no finding" sentinel (-1) so a suppressed group
+        # (no_finding, score -1) propagates as not-applicable instead of being
+        # masked by a 0.0 default, and a tx with no qualifying script group also
+        # yields -1 rather than a spurious applicable 0.0.
+        best: ScorerResult = ScorerResult(score=-1.0)
 
         for script_key, inps in groups.items():
             n_inputs = len(inps)
@@ -452,7 +456,10 @@ class MultipleSatScorer(BaseScorer):
                 raw_data, outputs, sender_recurrence, network,
                 spend_payloads,
             )
-            if result.score > best.score:
+            # >= (not >) so a suppressed group's no_finding result (score -1)
+            # replaces the -1 init and carries its observability sub_scores
+            # through; a real finding (score >= 0) still wins over any -1.
+            if result.score >= best.score:
                 best = result
 
         return best
@@ -588,6 +595,28 @@ class MultipleSatScorer(BaseScorer):
         # The baseline source reported is the "most specific tier actually used"
         # across the four features. Prefer per_script > per_policy > global > bootstrap.
         bl_source = _dominant_source([bl_nv, bl_na, bl_ex, bl_ni, bl_rc])
+
+        # Suppress benign multi-input script spends that are not double
+        # satisfaction: an owner consolidating their own UTxOs (uniform sweep),
+        # or a tx that returns value TO the script (state continuation, not
+        # extraction). Gated on ``not floor_applies`` so a high-confidence
+        # lazy-validator exploit (already floored to High) is never suppressed,
+        # and the CTF-01 marketplace double-sat (uniform=False, value_returned=0,
+        # Moderate) is unaffected. These two signals are exactly what the
+        # extraction-assets axis cannot distinguish on its own.
+        if not floor_applies and (uniform_sweep or lovelace_out_at_script > 0):
+            return ScorerResult.no_finding(
+                sub_scores={
+                    "s_extraction": round(s_extraction, 4),
+                    "s_exunits_inv": round(s_exunits_inv, 4),
+                    "s_inputs": round(s_inputs, 4),
+                    "s_recurrence": round(s_recurrence, 4),
+                    "n_inputs_same_script": float(n_inputs),
+                    "uniform_sweep": bool(uniform_sweep),
+                    "value_returned_lovelace": int(lovelace_out_at_script),
+                },
+                baseline_source=bl_source,
+            )
 
         reasons = []
         if s_extraction_lov > _REASON_T:

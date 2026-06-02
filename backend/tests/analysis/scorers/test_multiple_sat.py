@@ -487,7 +487,10 @@ class TestUniformSweepGuard:
     normally lifts lazy-validator hits into High is suppressed.
     """
 
-    def test_uniform_sweep_suppresses_lazy_validator_floor(self, scorer):
+    def test_uniform_sweep_suppressed(self, scorer):
+        # A uniform sweep (owner consolidating their own script UTxOs) is not
+        # double satisfaction; it is now suppressed entirely (no finding, -1),
+        # not merely band-capped.
         n = 12  # > min_inputs=10
         inputs = [
             {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
@@ -496,10 +499,9 @@ class TestUniformSweepGuard:
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.sub_scores["uniform_sweep"] is True
         assert result.sub_scores["s_exunits_inv"] > 0.8
-        assert "uniform_script_sweep_guard" in result.reasons
-        assert "lazy_validator_band_floor" not in result.reasons
-        assert result.score < 60.0
+        assert result.score == -1.0
 
     def test_below_min_inputs_does_not_engage_guard(self, scorer):
         # n=4 is the canonical lazy-validator scenario from the existing
@@ -564,10 +566,11 @@ class TestLazyValidatorExtractionGate:
     script" semantics that double-satisfaction requires.
     """
 
-    def test_state_machine_with_zero_extraction_is_not_floored(self, scorer):
-        # 2 inputs from the script, 1 output back to the same script
-        # carrying the consolidated value. Nothing escapes the script,
-        # so s_extraction must be 0 and the floor must NOT engage.
+    def test_state_machine_with_value_returned_suppressed(self, scorer):
+        # 2 inputs from the script, 1 output back to the same script carrying
+        # the consolidated value: value returns to the script (state
+        # continuation, s_extraction = 0), not extraction. Now suppressed
+        # entirely (no finding, -1) rather than scored-and-not-floored.
         inputs = [
             {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
             {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
@@ -580,9 +583,8 @@ class TestLazyValidatorExtractionGate:
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["s_extraction"] == 0.0
-        assert result.sub_scores["s_exunits_inv"] > 0.8
-        assert "lazy_validator_band_floor" not in result.reasons
-        assert result.score < 60.0
+        assert result.sub_scores["value_returned_lovelace"] > 0
+        assert result.score == -1.0
 
     def test_floor_still_fires_on_small_extraction(self, scorer):
         # The canonical low-value-drain case the floor exists for: the
@@ -620,7 +622,7 @@ class TestUniformSweepGuardAndAllowlistInteraction:
     Moderate regardless of allowlist path.
     """
 
-    def test_allowlisted_sweep_caps_at_moderate(self, scorer, monkeypatch):
+    def test_allowlisted_sweep_suppressed(self, scorer, monkeypatch):
         # Inject the sweep script into the preprod allowlist for the
         # duration of this test so the reweight path activates.
         from app.analysis.scorers import multiple_sat as ms_mod
@@ -636,11 +638,8 @@ class TestUniformSweepGuardAndAllowlistInteraction:
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
-        # Both suppression paths fire: the script is allowlisted AND the
-        # tx is a uniform sweep.
-        assert "allowlisted_batch_script" in result.reasons
-        assert "uniform_script_sweep_guard" in result.reasons
-        # The Moderate cap is what keeps the band correct here. Without
-        # the cap, the reweighted s_inputs (saturated for a 12-input
-        # sweep against p99=10) would climb above the High threshold.
-        assert result.score < 60.0
+        # A uniform sweep is suppressed regardless of allowlist status (it can
+        # no longer climb back to High via the allowlist reweight, because it
+        # never reaches scoring).
+        assert result.sub_scores["uniform_sweep"] is True
+        assert result.score == -1.0
