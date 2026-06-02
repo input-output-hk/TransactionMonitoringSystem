@@ -1256,22 +1256,35 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
             return None
         return v
 
-    row = rows[0]
-    idx = 0
+    # Read the single result row by column name rather than positional offsets.
+    # The name list mirrors the SELECT order above: the fixed head columns, then
+    # three aggregate columns (count, avg, max) per class. Zipping into a dict
+    # removes the fragile row[idx+N] / idx+=3 arithmetic that silently breaks if
+    # a SELECT column is added or reordered.
+    _HEAD_COLS = (
+        "total", "critical_count", "high_count", "moderate_count",
+        "informational_count", "avg_max_score", "last_analyzed_at",
+    )
+    agg_cols = [f"{col}_{stat}" for col in _CLASS_COLS for stat in ("count", "avg", "max")]
+    d = dict(zip([*_HEAD_COLS, *agg_cols], rows[0]))
+
     result: Dict[str, Any] = {
-        "total": row[idx], "critical_count": row[idx+1],
-        "high_count": row[idx+2], "moderate_count": row[idx+3],
-        "informational_count": row[idx+4], "avg_max_score": _safe(row[idx+5]),
-        "last_analyzed_at": row[idx+6],
+        "total": d["total"],
+        "critical_count": d["critical_count"],
+        "high_count": d["high_count"],
+        "moderate_count": d["moderate_count"],
+        "informational_count": d["informational_count"],
+        "avg_max_score": _safe(d["avg_max_score"]),
+        "last_analyzed_at": d["last_analyzed_at"],
     }
-    idx = 7
-    per_class = {}
-    for col in _CLASS_COLS:
-        per_class[col] = {
-            "scored_count": row[idx], "avg_score": _safe(row[idx+1]), "max_score": _safe(row[idx+2]),
+    result["per_class"] = {
+        col: {
+            "scored_count": d[f"{col}_count"],
+            "avg_score": _safe(d[f"{col}_avg"]),
+            "max_score": _safe(d[f"{col}_max"]),
         }
-        idx += 3
-    result["per_class"] = per_class
+        for col in _CLASS_COLS
+    }
     result["pending_count"] = get_pending_count(network)
     return result
 
