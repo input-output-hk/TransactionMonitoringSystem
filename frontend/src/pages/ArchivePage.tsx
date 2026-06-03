@@ -14,6 +14,7 @@ import { archiveApi } from "@/lib/api/archive";
 import { useArchivedAlerts } from "@/lib/archive-store";
 import { ATTACK_ICON } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 import {
 	formatAnalyzedAt,
 	nDaysAgoISODate,
@@ -157,7 +158,7 @@ export function ArchivePage() {
 												title="Copy"
 												onClick={(e) => {
 													e.stopPropagation();
-													navigator.clipboard?.writeText(a.tx_hash);
+													copyToClipboard(a.tx_hash);
 												}}
 											>
 												<Copy className="h-3.5 w-3.5" />

@@ -31,6 +31,7 @@ import {
 import { useLatestTransactions, useRecentBlocks } from "@/lib/api/transactions";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 import { formatTimeAgo } from "@/lib/utils/dates";
 import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
@@ -205,7 +206,9 @@ export function AttacksPage() {
 												title="Copy"
 												onClick={(e) => {
 													e.stopPropagation();
-													navigator.clipboard?.writeText(a.id);
+													// Copy the FULL hash, not the short display id — the
+													// id is just the truncated render.
+													copyToClipboard(a.fullHash);
 												}}
 											>
 												<Copy className="h-3.5 w-3.5" />
@@ -412,7 +415,7 @@ function CriticalAlertCard() {
 						title="Copy"
 						onClick={(e) => {
 							e.stopPropagation();
-							navigator.clipboard?.writeText(latest.fullHash);
+							copyToClipboard(latest.fullHash);
 						}}
 					>
 						<Copy className="h-3.5 w-3.5" />

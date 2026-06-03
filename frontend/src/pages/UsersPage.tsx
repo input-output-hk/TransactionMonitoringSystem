@@ -1,5 +1,3 @@
-import { useMemo, useState } from "react";
-import { Copy, Minus, Plus, Trash2 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,10 +25,13 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { USER_ROLES, type ManagedUser, type UserRole } from "@/mocks/users";
-import { addUser, removeUser, useUsers } from "@/lib/users-store";
-import { initials } from "@/lib/utils/strings";
 import { TableFooter } from "@/components/ui/table-footer";
+import { addUser, removeUser, useUsers } from "@/lib/users-store";
+import { copyToClipboard } from "@/lib/utils/clipboard";
+import { initials } from "@/lib/utils/strings";
+import { USER_ROLES, type ManagedUser, type UserRole } from "@/mocks/users";
+import { Copy, Minus, Plus, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
 
 export function UsersPage() {
 	const users = useUsers();
@@ -193,12 +194,10 @@ function AddUserFlow({
 			open={open}
 			onOpenChange={(v) => (v ? onOpenChange(true) : close())}
 		>
-			{/* Same #373D3F frame as the Delete/Restore dialogs so the modal
-			    family stays consistent. Inputs and buttons sit on bg-card
-			    (#292929) for the recessed look. */}
 			<DialogContent
 				showClose={false}
 				className="max-w-md bg-white dark:bg-[#373D3F]"
+				aria-describedby={undefined}
 			>
 				{step === "form" ? (
 					<>
@@ -263,11 +262,7 @@ function AddUserFlow({
 
 						{/* Cancel left, Confirm right — same layout as Delete dialog. */}
 						<DialogFooter className="justify-between">
-							<Button
-								variant="outline"
-								onClick={close}
-								className="bg-card"
-							>
+							<Button variant="outline" onClick={close} className="bg-card">
 								Cancel
 							</Button>
 							<Button
@@ -340,7 +335,9 @@ function InvitationLinkStep({
 					/>
 					<button
 						type="button"
-						onClick={() => navigator.clipboard?.writeText(link)}
+						onClick={() =>
+							copyToClipboard(link, { label: "Invitation link copied" })
+						}
 						className="text-muted-foreground hover:bg-accent hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 rounded-sm p-1.5"
 						title="Copy link"
 					>
