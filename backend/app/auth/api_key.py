@@ -1,9 +1,24 @@
-"""API Key Authentication for FastAPI"""
+"""API Key + session-cookie authentication for FastAPI.
+
+This module unifies two parallel auth mechanisms behind a single
+``verify_api_key`` dependency so existing endpoints don't need to change:
+
+- **API key** via the ``TMS-API-Key`` header — for server-to-server
+  callers (CLI, integrations, the analysis engine talking to itself).
+- **Session cookie** via ``settings.SESSION_COOKIE_NAME`` (default
+  ``tms_session``) — for browser users authenticated through the
+  magic-link flow.
+
+Either credential unlocks the same endpoints. Routes that need *human*
+auth specifically (e.g. ``/api/users``) should use ``require_user`` or
+``require_admin`` from :mod:`app.auth.deps` instead.
+"""
 
 import hmac
 import logging
-from typing import Optional, List
-from fastapi import Security, HTTPException, status
+from typing import List, Optional
+
+from fastapi import HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 
 from app.config import settings
@@ -47,21 +62,43 @@ def is_valid_api_key(candidate: Optional[str]) -> bool:
     return matched
 
 
-async def verify_api_key(api_key: Optional[str] = Security(api_key_header)) -> str:
-    """Verify the API key and return it if valid."""
+async def verify_api_key(
+    request: Request,
+    api_key: Optional[str] = Security(api_key_header),
+) -> str:
+    """Accept either a valid API key OR a valid session cookie.
+
+    Returns a short string identifying the credential used:
+      - ``"dev-mode"`` when no API_KEYS are configured (dev fallback)
+      - the raw API key string when ``TMS-API-Key`` matched
+      - ``"session:<user_id>"`` when a session cookie resolved to a user
+
+    Raises 403 only if neither credential is present/valid. Importing
+    ``lookup_session`` lazily here avoids a circular dependency:
+    ``app.auth.sessions`` already imports from ``app.db.postgres`` which
+    doesn't touch this module.
+    """
     if _dev_mode:
         return "dev-mode"
 
-    if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="API key required. Provide it in the TMS-API-Key header.",
-        )
+    # 1) API key wins if present and valid — preserves the historical
+    #    behaviour for server-to-server callers.
+    if api_key and is_valid_api_key(api_key):
+        return api_key
 
-    if not is_valid_api_key(api_key):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid API key.",
-        )
+    # 2) Otherwise try the session cookie. Imported lazily because the
+    #    sessions module needs the Postgres pool to be initialized.
+    session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if session_id:
+        from app.auth.sessions import lookup_session  # local to dodge cycles
+        user = await lookup_session(session_id)
+        if user:
+            return f"session:{user['id']}"
 
-    return api_key
+    # No credential matched. The 403 message intentionally stays neutral
+    # so an attacker probing different surfaces can't tell whether the
+    # endpoint expected a key vs a session.
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Authentication required.",
+    )
