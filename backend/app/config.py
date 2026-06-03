@@ -157,6 +157,34 @@ class Settings(BaseSettings):
     RAW_STORE_PATH: str = "./data/raw"
     RAW_STORE_ENABLED: bool = True
 
+    # ── Magic-link auth ───────────────────────────────────────────────────
+    # Sessions live in `user_sessions`. Cookie name and
+    # TTL are tunable; defaults match the design doc.
+    SESSION_COOKIE_NAME: str = "tms_session"
+    SESSION_TTL_DAYS: int = 7
+    # Magic-link tokens are short-lived and single-use. 15 min keeps the
+    # interception window narrow while leaving slack for slow mail delivery.
+    MAGIC_LINK_TTL_MINUTES: int = 15
+    # Used to build the verification URL inside outgoing magic-link emails.
+    # In dev this is the local app, in prod the public host behind the tunnel.
+    APP_BASE_URL: str = "http://localhost:8000"
+
+    # ── SMTP (outgoing magic-link emails) ─────────────────────────────────
+    # In dev we run Mailpit on the docker-compose network (`mailpit:1025`,
+    # web UI on 8025). In prod the customer supplies their own server via
+    # these env vars — no code changes needed.
+    SMTP_HOST: str = "localhost"
+    SMTP_PORT: int = 1025
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = False  # implicit TLS (port 465 style)
+    SMTP_USE_STARTTLS: bool = False  # opportunistic STARTTLS upgrade
+    SMTP_FROM_EMAIL: str = "noreply@tms.local"
+    SMTP_FROM_NAME: str = "TMS"
+    # When SMTP_HOST is unset/empty we log the magic link instead of sending
+    # an email — useful for tests and bootstrap before SMTP is configured.
+    SMTP_ENABLED: bool = True
+
     # Logging
     LOG_LEVEL: str = "INFO"
 
