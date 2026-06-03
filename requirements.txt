@@ -11,6 +11,10 @@ websockets>=16.0,<17.0
 clickhouse-driver==0.2.10
 asyncpg==0.31.0
 
+# Email (magic-link auth)
+aiosmtplib==3.0.2
+email-validator==2.2.0  # Pydantic's EmailStr requires this
+
 # Configuration
 python-dotenv==1.2.1
 PyYAML==6.0.3

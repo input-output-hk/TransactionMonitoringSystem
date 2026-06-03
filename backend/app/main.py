@@ -115,6 +115,10 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing databases...")
         await postgres.init_pool()
         await postgres.execute_schema()
+        # Magic-link auth tables (users, magic_link_tokens, user_sessions).
+        # Idempotent + handles legacy `users` table migration.
+        from app.auth.schema import execute_auth_schema
+        await execute_auth_schema()
         clickhouse.init_client()
         clickhouse.execute_schema()
         if settings.RAW_STORE_ENABLED:
