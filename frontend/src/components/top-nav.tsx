@@ -135,8 +135,8 @@ export function TopNav() {
 							<DropdownMenuSeparator />
 							<DropdownMenuItem
 								onSelect={() => {
-									logout();
-									navigate("/signup", { replace: true });
+									void logout();
+									navigate("/login", { replace: true });
 								}}
 								className="justify-end gap-3"
 							>
