@@ -1,15 +1,14 @@
 # Stage 1: build the React/Vite frontend.
-# VITE_TMS_API_KEY is baked into the bundle, so callers in the browser
-# get the right auth header without a separate sign-in flow.
+# Browser-side auth is the magic-link session cookie set by /api/auth/verify
+# — no API key is baked into the bundle. The backend's API_KEYS env stays
+# for server-to-server callers (CLI, integrations) but the SPA never sees it.
 FROM node:22-alpine AS frontend-build
 WORKDIR /frontend
 RUN corepack enable
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
-ARG VITE_TMS_API_KEY
 ARG VITE_NETWORK=preprod
-ENV VITE_TMS_API_KEY=${VITE_TMS_API_KEY}
 ENV VITE_NETWORK=${VITE_NETWORK}
 RUN pnpm build
 
