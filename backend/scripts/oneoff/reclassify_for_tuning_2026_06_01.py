@@ -1,13 +1,19 @@
 """Re-classify alert rows by re-running the FULL analysis engine, applying all
-of the 2026-06-01 detection tuning at once. Meant to be run on the server.
+of the 2026-06-01/02 detection tuning at once. Meant to be run on the server.
 
-Today's changes (all in the live scorers/config already):
-  - token_dust:  gate suppresses sub-dos_asset_min bundles;
-  - large_value: digits-floor cap holds normal-supply UTxOs to Informational;
-  - large_datum: entropy + leaf-concentration + size-backstop gate replaces the
-                 raw byte gate;
-  - sandwich:    net-ADA-profit + non-script-attacker suppression;
-  - circular:    structural-only cycles suppressed.
+The tuning changes this re-score applies (all in the live scorers/config
+already; the 06-02 multiple_sat and sandwich-bracketing work landed a day after
+the original 06-01 set, so older stored rows predate them):
+  - token_dust:   gate suppresses sub-dos_asset_min bundles;
+  - large_value:  digits-floor cap holds normal-supply UTxOs to Informational;
+  - large_datum:  entropy + leaf-concentration + size-backstop gate replaces the
+                  raw byte gate;
+  - sandwich:     temporal bracketing via (slot, block_index) + net-ADA-profit +
+                  non-script-attacker suppression;
+  - circular:     structural-only cycles suppressed;
+  - multiple_sat: per-script value-extraction baselines (skip the global tier) +
+                  per-script extraction headroom + uniform-sweep / value-returned
+                  state-continuation suppression.
 
 This re-runs ``engine._score_transaction`` with the SAME enrichment chain
 ``run_once`` uses (resolved inputs, cycles, sandwich, collisions), so every
