@@ -257,10 +257,13 @@ def main() -> None:
     # keeping the round-trip count low.
     _CHUNK = 500
 
-    corrected = []
+    total = len(feature_rows)
+    processed = 0
     score_drifted = 0
+    inserted = 0
+    partitions: set = set()
 
-    for chunk_start in range(0, len(feature_rows), _CHUNK):
+    for chunk_start in range(0, total, _CHUNK):
         chunk = feature_rows[chunk_start : chunk_start + _CHUNK]
 
         # Resolve input addresses before scoring: raw_data.inputs only carries
@@ -274,6 +277,7 @@ def main() -> None:
         _enrich_cycle_features(chunk, args.network)
         _enrich_sandwich_features(chunk, args.network)
 
+        chunk_results = []
         for feature_row in chunk:
             tx_hash = feature_row["tx_hash"]
             prev_max, prev_class, prev_at = metadata_by_tx[tx_hash]
@@ -283,7 +287,8 @@ def main() -> None:
             # ReplacingMergeTree dedupe kicks in; bump by 1s so the new row
             # wins max(analyzed_at).
             result["analyzed_at"] = prev_at + timedelta(seconds=1)
-            corrected.append(result)
+            chunk_results.append(result)
+            processed += 1
 
             if (
                 round(float(result["max_score"]), 2) != round(float(prev_max), 2)
@@ -296,29 +301,43 @@ def main() -> None:
                     f"{result['max_class'] or '(none)'} ({result['max_score']:.2f})"
                 )
 
-        # Periodic progress line so a 14k-row run doesn't look hung.
-        processed = min(chunk_start + _CHUNK, len(feature_rows))
-        print(f"  ...processed {processed}/{len(feature_rows)} rows", flush=True)
+        # Insert each chunk as it completes rather than buffering the whole
+        # run. Keeps memory flat (one chunk in flight, not N) and makes the
+        # backfill restartable: a crash leaves a consistent partial state since
+        # each re-scored row independently supersedes its old version via the
+        # ReplacingMergeTree, and re-running with --force resumes safely.
+        # Without --apply this stays a dry run and nothing is written.
+        if args.apply:
+            clickhouse.insert_class_scores(chunk_results)
+            inserted += len(chunk_results)
+            partitions.update(
+                r["analyzed_at"].strftime("%Y%m%d") for r in chunk_results
+            )
+
+        print(f"  ...processed {processed}/{total} rows", flush=True)
 
     print(
-        f"\nProcessed {len(corrected)} rows; "
+        f"\nProcessed {processed} rows; "
         f"{score_drifted} had score/class drift, "
-        f"{len(corrected) - score_drifted} unchanged (evidence-only update)."
+        f"{processed - score_drifted} unchanged (evidence-only update)."
     )
 
     if not args.apply:
         print("Dry run. Pass --apply to insert.")
         return
 
-    clickhouse.insert_class_scores(corrected)
     # Force a merge per affected partition so the dedupe takes effect now
-    # instead of waiting for background merges.
-    partitions = sorted({r["analyzed_at"].strftime("%Y%m%d") for r in corrected})
-    for part in partitions:
+    # instead of waiting for background merges. Done once at the end so each
+    # partition is optimised a single time regardless of how many chunks
+    # touched it.
+    for part in sorted(partitions):
         client.execute(
             f"OPTIMIZE TABLE tx_class_scores PARTITION {part} FINAL"
         )
-    print(f"Inserted {len(corrected)} rows; merged partitions: {', '.join(partitions)}")
+    print(
+        f"Inserted {inserted} rows; "
+        f"merged partitions: {', '.join(sorted(partitions))}"
+    )
 
 
 if __name__ == "__main__":

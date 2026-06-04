@@ -20,6 +20,18 @@ protocol_limits:
   max_value_size_bytes: 5000    # maxValueSize: per-output serialized Value CBOR cap
   max_tx_size_bytes: 16384      # maxTxSize: per-transaction serialized size cap
 
+# Cross-class corroboration signal. The risk band is driven solely by the
+# single highest class score (max_score), so a transaction that independently
+# trips two different attack detectors is banded the same as one that trips
+# only the strongest. That agreement is itself evidence worth surfacing. This
+# block does NOT change the band or alerting; it only records how many distinct
+# classes scored at or above corroboration_threshold, so multi-signal
+# transactions are filterable for analyst review (API: min_corroboration).
+# threshold tuned to 40 so a class must be a real partial signal (top of
+# Informational / into Moderate), not noise.
+composite_corroboration:
+  corroboration_threshold: 40.0
+
 scorers:
 
   # ------------------------------------------------------------------
@@ -462,6 +474,19 @@ scorers:
       name: 0.3
       unicode: 0.3
       recipients: 0.5
+    # Impersonating a high-value asset is more dangerous than cloning a meme
+    # coin: a fake stablecoin redirects DeFi collateral that users trust as
+    # worth $1, so an exact-name clone deserves more weight even when its
+    # distribution is still small (the attacker may be staging). The plain
+    # name axis treats every impersonation equally; this amplifies the
+    # identity signal for the curated token names below. multiplier >= 1.0 and
+    # the identity score is capped at 1.0, so it can only raise a score, never
+    # lower a detection. names must match the registry token names in
+    # backend/app/analysis/external.py (currently the stablecoins iUSD/DJED and
+    # the Djed reserve coin SHEN); extend as the registry gains USDM/USDA/USDC.
+    critical_assets:
+      multiplier: 1.8
+      names: ["iUSD", "DJED", "SHEN"]
 
   # ------------------------------------------------------------------
   phishing:

@@ -148,6 +148,18 @@ class ClassScoreResult(BaseModel):
     )
     analysis_version: str = ""
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    corroboration_count: int = Field(
+        0,
+        description=(
+            "Number of distinct attack classes that independently scored at or "
+            "above the corroboration threshold. A flag for analyst triage only; "
+            "does not affect risk_band."
+        ),
+    )
+    corroborating_classes: str = Field(
+        "",
+        description="Comma-separated names of the corroborating classes.",
+    )
     fee: Optional[int] = Field(None, description="Transaction fee in lovelace")
     output_count: Optional[int] = Field(None, description="Number of transaction outputs")
     archived: Optional[Dict[str, Any]] = Field(

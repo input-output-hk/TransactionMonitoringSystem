@@ -2,6 +2,22 @@
 
 from unittest.mock import patch
 from app.analysis.engine import _score_transaction, _build_scorers, _CLASS_NAMES
+from app.analysis.normalise import score_to_band
+from app.analysis.scorers.base import ScorerResult
+
+
+class _FixedScorer:
+    """Test double that gates open and returns a fixed score for a class."""
+
+    def __init__(self, name, score):
+        self.name = name
+        self._score = score
+
+    def gate(self, features):
+        return True
+
+    def score(self, features):
+        return ScorerResult(score=self._score)
 
 
 def _make_row(tx_hash="tx01", metadata=None, raw_data=None):
@@ -62,6 +78,39 @@ class TestScoreTransaction:
         for field in ("tx_hash", "network", "max_score", "max_class",
                        "risk_band", "sub_scores", "analysis_version", "analyzed_at"):
             assert field in result
+
+
+class TestCorroboration:
+    def test_counts_only_classes_above_threshold(self):
+        """corroboration_count = number of distinct classes at/above the
+        threshold; corroborating_classes lists them sorted. A sub-threshold
+        class is excluded."""
+        row = _make_row()
+        scorers = [
+            _FixedScorer("sandwich", 50.0),     # >= 40 -> counts
+            _FixedScorer("token_dust", 45.0),   # >= 40 -> counts
+            _FixedScorer("circular", 10.0),     # < 40 -> excluded
+        ]
+        result = _score_transaction(row, scorers)
+        assert result["corroboration_count"] == 2
+        assert result["corroborating_classes"] == "sandwich,token_dust"
+
+    def test_single_class_not_corroborated(self):
+        row = _make_row()
+        result = _score_transaction(row, [_FixedScorer("sandwich", 90.0)])
+        assert result["corroboration_count"] == 1
+        assert result["corroborating_classes"] == "sandwich"
+
+    def test_corroboration_does_not_change_band(self):
+        """Two corroborating classes both in the Moderate range must NOT
+        escalate the band: risk_band stays exactly score_to_band(max_score).
+        This pins Option B (flag-only) against any future regression that wires
+        corroboration into banding."""
+        row = _make_row()
+        scorers = [_FixedScorer("sandwich", 50.0), _FixedScorer("token_dust", 45.0)]
+        result = _score_transaction(row, scorers)
+        assert result["max_score"] == 50.0
+        assert result["risk_band"] == score_to_band(result["max_score"]) == "Moderate"
 
 
 class TestBuildScorers:
