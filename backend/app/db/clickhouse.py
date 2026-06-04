@@ -408,6 +408,8 @@ def execute_schema():
                 risk_band        String,
                 sub_scores       String,
                 evidence         String DEFAULT '{}',
+                corroboration_count   UInt8 DEFAULT 0,
+                corroborating_classes String DEFAULT '',
                 analysis_version String,
                 analyzed_at      DateTime,
                 INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
@@ -420,6 +422,16 @@ def execute_schema():
 
         client.execute(
             "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS evidence String DEFAULT '{}'"
+        )
+        # Cross-class corroboration flag (additive; see engine.py). Existing
+        # rows default to 0 / '' until re-scored.
+        client.execute(
+            "ALTER TABLE tx_class_scores "
+            "ADD COLUMN IF NOT EXISTS corroboration_count UInt8 DEFAULT 0"
+        )
+        client.execute(
+            "ALTER TABLE tx_class_scores "
+            "ADD COLUMN IF NOT EXISTS corroborating_classes String DEFAULT ''"
         )
 
         # Admin-curated archive of flagged transactions known to be false
@@ -775,6 +787,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
             token_dust, large_value, large_datum, multiple_sat,
             front_running, sandwich, circular, fake_token, phishing,
             max_score, max_class, risk_band, sub_scores, evidence,
+            corroboration_count, corroborating_classes,
             analysis_version, analyzed_at
         ) VALUES
         """,
@@ -789,6 +802,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
                 r["max_score"], r["max_class"], r["risk_band"],
                 json.dumps(r.get("sub_scores", {})),
                 json.dumps(r.get("evidence", {}), default=str),
+                r.get("corroboration_count", 0), r.get("corroborating_classes", ""),
                 r["analysis_version"], r["analyzed_at"],
             )
             for r in results
@@ -804,6 +818,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
                max_score, max_class, risk_band, sub_scores, evidence,
+               corroboration_count, corroborating_classes,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE tx_hash = %(tx_hash)s
@@ -818,6 +833,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
         "token_dust", "large_value", "large_datum", "multiple_sat",
         "front_running", "sandwich", "circular", "fake_token", "phishing",
         "max_score", "max_class", "risk_band", "sub_scores", "evidence",
+        "corroboration_count", "corroborating_classes",
         "analysis_version", "analyzed_at",
     )
     result = dict(zip(keys, rows[0]))
@@ -969,6 +985,7 @@ def _score_filter_conditions(
     analyzed_from: Optional[Any],
     analyzed_to: Optional[Any],
     include_archived: bool,
+    min_corroboration: int = 0,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """Build the shared WHERE conditions + params for the class-scores list and
     count queries.
@@ -1003,6 +1020,12 @@ def _score_filter_conditions(
     if min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
+    if min_corroboration > 0:
+        # Multi-signal filter: only transactions where at least this many
+        # distinct classes independently corroborated. Flag-only; orthogonal
+        # to risk_band / max_score.
+        conditions.append("corroboration_count >= %(min_corroboration)s")
+        params["min_corroboration"] = min_corroboration
     if analyzed_from is not None:
         conditions.append("analyzed_at >= %(analyzed_from)s")
         params["analyzed_from"] = analyzed_from
@@ -1032,6 +1055,7 @@ def get_class_scores_list(
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
+    min_corroboration: int = 0,
 ) -> List[Dict[str, Any]]:
     """Return multi-class score rows with optional filters.
 
@@ -1053,7 +1077,7 @@ def get_class_scores_list(
 
     conditions, params = _score_filter_conditions(
         network, risk_band, attack_class, min_score,
-        analyzed_from, analyzed_to, include_archived,
+        analyzed_from, analyzed_to, include_archived, min_corroboration,
     )
     params["limit"] = limit
     params["offset"] = offset
@@ -1067,6 +1091,7 @@ def get_class_scores_list(
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
                max_score, max_class, risk_band, sub_scores, evidence,
+               corroboration_count, corroborating_classes,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE {where}
@@ -1079,6 +1104,7 @@ def get_class_scores_list(
         "tx_hash", "network",
         *_CLASS_COLS,
         "max_score", "max_class", "risk_band", "sub_scores", "evidence",
+        "corroboration_count", "corroborating_classes",
         "analysis_version", "analyzed_at",
     )
     # Batch-fetch fee/output_count for matched tx_hashes
@@ -1118,6 +1144,7 @@ async def get_class_scores_list_async(
     min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
     include_archived: bool = False,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
+    min_corroboration: int = 0,
 ) -> List[Dict[str, Any]]:
     # Bind by keyword so a future reorder of the sync signature can't silently
     # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
@@ -1136,6 +1163,7 @@ async def get_class_scores_list_async(
             limit=limit,
             offset=offset,
             include_archived=include_archived,
+            min_corroboration=min_corroboration,
         ),
     )
 
@@ -1148,6 +1176,7 @@ def count_class_scores(
     analyzed_from: Optional[Any] = None,
     analyzed_to: Optional[Any] = None,
     include_archived: bool = False,
+    min_corroboration: int = 0,
 ) -> int:
     """Total number of class-score rows matching the given filters.
 
@@ -1161,7 +1190,7 @@ def count_class_scores(
     """
     conditions, params = _score_filter_conditions(
         network, risk_band, attack_class, min_score,
-        analyzed_from, analyzed_to, include_archived,
+        analyzed_from, analyzed_to, include_archived, min_corroboration,
     )
 
     where = " AND ".join(conditions)
@@ -1179,6 +1208,7 @@ async def count_class_scores_async(
     min_score: float,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
     include_archived: bool = False,
+    min_corroboration: int = 0,
 ) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -1192,6 +1222,7 @@ async def count_class_scores_async(
             analyzed_from=analyzed_from,
             analyzed_to=analyzed_to,
             include_archived=include_archived,
+            min_corroboration=min_corroboration,
         ),
     )
 

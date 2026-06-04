@@ -22,6 +22,8 @@ def _minimal_valid_yaml() -> str:
         protocol_limits:
           max_value_size_bytes: 5000
           max_tx_size_bytes: 16384
+        composite_corroboration:
+          corroboration_threshold: 40.0
         scorers:
           multiple_sat:
             weights: {}
@@ -89,6 +91,9 @@ def _minimal_valid_yaml() -> str:
             similarity_threshold: 0.8
             unicode_scores: {}
             reason_thresholds: {}
+            critical_assets:
+              multiplier: 1.8
+              names: []
           phishing:
             weights: {}
             fixed_anchors: {}
@@ -183,6 +188,7 @@ class TestValidation:
                 monkeypatch, tmp_path,
                 "protocol_limits:\n  max_value_size_bytes: 5000\n"
                 "  max_tx_size_bytes: 16384\n"
+                "composite_corroboration:\n  corroboration_threshold: 40.0\n"
                 "scorers:\n  multiple_sat: 'not a mapping'\n",
             )
 

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from app.config import settings
 from app.db import clickhouse, postgres
 from app.analysis.normalise import score_to_band
+from app.analysis.scorer_config import composite_corroboration_config
 from app.analysis.scorers.base import BaseScorer
 from app.analysis.scorers.phishing import PhishingScorer
 from app.analysis.scorers.token_dust import TokenDustScorer
@@ -29,8 +30,18 @@ from app.analysis.scorers.fake_token import FakeTokenScorer
 
 logger = logging.getLogger(__name__)
 
-# Version tag written to every result row
-_VERSION = "phase4"
+# Version tag written to every result row. Bumped to phase5 when the
+# fake_token criticality bonus and the cross-class corroboration signal landed,
+# so re-scored rows are distinguishable from the prior pass in the
+# ReplacingMergeTree history.
+_VERSION = "phase5"
+
+# Cross-class corroboration: a class counts as corroborating when it scores at
+# or above this threshold. Recorded as a flag only; does not affect max_score
+# or risk_band (see config/detection.yaml composite_corroboration).
+_CORROBORATION_THRESHOLD = float(
+    composite_corroboration_config()["corroboration_threshold"]
+)
 
 # All attack class names in canonical order
 _CLASS_NAMES = [
@@ -222,6 +233,12 @@ def _score_transaction(
 
     risk_band = score_to_band(max_score)
 
+    # Cross-class corroboration flag. Counts distinct classes scoring at or
+    # above the corroboration threshold. Surfaced for analyst filtering only:
+    # it deliberately does NOT feed max_score or risk_band, so alerting volume
+    # is unchanged.
+    corroborating = sorted(k for k, v in applicable.items() if v >= _CORROBORATION_THRESHOLD)
+
     return {
         "tx_hash": tx_hash,
         "network": network,
@@ -229,6 +246,8 @@ def _score_transaction(
         "max_score": round(max_score, 2),
         "max_class": max_class,
         "risk_band": risk_band,
+        "corroboration_count": len(corroborating),
+        "corroborating_classes": ",".join(corroborating),
         "sub_scores": sub_scores,
         "evidence": evidence,
         "analysis_version": _VERSION,

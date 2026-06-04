@@ -50,7 +50,8 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "circular":      ("weights", "fixed_anchors", "bootstrap_anchors", "cycle",
                       "reason_threshold", "moderate_cap"),
     "fake_token":    ("weights", "fixed_anchors", "bootstrap_anchors",
-                      "similarity_threshold", "unicode_scores", "reason_thresholds"),
+                      "similarity_threshold", "unicode_scores", "reason_thresholds",
+                      "critical_assets.multiplier", "critical_assets.names"),
     "phishing":      ("weights", "fixed_anchors", "bootstrap_anchors",
                       "similarity_suspicious_range", "social_engineering",
                       "reason_thresholds", "critical_threshold", "metadata_labels"),
@@ -91,6 +92,12 @@ _REQUIRED_PROTOCOL_LIMITS: Tuple[str, ...] = (
     "max_tx_size_bytes",
 )
 
+# Required keys for the top-level composite_corroboration block (cross-class
+# agreement signal; see detection.yaml). Top-level, not a scorer section.
+_REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
+    "corroboration_threshold",
+)
+
 
 def _validate(path: Path, data: Dict[str, Any]) -> None:
     if "scorers" not in data or not isinstance(data["scorers"], dict):
@@ -107,6 +114,20 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
         raise RuntimeError(
             f"Detection config {path} missing protocol_limits keys: "
             f"{', '.join(missing_limits)}"
+        )
+    corroboration = data.get("composite_corroboration")
+    if not isinstance(corroboration, dict):
+        raise RuntimeError(
+            f"Detection config {path} must contain a top-level "
+            f"'composite_corroboration' mapping."
+        )
+    missing_corr = [
+        k for k in _REQUIRED_COMPOSITE_CORROBORATION if k not in corroboration
+    ]
+    if missing_corr:
+        raise RuntimeError(
+            f"Detection config {path} missing composite_corroboration keys: "
+            f"{', '.join(missing_corr)}"
         )
     scorers = data["scorers"]
     missing: Iterable[str] = []
@@ -161,6 +182,15 @@ def get(section: str) -> Dict[str, Any]:
             f"Add a 'scorers.{section}' block to detection.yaml."
         )
     return cfg
+
+
+def composite_corroboration_config() -> Dict[str, Any]:
+    """Return the top-level composite_corroboration block.
+
+    Cross-class agreement signal (not a scorer section). Presence and required
+    keys are enforced at load time by :func:`_validate`.
+    """
+    return _CFG["composite_corroboration"]
 
 
 def protocol_limit(name: str) -> int:
