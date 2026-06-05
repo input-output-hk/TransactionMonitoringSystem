@@ -495,6 +495,10 @@ The attacker mints tokens with a TokenName identical or visually similar (Unicod
 final_score = 0.60 * identity_deception_score + 0.40 * distribution_score
 ```
 
+#### Critical-Asset Escalation
+
+Impersonating a high-value asset is more dangerous than cloning a meme coin: a fake stablecoin redirects DeFi collateral that users trust as worth $1. The identity sub-pipeline weighs every impersonation equally on the name axis, so a plain exact-name clone of a stablecoin scores no higher than any other clone and its severity ends up driven by distribution alone. To correct this, when the matched legitimate token is on the curated `fake_token.critical_assets.names` list (stablecoins iUSD/DJED/SHEN by default), the identity score is multiplied by `fake_token.critical_assets.multiplier` (default 1.8) and clipped to 1.0. The multiplier is >= 1.0 and the clip keeps it from exceeding a clean full-identity score, so the adjustment is strictly monotonic: it only ever raises an impersonation's score, never lowers a detection. The matched asset's tier is recorded in evidence as `matched_token_criticality` (`critical` or `standard`).
+
 ### `tokenname_similarity` Implementation
 Two-stage comparison:
 1. **Normalise**: Unicode NFKC normalisation → strip zero-width chars → map confusable chars to canonical equivalents (Unicode Consortium confusables.txt)
@@ -649,6 +653,21 @@ RiskScore(tx, class) = clip(sum(w_i * norm(f_i)) / sum(w_i), 0, 1) * 100
 ```
 
 Each attack class produces an independent score. A single TX can score on multiple classes simultaneously. Output one score vector per TX, with top contributing features and normalised values for each non-zero score.
+
+## Cross-Class Corroboration
+
+The risk band is derived solely from the single highest class score (`max_score`), so a transaction that independently trips two different detectors is banded identically to one that trips only the strongest: the agreement between detectors is otherwise lost. To surface that agreement without changing alerting, each scored transaction also records two fields on `tx_class_scores`:
+
+- `corroboration_count`: the number of distinct attack classes scoring at or above `composite_corroboration.corroboration_threshold` (default 40.0, in `config/detection.yaml`).
+- `corroborating_classes`: the comma-separated names of those classes (e.g. `sandwich,token_dust`).
+
+This is a flag only: it deliberately does not feed `max_score` or `risk_band`, so alerting volume is unchanged. The list endpoint exposes a `min_corroboration` filter for analyst triage:
+
+```
+GET /api/analysis/results?min_corroboration=2
+```
+
+returns only transactions where at least that many distinct classes corroborated (`corroboration_count >= 2`); `0` (the default) disables the filter. The intent is to pull multi-signal transactions where several independent detectors agree, regardless of the band the single highest score placed them in. The filter is API-only; there is no UI control.
 
 ## Implementation Notes
 

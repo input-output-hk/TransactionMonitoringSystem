@@ -79,7 +79,7 @@ Each batch then goes through four enrichment phases before scoring:
 
 After enrichment, each transaction is scored by 9 independent attack-class scorers (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing). Each scorer has a gate condition (cheap check to skip inapplicable transactions) and a score function (weighted sub-score composition producing a 0-100 risk score). Sub-scores use percentile-based normalisation against per-script or per-policy baselines, falling back to global baselines or fixed anchors.
 
-The output is a 9-element score vector per transaction, written to `tx_class_scores` in ClickHouse along with the max score, max class, risk band (Informational/Moderate/High/Critical), and sub-score breakdowns.
+The output is a 9-element score vector per transaction, written to `tx_class_scores` in ClickHouse along with the max score, max class, risk band (Informational/Moderate/High/Critical), sub-score breakdowns, per-class evidence, and a cross-class corroboration count (how many distinct classes scored above the corroboration threshold). The corroboration count is a triage flag only: it does not affect the risk band.
 
 ## 3. Transaction Lifecycle: State Transitions
 
