@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
@@ -27,13 +28,33 @@ from app.auth.deps import require_user
 from app.auth.email import send_magic_link
 from app.auth.models import RequestLinkPayload, User
 from app.auth.sessions import create_session, delete_session
-from app.auth.tokens import consume_token, issue_token
+from app.auth.tokens import consume_token, hash_token, issue_token
 from app.config import settings
 from app.db.postgres import get_connection
+from app.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# Per-email throttle on /api/auth/request-link.
+#
+# The global IP-based limiter in `app.rate_limit` collapses every
+# unauthenticated browser into a single bucket because the deployment
+# sits behind Cloudflare Tunnel and we don't yet trust X-Forwarded-For,
+# so `client.host` is always the loopback. That global cap (240/min)
+# can be exhausted by an attacker to either DoS the whole login surface
+# or, more nastily, burn a target user's outstanding tokens via
+# repeated `issue_token` calls (each one revokes the previous).
+#
+# This per-email bucket sits in front of any DB work and caps how
+# many fresh tokens a single address can mint in a window — a real
+# user almost never hits 5/15min, while a brute-force / DoS attempt
+# does within seconds.
+_EMAIL_LIMITER = RateLimiter(
+    max_requests=settings.MAGIC_LINK_PER_EMAIL_LIMIT,
+    window_seconds=settings.MAGIC_LINK_PER_EMAIL_WINDOW_SECONDS,
+)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -79,13 +100,22 @@ def _clear_session_cookie(request: Request, response: Response) -> None:
 
 
 async def _find_active_user_by_email(email: str) -> Optional[dict]:
-    """Case-insensitive lookup. Returns None for non-existent OR disabled."""
+    """Case-insensitive lookup, restricted to fully ``active`` users.
+
+    Pending users (invited but never redeemed their invite link) are
+    intentionally excluded: they should activate through the
+    admin-issued invite token, NOT by self-serving a login link via
+    this endpoint. Allowing both would keep two parallel live tokens
+    for the same user with the same effect, blurring the
+    "invite vs login" semantics and complicating future divergence
+    of the two purposes.
+    """
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
             SELECT id, email, full_name, role, status, created_at, last_login_at
             FROM users
-            WHERE lower(email) = lower($1) AND status <> 'disabled'
+            WHERE lower(email) = lower($1) AND status = 'active'
             LIMIT 1
             """,
             email,
@@ -93,7 +123,13 @@ async def _find_active_user_by_email(email: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-async def _get_user(user_id) -> Optional[dict]:
+async def _get_user(user_id: UUID) -> Optional[dict]:
+    """Fetch a user row by primary key, or ``None`` if not found.
+
+    Used after ``consume_token`` to re-read the user (whose ``status``
+    was just flipped from ``pending`` → ``active`` and whose
+    ``last_login_at`` was bumped, both in the session-create transaction).
+    """
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
@@ -114,10 +150,27 @@ async def request_link(payload: RequestLinkPayload):
     """Send a magic-link email if the address matches an active user.
 
     Returns 200 unconditionally. The same response shape is returned for
-    both existing and unknown emails so an attacker can't enumerate users
-    by probing this endpoint. Token issuance + SMTP send happens
-    in-process; failures are logged, never surfaced to the caller.
+    both existing and unknown emails — and for rate-limited callers —
+    so an attacker can't enumerate users or detect throttling by probing
+    this endpoint. Token issuance + SMTP send happens in-process;
+    failures are logged, never surfaced to the caller.
     """
+    # Per-email throttle BEFORE any DB work — keeps brute-force / DoS
+    # attempts from burning a victim's outstanding tokens and from
+    # exhausting the SMTP server. We use the normalized lowercase email
+    # as the key so case variations land in the same bucket.
+    email_key = payload.email.lower().strip()
+    allowed, _retry_after = await _EMAIL_LIMITER.check(email_key)
+    if not allowed:
+        # Silent 200 — never reveal the throttle to the caller, otherwise
+        # it doubles as an enumeration oracle ("address X is being
+        # actively targeted → it must be a real user").
+        logger.warning(
+            "request-link: per-email rate limit hit for %s (silent 200)",
+            payload.email,
+        )
+        return {"status": "ok"}
+
     user = await _find_active_user_by_email(payload.email)
     if user is not None:
         try:
@@ -173,10 +226,16 @@ async def verify(
     user_agent = (request.headers.get("user-agent") or "")[:500] or None
     client_ip = request.client.host if request.client else None
 
+    # Bind the new session back to the originating token. The first
+    # authenticated request on this session will then claim the token
+    # (mark it consumed and clear this back-reference) — so even with
+    # the redemption counter still > 0, no other party can redeem the
+    # same link once the real user has actually started using it.
     session_id, _ = await create_session(
         user_id=user["id"],
         user_agent=user_agent,
         ip=client_ip,
+        token_hash=hash_token(token),
     )
     _set_session_cookie(request, response, session_id)
 

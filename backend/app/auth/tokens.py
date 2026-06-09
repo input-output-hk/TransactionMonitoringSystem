@@ -35,9 +35,16 @@ TokenPurpose = Literal["invite", "login"]
 _TOKEN_BYTES = 32
 
 
-def _hash_token(token: str) -> str:
-    """sha256 hex. Deterministic so a lookup is just `WHERE token_hash = $1`."""
+def hash_token(token: str) -> str:
+    """sha256 hex. Deterministic so a lookup is just `WHERE token_hash = $1`.
+    Exposed publicly because callers (`api/auth.py:verify`) need to bind
+    the resulting session to the originating token without re-hashing
+    behind a private name."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# Back-compat alias for the previous private name.
+_hash_token = hash_token
 
 
 async def issue_token(user_id: UUID, purpose: TokenPurpose) -> str:
@@ -67,13 +74,18 @@ async def issue_token(user_id: UUID, purpose: TokenPurpose) -> str:
             await conn.execute(
                 """
                 INSERT INTO magic_link_tokens
-                    (token_hash, user_id, purpose, expires_at)
-                VALUES ($1, $2, $3, $4)
+                    (token_hash, user_id, purpose, expires_at,
+                     redemptions_remaining)
+                VALUES ($1, $2, $3, $4, $5)
                 """,
                 token_hash,
                 user_id,
                 purpose,
                 expires_at,
+                # Read at issue time (not consume time) so changing the
+                # setting doesn't retroactively grant extra redemptions
+                # to tokens already in the wild.
+                settings.MAGIC_LINK_MAX_REDEMPTIONS,
             )
     logger.debug("Issued %s token for user %s (exp %s)", purpose, user_id, expires_at)
     return token
@@ -83,35 +95,83 @@ async def consume_token(
     token: str,
     expected_purpose: TokenPurpose | None = None,
 ) -> Optional[UUID]:
-    """Atomically validate a magic-link token and mark it consumed.
+    """Atomically decrement a token's redemption counter and return the
+    associated ``user_id``, or ``None`` if the token can't be redeemed.
 
-    Returns the ``user_id`` on success. Returns ``None`` if the token is
-    unknown, already consumed, expired, or doesn't match the requested
-    purpose. The UPDATE … WHERE clause ensures only one caller can
-    succeed for a given token even under concurrent redemption attempts.
+    Reasons for ``None``: unknown token, already consumed, expired,
+    purpose mismatch, or redemptions exhausted.
+
+    By default ``settings.MAGIC_LINK_MAX_REDEMPTIONS`` is 1, giving
+    strict single-use semantics — the link dies the moment a real user
+    redeems it. The counter exists as a knob (not a default-on feature)
+    in case a future flow needs headless-scanner survivability:
+    bumping the setting lets the same link create N sessions before
+    the row's ``consumed_at`` is flipped.
+
+    The atomic UPDATE keeps the decrement race-safe under concurrent
+    redemption attempts regardless of the configured ceiling.
     """
     token_hash = _hash_token(token)
-    purpose_check = "AND purpose = $2" if expected_purpose else ""
-    args = [token_hash]
-    if expected_purpose:
-        args.append(expected_purpose)
-
+    # Bind both purposes to a fixed parameter slot ($2) and rely on
+    # SQL-side ``$2 IS NULL OR purpose = $2`` — avoids the f-string
+    # fragment that previous versions of this function used.
     async with get_connection() as conn:
         row = await conn.fetchrow(
-            f"""
+            """
             UPDATE magic_link_tokens
-            SET consumed_at = now()
+            SET redemptions_remaining = redemptions_remaining - 1,
+                consumed_at = CASE
+                    WHEN redemptions_remaining - 1 <= 0 THEN now()
+                    ELSE consumed_at
+                END
             WHERE token_hash = $1
-              {purpose_check}
+              AND ($2::text IS NULL OR purpose = $2)
               AND consumed_at IS NULL
               AND expires_at > now()
+              AND redemptions_remaining > 0
             RETURNING user_id
             """,
-            *args,
+            token_hash,
+            expected_purpose,
         )
     if not row:
         return None
     return row["user_id"]
+
+
+async def claim_session_token(session_id: str, token_hash: str) -> None:
+    """Mark a magic-link token as fully consumed and clear the session's
+    back-reference, in one transaction.
+
+    Triggered on the first authenticated request after a magic-link
+    redemption — see `auth/deps.py:current_user`. This is what gives
+    the system its single-use feel even though `consume_token` keeps a
+    redemption counter: the moment a real session is actually used, any
+    leftover redemptions on the token are wiped.
+
+    Idempotent: subsequent calls (e.g. concurrent claim attempts from
+    parallel requests) no-op because the `consumed_at IS NULL` and
+    `created_by_token_hash IS NOT NULL` predicates only match once.
+    """
+    async with get_connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE magic_link_tokens
+                SET consumed_at = now(),
+                    redemptions_remaining = 0
+                WHERE token_hash = $1 AND consumed_at IS NULL
+                """,
+                token_hash,
+            )
+            await conn.execute(
+                """
+                UPDATE user_sessions
+                SET created_by_token_hash = NULL
+                WHERE session_id = $1 AND created_by_token_hash IS NOT NULL
+                """,
+                session_id,
+            )
 
 
 async def purge_expired_tokens() -> int:

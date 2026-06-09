@@ -70,17 +70,32 @@ async def execute_auth_schema() -> None:
         # ── magic_link_tokens ───────────────────────────────────────────
         # token_hash = sha256 of the user-facing token. We never store the
         # plain token, so a DB read can't be used to log in as anyone.
+        #
+        # `redemptions_remaining` lets a token survive a few "drive-by"
+        # GETs from email security scanners (Defender, Gmail, Mimecast)
+        # before being marked consumed. Initial value is set per-token
+        # by issue_token (read from MAGIC_LINK_MAX_REDEMPTIONS settings).
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS magic_link_tokens (
-                token_hash   TEXT PRIMARY KEY,
-                user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                purpose      TEXT NOT NULL
-                             CHECK (purpose IN ('invite','login')),
-                expires_at   TIMESTAMPTZ NOT NULL,
-                consumed_at  TIMESTAMPTZ,
-                created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+                token_hash             TEXT PRIMARY KEY,
+                user_id                UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                purpose                TEXT NOT NULL
+                                       CHECK (purpose IN ('invite','login')),
+                expires_at             TIMESTAMPTZ NOT NULL,
+                consumed_at            TIMESTAMPTZ,
+                redemptions_remaining  INT NOT NULL DEFAULT 1,
+                created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
             )
+            """,
+        )
+        # Idempotent ALTER for installs that pre-date the redemption-count
+        # column. Safe to run on every startup — Postgres no-ops when the
+        # column already exists.
+        await conn.execute(
+            """
+            ALTER TABLE magic_link_tokens
+            ADD COLUMN IF NOT EXISTS redemptions_remaining INT NOT NULL DEFAULT 1
             """,
         )
         await conn.execute(
@@ -100,16 +115,34 @@ async def execute_auth_schema() -> None:
         # ── user_sessions ───────────────────────────────────────────────
         # session_id is 32 random bytes hex-encoded. NOT a JWT — opaque so
         # admin "disable user" can revoke instantly by deleting rows.
+        #
+        # `created_by_token_hash` back-references the magic-link token
+        # that established this session. The first authenticated request
+        # that comes with a valid session AND a still-set back-reference
+        # claims the token (marks it consumed, clears the column). After
+        # that, the token can't be redeemed again — even if its
+        # redemption counter hasn't hit zero.
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_sessions (
-                session_id   TEXT PRIMARY KEY,
-                user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-                expires_at   TIMESTAMPTZ NOT NULL,
-                user_agent   TEXT,
-                ip           TEXT
+                session_id              TEXT PRIMARY KEY,
+                user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at              TIMESTAMPTZ NOT NULL,
+                user_agent              TEXT,
+                ip                      TEXT,
+                created_by_token_hash   TEXT
             )
+            """,
+        )
+        # Idempotent ALTER for installs that pre-date the back-reference
+        # column. No FK on purpose: tokens get purged regularly, and we
+        # don't want session lookup to fail if the token row was already
+        # garbage-collected after consumption.
+        await conn.execute(
+            """
+            ALTER TABLE user_sessions
+            ADD COLUMN IF NOT EXISTS created_by_token_hash TEXT
             """,
         )
         await conn.execute(

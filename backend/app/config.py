@@ -162,9 +162,26 @@ class Settings(BaseSettings):
     # TTL are tunable; defaults match the design doc.
     SESSION_COOKIE_NAME: str = "tms_session"
     SESSION_TTL_DAYS: int = 7
-    # Magic-link tokens are short-lived and single-use. 15 min keeps the
-    # interception window narrow while leaving slack for slow mail delivery.
+    # Magic-link tokens are short-lived. 15 min keeps the interception
+    # window narrow while leaving slack for slow mail delivery.
     MAGIC_LINK_TTL_MINUTES: int = 15
+    # Ceiling on how many `/api/auth/verify` calls the same token can
+    # survive before being forcibly marked consumed. Set to 3 by default
+    # as a safety buffer for naive email-scanner pre-fetches and quick
+    # retries (network blip, double-click).
+    #
+    # IMPORTANT: this is NOT the everyday behaviour. The token is
+    # **also** marked consumed the first time the resulting session is
+    # used on any authenticated endpoint (via `claim_session_token`).
+    # So in the happy path — user clicks link, browser establishes
+    # session, AuthProvider hits /me — the token dies on that /me, even
+    # if the counter still shows 2 redemptions left. The counter is the
+    # emergency hatch, the back-reference claim is the normal one.
+    MAGIC_LINK_MAX_REDEMPTIONS: int = 3
+    # Per-email throttle on /api/auth/request-link. Caps how many fresh
+    # tokens a single address can request in the window.
+    MAGIC_LINK_PER_EMAIL_LIMIT: int = 5
+    MAGIC_LINK_PER_EMAIL_WINDOW_SECONDS: int = 15 * 60  # 15 minutes
     # Used to build the verification URL inside outgoing magic-link emails.
     # In dev this is the local app, in prod the public host behind the tunnel.
     APP_BASE_URL: str = "http://localhost:8000"

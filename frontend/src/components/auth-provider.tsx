@@ -29,6 +29,14 @@ type AuthContextValue = {
 	isLoading: boolean;
 	/** True once `/me` has resolved (regardless of authenticated state). */
 	isReady: boolean;
+	/**
+	 * True when `/me` failed with a non-401 error (network down, 5xx).
+	 * Distinguishes "anonymous user" (`user === null`, `isError === false`)
+	 * from "we don't know yet because the backend is misbehaving"
+	 * (`user === null`, `isError === true`). Route guards branch on this
+	 * so a transient 5xx doesn't silently redirect to /login.
+	 */
+	isError: boolean;
 	/** Re-fetch `/me` — called after login completes via /auth/verify. */
 	refetchUser: () => Promise<void>;
 	/** Call `/api/auth/logout` and clear local user state. */
@@ -42,12 +50,15 @@ const ME_QUERY_KEY = ["auth", "me"] as const;
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const qc = useQueryClient();
 
-	const { data, isLoading, isFetched } = useQuery({
+	const { data, isLoading, isFetched, isError } = useQuery({
 		queryKey: ME_QUERY_KEY,
 		queryFn: fetchMe,
 		staleTime: 5 * 60 * 1000,
 		refetchOnWindowFocus: false,
 		// Don't retry on 401 — fetchMe already returns null for that.
+		// 5xx errors propagate via `isError` so the UI can show an
+		// "auth unavailable" screen instead of silently logging the
+		// user out (data would otherwise stay undefined → null).
 		retry: false,
 	});
 
@@ -69,6 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		user: data ?? null,
 		isLoading,
 		isReady: isFetched,
+		isError,
 		refetchUser,
 		logout,
 	};

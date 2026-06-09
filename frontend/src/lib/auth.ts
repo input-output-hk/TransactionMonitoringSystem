@@ -22,7 +22,8 @@ export type { User };
 
 /** Hook used everywhere in the app to read auth state. */
 export function useAuth() {
-	const { user, isLoading, isReady, logout, refetchUser } = useAuthContext();
+	const { user, isLoading, isReady, isError, logout, refetchUser } =
+		useAuthContext();
 	return {
 		user,
 		/** True only when /me resolved AND returned a user. */
@@ -31,6 +32,8 @@ export function useAuth() {
 		isLoading,
 		/** /me has resolved at least once (regardless of result). */
 		isReady,
+		/** /me failed with a non-401 error (5xx / network). */
+		isError,
 		logout,
 		refetchUser,
 	};
