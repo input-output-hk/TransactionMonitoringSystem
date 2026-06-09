@@ -31,6 +31,7 @@ async def create_session(
     user_id: UUID,
     user_agent: str | None = None,
     ip: str | None = None,
+    token_hash: str | None = None,
 ) -> tuple[str, datetime]:
     """Mint a session for ``user_id`` and bump the user's ``last_login_at``.
 
@@ -38,6 +39,12 @@ async def create_session(
     setting the HTTP-only cookie. ``last_login_at`` is updated in the
     same transaction so audit views are always consistent with the
     sessions table.
+
+    ``token_hash``: if this session is being created from a magic-link
+    redemption, pass the originating token's sha256 hash so the first
+    authenticated request can claim (forcibly consume) the token even
+    when its redemption counter still has slack. See
+    `tokens.claim_session_token`.
     """
     session_id = secrets.token_urlsafe(_SESSION_BYTES)
     expires_at = datetime.now(timezone.utc) + timedelta(
@@ -49,14 +56,16 @@ async def create_session(
             await conn.execute(
                 """
                 INSERT INTO user_sessions
-                    (session_id, user_id, expires_at, user_agent, ip)
-                VALUES ($1, $2, $3, $4, $5)
+                    (session_id, user_id, expires_at, user_agent, ip,
+                     created_by_token_hash)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 """,
                 session_id,
                 user_id,
                 expires_at,
                 user_agent,
                 ip,
+                token_hash,
             )
             await conn.execute(
                 """
@@ -86,7 +95,8 @@ async def lookup_session(session_id: str) -> Optional[dict]:
             SELECT
                 u.id, u.email, u.full_name, u.role, u.status,
                 u.created_at, u.last_login_at,
-                s.session_id, s.expires_at AS session_expires_at
+                s.session_id, s.expires_at AS session_expires_at,
+                s.created_by_token_hash
             FROM user_sessions AS s
             JOIN users AS u ON u.id = s.user_id
             WHERE s.session_id = $1

@@ -69,6 +69,11 @@ export function UsersPage() {
 		mutationFn: (id: string) => deleteUser(id),
 		onSuccess: () => {
 			qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+			// If we just deleted the only row on this page, the refetch
+			// would arrive with an empty `data` array because the backend's
+			// offset is past the new total. Snap back to a valid page so
+			// the user sees a populated table instead of "No users".
+			if (rows.length === 1 && page > 0) setPage(page - 1);
 			toast.success("User removed");
 		},
 		onError: (err) =>
@@ -263,13 +268,15 @@ function AddUserFlow({
 	});
 
 	const close = () => {
+		// Reset eagerly — the previous `setTimeout(…, 200)` was a guess at
+		// the dialog's exit animation and races a quick reopen click. The
+		// dialog is being closed in the same tick anyway, so React batches
+		// these state updates with the unmount and there's no visible
+		// stale-render artifact.
 		onOpenChange(false);
-		// Reset only after the dialog has closed visually
-		setTimeout(() => {
-			setStep("form");
-			setDraft({ fullName: "", email: "", role: "Reviewer" });
-			createMutation.reset();
-		}, 200);
+		setStep("form");
+		setDraft({ fullName: "", email: "", role: "Reviewer" });
+		createMutation.reset();
 	};
 
 	const canConfirmForm =

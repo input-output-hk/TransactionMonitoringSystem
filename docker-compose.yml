@@ -157,6 +157,12 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      # mailpit has no healthcheck (the image doesn't ship one), so we
+      # settle for `service_started`. This is enough because magic-link
+      # sends are failure-tolerant: an SMTP timeout on the first email
+      # logs an error and returns 200 silently.
+      mailpit:
+        condition: service_started
     networks:
       - tms-network
     profiles:

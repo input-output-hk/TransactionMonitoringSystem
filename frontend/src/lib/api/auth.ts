@@ -161,9 +161,10 @@ export async function deleteUser(id: string): Promise<void> {
 	const res = await fetchWithAuth(`/api/users/${encodeURIComponent(id)}`, {
 		method: "DELETE",
 	});
-	// 204 No Content is the happy path; some errors come back as JSON
-	// (e.g. 400 "cannot delete your own account").
-	if (!res.ok && res.status !== 204) {
+	// 204 No Content is the happy path (`res.ok` already covers it). Other
+	// statuses come back as JSON with a `detail` (e.g. 400 "cannot delete
+	// your own account", 404, 403).
+	if (!res.ok) {
 		const err = (await res.json().catch(() => null)) as
 			| { detail?: string }
 			| null;

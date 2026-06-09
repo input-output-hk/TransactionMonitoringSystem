@@ -32,13 +32,34 @@ logger = logging.getLogger(__name__)
 async def current_user(request: Request) -> Optional[dict]:
     """Resolve the session cookie to a user dict, or ``None`` if absent.
 
+    Side effect: if the session row still carries a
+    ``created_by_token_hash`` (i.e. this is the FIRST authenticated
+    request after a magic-link redemption), claim the token: mark it
+    consumed and clear the back-reference. From then on, the
+    originating magic link can't be redeemed again — turning the
+    counter-based ``consume_token`` into effective single-use the
+    moment a real session starts being used.
+
     Never raises — endpoints that want a hard requirement should chain
     on top with :func:`require_user` or :func:`require_admin`.
     """
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
     if not session_id:
         return None
-    return await lookup_session(session_id)
+    user = await lookup_session(session_id)
+    if user and user.get("created_by_token_hash"):
+        # Imported lazily because tokens.py imports from app.db.postgres
+        # which already imports from app.config — keeping the import
+        # tree flat helps `python -m app.cli` cold-start.
+        from app.auth.tokens import claim_session_token
+        await claim_session_token(
+            session_id=user["session_id"],
+            token_hash=user["created_by_token_hash"],
+        )
+        # Reflect the post-claim state in the dict we return, so a
+        # caller that inspects this field sees the cleared value.
+        user["created_by_token_hash"] = None
+    return user
 
 
 async def require_user(
