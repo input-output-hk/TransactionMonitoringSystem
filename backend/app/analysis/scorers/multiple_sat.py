@@ -176,6 +176,9 @@ _SWEEP_GUARD_ENABLED: bool = bool(_SWEEP_GUARD["enabled"])
 _SWEEP_REQ_UNIFORM_RED: bool = bool(_SWEEP_GUARD["require_uniform_redeemer"])
 _SWEEP_REQ_NO_RETURN: bool = bool(_SWEEP_GUARD["require_no_script_return"])
 _SWEEP_MIN_INPUTS: int = int(_SWEEP_GUARD["min_inputs"])
+_SUPP_ESCAPE = _CFG["suppression_escape"]
+_SUPP_ESCAPE_ENABLED: bool = bool(_SUPP_ESCAPE["enabled"])
+_SUPP_ESCAPE_FLOOR_MIN: float = float(_SUPP_ESCAPE["extraction_floor_min"])
 
 # The floor's purpose is to guarantee the band lands at High; if config
 # drifts below the High threshold the docstring's promise breaks. Fail
@@ -682,7 +685,23 @@ class MultipleSatScorer(BaseScorer):
         # and the CTF-01 marketplace double-sat (uniform=False, value_returned=0,
         # Moderate) is unaffected. These two signals are exactly what the
         # extraction-assets axis cannot distinguish on its own.
-        if not floor_applies and (uniform_sweep or lovelace_out_at_script > 0):
+        #
+        # Extraction-magnitude escape hatch: both benign shapes are
+        # attacker-reachable (return 1 lovelace to the script to force the
+        # state-continuation arm; a >= min_inputs identical-redeemer full
+        # drain matches the sweep fingerprint), so when the UN-WIDENED
+        # extraction floor signal exceeds the configured threshold the
+        # finding is kept and capped at the top of Moderate instead of
+        # silenced. The benign populations sit far below the threshold
+        # (state machines ~0, observed small owner-sweeps ~0.002), so they
+        # remain suppressed. See multiple_sat.suppression_escape.
+        suppression_shape = uniform_sweep or lovelace_out_at_script > 0
+        escape = (
+            _SUPP_ESCAPE_ENABLED
+            and not allowlisted
+            and s_extraction_floor > _SUPP_ESCAPE_FLOOR_MIN
+        )
+        if not floor_applies and suppression_shape and not escape:
             return ScorerResult.no_finding(
                 sub_scores={
                     "s_extraction": round(s_extraction, 4),
@@ -695,6 +714,14 @@ class MultipleSatScorer(BaseScorer):
                 },
                 baseline_source=bl_source,
             )
+        escaped = not floor_applies and suppression_shape and escape
+        if escaped:
+            # High extraction under a benign-looking shape: never silence
+            # (recall), never elevate to High (the large-owner-sweep FP
+            # risk). The uniform-sweep cap above already lands sweeps at
+            # the top of Moderate; apply the same cap to the value-returned
+            # arm so both escape paths band identically.
+            final = min(final, BAND_MODERATE_MAX)
 
         reasons = []
         if s_extraction_lov > _REASON_T:
@@ -711,6 +738,8 @@ class MultipleSatScorer(BaseScorer):
             reasons.append("allowlisted_batch_script")
         if uniform_sweep:
             reasons.append("uniform_script_sweep_guard")
+        if escaped:
+            reasons.append("extraction_escape_moderate_cap")
 
         # ``lovelace_in_at_script`` / ``lovelace_out_at_script`` are already
         # computed at the top of this method via _compute_lovelace_flow; reuse

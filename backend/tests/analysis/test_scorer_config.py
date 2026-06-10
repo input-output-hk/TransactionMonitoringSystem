@@ -41,6 +41,9 @@ def _minimal_valid_yaml() -> str:
               require_uniform_redeemer: true
               require_no_script_return: true
               min_inputs: 10
+            suppression_escape:
+              enabled: true
+              extraction_floor_min: 0.5
           large_datum:
             gate:
               flag_datum_hash_only: true

@@ -814,3 +814,88 @@ class TestPerScriptExtractionHeadroom:
         result = scorer.score(_extraction_features(3, cpu=1))
         assert "lazy_validator_band_floor" in result.reasons
         assert result.score >= 60.0
+
+
+_NFT_POLICY = "c" * 56
+
+
+class TestSuppressionEscape:
+    """Extraction-magnitude escape hatch (multiple_sat.suppression_escape).
+
+    The two benign-shape suppressions are attacker-reachable: returning 1
+    lovelace to the script forces the state-continuation arm, and a large
+    identical-redeemer full drain matches the sweep fingerprint. When the
+    un-widened extraction floor signal exceeds the threshold, the finding
+    must surface at Moderate instead of being silenced to -1.
+    """
+
+    def _nft(self, i):
+        return {_NFT_POLICY: {f"{i:02d}" * 4: 1}}
+
+    def test_return_one_lovelace_double_sat_not_silenced(self, scorer):
+        # 2 script inputs each holding a distinct NFT; the attacker drains
+        # both NFTs to their wallet, runs a REAL (non-lazy) validator, and
+        # returns exactly 1 lovelace to the script to trigger the
+        # state-continuation suppression. Previously: no finding (-1).
+        inputs = [
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000, **self._nft(i)}}
+            for i in range(2)
+        ]
+        outputs = [
+            {"address": WALLET, "value": {
+                "lovelace": 9_500_000,
+                _NFT_POLICY: {("00" * 4): 1, ("01" * 4): 1},
+            }},
+            {"address": SCRIPT, "value": {"lovelace": 1}},
+        ]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"payload{i}",
+             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            for i in range(2)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        # Not lazy (real CPU), so the floor does not apply; the escape must.
+        assert result.sub_scores["s_exunits_inv"] < 0.8
+        assert result.score != -1.0
+        assert result.score >= 31.0  # Moderate band, surfaced for review
+        assert result.score <= 59.0  # capped, never High on this shape
+        assert "extraction_escape_moderate_cap" in result.reasons
+
+    def test_uniform_full_drain_double_sat_not_silenced(self, scorer):
+        # 12 identical-redeemer inputs each holding a distinct NFT, full
+        # drain to the attacker wallet: matches the sweep fingerprint
+        # exactly, but the asset axis saturates (12 >> p99=2), so the
+        # escape keeps the finding at the top of Moderate.
+        n = 12
+        inputs = [
+            {"address": _SWEEP_SCRIPT,
+             "value": {"lovelace": 2_600_000, **self._nft(i)}}
+            for i in range(n)
+        ]
+        outputs = [
+            {"address": WALLET, "value": {
+                "lovelace": 31_000_000,
+                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n)},
+            }},
+        ]
+        redeemers = _uniform_spend_redeemers(n)
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.score != -1.0
+        assert result.score == 59.0  # BAND_MODERATE_MAX
+        assert "uniform_script_sweep_guard" in result.reasons
+        assert "extraction_escape_moderate_cap" in result.reasons
+
+    def test_small_sweep_below_escape_floor_still_suppressed(self, scorer):
+        # Lovelace-only sweep far below the escape threshold (31.2M against
+        # the 5M/500M bootstrap anchor ~= 0.053): the benign suppression
+        # must keep winning.
+        n = 12
+        inputs = [
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
+            for _ in range(n)
+        ]
+        outputs = [{"address": WALLET, "value": {"lovelace": 31_000_000}}]
+        redeemers = _uniform_spend_redeemers(n)
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.score == -1.0

@@ -150,6 +150,26 @@ scorers:
       require_uniform_redeemer: true      # all spend redeemer payloads identical
       require_no_script_return: true      # no output back to the same payment cred
       min_inputs: 10                      # only kick in above this input count
+    # Extraction-magnitude escape hatch on the two benign-shape suppressions
+    # (uniform sweep, value-returned state continuation). Both shapes are
+    # attacker-reachable: returning 1 lovelace to the script forces the
+    # state-continuation suppression, and a >= min_inputs identical-redeemer
+    # full drain matches the sweep fingerprint exactly. When the UN-WIDENED
+    # extraction floor signal (s_extraction_floor, raw per-script/bootstrap
+    # anchors, so the per-script headroom cannot weaken it) exceeds
+    # extraction_floor_min, the shape is no longer confidently benign: the
+    # finding is kept and capped at the top of Moderate instead of silenced
+    # to no-finding. The benign populations the suppressions were built for
+    # sit far below the threshold: a state machine returning value scores
+    # ~0 on extraction, and the observed small owner-sweeps ~0.002 on the
+    # lovelace axis. 0.5 leaves them suppressed while any multi-asset drain
+    # (asset axis saturates at 1.0 with >2 net assets out) or a lovelace
+    # drain above ~half the bootstrap p99 surfaces for review. Recall-first:
+    # a Moderate false positive on a large owner-sweep is strictly better
+    # than a silenced real drain.
+    suppression_escape:
+      enabled: true
+      extraction_floor_min: 0.5
 
   # ------------------------------------------------------------------
   large_datum:

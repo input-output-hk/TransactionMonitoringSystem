@@ -299,8 +299,17 @@ score_multiple_satisfaction(tx):
     # dropped to no-finding (-1). Gated on `not floor_applies` so a floored
     # lazy-validator exploit and the CTF-01 marketplace case (uniform=False,
     # value_returned=0) are never suppressed.
+    # Escape hatch: both benign shapes are attacker-reachable (return 1
+    # lovelace to force the state-continuation arm; an identical-redeemer
+    # full drain matches the sweep fingerprint), so when the un-widened
+    # extraction floor signal exceeds suppression_escape.extraction_floor_min
+    # the finding is kept and capped at the top of Moderate instead.
+    escape = (suppression_escape.enabled and not allowlisted
+              and s_extraction_floor > suppression_escape.extraction_floor_min)
     if not floor_applies and (uniform_sweep or value_returned_to_script > 0):
-        return no_finding
+        if not escape:
+            return no_finding
+        score = min(score, BAND_MODERATE_MAX)   # reason: extraction_escape_moderate_cap
 
     return score
 ```
@@ -324,6 +333,7 @@ The value-extraction axis (`net_value_out_of_script`, `n_assets_out_of_script`) 
 - **Per-script value baselines (no global tier)** judge extraction against the contract's own history, not a batcher-dominated global distribution. See above.
 - **Uniform-sweep guard**: a tx whose fingerprint is "owner sweeping their own script UTxOs" (>= `min_inputs` script inputs, identical spend redeemers, no value returned to the same script) is a UTxO consolidation, not double-satisfaction. The lazy-validator floor is suppressed and the score is capped at the top of Moderate. Each leg (uniform-redeemer, no-return, min-inputs) is independently config-gated under `uniform_sweep_guard`. Real double-satisfaction has asymmetric satisfaction arguments and writes the satisfying value to a distinct address shape that the no-return predicate rejects.
 - **State-continuation suppression**: when the floor does not apply and either the sweep guard fires or any lovelace is returned to the script (state continuation, not extraction), the finding is dropped to no-finding (`score=-1`). Gated on `not floor_applies` so the CTF-01 marketplace double-sat (uniform=False, value_returned=0, Moderate) is unaffected.
+- **Extraction-magnitude escape hatch** (`suppression_escape`): both suppression shapes are attacker-reachable (returning 1 lovelace to the script forces the state-continuation arm; a large identical-redeemer full drain matches the sweep fingerprint), so when the un-widened extraction floor signal exceeds `extraction_floor_min` (default 0.5) the finding is kept and capped at the top of Moderate (reason `extraction_escape_moderate_cap`) instead of silenced. The benign populations sit far below the threshold (state machines score ~0 on extraction; observed small owner-sweeps ~0.002 on the lovelace axis), while any multi-asset drain saturates the asset axis at 1.0. Recall-first: a Moderate false positive on a large owner-sweep is strictly better than a silenced real drain.
 - Per-script allowlist of known batch-processing / resolution contracts **reduces** the `s_extraction` weight (redistributed proportionally to `s_inputs` and `s_recurrence`) rather than bypassing the scorer. This preserves the structural signals while suppressing the economic-magnitude signal for contracts where large extraction is legitimate.
 - The spend-redeemer gate condition excludes native-script multisig wallets, which evaluate as declarative ledger predicates per-input and are immune to multiple-satisfaction by construction.
 - **Net value linearity check**: spec-defined corroboration on the coefficient of variation of per-input extracted values, on the roadmap.
