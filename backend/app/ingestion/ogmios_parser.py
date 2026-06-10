@@ -1,9 +1,10 @@
 """Parser for Ogmios v6 transaction format into NormalizedTransaction"""
 
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 import logging
 
+from app.analysis.features import extract_fee, extract_lovelace, flatten_assets
 from app.models.transaction import (
     NormalizedTransaction,
     TransactionInput,
@@ -43,17 +44,8 @@ def parse_ogmios_transaction(
     # Absent (mempool txs, v5 payloads) means "validated".
     script_valid = tx_data.get("spends", "inputs") != "collaterals"
 
-    # Fee
-    # Ogmios v6 wraps fee as {"ada": {"lovelace": N}} in Conway/Babbage era
-    fee_obj = tx_data.get("fee", {})
-    if isinstance(fee_obj, dict):
-        ada = fee_obj.get("ada")
-        if isinstance(ada, dict):
-            fee = ada.get("lovelace", 0)   # {"ada": {"lovelace": N}}
-        else:
-            fee = fee_obj.get("lovelace", 0)  # legacy {"lovelace": N}
-    else:
-        fee = int(fee_obj) if fee_obj else 0
+    # Fee: v5/v6 shape handling lives in features.extract_fee.
+    fee = extract_fee(tx_data)
 
     # Parse inputs.
     # Ogmios does not include resolved UTxO values in the transaction body, so
@@ -121,29 +113,11 @@ def parse_ogmios_transaction(
             addresses.add(address)
 
             value = out.get("value", {})
-            if isinstance(value, dict):
-                # Ogmios v6: {"ada": {"lovelace": N}, ...}
-                # Ogmios v5: {"lovelace": N, ...}
-                ada = value.get("ada")
-                if isinstance(ada, dict):
-                    lovelace = ada.get("lovelace", 0)
-                else:
-                    lovelace = value.get("lovelace", 0)
-                # Multi-asset: everything except "lovelace" and "ada" keys
-                assets = {}
-                for key, val in value.items():
-                    if key in ("lovelace", "ada"):
-                        continue
-                    if isinstance(val, dict):
-                        # Format: {"policyId": {"assetName": quantity}}
-                        for asset_name, qty in val.items():
-                            assets[f"{key}.{asset_name}"] = int(qty)
-                    else:
-                        assets[key] = int(val)
-                asset_dict = assets if assets else None
-            else:
-                lovelace = int(value) if value else 0
-                asset_dict = None
+            # v5/v6 lovelace + flattened "policy.name" asset shape handling
+            # lives in features.extract_lovelace / flatten_assets.
+            lovelace = extract_lovelace(value)
+            assets = flatten_assets(value)
+            asset_dict = assets if assets else None
 
             outputs.append(TransactionOutput(
                 address=address,
@@ -187,16 +161,11 @@ def parse_ogmios_transaction(
                 else:
                     metadata[label] = content
 
-    # Deposit (v6 nests as {"ada": {"lovelace": N}}; v5 as {"lovelace": N})
+    # Deposit (v6 nests as {"ada": {"lovelace": N}}; v5 as {"lovelace": N}).
+    # None stays None ("no deposit field"), distinct from a known 0.
     deposit = tx_data.get("deposit")
     if deposit is not None:
-        if isinstance(deposit, dict):
-            ada = deposit.get("ada")
-            if isinstance(ada, dict):
-                deposit = ada.get("lovelace", 0)
-            else:
-                deposit = deposit.get("lovelace", 0)
-        deposit = int(deposit)
+        deposit = extract_lovelace(deposit)
 
     # input_count / output_count are CONSUMED / CREATED counts: regular
     # inputs and outputs for a validated tx, collaterals and the

@@ -83,6 +83,9 @@ from app.analysis.scorer_config import (
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 from app.analysis.features import extract_lovelace as _extract_lovelace
+# Promoted to features.iter_assets (shared v5/v6 asset iteration); the
+# underscore alias is part of this module's test surface.
+from app.analysis.features import iter_assets as _iter_assets  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -299,26 +302,6 @@ def _compute_net_value_out(
     """
     value_in, value_out = _compute_lovelace_flow(inputs, outputs, script_key)
     return max(0, value_in - value_out)
-
-
-def _iter_assets(val: Any):
-    """Yield ((policy_id, asset_name), qty) pairs from an Ogmios value dict.
-
-    Skips the lovelace component. Handles both v5 (`{"lovelace": N, policy: {asset: qty}}`)
-    and v6 (`{"ada": {"lovelace": N}, policy: {asset: qty}}`) shapes.
-    """
-    if not isinstance(val, dict):
-        return
-    for policy, inner in val.items():
-        if policy in ("ada", "lovelace"):
-            continue
-        if not isinstance(inner, dict):
-            continue
-        for asset_name, qty in inner.items():
-            try:
-                yield (policy, asset_name), int(qty)
-            except (TypeError, ValueError):
-                continue
 
 
 def _compute_n_assets_out(

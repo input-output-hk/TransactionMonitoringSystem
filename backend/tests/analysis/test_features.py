@@ -3,8 +3,11 @@ Ogmios v5/v6 field extraction."""
 
 from app.analysis.features import (
     SCRIPT_ADDRESS_PREFIXES,
+    extract_fee,
     extract_ttl,
+    flatten_assets,
     is_script_address,
+    iter_assets,
 )
 
 
@@ -68,3 +71,46 @@ class TestExtractTtl:
         assert extract_ttl({}) == 0
         assert extract_ttl(None) == 0
         assert extract_ttl({"validityInterval": None}) == 0
+
+
+class TestExtractFee:
+    def test_v6_nested(self):
+        assert extract_fee({"fee": {"ada": {"lovelace": 200_000}}}) == 200_000
+
+    def test_v5_flat(self):
+        assert extract_fee({"fee": {"lovelace": 170_000}}) == 170_000
+
+    def test_bare_number(self):
+        assert extract_fee({"fee": 150_000}) == 150_000
+
+    def test_absent(self):
+        assert extract_fee({}) == 0
+        assert extract_fee(None) == 0
+
+
+class TestFlattenAssets:
+    def test_nested_bundles_flatten_to_dotted_keys(self):
+        value = {
+            "ada": {"lovelace": 2_000_000},
+            "p1": {"aa": 5, "bb": 1},
+            "p2": {"cc": 7},
+        }
+        assert flatten_assets(value) == {"p1.aa": 5, "p1.bb": 1, "p2.cc": 7}
+
+    def test_flat_legacy_entries_pass_through(self):
+        assert flatten_assets({"lovelace": 1, "p1.aa": 3}) == {"p1.aa": 3}
+
+    def test_ada_only(self):
+        assert flatten_assets({"ada": {"lovelace": 9}}) == {}
+        assert flatten_assets("not a dict") == {}
+
+
+class TestIterAssets:
+    def test_yields_policy_name_qty(self):
+        value = {"ada": {"lovelace": 1}, "p1": {"aa": 2, "bb": 3}}
+        assert dict(iter_assets(value)) == {("p1", "aa"): 2, ("p1", "bb"): 3}
+
+    def test_skips_unparseable_and_flat(self):
+        value = {"lovelace": 1, "p1": {"aa": "garbage"}, "p2.flat": 5}
+        assert list(iter_assets(value)) == []
+        assert list(iter_assets(None)) == []

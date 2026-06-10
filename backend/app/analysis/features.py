@@ -126,6 +126,68 @@ def extract_lovelace(value: Any) -> int:
     return 0
 
 
+def extract_fee(tx_data: Any) -> int:
+    """Transaction fee in lovelace, handling both Ogmios schema versions.
+
+    The fee field carries the same shape as a value's ADA component
+    (v6 ``{"ada": {"lovelace": N}}``, v5 ``{"lovelace": N}``, or a bare
+    number), so this delegates to :func:`extract_lovelace`. The two
+    previously hand-rolled copies of this branching (block parser and
+    mempool collision capture) are the exact duplication class that let
+    the v6 mempool-resolution bug ship; one shared reader removes it.
+    """
+    if not isinstance(tx_data, dict):
+        return 0
+    return extract_lovelace(tx_data.get("fee", {}))
+
+
+def flatten_assets(value: Any) -> Dict[str, int]:
+    """Flatten an Ogmios value dict's native assets to ``{"policy.name": qty}``.
+
+    Skips the ``ada`` (v6) and ``lovelace`` (v5) components; nested
+    ``{policy: {name: qty}}`` bundles flatten to dotted keys, and already-
+    flat entries (legacy v5 paths) pass through. This is the storage shape
+    used by ``transaction_inputs.assets`` / resolved-input caches; the
+    block parser and the mempool UTxO resolver previously kept
+    character-identical copies of this loop.
+    """
+    assets: Dict[str, int] = {}
+    if not isinstance(value, dict):
+        return assets
+    for key, val in value.items():
+        if key in ("lovelace", "ada"):
+            continue
+        if isinstance(val, dict):
+            for asset_name, qty in val.items():
+                assets[f"{key}.{asset_name}"] = int(qty)
+        else:
+            assets[key] = int(val)
+    return assets
+
+
+def iter_assets(val: Any):
+    """Yield ``((policy_id, asset_name), qty)`` pairs from an Ogmios value dict.
+
+    Skips the lovelace component. Handles both v5 (`{"lovelace": N, policy: {asset: qty}}`)
+    and v6 (`{"ada": {"lovelace": N}, policy: {asset: qty}}`) shapes.
+    Entries whose quantity does not parse as an integer are skipped, and
+    flat (non-dict) policy entries are ignored: callers that must also
+    honour legacy flat entries use :func:`flatten_assets` instead.
+    """
+    if not isinstance(val, dict):
+        return
+    for policy, inner in val.items():
+        if policy in ("ada", "lovelace"):
+            continue
+        if not isinstance(inner, dict):
+            continue
+        for asset_name, qty in inner.items():
+            try:
+                yield (policy, asset_name), int(qty)
+            except (TypeError, ValueError):
+                continue
+
+
 def extract_ttl(tx_data: Any) -> int:
     """Transaction TTL (the slot after which the tx is invalid), handling both
     Ogmios schema versions.

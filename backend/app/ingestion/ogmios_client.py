@@ -14,7 +14,7 @@ from typing import Callable, Awaitable, Optional, Set, Dict, Any, List, Tuple
 
 import websockets
 
-from app.analysis.features import extract_lovelace, extract_ttl
+from app.analysis.features import extract_fee, extract_lovelace, extract_ttl, flatten_assets
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
@@ -50,20 +50,10 @@ def _parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
     utxo_id = utxo_tx.get("id", "") if isinstance(utxo_tx, dict) else ""
     utxo_index = utxo.get("index", 0)
     val = utxo.get("value", {})
-    lovelace = extract_lovelace(val)
-    assets: Dict[str, int] = {}
-    if isinstance(val, dict):
-        for k, v in val.items():
-            if k in ("lovelace", "ada"):
-                continue
-            if isinstance(v, dict):
-                for asset_name, qty in v.items():
-                    assets[f"{k}.{asset_name}"] = int(qty)
-            else:
-                assets[k] = int(v)
+    assets = flatten_assets(val)
     return (utxo_id, utxo_index), {
         "address": utxo.get("address", ""),
-        "amount": int(lovelace),
+        "amount": int(extract_lovelace(val)),
         "assets": assets if assets else None,
     }
 
@@ -857,12 +847,7 @@ class OgmiosClient:
         displacement, handled in _record_displacements on the chain side.
         """
         input_refs = set()
-        fee_obj = tx_data.get("fee", {})
-        if isinstance(fee_obj, dict):
-            ada = fee_obj.get("ada")
-            tx_fee = ada.get("lovelace", 0) if isinstance(ada, dict) else fee_obj.get("lovelace", 0)
-        else:
-            tx_fee = int(fee_obj or 0)
+        tx_fee = extract_fee(tx_data)
         tx_ttl = extract_ttl(tx_data)
         # Extract first input address for address clustering.
         # Ogmios mempool inputs are unresolved references (tx_hash + index),
