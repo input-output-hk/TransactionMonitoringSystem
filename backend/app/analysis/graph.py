@@ -21,6 +21,9 @@ _CIRCULAR_CFG = _get_cfg("circular")
 _CYCLE_CFG = _CIRCULAR_CFG["cycle"]
 _MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
 _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
+# Public alias: the engine's cycle pre-filter must key off the same knob so
+# the two sites cannot drift (the engine previously hardcoded the value).
+MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
 
 
@@ -116,7 +119,12 @@ def detect_cycle(
         if not current_addresses:
             break
 
-        addr_list = list(current_addresses)[:max_fanout]
+        # Deterministic frontier: set iteration order varies across Python
+        # processes (string hash randomization), so an unsorted truncation
+        # would explore a different address subset run-to-run and silently
+        # miss cycles through the dropped legs. Same rationale as
+        # _first_sorted, applied to the cap that actually controls recall.
+        addr_list = sorted(current_addresses)[:max_fanout]
 
         # Find txs where these addresses are inputs (they spent received funds).
         # The slot window is bounded: cycles spanning >24h are almost always

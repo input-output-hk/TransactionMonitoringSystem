@@ -34,7 +34,8 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
                       "uniform_sweep_guard.require_uniform_redeemer",
                       "uniform_sweep_guard.require_no_script_return",
                       "uniform_sweep_guard.min_inputs"),
-    "large_datum":   ("gate", "weights", "fixed_anchors", "bootstrap_anchors",
+    "large_datum":   ("gate", "gate.flag_datum_hash_only",
+                      "weights", "fixed_anchors", "bootstrap_anchors",
                       "aggregate_engagement_min", "reason_threshold"),
     "token_dust":    ("gate.min_token_count", "weights", "bootstrap_anchors",
                       "allowlist_prefixes", "allowlist_policies",
@@ -45,17 +46,18 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
                       "reason_thresholds", "min_recurrence_wins", "high_band_cap",
                       "delta_ms_default"),
     "sandwich":      ("weights", "fixed_anchors", "bootstrap_anchors", "link_scores",
-                      "window_slots", "min_profit_lovelace",
+                      "window_slots", "neighbor_limit", "min_profit_lovelace",
                       "reason_thresholds"),
     "circular":      ("weights", "fixed_anchors", "bootstrap_anchors", "cycle",
                       "reason_threshold", "moderate_cap"),
     "fake_token":    ("weights", "fixed_anchors", "bootstrap_anchors",
                       "similarity_threshold", "unicode_scores", "reason_thresholds",
-                      "critical_assets.multiplier", "critical_assets.names"),
+                      "critical_assets.multiplier", "critical_assets.names",
+                      "ascii_homoglyphs_enabled"),
     "phishing":      ("weights", "fixed_anchors", "bootstrap_anchors",
                       "similarity_suspicious_range", "social_engineering",
                       "reason_thresholds", "critical_threshold", "metadata_labels",
-                      "asset_name_carrier"),
+                      "asset_name_carrier", "min_decoded_string_len"),
 }
 
 
@@ -99,6 +101,10 @@ _REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
     "corroboration_threshold",
 )
 
+_REQUIRED_BASELINES: Tuple[str, ...] = (
+    "min_spread_ratio",
+)
+
 
 def _validate(path: Path, data: Dict[str, Any]) -> None:
     if "scorers" not in data or not isinstance(data["scorers"], dict):
@@ -129,6 +135,17 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
         raise RuntimeError(
             f"Detection config {path} missing composite_corroboration keys: "
             f"{', '.join(missing_corr)}"
+        )
+    baselines = data.get("baselines")
+    if not isinstance(baselines, dict):
+        raise RuntimeError(
+            f"Detection config {path} must contain a top-level 'baselines' mapping."
+        )
+    missing_bl = [k for k in _REQUIRED_BASELINES if k not in baselines]
+    if missing_bl:
+        raise RuntimeError(
+            f"Detection config {path} missing baselines keys: "
+            f"{', '.join(missing_bl)}"
         )
     scorers = data["scorers"]
     missing: Iterable[str] = []
@@ -183,6 +200,14 @@ def get(section: str) -> Dict[str, Any]:
             f"Add a 'scorers.{section}' block to detection.yaml."
         )
     return cfg
+
+
+def baselines_config() -> Dict[str, Any]:
+    """Return the top-level baselines block (resolution tunables shared by
+    every percentile-baselined scorer). Presence and required keys are
+    enforced at load time by :func:`_validate`.
+    """
+    return _CFG["baselines"]
 
 
 def composite_corroboration_config() -> Dict[str, Any]:

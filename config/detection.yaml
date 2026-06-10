@@ -32,6 +32,19 @@ protocol_limits:
 composite_corroboration:
   corroboration_threshold: 40.0
 
+# Baseline-resolution tunables shared by every percentile-baselined scorer
+# (consumed by normalise.py / scorer_config.py, not by a single scorer).
+baselines:
+  # A per-script (or per-policy) baseline with near-zero spread between p50
+  # and p99 collapses the inverted-normalise axis onto p50: any value at the
+  # median scores 1.0 and looks maximally suspicious. The strict-equality
+  # case (p99 == p50) is handled inside normalise(); baselines with a tiny
+  # positive spread (e.g. p50=2.52M, p99=2.59M; 2.7% of p50) still saturate
+  # every normal interaction. A baseline whose spread is below this fraction
+  # of p50 is treated as uninformative and resolution falls through to the
+  # next tier (global / bootstrap).
+  min_spread_ratio: 0.10
+
 scorers:
 
   # ------------------------------------------------------------------
@@ -176,6 +189,13 @@ scorers:
       # large legitimate datums. Mid-range (6-12 KB) high-entropy datums that
       # overlap legitimate state remain a known gap (needs recurrence/semantics).
       size_backstop_fraction: 0.75
+      # Observability flag for datumHash-only outputs at script addresses.
+      # The referenced datum cannot be sized without an indexer, so a
+      # bloat-by-hash attack is invisible to the byte gates above. When on,
+      # the scorer engages and records datum_hash_only_count in sub_scores
+      # plus the addresses in evidence; the result stays a no-finding (-1)
+      # and never alerts. Kill switch only.
+      flag_datum_hash_only: true
     # Observability-only engagement threshold for the multi-output
     # datum-bloat shape (an attacker splits the bloat payload across N
     # script-address outputs of the same contract, each individually
@@ -375,6 +395,10 @@ scorers:
       swap_profit:         { p50: 0,   p99: 5_000_000 }
       attacker_recurrence: { p50: 0,   p99: 5 }
     window_slots: 5              # gate: structural triplet must fit within N slots
+    # Cap on neighbour rows fetched around a victim tx during structural
+    # detection. Bounds the per-tx query cost; a window busier than this is
+    # batcher traffic, not a 3-leg sandwich.
+    neighbor_limit: 20
     link_scores:
       linked: 1.0                # attacker_linked flag present
       unlinked: 0.2              # triplet present but no linkage evidence
@@ -487,6 +511,14 @@ scorers:
     critical_assets:
       multiplier: 1.8
       names: ["iUSD", "DJED", "SHEN"]
+    # ASCII visual lookalikes (spec homoglyph table: O/0, I/l/1). When on,
+    # the similarity comparison folds both sides through the lookalike
+    # groups so a digit-for-letter forgery ("1NDY") matches the legitimate
+    # name at full similarity, and the unicode-suspicion axis gets the
+    # homoglyph bump only when the fold STRICTLY increases similarity to
+    # the matched name (a name that merely contains digits gains nothing,
+    # so legitimately numeric names like MIN100 are unaffected).
+    ascii_homoglyphs_enabled: true
 
   # ------------------------------------------------------------------
   phishing:
@@ -555,3 +587,6 @@ scorers:
     # only; thresholds are shared with the other carriers.
     asset_name_carrier:
       enabled: true
+    # Minimum length for a decoded datum text span to be kept for URL and
+    # social-engineering scanning; shorter spans are CBOR structural noise.
+    min_decoded_string_len: 4

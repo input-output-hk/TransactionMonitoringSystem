@@ -127,12 +127,12 @@ def _enrich_inputs_with_resolved_addresses(
 
     # Fetch raw_data of referenced txs to extract output values
     # Cap to avoid oversized IN clauses; remaining inputs just won't have values
-    _MAX_REF_TXS = 2000
-    if len(ref_tx_hashes) > _MAX_REF_TXS:
+    max_ref_txs = settings.ANALYSIS_MAX_REF_TXS
+    if len(ref_tx_hashes) > max_ref_txs:
         logger.warning(
-            "Capping ref tx lookups: %d -> %d", len(ref_tx_hashes), _MAX_REF_TXS,
+            "Capping ref tx lookups: %d -> %d", len(ref_tx_hashes), max_ref_txs,
         )
-        ref_tx_hashes = set(list(ref_tx_hashes)[:_MAX_REF_TXS])
+        ref_tx_hashes = set(sorted(ref_tx_hashes)[:max_ref_txs])
 
     ref_outputs: Dict[str, Dict[int, Dict]] = {}  # ref_tx -> {index -> output}
     if ref_tx_hashes:
@@ -281,17 +281,19 @@ def _enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
     if not settings.SCORER_CIRCULAR_ENABLED or not settings.CYCLE_DETECTION_ENABLED:
         return
     try:
-        from app.analysis.graph import detect_cycle
+        from app.analysis import graph as graph_mod
     except ImportError:
         return
 
     for row in rows:
-        # Pre-filter: skip txs with many outputs (unlikely circular)
+        # Pre-filter: skip txs with many outputs (unlikely circular).
+        # Same knob as detect_cycle's own fan-out gate
+        # (circular.cycle.max_output_fanout) so the two sites cannot drift.
         output_count = row.get("output_count", 0)
-        if output_count > 20:
+        if output_count > graph_mod.MAX_OUTPUT_FANOUT:
             continue
         try:
-            cycle = detect_cycle(row["tx_hash"], network)
+            cycle = graph_mod.detect_cycle(row["tx_hash"], network)
             if cycle:
                 row["cycle"] = cycle
         except Exception as e:

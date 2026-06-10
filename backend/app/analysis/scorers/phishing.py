@@ -91,6 +91,9 @@ _REASON_T = _CFG["reason_thresholds"]
 _CRITICAL_T = float(_CFG["critical_threshold"])
 _RELEVANT_LABELS = set(str(x) for x in _CFG["metadata_labels"])
 _ASSET_CARRIER_ENABLED = bool(_CFG["asset_name_carrier"]["enabled"])
+# Minimum length for a decoded datum text span to be kept for URL / SE
+# scanning. Shorter spans are CBOR structural noise, not content.
+_MIN_DECODED_STR_LEN = int(_CFG["min_decoded_string_len"])
 
 # URL extraction regexes.
 #
@@ -113,6 +116,38 @@ _BARE_DOMAIN_RE = re.compile(
 # short matches where tldextract's PSL recognises a 2-letter TLD (e.g. ``a.io``
 # is technically parseable but almost always noise).
 _BARE_DOMAIN_MIN_LEN = 6
+
+# Defanged-URL normalisation, applied to carrier text BEFORE regex
+# extraction. Phishing payloads routinely "defang" URLs to dodge naive
+# scanners: bracketed/parenthesised/spelled dots (``evil[.]io``,
+# ``evil(.)io``, ``evil[dot]io``), Unicode dot lookalikes (ideographic
+# full stop U+3002, fullwidth U+FF0E, halfwidth U+FF61), and ``hxxp``
+# scheme mangling. These are notation conventions, not tunables, so they
+# live here as a named table rather than in detection.yaml.
+_DEFANG_REPLACEMENTS = (
+    ("[.]", "."),
+    ("(.)", "."),
+    ("[dot]", "."),
+    ("(dot)", "."),
+    ("。", "."),
+    ("．", "."),
+    ("｡", "."),
+)
+_HXXP_RE = re.compile(r"hxxp(s?)://", re.IGNORECASE)
+
+
+def _refang(text: str) -> str:
+    """Undo common URL defanging so the extraction regexes see the real URL."""
+    for needle, repl in _DEFANG_REPLACEMENTS:
+        text = text.replace(needle, repl)
+    return _HXXP_RE.sub(r"http\1://", text)
+
+
+def _url_candidates(text: str) -> List[str]:
+    """Raw URL + bare-domain regex hits in ``text`` (defang-normalised,
+    un-validated)."""
+    text = _refang(text)
+    return _URL_RE.findall(text) + _BARE_DOMAIN_RE.findall(text)
 
 # RFC 2606 reserved TLDs. Not in Mozilla's Public Suffix List (and so rejected
 # by tldextract) but frequently appear in phishing-harness output and the
@@ -207,7 +242,7 @@ def _decode_datum_strings(datum: Any) -> List[str]:
     """
     results: List[str] = []
 
-    _MIN_LEN = 4
+    _MIN_LEN = _MIN_DECODED_STR_LEN
 
     def _emit_bytes(blob: bytes) -> None:
         """Try to UTF-8 decode and emit; fall back to a byte-scan of
@@ -634,8 +669,7 @@ class PhishingScorer(BaseScorer):
                 if content is None:
                     continue
                 text = self._flatten_to_text(content)
-                candidates.extend(_URL_RE.findall(text))
-                candidates.extend(_BARE_DOMAIN_RE.findall(text))
+                candidates.extend(_url_candidates(text))
 
         # --- Carrier 2: inline datums on outputs ------------------------
         raw_data = features.get("raw_data") or {}
@@ -648,8 +682,7 @@ class PhishingScorer(BaseScorer):
                 if datum is None:
                     continue
                 for decoded in _decode_datum_strings(datum):
-                    candidates.extend(_URL_RE.findall(decoded))
-                    candidates.extend(_BARE_DOMAIN_RE.findall(decoded))
+                    candidates.extend(_url_candidates(decoded))
 
         # --- Carrier 3: decoded native-asset names -----------------------
         if _ASSET_CARRIER_ENABLED:
@@ -661,8 +694,7 @@ class PhishingScorer(BaseScorer):
         """Raw URL/domain regex hits inside decoded asset names (un-validated)."""
         hits: List[str] = []
         for name in _decode_asset_name_strings(features.get("raw_data") or {}):
-            hits.extend(_URL_RE.findall(name))
-            hits.extend(_BARE_DOMAIN_RE.findall(name))
+            hits.extend(_url_candidates(name))
         return hits
 
     def _validate_candidates(self, candidates: List[str]) -> List[str]:

@@ -305,3 +305,30 @@ class TestAssetNameCarrier:
             ]
         }
         assert scorer.gate(_features(metadata=None, raw_data=raw)) is False
+
+
+class TestDefangedUrls:
+    """Defanged URLs (bracketed dots, Unicode dot lookalikes, hxxp schemes)
+    must be re-fanged before extraction; otherwise a trivially obfuscated
+    payload evades the gate entirely."""
+
+    def test_bracket_dot_defang_detected(self, scorer):
+        meta = {"674": {"msg": ["claim rewards at cardano-drop[.]io/claim"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_dot_word_defang_detected(self, scorer):
+        meta = {"674": {"msg": ["visit claim-ada-reward[dot]xyz now"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_ideographic_dot_detected(self, scorer):
+        # U+3002 IDEOGRAPHIC FULL STOP standing in for the dot.
+        meta = {"674": {"msg": ["visit cardano-drop。io for rewards"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_hxxp_scheme_detected(self, scorer):
+        meta = {"674": {"msg": ["hxxps://evil-claim.example/wallet"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_plain_text_still_not_gated(self, scorer):
+        meta = {"674": {"msg": ["thanks for the great meetup[no urls here]"]}}
+        assert scorer.gate(_features(metadata=meta)) is False

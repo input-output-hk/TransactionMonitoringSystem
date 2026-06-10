@@ -73,29 +73,32 @@ def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
     return False
 
 
+# CIP-19 Shelley address types whose PAYMENT credential is a script hash.
+# The header high nibble encodes the type; the first Bech32 data character
+# follows from it (shared by mainnet and testnet since the network bit does
+# not reach it):
+#   type 1 -> 'z' (script payment + stake key)
+#   type 3 -> 'x' (script payment + script stake)
+#   type 5 -> '2' (script payment + pointer stake, deprecated but valid)
+#   type 7 -> 'w' (script payment, no stake / enterprise)
+# Type 2 ('y') is payment-KEY + script-stake and is deliberately excluded:
+# the spending credential is a key, so script-targeted attacks do not apply.
+SCRIPT_ADDRESS_PREFIXES = (
+    "addr1w", "addr1z", "addr1x", "addr12",
+    "addr_test1w", "addr_test1z", "addr_test1x", "addr_test12",
+)
+
+
 def is_script_address(address: str) -> bool:
     """Detect whether a Cardano address is a script (validator) address.
 
-    Cardano Shelley-era addresses encode the payment credential type in the
-    header nibble.  For Bech32 addresses the human-readable prefix indicates:
-      - addr1q / addr_test1q  -> payment key (normal wallet)
-      - addr1w / addr_test1w  -> script payment credential (validator)
-      - addr1z / addr_test1z  -> script payment + staking key
-    Enterprise and pointer addresses follow similar patterns.
-
-    This heuristic covers the vast majority of addresses seen on Preprod and
-    Mainnet.  Byron-era addresses (Ae2...) are never script addresses.
+    Matches every CIP-19 address type whose payment credential is a script
+    hash (see ``SCRIPT_ADDRESS_PREFIXES``). Byron-era addresses (Ae2...,
+    DdzFF...) are never script addresses.
     """
     if not address:
         return False
-    laddr = address.lower()
-    # Script payment credential prefixes (mainnet + testnet variants)
-    return (
-        laddr.startswith("addr1w")
-        or laddr.startswith("addr_test1w")
-        or laddr.startswith("addr1z")
-        or laddr.startswith("addr_test1z")
-    )
+    return address.lower().startswith(SCRIPT_ADDRESS_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +124,27 @@ def extract_lovelace(value: Any) -> int:
         except (TypeError, ValueError):
             return 0
     return 0
+
+
+def extract_ttl(tx_data: Any) -> int:
+    """Transaction TTL (the slot after which the tx is invalid), handling both
+    Ogmios schema versions.
+
+    Ogmios v6 emits ``validityInterval.invalidAfter``; v5 emits ``timeToLive``.
+    Returns ``0`` when absent or unparseable so callers can default safely.
+    """
+    if not isinstance(tx_data, dict):
+        return 0
+    vi = tx_data.get("validityInterval")
+    if isinstance(vi, dict) and vi.get("invalidAfter") is not None:
+        try:
+            return int(vi["invalidAfter"])
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return int(tx_data.get("timeToLive", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def decode_hex_asset_name(hex_name: str) -> str:

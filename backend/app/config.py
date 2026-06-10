@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     ANALYSIS_ENGINE_ENABLED: bool = True
     ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30   # how often the engine polls for new txs
     ANALYSIS_ENGINE_BATCH_SIZE: int = 100         # max transactions scored per run
+    # Cap on referenced-tx raw_data lookups per enrichment batch (bounds the
+    # IN-clause size); inputs past the cap simply stay unresolved for the run.
+    ANALYSIS_MAX_REF_TXS: int = 2000
 
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True

@@ -14,6 +14,7 @@ from typing import Callable, Awaitable, Optional, Set, Dict, Any, List
 
 import websockets
 
+from app.analysis.features import extract_ttl
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
@@ -679,7 +680,7 @@ class OgmiosClient:
                         tx_fee = ada.get("lovelace", 0) if isinstance(ada, dict) else fee_obj.get("lovelace", 0)
                     else:
                         tx_fee = int(fee_obj or 0)
-                    tx_ttl = tx_data.get("timeToLive", 0) or 0
+                    tx_ttl = extract_ttl(tx_data)
                     # Extract first input address for address clustering.
                     # Ogmios mempool inputs are unresolved references (tx_hash + index),
                     # not full UTxOs with addresses. Extract the address field if present

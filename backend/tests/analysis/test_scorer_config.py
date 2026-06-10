@@ -24,6 +24,8 @@ def _minimal_valid_yaml() -> str:
           max_tx_size_bytes: 16384
         composite_corroboration:
           corroboration_threshold: 40.0
+        baselines:
+          min_spread_ratio: 0.10
         scorers:
           multiple_sat:
             weights: {}
@@ -40,7 +42,8 @@ def _minimal_valid_yaml() -> str:
               require_no_script_return: true
               min_inputs: 10
           large_datum:
-            gate: {}
+            gate:
+              flag_datum_hash_only: true
             weights: {}
             fixed_anchors: {}
             bootstrap_anchors: {}
@@ -75,6 +78,7 @@ def _minimal_valid_yaml() -> str:
             bootstrap_anchors: {}
             link_scores: {}
             window_slots: 5
+            neighbor_limit: 20
             min_profit_lovelace: 200000
             reason_thresholds: {}
           circular:
@@ -94,6 +98,7 @@ def _minimal_valid_yaml() -> str:
             critical_assets:
               multiplier: 1.8
               names: []
+            ascii_homoglyphs_enabled: true
           phishing:
             weights: {}
             fixed_anchors: {}
@@ -105,6 +110,7 @@ def _minimal_valid_yaml() -> str:
             metadata_labels: []
             asset_name_carrier:
               enabled: true
+            min_decoded_string_len: 4
         """)
 
 
@@ -191,6 +197,7 @@ class TestValidation:
                 "protocol_limits:\n  max_value_size_bytes: 5000\n"
                 "  max_tx_size_bytes: 16384\n"
                 "composite_corroboration:\n  corroboration_threshold: 40.0\n"
+                "baselines:\n  min_spread_ratio: 0.10\n"
                 "scorers:\n  multiple_sat: 'not a mapping'\n",
             )
 
