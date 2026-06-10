@@ -54,7 +54,8 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
                       "critical_assets.multiplier", "critical_assets.names"),
     "phishing":      ("weights", "fixed_anchors", "bootstrap_anchors",
                       "similarity_suspicious_range", "social_engineering",
-                      "reason_thresholds", "critical_threshold", "metadata_labels"),
+                      "reason_thresholds", "critical_threshold", "metadata_labels",
+                      "asset_name_carrier"),
 }
 
 

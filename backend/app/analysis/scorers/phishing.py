@@ -2,15 +2,16 @@
 
 Detects malicious URLs, social engineering content, and deceptive instructions
 embedded in on-chain transaction metadata (CIP-0020 label 674, CIP-0025 label
-721).  Scores via two sub-pipelines:
+721), in inline datums, or in native-asset names.  Scores via two
+sub-pipelines:
 
   Content   (weight 0.65): URL blacklist match, domain suspicion, social
                            engineering keyword patterns.
   Delivery  (weight 0.35): mass distribution indicators (output count,
                            recipient uniformity, URL recurrence).
 
-Gate condition: metadata must be present with at least one relevant label
-containing at least one URL.
+Gate condition: at least one URL extracted from any carrier (relevant
+metadata label, inline datum, or decoded asset name).
 """
 
 import os
@@ -29,7 +30,7 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
-from app.analysis.features import get_cbor2
+from app.analysis.features import get_cbor2, decode_hex_asset_name
 from app.config import settings
 
 # No-network tldextract: use the PSL snapshot bundled with the wheel rather
@@ -89,6 +90,7 @@ _PHISHING_TLD_BONUS = float(_SE["phishing_tld_bonus"])
 _REASON_T = _CFG["reason_thresholds"]
 _CRITICAL_T = float(_CFG["critical_threshold"])
 _RELEVANT_LABELS = set(str(x) for x in _CFG["metadata_labels"])
+_ASSET_CARRIER_ENABLED = bool(_CFG["asset_name_carrier"]["enabled"])
 
 # URL extraction regexes.
 #
@@ -354,13 +356,56 @@ def _decode_datum_strings(datum: Any) -> List[str]:
     return results
 
 
+def _decode_asset_name_strings(raw_data: Any) -> List[str]:
+    """Collect decoded (hex -> UTF-8) native-asset names from a tx's mint map
+    and output value bundles.
+
+    The dominant in-the-wild Cardano phishing shape delivers the URL in the
+    token name itself (a token literally named ``claim-ada.xyz``), airdropped
+    to wallet addresses with NO metadata and NO datum, so it never enters the
+    other two carriers. Both the ``mint`` map and every output ``value``
+    bundle are scanned: an airdrop tx usually carries the name in both, but a
+    re-distribution of a previously minted scam token only shows in outputs.
+
+    Skips the ``ada`` (Ogmios v6) and ``lovelace`` (v5) keys when iterating
+    value bundles. Asset names that do not decode as UTF-8 fall back to their
+    raw hex form, which contains no ``.`` and therefore can never satisfy the
+    downstream URL/domain matching.
+    """
+    if not isinstance(raw_data, dict):
+        return []
+    names: List[str] = []
+    seen: set = set()
+
+    def _collect(bundle: Any) -> None:
+        if not isinstance(bundle, dict):
+            return
+        for policy_key, token_map in bundle.items():
+            if policy_key in ("ada", "lovelace") or not isinstance(token_map, dict):
+                continue
+            for hex_name in token_map.keys():
+                decoded = decode_hex_asset_name(str(hex_name))
+                if decoded not in seen:
+                    seen.add(decoded)
+                    names.append(decoded)
+
+    _collect(raw_data.get("mint"))
+    outputs = raw_data.get("outputs")
+    if isinstance(outputs, list):
+        for out in outputs:
+            if isinstance(out, dict):
+                _collect(out.get("value"))
+    return names
+
+
 class PhishingScorer(BaseScorer):
     name = "phishing"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """Fire when phishing URLs appear in EITHER tx-level metadata
-        (CIP-20 label 674 / CIP-25 label 721) OR an output's inline datum
-        (CIP-68 reference-NFT pattern and similar datum-carried payloads).
+        """Fire when phishing URLs appear in tx-level metadata (CIP-20 label
+        674 / CIP-25 label 721), in an output's inline datum (CIP-68
+        reference-NFT pattern and similar datum-carried payloads), or in a
+        decoded native-asset name (URL-named scam-token airdrops).
 
         Sender allowlist: if any input address matches a known legitimate
         sender, skip scoring to reduce false positives (Polimi Section 4.9.4).
@@ -379,6 +424,13 @@ class PhishingScorer(BaseScorer):
         urls = self._extract_urls(features)
         if not urls:
             return ScorerResult(score=0.0)
+
+        # URLs delivered inside asset names, tracked separately for the
+        # reason flag and evidence panel. Always a subset of ``urls``.
+        asset_name_urls = (
+            self._validate_candidates(self._asset_name_candidates(features))
+            if _ASSET_CARRIER_ENABLED else []
+        )
 
         # ----- Content sub-pipeline (weight = 0.65) -----
 
@@ -499,6 +551,8 @@ class PhishingScorer(BaseScorer):
             reasons.append("social_engineering_language")
         if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
+        if asset_name_urls:
+            reasons.append("url_in_asset_name")
 
         # Severity classification (Polimi Section 4.9.3)
         severity = None
@@ -541,6 +595,7 @@ class PhishingScorer(BaseScorer):
                 "se_tier": se_tier,
                 "urls": url_records,
                 "url_count": len(urls),
+                "asset_name_urls": asset_name_urls,
                 "recipient_count": recipient_count,
                 "metadata_labels": metadata_labels,
             },
@@ -561,9 +616,13 @@ class PhishingScorer(BaseScorer):
              collects any UTF-8 decodable span. Catches CIP-68
              reference-NFT phishing (metadata lives in the datum, not in
              auxiliary data).
-          3. Bare-domain forms (``cardano-drop.io/claim``) alongside
-             scheme-prefixed URLs. Filtered through the PSL snapshot so
-             bare-word matches like ``3.14`` don't survive.
+          3. Decoded native-asset names from the mint map and output value
+             bundles. Catches the URL-named scam-token airdrop, which
+             carries no metadata or datum at all.
+
+        Bare-domain forms (``cardano-drop.io/claim``) are matched alongside
+        scheme-prefixed URLs in every carrier, then filtered through the PSL
+        snapshot so bare-word matches like ``3.14`` don't survive.
         """
         candidates: List[str] = []
 
@@ -592,9 +651,24 @@ class PhishingScorer(BaseScorer):
                     candidates.extend(_URL_RE.findall(decoded))
                     candidates.extend(_BARE_DOMAIN_RE.findall(decoded))
 
-        # Validate each candidate through tldextract's PSL. Scheme-prefixed
-        # hits pass trivially; bare-domain hits only survive if their TLD
-        # is a real public suffix.
+        # --- Carrier 3: decoded native-asset names -----------------------
+        if _ASSET_CARRIER_ENABLED:
+            candidates.extend(self._asset_name_candidates(features))
+
+        return self._validate_candidates(candidates)
+
+    def _asset_name_candidates(self, features: Dict[str, Any]) -> List[str]:
+        """Raw URL/domain regex hits inside decoded asset names (un-validated)."""
+        hits: List[str] = []
+        for name in _decode_asset_name_strings(features.get("raw_data") or {}):
+            hits.extend(_URL_RE.findall(name))
+            hits.extend(_BARE_DOMAIN_RE.findall(name))
+        return hits
+
+    def _validate_candidates(self, candidates: List[str]) -> List[str]:
+        """Validate each candidate through tldextract's PSL. Scheme-prefixed
+        hits pass trivially; bare-domain hits only survive if their TLD
+        is a real public suffix."""
         seen: set = set()
         validated: List[str] = []
         for cand in candidates:
@@ -741,6 +815,12 @@ class PhishingScorer(BaseScorer):
                     continue
                 for span in _decode_datum_strings(datum):
                     text += " " + span.lower()
+
+        # Asset names are a social-engineering carrier too: scam tokens are
+        # routinely named with urgency/brand bait ("ClaimADARewards").
+        if _ASSET_CARRIER_ENABLED:
+            for name in _decode_asset_name_strings(raw_data):
+                text += " " + name.lower()
 
         if not text:
             return 0.0, "None"

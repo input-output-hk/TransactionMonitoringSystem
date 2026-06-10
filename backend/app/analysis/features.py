@@ -123,6 +123,19 @@ def extract_lovelace(value: Any) -> int:
     return 0
 
 
+def decode_hex_asset_name(hex_name: str) -> str:
+    """Decode a hex-encoded asset name to UTF-8, falling back to the raw string.
+
+    Ogmios emits native-asset names as hex. The fallback keeps the contract
+    total (callers always get a string back); a pure-hex fallback contains no
+    ``.`` so it can never satisfy URL/domain matching downstream.
+    """
+    try:
+        return bytes.fromhex(hex_name).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return hex_name
+
+
 def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
     """Estimate the CBOR byte size of an Ogmios output value dict.
 

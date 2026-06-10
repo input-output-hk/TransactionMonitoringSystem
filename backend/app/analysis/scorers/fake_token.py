@@ -29,6 +29,7 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
+from app.analysis.features import decode_hex_asset_name as _decode_hex_asset_name
 
 logger = logging.getLogger(__name__)
 
@@ -212,14 +213,6 @@ def _flatten_cip25(obj: Any, parts: List[str], depth: int = 0):
     elif isinstance(obj, list):
         for item in obj:
             _flatten_cip25(item, parts, depth + 1)
-
-
-def _decode_hex_asset_name(hex_name: str) -> str:
-    """Decode a hex-encoded asset name to UTF-8, falling back to the raw string."""
-    try:
-        return bytes.fromhex(hex_name).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return hex_name
 
 
 def _extract_minted_assets(raw_data: Dict, metadata: Optional[Dict] = None) -> List[Dict[str, Any]]:

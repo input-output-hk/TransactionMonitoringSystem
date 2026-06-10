@@ -103,6 +103,8 @@ def _minimal_valid_yaml() -> str:
             reason_thresholds: {}
             critical_threshold: 0.6
             metadata_labels: []
+            asset_name_carrier:
+              enabled: true
         """)
 
 

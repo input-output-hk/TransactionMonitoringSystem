@@ -540,12 +540,18 @@ If no substitution fits within the 32-byte AssetName limit, a zero-width space (
 ## Attack 9: Phishing via Metadata
 
 ### Definition
-The attacker embeds malicious URLs, deceptive instructions, or social engineering messages in on-chain transaction metadata (CIP-20 label 674) or CIP-25 NFT metadata (label 721). Often delivered as mass airdrops, with small token or bare ADA sent to many recipients alongside the malicious metadata.
+The attacker embeds malicious URLs, deceptive instructions, or social engineering messages in on-chain transaction metadata (CIP-20 label 674), CIP-25 NFT metadata (label 721), inline datums, or the native-asset name itself. Often delivered as mass airdrops, with small token or bare ADA sent to many recipients alongside the malicious payload.
 
 ### Gate Conditions
-- `metadata_present == true`
-- At least one relevant metadata label present (674 or 721)
-- At least one URL extracted from metadata fields
+- At least one URL extracted from any of the three carriers below
+- Sender not on the allowlist of known legitimate protocol addresses
+
+### URL Carriers
+1. **Tx-level metadata** under a relevant label (`phishing.metadata_labels`, default 674 and 721).
+2. **Inline datums on outputs**: the Plutus-Data tree is walked and every UTF-8 decodable span is scanned. Catches CIP-68 reference-NFT phishing, where the payload lives in the datum rather than auxiliary data.
+3. **Decoded native-asset names** from the mint map and output value bundles (`phishing.asset_name_carrier.enabled`). Catches the URL-named scam-token airdrop: the dominant in-the-wild Cardano scam mints a token literally named after the phishing domain (e.g. `claim-ada.xyz`) and mass-airdrops it to wallet addresses with no metadata and no datum, so it never enters the other two carriers. Names are hex-decoded to UTF-8 first; names that fail decoding fall back to raw hex, which contains no dot and can never match. Asset names also feed the social-engineering text scan (scam tokens are routinely named with urgency or brand bait). URLs found in asset names are recorded in evidence as `asset_name_urls` and raise the `url_in_asset_name` reason flag.
+
+Bare-domain forms (`cardano-drop.io/claim`) are matched alongside scheme-prefixed URLs in every carrier, then validated against the Public Suffix List so bare-word matches like `3.14` do not survive. Mass distribution is scored by the delivery sub-pipeline below regardless of carrier (`recipient_count` counts distinct output addresses).
 
 ### Detection: Two Sub-Pipelines
 

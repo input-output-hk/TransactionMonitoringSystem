@@ -544,3 +544,14 @@ scorers:
       recipients: 0.5
     critical_threshold: 0.60         # content_score above this → severity=Critical
     metadata_labels: ["674", "721"]  # CIP-20 message label, CIP-25 NFT metadata
+    # Carrier 3: native-asset names. The dominant in-the-wild Cardano scam
+    # delivers the URL in the token name itself (a token literally named
+    # "claim-ada.xyz"), mass-airdropped to wallet addresses with no metadata
+    # and no datum, so it never enters the other two carriers. Decoded
+    # (hex to UTF-8) names from the mint map and output value bundles go
+    # through the same URL extraction + PSL validation as metadata text, and
+    # feed the social-engineering scan. Names that fail UTF-8 decoding fall
+    # back to raw hex, which has no dot and can never match. Kill switch
+    # only; thresholds are shared with the other carriers.
+    asset_name_carrier:
+      enabled: true
