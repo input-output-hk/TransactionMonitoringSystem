@@ -17,10 +17,19 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
+from app.analysis.scorer_config import baselines_config
 from app.config import settings
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
+
+# Drift guard (baselines.drift in config/detection.yaml): a recompute whose
+# p99 jumps beyond the threshold relative to the stored baseline is HELD
+# (prior row stays active) and logged to baseline_drift_events. This is the
+# anti-poisoning control for per-script baselines; see the config comment.
+_DRIFT_CFG = baselines_config()["drift"]
+_DRIFT_ENABLED: bool = bool(_DRIFT_CFG["enabled"])
+_DRIFT_P99_THRESHOLD: float = float(_DRIFT_CFG["p99_threshold"])
 
 # Features computed from utxo_features table
 _UTXO_FEATURES = [
@@ -96,6 +105,7 @@ def compute_global_baselines(network: str) -> List[tuple]:
             p50, p99, count, now, 180,
         ))
 
+    rows = _filter_drifted(rows)
     if rows:
         clickhouse.insert_baselines(rows)
         logger.info(
@@ -125,6 +135,7 @@ def compute_script_baselines(
             p50, p99, count, now, 90,
         ))
 
+    rows = _filter_drifted(rows)
     if rows:
         clickhouse.insert_baselines(rows)
         logger.info(
@@ -167,6 +178,7 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
                 p50, p99, count, now, 90,
             ))
 
+    rows = _filter_drifted(rows)
     if rows:
         clickhouse.insert_baselines(rows)
         logger.info(
@@ -201,14 +213,16 @@ def get_active_script_addresses(network: str, limit: int = 500) -> List[str]:
     """
     try:
         client = clickhouse._get_client()
+        # Chain-time window: same rationale as _query_percentiles.
         rows = client.execute(
             """
-            SELECT address, count() AS cnt
-            FROM utxo_features
-            WHERE network = %(network)s
-              AND is_script_address = 1
-              AND ingestion_timestamp >= now() - INTERVAL 90 DAY
-            GROUP BY address
+            SELECT f.address AS address, count() AS cnt
+            FROM utxo_features f
+            JOIN transactions t ON f.tx_hash = t.tx_hash AND f.network = t.network
+            WHERE f.network = %(network)s
+              AND f.is_script_address = 1
+              AND t.timestamp >= now() - INTERVAL 90 DAY
+            GROUP BY f.address
             HAVING cnt >= %(min_samples)s
             ORDER BY cnt DESC
             LIMIT %(limit)s
@@ -265,6 +279,53 @@ def check_drift(
     return abs(new_p99 - old_p99) / (abs(old_p99) + 1e-9) > threshold
 
 
+def _filter_drifted(rows: List[tuple]) -> List[tuple]:
+    """Hold baseline updates whose p99 drifted beyond the configured
+    threshold from the stored baseline.
+
+    Held rows are NOT inserted (the ReplacingMergeTree keeps the prior row
+    as the active baseline) and are recorded in ``baseline_drift_events``
+    plus a warning log so an analyst can review and, if legitimate, apply
+    them by re-running the recompute after raising the threshold or
+    clearing the stored row. First-ever baselines (no prior row) always
+    pass: drift is only definable against history.
+
+    Row tuple shape: ``(network, scope_type, scope_id, feature, p50, p99,
+    sample_count, computed_at, window_days)``.
+    """
+    if not _DRIFT_ENABLED:
+        return rows
+    kept: List[tuple] = []
+    for row in rows:
+        network, scope_type, scope_id, feature, _p50, new_p99 = row[:6]
+        computed_at = row[7]
+        prior = clickhouse.get_baseline(network, scope_type, scope_id, feature)
+        if prior is None:
+            kept.append(row)
+            continue
+        old_p99 = float(prior["p99"])
+        if check_drift(old_p99, float(new_p99), _DRIFT_P99_THRESHOLD):
+            drift_ratio = (
+                abs(float(new_p99) - old_p99) / (abs(old_p99) + 1e-9)
+            )
+            try:
+                clickhouse.insert_baseline_drift_event(
+                    network, scope_type, scope_id, feature,
+                    old_p99, float(new_p99), drift_ratio, computed_at,
+                )
+            except Exception:
+                logger.exception("Failed to record baseline drift event")
+            logger.warning(
+                "Baseline drift HELD: %s/%s %s/%s p99 %.4g -> %.4g "
+                "(ratio %.2f > %.2f); prior baseline stays active",
+                scope_type, scope_id[:16], network, feature,
+                old_p99, float(new_p99), drift_ratio, _DRIFT_P99_THRESHOLD,
+            )
+            continue
+        kept.append(row)
+    return kept
+
+
 def _query_percentiles(
     table: str,
     feature: str,
@@ -281,15 +342,23 @@ def _query_percentiles(
         raise ValueError(f"Disallowed feature: {feature}")
     try:
         client = clickhouse._get_client()
+        # Window on CHAIN time (transactions.timestamp), not ingestion time:
+        # during a backfill/replay every historical row carries a recent
+        # ingestion_timestamp, which would collapse the 90/180-day window to
+        # "everything ingested recently" and distort the percentiles.
+        # quantileExact for determinism: the default quantile() is a sampled
+        # estimator whose output jitters across recomputes, which would feed
+        # spurious drift signals (matches the multiple_sat precedent).
         rows = client.execute(
             f"""
             SELECT
-                quantile(0.50)(toFloat64({feature})) AS p50,
-                quantile(0.99)(toFloat64({feature})) AS p99,
+                quantileExact(0.50)(toFloat64(f.{feature})) AS p50,
+                quantileExact(0.99)(toFloat64(f.{feature})) AS p99,
                 count() AS cnt
-            FROM {table}
-            WHERE network = %(network)s
-              AND ingestion_timestamp >= now() - INTERVAL %(days)s DAY
+            FROM {table} f
+            JOIN transactions t ON f.tx_hash = t.tx_hash AND f.network = t.network
+            WHERE f.network = %(network)s
+              AND t.timestamp >= now() - INTERVAL %(days)s DAY
             """,
             {"network": network, "days": window_days},
         )
@@ -317,16 +386,19 @@ def _query_percentiles_scoped(
         raise ValueError(f"Disallowed scope_column: {scope_column}")
     try:
         client = clickhouse._get_client()
+        # Chain-time window + exact quantiles: same rationale as
+        # _query_percentiles above.
         rows = client.execute(
             f"""
             SELECT
-                quantile(0.50)(toFloat64({feature})) AS p50,
-                quantile(0.99)(toFloat64({feature})) AS p99,
+                quantileExact(0.50)(toFloat64(f.{feature})) AS p50,
+                quantileExact(0.99)(toFloat64(f.{feature})) AS p99,
                 count() AS cnt
-            FROM {table}
-            WHERE network = %(network)s
-              AND {scope_column} = %(scope_value)s
-              AND ingestion_timestamp >= now() - INTERVAL %(days)s DAY
+            FROM {table} f
+            JOIN transactions t ON f.tx_hash = t.tx_hash AND f.network = t.network
+            WHERE f.network = %(network)s
+              AND f.{scope_column} = %(scope_value)s
+              AND t.timestamp >= now() - INTERVAL %(days)s DAY
             """,
             {"network": network, "scope_value": scope_value, "days": window_days},
         )

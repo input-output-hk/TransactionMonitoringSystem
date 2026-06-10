@@ -491,6 +491,27 @@ def execute_schema():
             ORDER BY (network, scope_type, scope_id, feature)
         """)
 
+        # Append-only log of HELD baseline updates. When a recompute produces
+        # a p99 drifting beyond baselines.drift.p99_threshold from the stored
+        # value, the update is NOT applied (the prior row stays active) and
+        # the rejected candidate is recorded here for analyst review. This is
+        # the anti-poisoning control: an attacker widening a per-script
+        # distribution to de-sensitise a scorer must now move p99 slowly
+        # under the drift threshold, and every held jump leaves a trail.
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS baseline_drift_events (
+                network     String,
+                scope_type  String,
+                scope_id    String,
+                feature     String,
+                old_p99     Float64,
+                new_p99     Float64,
+                drift_ratio Float64,
+                detected_at DateTime
+            ) ENGINE = MergeTree
+            ORDER BY (network, detected_at)
+        """)
+
         logger.info("ClickHouse schema initialized")
     except ClickHouseError as e:
         logger.error(f"Failed to create ClickHouse schema: {e}")
@@ -893,6 +914,31 @@ def insert_baselines(rows: List[tuple]):
         ) VALUES
         """,
         rows,
+    )
+
+
+def insert_baseline_drift_event(
+    network: str,
+    scope_type: str,
+    scope_id: str,
+    feature: str,
+    old_p99: float,
+    new_p99: float,
+    drift_ratio: float,
+    detected_at: datetime,
+):
+    """Record a HELD baseline update (drift beyond threshold; not applied)."""
+    _get_client().execute(
+        """
+        INSERT INTO baseline_drift_events (
+            network, scope_type, scope_id, feature,
+            old_p99, new_p99, drift_ratio, detected_at
+        ) VALUES
+        """,
+        [(
+            network, scope_type, scope_id, feature,
+            float(old_p99), float(new_p99), float(drift_ratio), detected_at,
+        )],
     )
 
 

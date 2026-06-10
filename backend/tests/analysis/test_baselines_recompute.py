@@ -78,6 +78,8 @@ class TestMultipleSatPerScriptBaselines:
                 "n_inputs_same_script": (2.0, 3.0),
             },
         ]
+        # No prior baselines: first-ever rows always pass the drift guard.
+        mock_ch.get_baseline.return_value = None
         rows = compute_multiple_sat_per_script_baselines("preprod")
 
         # One row per feature, all per_script, all for addrA.
@@ -126,3 +128,67 @@ class TestExtractionPercentilesReshape:
         first_feature = _MULTIPLE_SAT_EVIDENCE_KEYS[0][0]
         assert rec[first_feature] == (5_000_000.0, 50_000_000.0)
         assert rec["n_assets_out_of_script"] == (2.0, 4.0)
+
+
+class TestDriftGuard:
+    """Drift guard (baselines.drift): a recompute whose p99 jumps beyond the
+    threshold is HELD (prior baseline stays active) and recorded, closing the
+    baseline-poisoning path where one wide-distribution dump de-sensitises a
+    per-script scorer."""
+
+    def _row(self, p99, feature="value_cbor_bytes"):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        return ("preprod", "per_script", "addrA", feature, 5.0, p99, 300, now, 90)
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_drift_holds_previous_baseline(self, mock_ch):
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 10.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        kept = _filter_drifted([self._row(p99=100.0)])  # 9x jump
+        assert kept == []
+        mock_ch.insert_baseline_drift_event.assert_called_once()
+        args = mock_ch.insert_baseline_drift_event.call_args.args
+        assert args[4] == 10.0   # old_p99
+        assert args[5] == 100.0  # new_p99
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_small_change_inserts_normally(self, mock_ch):
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 10.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        rows = [self._row(p99=12.0)]  # 20% < 50% threshold
+        assert _filter_drifted(rows) == rows
+        mock_ch.insert_baseline_drift_event.assert_not_called()
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_first_baseline_always_passes(self, mock_ch):
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = None
+        rows = [self._row(p99=1_000_000.0)]
+        assert _filter_drifted(rows) == rows
+        mock_ch.insert_baseline_drift_event.assert_not_called()
+
+
+class TestChainTimeWindows:
+    """Baseline percentile queries window on chain time (transactions.timestamp)
+    via a JOIN, and use deterministic exact quantiles."""
+
+    @patch("app.db.clickhouse._get_client")
+    def test_percentile_query_uses_chain_time_and_exact(self, mock_get_client):
+        from app.analysis.baselines import _query_percentiles
+        client = MagicMock()
+        mock_get_client.return_value = client
+        client.execute.return_value = [(10.0, 99.0, 500)]
+        result = _query_percentiles("utxo_features", "value_cbor_bytes", "preprod", 180)
+        assert result == (10.0, 99.0, 500)
+        sql = client.execute.call_args.args[0]
+        assert "quantileExact" in sql
+        assert "JOIN transactions" in sql
+        assert "t.timestamp >=" in sql
+        assert "ingestion_timestamp" not in sql

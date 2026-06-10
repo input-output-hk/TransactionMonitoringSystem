@@ -651,7 +651,9 @@ All values are recommended starting points. Validate against production data.
 - Minimum 200 transactions per script/policy before per-entity baseline is valid
 - Below threshold → fall back to global baselines (by script type)
 - **Exception**: the Multiple Satisfaction value-extraction axis (`net_value_out_of_script`, `n_assets_out_of_script`) skips the global tier and falls back per-script → bootstrap, because a global value-extraction distribution is dominated by legitimate batchers and would de-sensitise the scorer (see Attack 4: Per-Script-Only Value Baselines).
-- **Drift check**: if new p99 differs > 50% from current, flag for analyst review before applying
+- **Drift guard** (`baselines.drift`): a recompute whose p99 differs more than `p99_threshold` (default 0.50, relative) from the stored baseline is HELD: the prior baseline stays active and the rejected candidate is logged to the `baseline_drift_events` table for analyst review. First-ever baselines always pass. This is the anti-poisoning control: pre-training a wide per-script distribution to de-sensitise a scorer now requires moving p99 slowly under the threshold across multiple recomputes, leaving a trail.
+- **Per-script p99 cap** (`baselines.per_script_p99_cap_multiplier`, default 5.0): a learned baseline's p99 is capped at K times the scorer's bootstrap anchor p99 at resolution time. The resolved p99 is the normalisation saturation point, so without the cap a poisoned baseline could push it arbitrarily high and a real attack would normalise to ~0. An established contract may legitimately run up to K times the protocol-grounded anchor, never beyond it.
+- **Windows and determinism**: baseline percentile queries window on chain time (`transactions.timestamp`, not ingestion time, so backfills cannot collapse the window) and use `quantileExact` so recomputes are deterministic and drift signals are not jitter.
 
 
 ## Normalisation Formula

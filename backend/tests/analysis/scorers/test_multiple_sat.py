@@ -899,3 +899,49 @@ class TestSuppressionEscape:
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.score == -1.0
+
+
+class TestBaselinePoisoningResistance:
+    """A pre-trained (poisoned) wide per-script extraction baseline must not
+    silence a real drain: the p99 cap in resolved_or_bootstrap bounds the
+    saturation point at K x the bootstrap anchor, so the lazy-validator
+    floor still fires."""
+
+    def test_poisoned_wide_baseline_cannot_silence_drain(self, scorer, monkeypatch):
+        poisoned = {
+            # Wide spread (passes the min-spread usability guard), huge p99.
+            ("per_script", "net_value_out_of_script"): {
+                "p50": 5_000_000.0, "p99": 1e15, "sample_count": 500,
+                "computed_at": None, "window_days": 90,
+            },
+            ("per_script", "n_assets_out_of_script"): {
+                "p50": 0.0, "p99": 1000.0, "sample_count": 500,
+                "computed_at": None, "window_days": 90,
+            },
+        }
+        _plant_baselines(monkeypatch, poisoned)
+        n = 4
+        nft_policy = "d" * 56
+        inputs = [
+            {"address": SCRIPT,
+             "value": {"lovelace": 2_700_000,
+                       nft_policy: {f"{i:02d}" * 4: 1 for i in range(i * 3, i * 3 + 3)}}}
+            for i in range(n)
+        ]
+        outputs = [{
+            "address": WALLET,
+            "value": {"lovelace": 10_000_000,
+                      nft_policy: {f"{i:02d}" * 4: 1 for i in range(12)}},
+        }]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"p{i}",
+             "executionUnits": {"memory": 600, "cpu": 100}}
+            for i in range(n)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        # 12 distinct NFTs drained vs capped p99 (5 x bootstrap 2 = 10):
+        # extraction saturates despite the poisoned baseline, and the
+        # lazy-validator floor lands the score in High.
+        assert result.score >= 60.0
+        assert "lazy_validator_band_floor" in result.reasons

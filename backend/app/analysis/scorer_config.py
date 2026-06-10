@@ -105,6 +105,8 @@ _REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
 
 _REQUIRED_BASELINES: Tuple[str, ...] = (
     "min_spread_ratio",
+    "per_script_p99_cap_multiplier",
+    "drift",
 )
 
 
@@ -210,6 +212,14 @@ def baselines_config() -> Dict[str, Any]:
     enforced at load time by :func:`_validate`.
     """
     return _CFG["baselines"]
+
+
+# Cap on a LEARNED baseline's p99 relative to the scorer's bootstrap anchor
+# (baselines.per_script_p99_cap_multiplier; 0 disables). Applied in
+# resolved_or_bootstrap; see its docstring for the poisoning threat model.
+_P99_CAP_MULTIPLIER: float = float(
+    _CFG["baselines"]["per_script_p99_cap_multiplier"]
+)
 
 
 def composite_corroboration_config() -> Dict[str, Any]:
@@ -323,6 +333,16 @@ def resolved_or_bootstrap(
                               ``["per_script"]`` the global tier is skipped, so a
                               per-script miss drops straight to ``bootstrap``.
 
+    A learned baseline's p99 is additionally CAPPED at
+    ``baselines.per_script_p99_cap_multiplier`` times the scorer's bootstrap
+    anchor p99. The normalisation saturation point is the resolved p99, so an
+    attacker who pre-trains a wide per-script distribution (~200 outputs over
+    the 90-day window, roughly tens of ADA in fees) could otherwise push p99
+    arbitrarily high and have a real attack normalise to ~0. The cap bounds
+    that de-sensitisation: an established contract may legitimately run up
+    to K times the protocol-grounded anchor, but never so far that the
+    anchor's threat model becomes unreachable.
+
     Returns ``(p50, p99, source)`` where ``source`` is one of
     ``"per_script" | "per_policy" | "global" | "bootstrap"``.
     """
@@ -333,4 +353,9 @@ def resolved_or_bootstrap(
     if source == "missing":
         p50, p99 = anchor(bootstrap, bootstrap_key)
         source = "bootstrap"
+    elif _P99_CAP_MULTIPLIER > 0:
+        _, anchor_p99 = anchor(bootstrap, bootstrap_key)
+        cap = _P99_CAP_MULTIPLIER * anchor_p99
+        if anchor_p99 > 0 and p99 > cap:
+            p99 = cap
     return p50, p99, source

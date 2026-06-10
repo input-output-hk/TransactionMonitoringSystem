@@ -26,6 +26,10 @@ def _minimal_valid_yaml() -> str:
           corroboration_threshold: 40.0
         baselines:
           min_spread_ratio: 0.10
+          per_script_p99_cap_multiplier: 5.0
+          drift:
+            enabled: true
+            p99_threshold: 0.50
         scorers:
           multiple_sat:
             weights: {}
@@ -201,6 +205,8 @@ class TestValidation:
                 "  max_tx_size_bytes: 16384\n"
                 "composite_corroboration:\n  corroboration_threshold: 40.0\n"
                 "baselines:\n  min_spread_ratio: 0.10\n"
+                "  per_script_p99_cap_multiplier: 5.0\n"
+                "  drift:\n    enabled: true\n    p99_threshold: 0.50\n"
                 "scorers:\n  multiple_sat: 'not a mapping'\n",
             )
 
@@ -223,3 +229,50 @@ class TestAnchor:
         container = {"foo": {"p50": 1, "p99": 9}}
         p50, p99 = sc.anchor(container, "foo")
         assert isinstance(p50, float) and isinstance(p99, float)
+
+
+class TestPerScriptP99Cap:
+    """A learned baseline's p99 is capped at K x the bootstrap anchor p99
+    (baselines.per_script_p99_cap_multiplier), bounding how far a poisoned
+    per-script distribution can de-sensitise any scorer."""
+
+    def test_resolved_p99_capped(self, monkeypatch):
+        import app.analysis.scorer_config as sc
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (0.0, 1_000_000.0, "per_script"),
+        )
+        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        p50, p99, source = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        assert source == "per_script"
+        assert p99 == sc._P99_CAP_MULTIPLIER * 2.0
+        # A canonical attack value (2 = the anchor p99) still normalises
+        # above zero against the capped saturation point.
+        from app.analysis.normalise import normalise
+        assert normalise(2.0, p50=p50, p99=p99) > 0.0
+
+    def test_uncapped_when_below_cap(self, monkeypatch):
+        import app.analysis.scorer_config as sc
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (0.0, 5.0, "per_script"),
+        )
+        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        _, p99, _ = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        assert p99 == 5.0
+
+    def test_bootstrap_path_not_capped(self, monkeypatch):
+        import app.analysis.scorer_config as sc
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (0.0, 1.0, "missing"),
+        )
+        bootstrap = {"feat": {"p50": 1.0, "p99": 9.0}}
+        p50, p99, source = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        assert (p50, p99, source) == (1.0, 9.0, "bootstrap")

@@ -44,6 +44,24 @@ baselines:
   # of p50 is treated as uninformative and resolution falls through to the
   # next tier (global / bootstrap).
   min_spread_ratio: 0.10
+  # Cap on a LEARNED (per-script / per-policy / global) baseline's p99
+  # relative to the scorer's bootstrap anchor p99; 0 disables. The resolved
+  # p99 is the normalisation saturation point, so an attacker who pre-trains
+  # a wide per-script distribution (~200 outputs over the 90-day window,
+  # roughly tens of ADA in fees) could otherwise push p99 arbitrarily high
+  # and have a real attack normalise to ~0. With the cap, an established
+  # contract may legitimately run up to K times the protocol-grounded anchor
+  # but never so far that the anchor's threat model becomes unreachable.
+  per_script_p99_cap_multiplier: 5.0
+  # Drift guard on baseline recomputes. A new p99 differing from the stored
+  # one by more than p99_threshold (relative) is HELD: the prior baseline
+  # stays active and the rejected candidate is logged to
+  # baseline_drift_events for analyst review. Poisoning a per-script
+  # baseline now requires moving p99 slowly under the threshold, leaving a
+  # multi-day trail, instead of one wide-distribution dump.
+  drift:
+    enabled: true
+    p99_threshold: 0.50
 
 scorers:
 
