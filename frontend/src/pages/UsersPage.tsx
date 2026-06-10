@@ -65,15 +65,20 @@ export function UsersPage() {
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
 
+	// Snap back to a populated page whenever the current one ends up empty
+	// (last row deleted, or rows removed elsewhere). Done as a render-phase
+	// update rather than in an effect: React applies it before committing,
+	// so there's no cascading-render warning and no flash of "No users".
+	// Guarded so it converges to 0 without looping; `data &&` skips the
+	// in-flight window where a page change has reset `data` to undefined.
+	if (data && data.data.length === 0 && page > 0) {
+		setPage((p) => Math.max(0, p - 1));
+	}
+
 	const removeMutation = useMutation({
 		mutationFn: (id: string) => deleteUser(id),
 		onSuccess: () => {
 			qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
-			// If we just deleted the only row on this page, the refetch
-			// would arrive with an empty `data` array because the backend's
-			// offset is past the new total. Snap back to a valid page so
-			// the user sees a populated table instead of "No users".
-			if (rows.length === 1 && page > 0) setPage(page - 1);
 			toast.success("User removed");
 		},
 		onError: (err) =>

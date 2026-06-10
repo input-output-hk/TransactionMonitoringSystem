@@ -13,6 +13,7 @@ import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { initials } from "@/lib/utils/strings";
 import { LogOut, User } from "lucide-react";
+import { useId } from "react";
 
 /* ---------- User-menu icons ----------
  *
@@ -91,6 +92,10 @@ function DarkModeIcon({ className }: { className?: string }) {
 
 /** Peach sun "chip" — fill colors are intentional (not currentColor). */
 function LightModeIcon({ className }: { className?: string }) {
+	// `useId` keeps the SVG filter id unique per render so two instances of
+	// this icon in the same document (e.g. StrictMode double-render) don't
+	// share — and accidentally swap — the same `<filter>`.
+	const filterId = `tms-light-mode-shadow-${useId()}`;
 	return (
 		<svg
 			className={className}
@@ -99,7 +104,7 @@ function LightModeIcon({ className }: { className?: string }) {
 			xmlns="http://www.w3.org/2000/svg"
 			aria-hidden="true"
 		>
-			<g filter="url(#tms-light-mode-shadow)">
+			<g filter={`url(#${filterId})`}>
 				<rect
 					width="20"
 					height="20"
@@ -111,7 +116,7 @@ function LightModeIcon({ className }: { className?: string }) {
 			</g>
 			<defs>
 				<filter
-					id="tms-light-mode-shadow"
+					id={filterId}
 					x="-0.000782013"
 					y="-4.95911e-05"
 					width="43.4"

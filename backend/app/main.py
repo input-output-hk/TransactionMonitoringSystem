@@ -26,7 +26,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from app.rate_limit import RateLimitMiddleware, RateLimiter
+from app.rate_limit import (
+    RateLimitMiddleware,
+    RateLimiter,
+    start_all_cleanups,
+    stop_all_cleanups,
+)
 from app.db import postgres, clickhouse, raw_store
 from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api
 from app.tasks import analysis as analysis_task
@@ -102,9 +107,13 @@ async def lifespan(app: FastAPI):
     if not settings.CLICKHOUSE_PASSWORD:
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
 
-    # Start rate-limiter cleanup task
+    # Start the eviction loop for EVERY registered rate limiter (the global
+    # IP/key limiter in this module + the per-email limiter in
+    # app.api.auth). Done via the registry so no limiter is forgotten —
+    # an unstarted cleanup task means unbounded memory growth for
+    # attacker-controlled keys.
+    start_all_cleanups()
     if settings.RATE_LIMIT_ENABLED:
-        _limiter.start_cleanup()
         logger.info(
             f"Rate limiting enabled: {settings.RATE_LIMIT_REQUESTS} req"
             f" / {settings.RATE_LIMIT_WINDOW_SECONDS}s per key"
@@ -152,8 +161,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down...")
-    if settings.RATE_LIMIT_ENABLED:
-        _limiter.stop_cleanup()
+    stop_all_cleanups()
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
     if ogmios_client:
