@@ -24,6 +24,18 @@ from app.models.transaction import NormalizedTransaction, TransactionInput
 logger = logging.getLogger(__name__)
 
 
+class BlockPersistError(Exception):
+    """A block's ClickHouse persistence failed after all retries.
+
+    Raised INSTEAD of advancing the sync checkpoint: the exception propagates
+    to run_chain_sync's error handler, trips the chain circuit breaker, and
+    the reconnect replays the block from the unadvanced checkpoint. Replay is
+    safe because every fact table is ReplacingMergeTree (idempotent insert).
+    The previous behaviour (log + continue to save_sync_point) permanently
+    lost the block's transactions from the analytics warehouse.
+    """
+
+
 def _parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
     """Parse one resolved UTxO from queryLedgerState/utxo into
     ``((tx_id, index), {address, amount, assets})``.
@@ -473,11 +485,10 @@ class OgmiosClient:
                 logger.error(f"Input amount resolution failed (non-fatal): {e}")
 
         if normalized_txs:
-            # Batch persist to ClickHouse (non-blocking — runs in thread pool)
-            try:
-                await clickhouse.insert_transactions_batch_async(normalized_txs)
-            except Exception as e:
-                logger.error(f"Error persisting block {block_slot} to ClickHouse: {e}")
+            # Batch persist to ClickHouse. Checkpoint-BLOCKING: retried with
+            # backoff, then raises BlockPersistError so save_sync_point below
+            # is never reached and the block replays after reconnect.
+            await self._insert_block_with_retry(normalized_txs, block_slot)
 
             # Write full raw payloads to local filesystem store.
             # Awaited before the checkpoint save: if a write fails and the process
@@ -589,6 +600,40 @@ class OgmiosClient:
             f"{len(normalized_txs)} transactions confirmed"
         )
 
+    async def _insert_block_with_retry(
+        self, normalized_txs: List[NormalizedTransaction], block_slot: int,
+    ) -> None:
+        """Persist a block's transactions to ClickHouse, retrying with
+        exponential backoff; raise BlockPersistError on exhaustion.
+
+        See BlockPersistError for why this must never be swallowed: a caught
+        insert failure followed by save_sync_point loses the block forever.
+        """
+        delay = settings.CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS
+        max_attempts = settings.CLICKHOUSE_INSERT_MAX_RETRIES
+        last_err: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await clickhouse.insert_transactions_batch_async(normalized_txs)
+                return
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "ClickHouse insert for block %s failed "
+                    "(attempt %d/%d): %s",
+                    block_slot, attempt, max_attempts, e,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(delay)
+                    delay = min(
+                        delay * 2,
+                        settings.CLICKHOUSE_INSERT_RETRY_MAX_DELAY_SECONDS,
+                    )
+        raise BlockPersistError(
+            f"Block at slot {block_slot}: ClickHouse insert failed after "
+            f"{max_attempts} attempts; checkpoint NOT advanced, block will replay."
+        ) from last_err
+
     async def _handle_roll_backward(self, result: dict):
         """Process a chain rollback (rollBackward)."""
         point = result.get("point", {})
@@ -617,6 +662,24 @@ class OgmiosClient:
             await postgres.mark_lifecycle_rolled_back(rollback_slot, self.network)
         except Exception as e:
             logger.error(f"Error marking rollback in PostgreSQL: {e}")
+
+        # Purge orphaned-fork rows from the analytics warehouse so they
+        # cannot feed scorers, baselines, or API reads. Deliberately NOT
+        # wrapped in try/except: a failure here propagates, the connection
+        # resets, and the node re-sends the rollback (the cleanup is
+        # idempotent). Skipped on rollback-to-origin: that is a node-resync
+        # artifact (checkpoint past the volatile chain), and wiping the
+        # whole network's history on it would destroy the warehouse over a
+        # transient condition.
+        if settings.ROLLBACK_CLEANUP_ENABLED and not rolled_back_to_origin:
+            deleted = await clickhouse.delete_rolled_back_txs_async(
+                self.network, rollback_slot,
+            )
+            if deleted:
+                logger.warning(
+                    "Rollback cleanup: purged %d orphaned tx(s) past slot %s "
+                    "from ClickHouse", deleted, rollback_slot,
+                )
 
         if rollback_id:
             await postgres.save_sync_point(self.network, rollback_slot, rollback_id)

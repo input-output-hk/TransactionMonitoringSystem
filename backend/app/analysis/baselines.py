@@ -213,15 +213,21 @@ def get_active_script_addresses(network: str, limit: int = 500) -> List[str]:
     """
     try:
         client = clickhouse._get_client()
-        # Chain-time window: same rationale as _query_percentiles.
+        # Chain-time window + FINAL dedup: same rationale as
+        # _query_percentiles; cnt gates BASELINE_MIN_SAMPLES, so duplicate
+        # rows must not inflate it.
         rows = client.execute(
             """
             SELECT f.address AS address, count() AS cnt
-            FROM utxo_features f
-            JOIN transactions t ON f.tx_hash = t.tx_hash AND f.network = t.network
-            WHERE f.network = %(network)s
-              AND f.is_script_address = 1
-              AND t.timestamp >= now() - INTERVAL 90 DAY
+            FROM (
+                SELECT tx_hash, network, address FROM utxo_features FINAL
+                WHERE network = %(network)s AND is_script_address = 1
+            ) f
+            JOIN (
+                SELECT tx_hash, network, timestamp FROM transactions FINAL
+                WHERE network = %(network)s
+                  AND timestamp >= now() - INTERVAL 90 DAY
+            ) t ON f.tx_hash = t.tx_hash AND f.network = t.network
             GROUP BY f.address
             HAVING cnt >= %(min_samples)s
             ORDER BY cnt DESC
@@ -349,16 +355,22 @@ def _query_percentiles(
         # quantileExact for determinism: the default quantile() is a sampled
         # estimator whose output jitters across recomputes, which would feed
         # spurious drift signals (matches the multiple_sat precedent).
+        # FINAL on both sides: a not-yet-merged duplicate feature row (or a
+        # duplicate transactions row multiplying the join) would weight the
+        # quantiles. Daily-batch cadence absorbs the FINAL cost.
         rows = client.execute(
             f"""
             SELECT
                 quantileExact(0.50)(toFloat64(f.{feature})) AS p50,
                 quantileExact(0.99)(toFloat64(f.{feature})) AS p99,
                 count() AS cnt
-            FROM {table} f
-            JOIN transactions t ON f.tx_hash = t.tx_hash AND f.network = t.network
-            WHERE f.network = %(network)s
-              AND t.timestamp >= now() - INTERVAL %(days)s DAY
+            FROM (SELECT * FROM {table} FINAL WHERE network = %(network)s) f
+            JOIN (
+                SELECT tx_hash, network, timestamp FROM transactions FINAL
+                WHERE network = %(network)s
+                  AND timestamp >= now() - INTERVAL %(days)s DAY
+            ) t ON f.tx_hash = t.tx_hash AND f.network = t.network
+            WHERE t.timestamp >= now() - INTERVAL %(days)s DAY
             """,
             {"network": network, "days": window_days},
         )
@@ -386,19 +398,25 @@ def _query_percentiles_scoped(
         raise ValueError(f"Disallowed scope_column: {scope_column}")
     try:
         client = clickhouse._get_client()
-        # Chain-time window + exact quantiles: same rationale as
-        # _query_percentiles above.
+        # Chain-time window + exact quantiles + FINAL dedup: same rationale
+        # as _query_percentiles above.
         rows = client.execute(
             f"""
             SELECT
                 quantileExact(0.50)(toFloat64(f.{feature})) AS p50,
                 quantileExact(0.99)(toFloat64(f.{feature})) AS p99,
                 count() AS cnt
-            FROM {table} f
-            JOIN transactions t ON f.tx_hash = t.tx_hash AND f.network = t.network
-            WHERE f.network = %(network)s
-              AND f.{scope_column} = %(scope_value)s
-              AND t.timestamp >= now() - INTERVAL %(days)s DAY
+            FROM (
+                SELECT * FROM {table} FINAL
+                WHERE network = %(network)s
+                  AND {scope_column} = %(scope_value)s
+            ) f
+            JOIN (
+                SELECT tx_hash, network, timestamp FROM transactions FINAL
+                WHERE network = %(network)s
+                  AND timestamp >= now() - INTERVAL %(days)s DAY
+            ) t ON f.tx_hash = t.tx_hash AND f.network = t.network
+            WHERE t.timestamp >= now() - INTERVAL %(days)s DAY
             """,
             {"network": network, "scope_value": scope_value, "days": window_days},
         )

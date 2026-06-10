@@ -189,6 +189,6 @@ class TestChainTimeWindows:
         assert result == (10.0, 99.0, 500)
         sql = client.execute.call_args.args[0]
         assert "quantileExact" in sql
-        assert "JOIN transactions" in sql
+        assert "FROM transactions FINAL" in sql  # chain-time join, deduped
         assert "t.timestamp >=" in sql
         assert "ingestion_timestamp" not in sql

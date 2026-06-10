@@ -26,7 +26,7 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from app.config import settings
@@ -125,5 +125,42 @@ async def write_mempool(network: str, tx_hash: str,
                         tx_data: Dict[str, Any], ts: datetime):
     """Write a mempool-observed transaction's full Ogmios payload."""
     await _write_async(_PREFIX_MEMPOOL, network, tx_hash, tx_data, ts)
+
+
+def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[str, Any]]:
+    """Read back a transaction's full Ogmios payload from the raw store.
+
+    ``ts`` is the transaction row's ``timestamp``: the ingester passes the
+    same ``now`` to both the ClickHouse row and ``write_confirmed``, so the
+    day directory is derivable. Probe order covers clock-edge skew and
+    mempool-only observation:
+
+      1. ``confirmed/{YYYYMMDD(ts)}``
+      2. ``confirmed/{YYYYMMDD(ts +/- 1 day)}`` (midnight-boundary writes)
+      3. ``mempool/`` same three days (tx observed in mempool, confirmed
+         payload write failed)
+
+    Returns the parsed dict, or None when no blob is found or parseable.
+    Synchronous by design: the analysis engine calls it from the ClickHouse
+    executor thread, never from the event loop.
+    """
+    candidates = []
+    for prefix in (_PREFIX_CONFIRMED, _PREFIX_MEMPOOL):
+        for day_offset in (0, -1, 1):
+            candidates.append(
+                _build_path(
+                    prefix, network, tx_hash,
+                    ts + timedelta(days=day_offset),
+                )
+            )
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError, EOFError) as e:
+            logger.warning(f"Raw store read failed for {path}: {e}")
+    return None
 
 

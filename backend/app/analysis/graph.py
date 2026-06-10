@@ -71,15 +71,25 @@ def detect_cycle(
     if not origin_addresses:
         return None
 
-    # Step 2: Get output addresses and amounts of this tx
+    # Step 2: Get output addresses and amounts of this tx.
+    # FINAL on both sides: origin_amount is summed from these rows, and a
+    # not-yet-merged ReplacingMergeTree duplicate (or a duplicate
+    # transactions row multiplying the join) would double it.
     out_rows = client.execute(
         """
-        SELECT address, amount, slot
-        FROM transaction_outputs o
-        JOIN transactions t ON o.tx_hash = t.tx_hash AND o.network = t.network
-        WHERE o.tx_hash = %(tx_hash)s
-          AND o.network = %(network)s
-          AND o.is_collateral = 0
+        SELECT o.address, o.amount, t.slot
+        FROM (
+            SELECT tx_hash, network, address, amount
+            FROM transaction_outputs FINAL
+            WHERE tx_hash = %(tx_hash)s
+              AND network = %(network)s
+              AND is_collateral = 0
+        ) o
+        JOIN (
+            SELECT tx_hash, network, slot
+            FROM transactions FINAL
+            WHERE tx_hash = %(tx_hash)s AND network = %(network)s
+        ) t ON o.tx_hash = t.tx_hash AND o.network = t.network
         """,
         {"tx_hash": tx_hash, "network": network},
     )

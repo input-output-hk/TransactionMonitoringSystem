@@ -110,9 +110,12 @@ def _attacker_net_ada(
     back to the join keeps an unresolved input from understating cost and
     overstating profit.
     """
+    # FINAL on every summed table: this is the sandwich economic gate, so a
+    # not-yet-merged ReplacingMergeTree duplicate would inflate "profit" and
+    # fabricate confirmations. (FINAL inside a join must be a subquery.)
     out_rows = client.execute(
         """
-        SELECT sum(amount) FROM transaction_outputs
+        SELECT sum(amount) FROM transaction_outputs FINAL
         WHERE tx_hash IN %(hashes)s AND network = %(network)s
           AND address = %(addr)s AND is_collateral = 0
         """,
@@ -121,13 +124,27 @@ def _attacker_net_ada(
     in_rows = client.execute(
         """
         SELECT sum(coalesce(o.amount, ti.amount))
-        FROM transaction_inputs ti
-        LEFT JOIN transaction_outputs o
+        FROM (
+            SELECT tx_hash, network, address, amount,
+                   input_tx_hash, input_index_in_tx
+            FROM transaction_inputs FINAL
+            WHERE tx_hash IN %(hashes)s AND network = %(network)s
+              AND address = %(addr)s AND is_collateral = 0 AND is_reference = 0
+        ) ti
+        LEFT JOIN (
+            SELECT tx_hash, network, output_index, amount
+            FROM transaction_outputs FINAL
+            WHERE network = %(network)s AND is_collateral = 0
+              AND tx_hash IN (
+                  SELECT input_tx_hash FROM transaction_inputs FINAL
+                  WHERE tx_hash IN %(hashes)s AND network = %(network)s
+                    AND address = %(addr)s
+                    AND is_collateral = 0 AND is_reference = 0
+              )
+        ) o
           ON o.tx_hash = ti.input_tx_hash
          AND o.output_index = ti.input_index_in_tx
          AND o.network = ti.network
-        WHERE ti.tx_hash IN %(hashes)s AND ti.network = %(network)s
-          AND ti.address = %(addr)s AND ti.is_collateral = 0 AND ti.is_reference = 0
         """,
         {"hashes": leg_hashes, "network": network, "addr": attacker_addr},
     )

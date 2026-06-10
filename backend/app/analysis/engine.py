@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
-from app.db import clickhouse, postgres
+from app.db import clickhouse, postgres, raw_store
 from app.analysis.normalise import score_to_band
 from app.analysis.scorer_config import composite_corroboration_config
 from app.analysis.scorers.base import BaseScorer
@@ -210,6 +210,11 @@ def _score_transaction(
     scores: Dict[str, float] = {name: -1.0 for name in _CLASS_NAMES}
     sub_scores: Dict[str, Dict[str, float]] = {}
     evidence: Dict[str, Dict[str, Any]] = {}
+    if row.get("raw_data_unavailable"):
+        # The raw payload could not be recovered after the fallback budget:
+        # raw_data-gated scorers will skip, so mark the degradation in
+        # evidence to make it visible and filterable rather than silent.
+        evidence["_meta"] = {"raw_data_unavailable": True}
 
     for scorer in scorers:
         try:
@@ -345,6 +350,87 @@ def _enrich_collision_features(rows: List[Dict[str, Any]], network: str):
             row["collision"] = collision
 
 
+# Defer bookkeeping for transactions whose raw_data could not be recovered:
+# (network, tx_hash) -> failed fallback attempts. In-process only; a restart
+# resets the counters, which merely delays the degraded-scoring decision.
+_raw_fallback_attempts: Dict[tuple, int] = {}
+
+
+def _resolve_raw_data(
+    rows: List[Dict[str, Any]], network: str,
+) -> List[Dict[str, Any]]:
+    """Parse each row's raw_data, recovering from the raw store when needed.
+
+    The stored column may be empty-with-flag (payload over RAW_DATA_MAX_BYTES)
+    or unparseable (legacy rows written with the old mid-JSON truncation).
+    Previously such rows were scored with raw_data=None: every raw_data-gated
+    scorer silently skipped, the tx was written all -1, and it was NEVER
+    re-evaluated — exactly the large, attack-shaped transactions. Now:
+
+      1. Recover the full payload from the raw store (read_confirmed probes
+         the day directories derived from the row's timestamp).
+      2. On a failed read, DEFER the tx (drop it from this batch, no score
+         row written) so the next engine poll retries, up to
+         RAW_FALLBACK_MAX_ATTEMPTS.
+      3. After the attempt budget, score degraded with raw_data=None and a
+         raw_data_unavailable evidence marker, so a lost blob cannot park
+         the tx in the unanalyzed queue forever and the degradation is
+         visible/filterable instead of silent.
+
+    Returns the rows to score this run (deferred rows removed).
+    """
+    kept: List[Dict[str, Any]] = []
+    for row in rows:
+        rd = row.get("raw_data")
+        truncated = bool(row.get("raw_data_truncated"))
+        parsed: Optional[Dict[str, Any]] = None
+        if isinstance(rd, dict):
+            parsed = rd
+        elif isinstance(rd, str) and rd:
+            try:
+                parsed = json.loads(rd)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+
+        needs_recovery = parsed is None and (
+            truncated or (isinstance(rd, str) and bool(rd))
+        )
+        if needs_recovery and settings.RAW_FALLBACK_ENABLED:
+            ts = row.get("timestamp")
+            if isinstance(ts, datetime):
+                try:
+                    parsed = raw_store.read_confirmed(network, row["tx_hash"], ts)
+                except Exception:
+                    logger.exception(
+                        "Raw store fallback failed for %s", row["tx_hash"][:16],
+                    )
+                    parsed = None
+
+        if needs_recovery and parsed is None:
+            key = (network, row["tx_hash"])
+            attempts = _raw_fallback_attempts.get(key, 0) + 1
+            if attempts < settings.RAW_FALLBACK_MAX_ATTEMPTS:
+                _raw_fallback_attempts[key] = attempts
+                logger.warning(
+                    "Deferring %s: raw_data unrecoverable (attempt %d/%d)",
+                    row["tx_hash"][:16], attempts,
+                    settings.RAW_FALLBACK_MAX_ATTEMPTS,
+                )
+                continue
+            _raw_fallback_attempts.pop(key, None)
+            row["raw_data_unavailable"] = True
+            logger.error(
+                "Scoring %s degraded: raw_data unrecoverable after %d attempts",
+                row["tx_hash"][:16], attempts,
+            )
+        elif needs_recovery:
+            _raw_fallback_attempts.pop((network, row["tx_hash"]), None)
+
+        row["raw_data"] = parsed
+        kept.append(row)
+    return kept
+
+
 def run_once(network: str) -> int:
     """Score one batch of unanalyzed transactions.  Returns the count scored."""
     if not settings.ANALYSIS_ENABLED:
@@ -358,14 +444,12 @@ def run_once(network: str) -> int:
 
     scorers = _build_scorers()
 
-    # Pre-parse JSON string fields so scorers receive dicts, not strings
+    # Parse raw_data (with raw-store recovery / deferral) and metadata so
+    # scorers receive dicts, not strings.
+    rows = _resolve_raw_data(rows, network)
+    if not rows:
+        return 0
     for row in rows:
-        rd = row.get("raw_data")
-        if isinstance(rd, str) and rd:
-            try:
-                row["raw_data"] = json.loads(rd)
-            except (json.JSONDecodeError, TypeError):
-                row["raw_data"] = None
         md = row.get("metadata")
         if isinstance(md, str) and md not in ("", "{}"):
             try:

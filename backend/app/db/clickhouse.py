@@ -16,12 +16,6 @@ from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
 
-# Maximum byte-length of the raw_data JSON stored per transaction.
-# Full Ogmios payloads for Plutus transactions can reach hundreds
-# of kilobytes; at Mainnet scale this balloons ClickHouse storage and slows
-# ingestion. 64 KiB is sufficient for debugging while keeping inserts fast.
-_RAW_DATA_MAX_BYTES = 65_536
-
 # Thread-local ClickHouse clients + 3-worker executor.
 #
 # clickhouse_driver.Client is NOT thread-safe (one TCP connection per
@@ -115,44 +109,265 @@ def shutdown_executor():
     _ch_executor.shutdown(wait=True)
 
 
+# ---------------------------------------------------------------------------
+# Schema v2: dedup-safe layout
+#
+# All per-transaction fact tables are ReplacingMergeTree versioned by
+# ingestion_timestamp (set once by the ingester and shared by a tx's child
+# rows), keyed on the natural identity of each row. Ingestion replays after a
+# crash/restart or checkpoint-driven re-sync therefore collapse to one row per
+# key instead of accumulating duplicates that inflate sums and counts.
+#
+# Deliberately NO PARTITION BY anywhere: ReplacingMergeTree only deduplicates
+# within a partition, and every available time column is unstable across
+# replays (`timestamp` is wall-clock at ingestion; `ingestion_timestamp` and
+# `analyzed_at` move on every replay/re-score). A time-based partition would
+# scatter versions of the same logical row across partitions where neither
+# background merges nor FINAL can ever collapse them.
+#
+# The templates are shared with backend/scripts/migrate_dedup_schema.py (which
+# instantiates them as `<table>_v2` before swapping), so the migrated layout
+# cannot drift from what execute_schema() creates on a fresh install.
+SCHEMA_DDL: Dict[str, str] = {
+    # Main transactions table. ORDER BY (network, tx_hash) is the dedup key;
+    # the p_by_time projection re-sorts by (network, timestamp) so the list
+    # endpoint's top-N-by-time query stays a tail read instead of a full sort.
+    # raw_data is ZSTD(3)-compressed (large JSON compresses ~5-10x) and
+    # raw_data_truncated flags payloads dropped under RAW_DATA_MAX_BYTES —
+    # an invalid sliced-JSON prefix is never stored.
+    "transactions": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash String,
+            network String,
+            slot Nullable(UInt64),
+            block_height Nullable(UInt32),
+            block_hash Nullable(String),
+            block_index Nullable(UInt32),
+            timestamp DateTime,
+            fee UInt64,
+            deposit Nullable(Int64),
+            input_count UInt8,
+            output_count UInt8,
+            total_input_value Nullable(UInt64),
+            total_output_value UInt64,
+            addresses Array(String),
+            metadata String,
+            raw_data String CODEC(ZSTD(3)),
+            raw_data_truncated UInt8 DEFAULT 0,
+            ingestion_timestamp DateTime DEFAULT now(),
+            INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_slot slot TYPE minmax GRANULARITY 1,
+            INDEX idx_block_height block_height TYPE minmax GRANULARITY 1,
+            INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1,
+            PROJECTION p_by_time (SELECT * ORDER BY network, timestamp)
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, tx_hash)
+    """,
+    "transaction_inputs": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash String,
+            network String,
+            input_index UInt8,
+            input_tx_hash String,
+            input_index_in_tx UInt8,
+            address String,
+            amount UInt64,
+            assets String,
+            is_reference UInt8,
+            is_collateral UInt8,
+            ingestion_timestamp DateTime DEFAULT now(),
+            INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_address address TYPE bloom_filter GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, tx_hash, input_index)
+    """,
+    "transaction_outputs": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash String,
+            network String,
+            output_index UInt8,
+            address String,
+            amount UInt64,
+            assets String,
+            is_collateral UInt8,
+            ingestion_timestamp DateTime DEFAULT now(),
+            INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_address address TYPE bloom_filter GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, tx_hash, output_index)
+    """,
+    # Address lookup table (target of address_transactions_mv). The MV fires
+    # on every INSERT into transactions, so replayed blocks produce duplicate
+    # MV rows with identical keys — the ReplacingMergeTree collapses them.
+    "address_transactions": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            network     String,
+            address     String,
+            slot        UInt64,
+            tx_hash     String,
+            timestamp   DateTime,
+            ingestion_timestamp DateTime DEFAULT now()
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, address, slot, tx_hash)
+    """,
+    # Extended UTxO-level features, populated inline during ingestion.
+    # One row per output per transaction.
+    "utxo_features": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash              String,
+            network              String,
+            output_index         UInt16,
+            address              String,
+            is_script_address    UInt8,
+            ada_amount           UInt64,
+            value_cbor_bytes     UInt32,
+            unique_policy_count  UInt16,
+            unique_token_count   UInt16,
+            datum_present        UInt8,
+            datum_bytes          UInt32,
+            datum_ratio          Float32,
+            utxo_total_bytes     UInt32,
+            ingestion_timestamp  DateTime DEFAULT now(),
+            INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_network    network TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_address    address TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_is_script  is_script_address TYPE minmax GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, tx_hash, output_index)
+    """,
+    # Transaction-level script execution features, populated inline
+    # during ingestion.  One row per transaction.
+    "tx_script_features": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash              String,
+            network              String,
+            redeemers_count      UInt16,
+            spending_inputs      UInt16,
+            exunits_mem_total    UInt64,
+            exunits_cpu_total    UInt64,
+            mint_policy_count    UInt16,
+            mint_entries         String,
+            ingestion_timestamp  DateTime DEFAULT now(),
+            INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_network    network TYPE bloom_filter GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, tx_hash)
+    """,
+    # Multi-class scoring output.  One row per scored transaction.
+    # Each attack class gets an independent 0-100 score; -1 means the
+    # gate condition failed (class not applicable). Versioned by analyzed_at
+    # so a re-score replaces the prior row; no partition, so cross-day
+    # re-scores of the same tx still merge.
+    "tx_class_scores": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash          String,
+            network          String,
+            token_dust       Float32 DEFAULT -1,
+            large_value      Float32 DEFAULT -1,
+            large_datum      Float32 DEFAULT -1,
+            multiple_sat     Float32 DEFAULT -1,
+            front_running    Float32 DEFAULT -1,
+            sandwich         Float32 DEFAULT -1,
+            circular         Float32 DEFAULT -1,
+            fake_token       Float32 DEFAULT -1,
+            phishing         Float32 DEFAULT -1,
+            max_score        Float32,
+            max_class        String,
+            risk_band        String,
+            sub_scores       String,
+            evidence         String DEFAULT '{{}}',
+            corroboration_count   UInt8 DEFAULT 0,
+            corroborating_classes String DEFAULT '',
+            analysis_version String,
+            analyzed_at      DateTime,
+            INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(analyzed_at)
+        ORDER BY (network, tx_hash)
+    """,
+    # Admin-curated archive of flagged transactions known to be false
+    # positives. Additive to tx_class_scores: a row here suppresses the
+    # corresponding score from "currently dangerous" lists at query time.
+    # An entry can exist without a matching tx_class_scores row (cross-
+    # instance CSV import: another admin's archive for a tx this instance
+    # never observed).
+    "archived_alerts": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            tx_hash      String,
+            network      String,
+            note         String,
+            archived_by  String,
+            archived_at  DateTime DEFAULT now(),
+            source       String DEFAULT 'local',
+            INDEX idx_tx_hash    tx_hash     TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_network    network     TYPE bloom_filter GRANULARITY 1,
+            INDEX idx_archived   archived_at TYPE minmax       GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(archived_at)
+        ORDER BY (network, tx_hash)
+    """,
+}
+
+# ReplacingMergeTree (dedup key columns, version column) per v2 table. Used by
+# scripts/migrate_dedup_schema.py to build the argMax() collapse queries; kept
+# adjacent to SCHEMA_DDL so the two cannot drift.
+DEDUP_TABLE_KEYS: Dict[str, Tuple[Tuple[str, ...], str]] = {
+    "transactions": (("network", "tx_hash"), "ingestion_timestamp"),
+    "transaction_inputs": (("network", "tx_hash", "input_index"), "ingestion_timestamp"),
+    "transaction_outputs": (("network", "tx_hash", "output_index"), "ingestion_timestamp"),
+    "address_transactions": (("network", "address", "slot", "tx_hash"), "ingestion_timestamp"),
+    "utxo_features": (("network", "tx_hash", "output_index"), "ingestion_timestamp"),
+    "tx_script_features": (("network", "tx_hash"), "ingestion_timestamp"),
+    "tx_class_scores": (("network", "tx_hash"), "analyzed_at"),
+    "archived_alerts": (("network", "tx_hash"), "archived_at"),
+}
+
+# Path of the one-shot migration named in the startup-guard error message.
+_MIGRATION_SCRIPT = "backend/scripts/migrate_dedup_schema.py"
+
+
+def _assert_no_legacy_schema(client: Client) -> None:
+    """Refuse to start against a half-migrated (pre-v2) ClickHouse layout.
+
+    CREATE TABLE IF NOT EXISTS silently keeps a legacy table's engine and
+    partitioning, so without this check an un-migrated deployment would run
+    with duplicate-accumulating MergeTree tables while the readers assume
+    ReplacingMergeTree dedup. A v2 table is detected as: ReplacingMergeTree
+    engine AND no PARTITION BY clause (any time-based partition is unstable
+    across replays and breaks FINAL dedup). Tables that don't exist yet are
+    fine — execute_schema() just created them from SCHEMA_DDL.
+    """
+    rows = client.execute(
+        """
+        SELECT name, engine, engine_full
+        FROM system.tables
+        WHERE database = currentDatabase()
+          AND name IN %(tables)s
+        """,
+        {"tables": list(DEDUP_TABLE_KEYS)},
+    )
+    legacy = sorted(
+        name for name, engine, engine_full in rows
+        if engine != "ReplacingMergeTree" or "PARTITION BY" in (engine_full or "")
+    )
+    if legacy:
+        raise RuntimeError(
+            f"ClickHouse tables {legacy} still use the legacy (pre-dedup) "
+            f"schema. Stop ALL app instances sharing this database and run "
+            f"{_MIGRATION_SCRIPT} before starting again."
+        )
+
+
 def execute_schema():
     """Create ClickHouse tables if they don't exist"""
     client = _get_client()
 
     try:
-        # Main transactions table.
-        # Partitioned by day so that "last N hours / last day" queries prune to
-        # 1–2 partitions instead of scanning the entire current month.
-        # NOTE: changing PARTITION BY on an existing table requires recreating it;
-        # this DDL only takes effect on a fresh deployment.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                tx_hash String,
-                network String,
-                slot Nullable(UInt64),
-                block_height Nullable(UInt32),
-                block_hash Nullable(String),
-                block_index Nullable(UInt32),
-                timestamp DateTime,
-                fee UInt64,
-                deposit Nullable(Int64),
-                input_count UInt8,
-                output_count UInt8,
-                total_input_value Nullable(UInt64),
-                total_output_value UInt64,
-                addresses Array(String),
-                metadata String,
-                raw_data String,
-                ingestion_timestamp DateTime DEFAULT now(),
-                INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_slot slot TYPE minmax GRANULARITY 1,
-                INDEX idx_block_height block_height TYPE minmax GRANULARITY 1,
-                INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, timestamp, tx_hash)
-            PARTITION BY toYYYYMMDD(timestamp)
-        """)
+        # Main transactions table (see SCHEMA_DDL for the layout rationale).
+        client.execute(SCHEMA_DDL["transactions"].format(table="transactions"))
 
         # Add network column if it doesn't exist (migration for existing tables)
         try:
@@ -176,26 +391,7 @@ def execute_schema():
             logger.debug(f"total_input_value already Nullable or migration not needed: {e}")
 
         # Transaction inputs table
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS transaction_inputs (
-                tx_hash String,
-                network String,
-                input_index UInt8,
-                input_tx_hash String,
-                input_index_in_tx UInt8,
-                address String,
-                amount UInt64,
-                assets String,
-                is_reference UInt8,
-                is_collateral UInt8,
-                ingestion_timestamp DateTime DEFAULT now(),
-                INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_address address TYPE bloom_filter GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash, input_index)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
+        client.execute(SCHEMA_DDL["transaction_inputs"].format(table="transaction_inputs"))
 
         # Add network column if it doesn't exist (migration for existing tables)
         try:
@@ -204,71 +400,13 @@ def execute_schema():
             logger.debug(f"Network column may already exist or migration not needed: {e}")
 
         # Transaction outputs table
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS transaction_outputs (
-                tx_hash String,
-                network String,
-                output_index UInt8,
-                address String,
-                amount UInt64,
-                assets String,
-                is_collateral UInt8,
-                ingestion_timestamp DateTime DEFAULT now(),
-                INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_address address TYPE bloom_filter GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash, output_index)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
+        client.execute(SCHEMA_DDL["transaction_outputs"].format(table="transaction_outputs"))
 
         # Add network column if it doesn't exist (migration for existing tables)
         try:
             client.execute("ALTER TABLE transaction_outputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
         except Exception as e:
             logger.debug(f"Network column may already exist or migration not needed: {e}")
-
-        # Analysis results table — written by the Analysis Engine.
-        # ORDER BY (network, tx_hash) is the ReplacingMergeTree dedup key and must
-        # not include analyzed_at. risk_level gets a bloom_filter skip index so
-        # WHERE risk_level = 'HIGH' queries don't scan every granule for the network.
-        # Partitioned by day (same rationale as transactions).
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS tx_analysis_results (
-                tx_hash String,
-                network String,
-                risk_score Float32,
-                risk_level String,
-                cluster_id UInt32,
-                is_anomaly UInt8,
-                anomaly_reasons Array(String),
-                analysis_version String,
-                analyzed_at DateTime,
-                INDEX idx_risk_level risk_level TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_analyzed_at analyzed_at TYPE minmax GRANULARITY 1
-            ) ENGINE = ReplacingMergeTree(analyzed_at)
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMMDD(analyzed_at)
-        """)
-
-        # Add risk_level index to existing tables (no-op if already present).
-        try:
-            client.execute(
-                "ALTER TABLE tx_analysis_results ADD INDEX idx_risk_level risk_level "
-                "TYPE bloom_filter GRANULARITY 1"
-            )
-            client.execute("ALTER TABLE tx_analysis_results MATERIALIZE INDEX idx_risk_level")
-        except Exception as e:
-            logger.debug(f"risk_level index may already exist: {e}")
-
-        try:
-            client.execute(
-                "ALTER TABLE tx_analysis_results ADD INDEX idx_analyzed_at analyzed_at "
-                "TYPE minmax GRANULARITY 1"
-            )
-            client.execute("ALTER TABLE tx_analysis_results MATERIALIZE INDEX idx_analyzed_at")
-        except Exception as e:
-            logger.debug(f"analyzed_at index may already exist: {e}")
 
         # Address lookup table.
         #
@@ -286,18 +424,7 @@ def execute_schema():
         #
         # NOTE: `transactions.slot` is Nullable; `ifNull(slot, 0)` is used so the
         # lookup table column stays non-nullable and the ORDER BY is efficient.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS address_transactions (
-                network     String,
-                address     String,
-                slot        UInt64,
-                tx_hash     String,
-                timestamp   DateTime,
-                ingestion_timestamp DateTime DEFAULT now()
-            ) ENGINE = ReplacingMergeTree()
-            ORDER BY (network, address, slot, tx_hash)
-            PARTITION BY toYYYYMMDD(timestamp)
-        """)
+        client.execute(SCHEMA_DDL["address_transactions"].format(table="address_transactions"))
 
         # Materialized view: unnests `addresses` into address_transactions.
         # ARRAY JOIN in the SELECT is supported in ClickHouse MV definitions and
@@ -342,83 +469,14 @@ def execute_schema():
 
         # Extended UTxO-level features, populated inline during ingestion.
         # One row per output per transaction.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS utxo_features (
-                tx_hash              String,
-                network              String,
-                output_index         UInt16,
-                address              String,
-                is_script_address    UInt8,
-                ada_amount           UInt64,
-                value_cbor_bytes     UInt32,
-                unique_policy_count  UInt16,
-                unique_token_count   UInt16,
-                datum_present        UInt8,
-                datum_bytes          UInt32,
-                datum_ratio          Float32,
-                utxo_total_bytes     UInt32,
-                ingestion_timestamp  DateTime DEFAULT now(),
-                INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network    network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_address    address TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_is_script  is_script_address TYPE minmax GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash, output_index)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
+        client.execute(SCHEMA_DDL["utxo_features"].format(table="utxo_features"))
 
         # Transaction-level script execution features, populated inline
         # during ingestion.  One row per transaction.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS tx_script_features (
-                tx_hash              String,
-                network              String,
-                redeemers_count      UInt16,
-                spending_inputs      UInt16,
-                exunits_mem_total    UInt64,
-                exunits_cpu_total    UInt64,
-                mint_policy_count    UInt16,
-                mint_entries         String,
-                ingestion_timestamp  DateTime DEFAULT now(),
-                INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network    network TYPE bloom_filter GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
+        client.execute(SCHEMA_DDL["tx_script_features"].format(table="tx_script_features"))
 
         # Multi-class scoring output.  One row per scored transaction.
-        # Each attack class gets an independent 0-100 score; -1 means the
-        # gate condition failed (class not applicable).
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS tx_class_scores (
-                tx_hash          String,
-                network          String,
-                token_dust       Float32 DEFAULT -1,
-                large_value      Float32 DEFAULT -1,
-                large_datum      Float32 DEFAULT -1,
-                multiple_sat     Float32 DEFAULT -1,
-                front_running    Float32 DEFAULT -1,
-                sandwich         Float32 DEFAULT -1,
-                circular         Float32 DEFAULT -1,
-                fake_token       Float32 DEFAULT -1,
-                phishing         Float32 DEFAULT -1,
-                max_score        Float32,
-                max_class        String,
-                risk_band        String,
-                sub_scores       String,
-                evidence         String DEFAULT '{}',
-                corroboration_count   UInt8 DEFAULT 0,
-                corroborating_classes String DEFAULT '',
-                analysis_version String,
-                analyzed_at      DateTime,
-                INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1
-            ) ENGINE = ReplacingMergeTree(analyzed_at)
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMMDD(analyzed_at)
-        """)
+        client.execute(SCHEMA_DDL["tx_class_scores"].format(table="tx_class_scores"))
 
         client.execute(
             "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS evidence String DEFAULT '{}'"
@@ -434,27 +492,8 @@ def execute_schema():
             "ADD COLUMN IF NOT EXISTS corroborating_classes String DEFAULT ''"
         )
 
-        # Admin-curated archive of flagged transactions known to be false
-        # positives. Additive to tx_class_scores: a row here suppresses the
-        # corresponding score from "currently dangerous" lists at query time.
-        # An entry can exist without a matching tx_class_scores row (cross-
-        # instance CSV import: another admin's archive for a tx this instance
-        # never observed).
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS archived_alerts (
-                tx_hash      String,
-                network      String,
-                note         String,
-                archived_by  String,
-                archived_at  DateTime DEFAULT now(),
-                source       String DEFAULT 'local',
-                INDEX idx_tx_hash    tx_hash     TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network    network     TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_archived   archived_at TYPE minmax       GRANULARITY 1
-            ) ENGINE = ReplacingMergeTree(archived_at)
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMM(archived_at)
-        """)
+        # Admin-curated archive of flagged transactions (see SCHEMA_DDL).
+        client.execute(SCHEMA_DDL["archived_alerts"].format(table="archived_alerts"))
 
         # Per-script / per-policy / global baseline statistics used by the
         # percentile normalisation framework.  Updated daily (or on bootstrap).
@@ -512,10 +551,36 @@ def execute_schema():
             ORDER BY (network, detected_at)
         """)
 
+        # Startup guard: CREATE IF NOT EXISTS above silently keeps a legacy
+        # table's engine/partitioning, so verify the live layout is v2 and
+        # refuse to run half-migrated (raises RuntimeError naming the
+        # migration script).
+        _assert_no_legacy_schema(client)
+
         logger.info("ClickHouse schema initialized")
     except ClickHouseError as e:
         logger.error(f"Failed to create ClickHouse schema: {e}")
         raise
+
+
+def _serialize_raw_data(raw_data: Optional[Dict[str, Any]]) -> Tuple[str, int]:
+    """Serialize a tx's raw Ogmios payload for the transactions INSERT.
+
+    Returns ``(json_string, truncated_flag)``. When RAW_DATA_MAX_BYTES > 0
+    and the serialized payload exceeds it, an EMPTY string is stored with the
+    flag set — never a sliced prefix, which is invalid JSON and used to make
+    the analysis engine silently score the tx with every gate closed. The
+    full payload stays available in the raw store (ADR-009); the engine falls
+    back to it when the flag is set.
+    """
+    if not raw_data:
+        return "", 0
+    raw_json = json.dumps(raw_data)
+    max_bytes = settings.RAW_DATA_MAX_BYTES
+    # json.dumps defaults to ensure_ascii=True, so len() == byte length.
+    if max_bytes > 0 and len(raw_json) > max_bytes:
+        return "", 1
+    return raw_json, 0
 
 
 def insert_transactions_batch(transactions: List[NormalizedTransaction]):
@@ -531,15 +596,10 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
     now = datetime.now(timezone.utc)
 
     try:
-        client.execute(
-            """
-            INSERT INTO transactions (
-                tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
-                input_count, output_count, total_input_value, total_output_value,
-                addresses, metadata, raw_data, ingestion_timestamp
-            ) VALUES
-            """,
-            [(
+        tx_rows = []
+        for tx in transactions:
+            raw_json, raw_truncated = _serialize_raw_data(tx.raw_data)
+            tx_rows.append((
                 tx.tx_hash,
                 tx.network or settings.CARDANO_NETWORK,
                 tx.slot,
@@ -555,9 +615,19 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 tx.total_output_value,
                 tx.addresses,
                 json.dumps(tx.metadata) if tx.metadata else "",
-                (json.dumps(tx.raw_data) if tx.raw_data else "")[:_RAW_DATA_MAX_BYTES],
+                raw_json,
+                raw_truncated,
                 tx.ingestion_timestamp or now,
-            ) for tx in transactions]
+            ))
+        client.execute(
+            """
+            INSERT INTO transactions (
+                tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
+                input_count, output_count, total_input_value, total_output_value,
+                addresses, metadata, raw_data, raw_data_truncated, ingestion_timestamp
+            ) VALUES
+            """,
+            tx_rows,
         )
 
         all_inputs = [
@@ -654,6 +724,59 @@ async def insert_transactions_batch_async(transactions: List[NormalizedTransacti
 # Analysis Engine helpers
 # ---------------------------------------------------------------------------
 
+# Tables holding per-transaction chain facts that must be purged when the
+# chain rolls back past their slot. archived_alerts is deliberately absent:
+# it is admin curation, not chain state.
+_ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
+    "transactions",
+    "transaction_inputs",
+    "transaction_outputs",
+    "utxo_features",
+    "tx_script_features",
+    "address_transactions",
+    "tx_class_scores",
+)
+
+
+def delete_rolled_back_txs(network: str, rollback_slot: int) -> int:
+    """Delete all rows for transactions confirmed after ``rollback_slot``.
+
+    Called on a ChainSync rollBackward: blocks past the rollback point are
+    off-chain, so their rows would otherwise feed scorers, baselines, and
+    API reads forever. Uses lightweight DELETEs (ClickHouse 22.8+). If the
+    transaction later re-confirms on the new fork, ChainSync re-delivers it
+    and the ReplacingMergeTree insert is a clean upsert with the new block
+    coordinates. Returns the number of orphaned tx hashes.
+
+    Idempotent: re-running after a partial failure deletes whatever remains.
+    """
+    client = _get_client()
+    rows = client.execute(
+        """
+        SELECT DISTINCT tx_hash FROM transactions FINAL
+        WHERE network = %(network)s AND slot > %(slot)s
+        """,
+        {"network": network, "slot": rollback_slot},
+    )
+    hashes = [r[0] for r in rows]
+    if not hashes:
+        return 0
+    for table in _ROLLBACK_CLEANUP_TABLES:
+        client.execute(
+            f"DELETE FROM {table} WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+            {"network": network, "hashes": hashes},
+        )
+    return len(hashes)
+
+
+async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> int:
+    """Async wrapper for delete_rolled_back_txs (runs on the CH executor)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ch_executor, delete_rolled_back_txs, network, rollback_slot,
+    )
+
+
 def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[str, Any]]:
     """Resolve input values and unique source addresses for a batch of transactions.
 
@@ -663,21 +786,43 @@ def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[s
     """
     if not tx_hashes:
         return {}
+    # FINAL-in-subquery on BOTH join sides: this is a sum over a join, so a
+    # not-yet-merged ReplacingMergeTree duplicate on either side would double
+    # the resolved input value feeding the scorers. (FINAL directly on a
+    # joined table is rejected by ClickHouse; subqueries are the supported
+    # form.) The inner ref-bound on to2 keeps the FINAL scan proportional to
+    # the batch, not the table.
     rows = _get_client().execute(
         """
         SELECT
             ti.tx_hash,
             sum(coalesce(to2.amount, 0))  AS resolved_input_value,
             uniqExact(to2.address)        AS unique_input_addresses
-        FROM transaction_inputs ti
-        LEFT JOIN transaction_outputs to2
+        FROM (
+            SELECT tx_hash, network, input_tx_hash, input_index_in_tx
+            FROM transaction_inputs FINAL
+            WHERE tx_hash      IN %(tx_hashes)s
+              AND network       = %(network)s
+              AND is_collateral = 0
+              AND is_reference  = 0
+        ) ti
+        LEFT JOIN (
+            SELECT tx_hash, network, output_index, address, amount
+            FROM transaction_outputs FINAL
+            WHERE network = %(network)s
+              AND is_collateral = 0
+              AND tx_hash IN (
+                  SELECT input_tx_hash
+                  FROM transaction_inputs FINAL
+                  WHERE tx_hash      IN %(tx_hashes)s
+                    AND network       = %(network)s
+                    AND is_collateral = 0
+                    AND is_reference  = 0
+              )
+        ) to2
             ON  ti.input_tx_hash     = to2.tx_hash
             AND ti.input_index_in_tx = to2.output_index
             AND ti.network           = to2.network
-        WHERE ti.tx_hash      IN %(tx_hashes)s
-          AND ti.network       = %(network)s
-          AND ti.is_collateral = 0
-          AND ti.is_reference  = 0
         GROUP BY ti.tx_hash
         """,
         {"tx_hashes": tx_hashes, "network": network},
@@ -702,10 +847,13 @@ def get_outputs_for_refs(
     # Deduplicate and build a set for filtering
     ref_set = set(refs)
     unique_tx_hashes = list({r[0] for r in ref_set})
+    # FINAL: resolved amounts feed total_input_value at ingestion; a
+    # pre-merge duplicate row is harmless for the dict shape (same key,
+    # same value) but FINAL keeps the contract exact.
     rows = _get_client().execute(
         """
         SELECT tx_hash, output_index, address, amount
-        FROM transaction_outputs
+        FROM transaction_outputs FINAL
         WHERE tx_hash IN %(tx_hashes)s
           AND network = %(network)s
           AND is_collateral = 0
@@ -736,9 +884,13 @@ def get_address_activity(addresses: List[str], network: str) -> Dict[str, int]:
     """
     if not addresses:
         return {}
+    # uniqExact(tx_hash) rather than count(): the MV fires on every INSERT
+    # into transactions, so a replayed block produces duplicate rows until
+    # the ReplacingMergeTree merge runs; counting distinct tx hashes is
+    # correct in both states and cheaper than FINAL here.
     rows = _get_client().execute(
         """
-        SELECT address, count() AS tx_count
+        SELECT address, uniqExact(tx_hash) AS tx_count
         FROM address_transactions
         WHERE network  = %(network)s
           AND address IN %(addresses)s
@@ -1527,7 +1679,8 @@ def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str,
         """
         SELECT t.tx_hash, t.network, t.fee, t.input_count, t.output_count,
                t.total_output_value, t.metadata, t.addresses, t.raw_data,
-               t.slot, t.block_height, t.timestamp
+               t.raw_data_truncated, t.slot, t.block_height, t.timestamp,
+               t.ingestion_timestamp
         FROM transactions t
         LEFT ANTI JOIN tx_class_scores s
           ON t.tx_hash = s.tx_hash AND t.network = s.network
@@ -1544,5 +1697,6 @@ def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str,
     )
     keys = ("tx_hash", "network", "fee", "input_count", "output_count",
             "total_output_value", "metadata", "addresses", "raw_data",
-            "slot", "block_height", "timestamp")
+            "raw_data_truncated", "slot", "block_height", "timestamp",
+            "ingestion_timestamp")
     return [dict(zip(keys, row)) for row in rows]

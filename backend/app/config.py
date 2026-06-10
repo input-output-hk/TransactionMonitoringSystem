@@ -146,6 +146,44 @@ class Settings(BaseSettings):
     CYCLE_MAX_FANOUT: int = 50
     SANDWICH_SIMPLIFIED_ENABLED: bool = True
 
+    # ClickHouse write resilience.
+    # A block whose ClickHouse insert fails must NOT have its sync checkpoint
+    # advanced (silent permanent block loss). The ingester retries the insert
+    # with exponential backoff, then raises BlockPersistError so the chain-sync
+    # loop trips its circuit breaker and replays the block from the unadvanced
+    # checkpoint (safe: all fact tables are ReplacingMergeTree).
+    CLICKHOUSE_INSERT_MAX_RETRIES: int = 5  # total attempts before giving up
+    # First retry delay; doubles per attempt. 1 s rides out a ClickHouse
+    # merge stall / brief socket drop without flooding reconnects.
+    CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS: float = 1.0
+    # Backoff ceiling: a ClickHouse restart takes tens of seconds; waiting
+    # longer than 30 s per attempt just delays the circuit-breaker handoff.
+    CLICKHOUSE_INSERT_RETRY_MAX_DELAY_SECONDS: float = 30.0
+
+    # Chain rollback cleanup: on rollBackward, delete ClickHouse rows for
+    # transactions whose slot is past the rollback point so orphaned-fork data
+    # cannot feed scorers or API reads. archived_alerts is exempt (admin
+    # curation, not chain state).
+    ROLLBACK_CLEANUP_ENABLED: bool = True
+
+    # Maximum byte-length of the raw_data JSON stored per transaction.
+    # 0 = no limit (store the full payload; ZSTD codec keeps it cheap).
+    # When > 0 and the serialized JSON exceeds the limit, an EMPTY string is
+    # stored with raw_data_truncated = 1 — never an invalid JSON prefix, which
+    # previously made the scorer silently treat the tx as feature-less.
+    RAW_DATA_MAX_BYTES: int = 0
+
+    # Analysis Engine raw_data fallback: when a tx row's raw_data is missing,
+    # truncated, or unparseable, read the full payload back from the raw store
+    # (ADR-009) before scoring. On a failed read the tx is deferred (no score
+    # row written) and retried on later engine runs.
+    RAW_FALLBACK_ENABLED: bool = True
+    # After this many failed fallback attempts the tx is scored anyway with
+    # raw_data=None and a raw_data_unavailable evidence marker, so a lost blob
+    # cannot park a tx in the pending queue forever. 3 covers transient
+    # filesystem hiccups across ~3 engine intervals.
+    RAW_FALLBACK_MAX_ATTEMPTS: int = 3
+
     # Lifecycle cleanup — PENDING → DROPPED sweep
     # PENDING transactions older than this threshold are marked DROPPED by the
     # background cleanup sweep that runs alongside the analysis engine.
