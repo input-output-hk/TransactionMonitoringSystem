@@ -14,7 +14,7 @@ from typing import Callable, Awaitable, Optional, Set, Dict, Any, List
 
 import websockets
 
-from app.analysis.features import extract_ttl
+from app.analysis.features import extract_lovelace, extract_ttl
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
@@ -22,6 +22,38 @@ from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
 from app.models.transaction import NormalizedTransaction, TransactionInput
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
+    """Parse one resolved UTxO from queryLedgerState/utxo into
+    ``((tx_id, index), {address, amount, assets})``.
+
+    ``extract_lovelace`` handles both the v5 top-level ``{"lovelace": N}``
+    and the v6 nested ``{"ada": {"lovelace": N}}`` value shapes. The previous
+    v5-only read returned 0 for every v6 UTxO and mis-filed the ``ada``
+    sub-dict as a native asset, so every mempool-resolved input carried
+    amount=0 and total_input_value stayed NULL.
+    """
+    utxo_tx = utxo.get("transaction", {})
+    utxo_id = utxo_tx.get("id", "") if isinstance(utxo_tx, dict) else ""
+    utxo_index = utxo.get("index", 0)
+    val = utxo.get("value", {})
+    lovelace = extract_lovelace(val)
+    assets: Dict[str, int] = {}
+    if isinstance(val, dict):
+        for k, v in val.items():
+            if k in ("lovelace", "ada"):
+                continue
+            if isinstance(v, dict):
+                for asset_name, qty in v.items():
+                    assets[f"{k}.{asset_name}"] = int(qty)
+            else:
+                assets[k] = int(v)
+    return (utxo_id, utxo_index), {
+        "address": utxo.get("address", ""),
+        "amount": int(lovelace),
+        "assets": assets if assets else None,
+    }
 
 
 class OgmiosClient:
@@ -185,30 +217,8 @@ class OgmiosClient:
 
         cache_entry: Dict[tuple, dict] = {}
         for utxo in utxos:
-            utxo_tx = utxo.get("transaction", {})
-            utxo_id = utxo_tx.get("id", "") if isinstance(utxo_tx, dict) else ""
-            utxo_index = utxo.get("index", 0)
-            val = utxo.get("value", {})
-            if isinstance(val, dict):
-                lovelace = val.get("lovelace", 0)
-                assets = {}
-                for k, v in val.items():
-                    if k == "lovelace":
-                        continue
-                    if isinstance(v, dict):
-                        for asset_name, qty in v.items():
-                            assets[f"{k}.{asset_name}"] = int(qty)
-                    else:
-                        assets[k] = int(v)
-            else:
-                lovelace = int(val) if val else 0
-                assets = {}
-
-            cache_entry[(utxo_id, utxo_index)] = {
-                "address": utxo.get("address", ""),
-                "amount": int(lovelace),
-                "assets": assets if assets else None,
-            }
+            ref, resolved = _parse_resolved_utxo(utxo)
+            cache_entry[ref] = resolved
 
         if cache_entry:
             self._pending_input_cache[tx_id] = cache_entry
@@ -495,10 +505,19 @@ class OgmiosClient:
             # node's mempool simultaneously).
             confirmed_hashes = {tx.tx_hash for tx in normalized_txs}
             for tx in normalized_txs:
-                conf_refs = {
-                    (inp.tx_hash, inp.index) for inp in tx.inputs
-                    if not inp.is_collateral and not inp.is_reference
-                }
+                # The consumed refs are the regular inputs for a validated
+                # tx, the collaterals for a phase-2-failed one (the ledger
+                # spends collateral on failure; the regular inputs stay live).
+                if tx.script_valid:
+                    conf_refs = {
+                        (inp.tx_hash, inp.index) for inp in tx.inputs
+                        if not inp.is_collateral and not inp.is_reference
+                    }
+                else:
+                    conf_refs = {
+                        (inp.tx_hash, inp.index) for inp in tx.inputs
+                        if inp.is_collateral
+                    }
                 if not conf_refs:
                     continue
                 for pending_id, (pending_refs, pending_seen, pending_fee, pending_addr, pending_ttl) in self._pending_input_sets.items():
