@@ -174,6 +174,14 @@ class Settings(BaseSettings):
     RAW_STORE_RETENTION_DAYS: int = 0
     RETENTION_SWEEP_INTERVAL_HOURS: int = 24
 
+    # Background-task supervisor restart backoff. Base doubles per crash up
+    # to the ceiling; a run lasting longer than the stable-reset window
+    # resets the delay (one-off crashes recover fast, persistent bugs stop
+    # hammering logs and downstream services at a fixed cadence).
+    SUPERVISOR_BACKOFF_BASE_SECONDS: float = 5.0
+    SUPERVISOR_BACKOFF_MAX_SECONDS: float = 300.0
+    SUPERVISOR_STABLE_RESET_SECONDS: float = 600.0
+
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True
     BASELINE_MIN_SAMPLES: int = 200          # min txs before per-script baseline is trusted

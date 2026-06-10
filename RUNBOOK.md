@@ -247,7 +247,7 @@ docker compose ps
 
 ### Restart after a crash
 
-The application reconnects to Ogmios automatically on restart using an exponential backoff circuit breaker. After a restart it reads the last saved `sync_checkpoint` from PostgreSQL and resumes from that slot, so no blocks are missed.
+The application reconnects to Ogmios automatically on restart using an exponential backoff circuit breaker. After a restart it reads the last saved `sync_checkpoint` from PostgreSQL and resumes from that slot. The checkpoint only advances after the block's ClickHouse insert succeeds (failed inserts retry with backoff, then force a reconnect and replay), so confirmed blocks are not lost across restarts or transient ClickHouse outages. Replayed blocks deduplicate via the ReplacingMergeTree schema.
 
 ```bash
 # Restart just the app (databases keep running)
@@ -272,7 +272,7 @@ Variables are layered across files:
 | `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
 | `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; requires `TMS_ALLOW_DEV_MODE=1` or the app refuses to start |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
-| `RATE_LIMIT_REQUESTS` | `60` | Max requests per window per key |
+| `RATE_LIMIT_REQUESTS` | `240` | Max requests per window per key |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background risk scoring |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | How often the engine polls for unscored transactions |
@@ -310,7 +310,7 @@ ConnectionRefusedError / WebSocket connection failed
 curl -H "TMS-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
-Check the `ogmios` field for `chain_circuit_state` and `mempool_circuit_state`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
+Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempool`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
 
 ### Database containers won't start
 
@@ -337,7 +337,7 @@ Update `POSTGRES_PORT` in `.env` to match.
 
 ### Reset all data
 
-**Destructive: deletes everything in the databases and the raw data volume.**
+**Destructive: deletes everything in the databases and the raw data volume.** Take a backup first (next section).
 
 ```bash
 docker compose down -v
@@ -346,6 +346,31 @@ docker compose up -d
 
 On next startup the application recreates all schemas automatically and begins syncing from the chain tip.
 
+## Backup & restore
+
+Run `./scripts/backup.sh [output-dir]` with the databases up. It produces:
+
+- `postgres.sql.gz`: full dump of the operational DB (lifecycle, sync checkpoints, collisions, audit logs, entity state)
+- `clickhouse/<table>.native.gz`: per-table Native-format export of the analytics warehouse, including `tx_class_scores` and `archived_alerts` (the detection product)
+- `MANIFEST`: row counts at backup time
+
+The raw store (Data Lake) is write-once files; back it up incrementally with rsync or restic against the `raw_store_data` volume (host runs: `RAW_STORE_PATH`). Schedule the script via cron on the host; daily is appropriate at preprod volume.
+
+Restore:
+
+1. Start empty databases (`docker compose up -d`), let the app create schemas once, then stop the app.
+2. PostgreSQL: `gunzip -c postgres.sql.gz | docker exec -i tms-postgres psql -U $POSTGRES_USER $POSTGRES_DB`
+3. ClickHouse, per table: `gunzip -c clickhouse/<t>.native.gz | docker exec -i tms-clickhouse clickhouse-client --query "INSERT INTO tms_analytics.<t> FORMAT Native"`
+4. Restore the raw-store files into the volume, then start the app. The sync checkpoint in the Postgres dump makes ingestion resume from the backed-up slot; any gap replays from the chain.
+
+## Schema migration (dedup-safe v2)
+
+Deployments created before the ReplacingMergeTree schema must run the one-shot migration before the app will start (the startup guard refuses a legacy layout and names the script):
+
+1. Stop ALL app instances sharing the ClickHouse database (preprod and preview).
+2. Dry-run: `cd backend && python scripts/migrate_dedup_schema.py` (prints per-table row and duplicate counts).
+3. Apply: `python scripts/migrate_dedup_schema.py --apply`
+4. Restart the instances. Legacy data is preserved as `<table>__legacy_<date>`; drop those tables manually after a verification window.
 
 ## API quick reference
 

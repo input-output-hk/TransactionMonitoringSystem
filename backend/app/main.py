@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
@@ -43,16 +43,29 @@ async def _supervised(label: str, coro_fn):
     Normal shutdown (self._running = False) causes the coroutine to return
     without raising, so we don't restart in that case.
     asyncio.CancelledError propagates to let the task be properly cancelled.
+
+    Restart delay backs off exponentially (a persistent bug previously
+    became an infinite fixed 5 s crash loop hammering logs and downstream
+    services) and resets after a stable run, so a one-off crash recovers
+    fast while a hard failure settles at the ceiling.
     """
+    delay = settings.SUPERVISOR_BACKOFF_BASE_SECONDS
+    loop = asyncio.get_running_loop()
     while True:
+        started = loop.time()
         try:
             await coro_fn()
             return  # clean return means disconnect() was called
         except asyncio.CancelledError:
             return
         except Exception as e:
-            logger.error(f"[supervisor] {label} crashed: {e!r} — restarting in 5 s")
-            await asyncio.sleep(5)
+            if loop.time() - started >= settings.SUPERVISOR_STABLE_RESET_SECONDS:
+                delay = settings.SUPERVISOR_BACKOFF_BASE_SECONDS
+            logger.error(
+                f"[supervisor] {label} crashed: {e!r} — restarting in {delay:.0f} s"
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, settings.SUPERVISOR_BACKOFF_MAX_SECONDS)
 
 
 async def broadcast_lifecycle_event(event: dict):
@@ -239,6 +252,27 @@ async def health():
     an API key so external scanners cannot enumerate internals.
     """
     return {"status": "healthy"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness probe: 503 while the ingestion pipeline is DOWN.
+
+    /health stays a pure liveness signal (the process is up), which kept
+    load balancers routing to an instance that was ingesting nothing
+    (audit finding). Orchestrators should gate traffic on THIS endpoint.
+    Unauthenticated like /health, but exposes only the coarse state word,
+    no internals.
+    """
+    state = "UNKNOWN"
+    if ogmios_client:
+        state = ogmios_client.status["pipeline_state"]
+    if state == "DOWN":
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "pipeline_state": state},
+        )
+    return {"status": "ready", "pipeline_state": state}
 
 
 @app.get("/health/detail")

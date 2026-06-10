@@ -133,10 +133,12 @@ Instead of many different tokens, the attacker creates a UTxO with a single Asse
 
 | Feature | Role | Weight |
 |---------|------|--------|
-| `quantity_digits` | Primary: decimal digits in the quantity (proxy for CBOR cost). **Per-policy baseline.** | 0.40 |
-| `value_cbor_bytes` | Primary: high despite low asset count = defining anomaly. **Per-script baseline.** | 0.35 |
-| `sender_recurrence` | Contextual | 0.15 |
-| `lovelace_amount` | Secondary (inverted): minimal ADA = instrumental deposit | 0.10 |
+| `quantity_digits` | Primary: decimal digits in the quantity (proxy for CBOR cost). **Per-policy baseline.** | 0.55 |
+| `value_cbor_bytes` | Primary: high despite low asset count = defining anomaly. **Per-script baseline.** | 0.20 |
+| `lovelace_amount` | Secondary (inverted): minimal ADA = instrumental deposit | 0.15 |
+| `sender_recurrence` | Contextual | 0.10 |
+
+Weights were retuned from the Polimi starting points (0.40/0.35/0.10/0.15): a simple single-token UTxO has naturally low `value_cbor_bytes` regardless of quantity, so the byte axis only fires for multi-asset outputs; the heavier `quantity_digits` weight lets a max-quantity (near int64) attack reach High/Critical without the CBOR signal. Tunables live in `config/detection.yaml` under `large_value.weights`.
 
 ### Scoring
 
@@ -150,7 +152,7 @@ score_large_value(utxo):
     s_ada        = 1 - normalise(utxo.lovelace_amount, per_script_baselines)
     s_recurrence = normalise(utxo.sender_recurrence, per_script_baselines)
 
-    score = 0.40 * s_digits + 0.35 * s_bytes + 0.10 * s_ada + 0.15 * s_recurrence
+    score = 0.55 * s_digits + 0.20 * s_bytes + 0.15 * s_ada + 0.10 * s_recurrence
     return clip(score, 0, 1) * 100
 ```
 
@@ -479,7 +481,7 @@ The attacker mints tokens with a TokenName identical or visually similar (Unicod
 
 ### Gate Conditions
 - TX includes a minting action (`mint_present == true`)
-- At least one minted token name has `tokenname_similarity >= 0.80` against a known legitimate token
+- At least one minted token name has `tokenname_similarity >= 0.70` against a known legitimate token (tuned down from the Polimi starting point 0.80; `fake_token.similarity_threshold` in `config/detection.yaml`)
 - `policy_id != legitimate_policy_id` for the matched token
 
 ### Detection: Two Sub-Pipelines

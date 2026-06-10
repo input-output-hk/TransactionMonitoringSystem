@@ -21,7 +21,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Paths that are never rate-limited
-_EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/ws"}
+_EXEMPT_PATHS = {"/", "/health", "/health/ready", "/docs", "/redoc", "/openapi.json", "/ws"}
 
 
 class RateLimiter:

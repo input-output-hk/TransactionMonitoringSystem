@@ -4,6 +4,7 @@
 #   ./scripts/reset.sh                 # reset only the current TMS_ENV's network (safe)
 #   ./scripts/reset.sh --network=X     # reset only network X
 #   ./scripts/reset.sh --all           # reset every network (destructive)
+#   ./scripts/reset.sh --yes           # skip the confirmation prompt (automation)
 #
 # The script honours TMS_ENV so running it from a preview-configured terminal
 # will not nuke preprod data.
@@ -27,6 +28,26 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Destructive: require explicit confirmation (matches db.sh reset). The
+# --yes flag exists for non-interactive automation that has already decided.
+CONFIRMED=0
+for arg in "$@"; do
+    [ "$arg" = "--yes" ] && CONFIRMED=1
+done
+if [ "$CONFIRMED" != "1" ]; then
+    if [ "$ALL" = "1" ]; then
+        SCOPE_DESC="ALL networks"
+    else
+        SCOPE_DESC="network '${NETWORK_ARG:-current TMS_ENV}'"
+    fi
+    printf "This DELETES all TMS data for %s. Type 'yes' to continue: " "$SCOPE_DESC"
+    read -r REPLY
+    if [ "$REPLY" != "yes" ]; then
+        echo "Aborted."
+        exit 1
+    fi
+fi
 
 # Activate virtual environment
 if [ -f venv/bin/activate ]; then
