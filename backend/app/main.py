@@ -97,7 +97,18 @@ async def lifespan(app: FastAPI):
                 "shell environment) for local dev."
             )
         logger.warning("No API keys configured — API is open (development mode)")
+    # Same fail-fast posture as API_KEYS: an empty ClickHouse password is a
+    # deliberate dev-mode choice, never an accident a production deploy
+    # discovers later. (The port binds to loopback in compose, so this is
+    # defence-in-depth against other local processes/containers.)
     if not settings.CLICKHOUSE_PASSWORD:
+        if not allow_dev_mode:
+            raise RuntimeError(
+                "CLICKHOUSE_PASSWORD is empty and TMS_ALLOW_DEV_MODE != '1'. "
+                "Refusing to start against an unauthenticated ClickHouse. "
+                "Set CLICKHOUSE_PASSWORD (and the matching docker-compose "
+                "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
+            )
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
 
     # Start rate-limiter cleanup task
@@ -189,10 +200,13 @@ if settings.RATE_LIMIT_ENABLED:
     )
     app.add_middleware(RateLimitMiddleware, limiter=_limiter)
 
-# CORS: registered last → outermost → executes first, wraps rate limiter
+# CORS: registered last → outermost → executes first, wraps rate limiter.
+# Origins are configurable (CORS_ALLOW_ORIGINS, comma-separated); the "*"
+# default keeps the demo SPA / local vite dev server working. Tighten to
+# the dashboard origin in production deployments.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_allow_origins_list,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -101,6 +101,19 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 240  # max requests per window per key/IP
     RATE_LIMIT_WINDOW_SECONDS: int = 60  # sliding window duration in seconds
+    # Honour X-Forwarded-For for client IPs (rate limiting, audit logs).
+    # ONLY enable behind a reverse proxy / tunnel that strips and re-sets
+    # the header; otherwise it is attacker-controlled.
+    TRUSTED_PROXY_ENABLED: bool = False
+
+    # Comma-separated allowed CORS origins. "*" (default) keeps the demo
+    # SPA and local vite dev servers working; tighten to the dashboard
+    # origin in production.
+    CORS_ALLOW_ORIGINS: str = "*"
+
+    @property
+    def cors_allow_origins_list(self) -> list:
+        return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
 
     # Analysis Engine
     ANALYSIS_ENGINE_ENABLED: bool = True

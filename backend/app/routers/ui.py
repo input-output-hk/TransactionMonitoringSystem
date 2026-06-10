@@ -609,7 +609,7 @@ async def root():
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
                                     <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn restore" onclick="restoreAlert('${{a.tx_hash}}','${{a.network}}')">Restore</button>
-                                    <span style="color:#888;font-size:11px">By: ${{a.archived_by || '-'}}</span>
+                                    <span style="color:#888;font-size:11px">By: ${{(a.archived_by || '-').replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}})[c])}}</span>
                                     <span style="color:#666;font-size:11px">${{when}}</span>
                                 </div>
                                 <div class="risk-sub">Was: ${{wasClass}} (${{wasBand}}, ${{wasScore}}) &middot; source: ${{a.source || 'local'}}</div>

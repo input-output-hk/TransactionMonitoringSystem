@@ -66,8 +66,14 @@ def _build_path(prefix: str, network: str, tx_hash: str, date: datetime) -> str:
     shard prefix distributes PUTs across multiple index partitions, avoiding
     the hot-prefix throttling that occurs when millions of keys share a prefix.
     """
-    # Validate tx_hash to prevent path traversal (Ogmios data is untrusted)
-    if not tx_hash or not all(c in "0123456789abcdef" for c in tx_hash):
+    # Validate tx_hash to prevent path traversal (Ogmios data is untrusted).
+    # Cardano tx ids are exactly 64 hex chars (Blake2b-256); the length check
+    # also blocks pathological all-hex strings becoming huge filenames.
+    if (
+        not tx_hash
+        or len(tx_hash) != 64
+        or not all(c in "0123456789abcdef" for c in tx_hash)
+    ):
         logger.warning(f"Invalid tx_hash for raw store: {tx_hash[:20]!r}")
         return ""
     day_dir = date.strftime("%Y%m%d")

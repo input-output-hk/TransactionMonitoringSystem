@@ -474,6 +474,25 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
         return int(result.split()[1])
 
 
+async def insert_audit_log(
+    event_type: str,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    details: str,
+    ip_address: Optional[str],
+) -> None:
+    """Append one audit row. ``details`` is a JSON string; ``user_id`` stays
+    NULL until server-side accounts exist (the actor is carried in details).
+    """
+    async with get_connection() as conn:
+        await conn.execute("""
+            INSERT INTO audit_logs (
+                event_type, entity_type, entity_id, action, details, ip_address
+            ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::inet)
+        """, event_type, entity_type, entity_id, action, details, ip_address)
+
+
 async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
     """Delete TERMINAL lifecycle rows (DROPPED / ROLLED_BACK) older than the
     retention window. CONFIRMED and PENDING rows are never pruned: CONFIRMED

@@ -16,13 +16,15 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response, Security, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, Security, status
 from fastapi.responses import StreamingResponse
 
+from app import audit
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import archive_queries
 from app.models.archive import (
+    TX_HASH_PATTERN,
     ArchiveEntry,
     ArchiveEntryEnriched,
     BulkArchiveRequest,
@@ -50,7 +52,7 @@ CSV_COLUMNS = ("network", "tx_hash", "note", "archived_by", "archived_at", "sour
     status_code=status.HTTP_201_CREATED,
     dependencies=[Security(verify_api_key)],
 )
-async def archive_alert(entry: ArchiveEntry) -> dict:
+async def archive_alert(entry: ArchiveEntry, request: Request) -> dict:
     """Mark a flagged transaction as a known false positive.
 
     Returns 201 on insert, 409 if (network, tx_hash) is already archived.
@@ -79,6 +81,17 @@ async def archive_alert(entry: ArchiveEntry) -> dict:
     except Exception as e:
         logger.error(f"Error archiving {entry.tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Failed to archive alert")
+    # Archiving SUPPRESSES an alert from active lists: for a monitoring
+    # system that is the highest-impact mutation, so it always leaves an
+    # audit row (actor + note + source IP).
+    await audit.record(
+        event_type="alert_suppression",
+        action="archive",
+        entity_type="transaction",
+        entity_id=f"{entry.network}:{entry.tx_hash}",
+        details={"archived_by": entry.archived_by, "note": entry.note},
+        request=request,
+    )
     return {
         "network": entry.network,
         "tx_hash": entry.tx_hash,
@@ -126,20 +139,32 @@ async def list_archived(
 
 
 @router.post("/bulk", dependencies=[Security(verify_api_key)])
-async def bulk_import(request: BulkArchiveRequest) -> BulkArchiveResult:
+async def bulk_import(payload_request: BulkArchiveRequest, request: Request) -> BulkArchiveResult:
     """Bulk upsert (skip-existing) used by CSV import.
 
     For each entry, INSERT if (network, tx_hash) is not already archived;
     otherwise skip. Local notes/attribution are never overwritten.
     """
-    payload = [e.model_dump() for e in request.entries]
+    payload = [e.model_dump() for e in payload_request.entries]
     try:
         outcome = await archive_queries.archive_bulk_insert_async(
-            payload, request.source_label,
+            payload, payload_request.source_label,
         )
     except Exception as e:
         logger.error(f"Error during bulk import: {e}")
         raise HTTPException(status_code=500, detail="Failed to import archive batch")
+    await audit.record(
+        event_type="alert_suppression",
+        action="bulk_archive",
+        entity_type="archive_batch",
+        entity_id=payload_request.source_label or "bulk",
+        details={
+            "entries": len(payload),
+            "inserted": outcome["inserted"],
+            "skipped": outcome["skipped"],
+        },
+        request=request,
+    )
     return BulkArchiveResult(
         inserted=outcome["inserted"],
         skipped=outcome["skipped"],
@@ -206,7 +231,8 @@ async def export_csv(
     dependencies=[Security(verify_api_key)],
 )
 async def restore_alert(
-    tx_hash: str,
+    request: Request,
+    tx_hash: str = Path(pattern=TX_HASH_PATTERN),
     network: Optional[NetworkType] = Query(None),
 ) -> Response:
     """Restore a transaction by hard-deleting its archive row."""
@@ -221,6 +247,14 @@ async def restore_alert(
             status_code=404,
             detail=f"No archive entry found for {tx_hash} on {query_network}",
         )
+    await audit.record(
+        event_type="alert_suppression",
+        action="restore",
+        entity_type="transaction",
+        entity_id=f"{query_network}:{tx_hash}",
+        details={},
+        request=request,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -230,7 +264,7 @@ async def restore_alert(
     dependencies=[Security(verify_api_key)],
 )
 async def get_archived(
-    tx_hash: str,
+    tx_hash: str = Path(pattern=TX_HASH_PATTERN),
     network: Optional[NetworkType] = Query(None),
 ) -> ArchiveEntryEnriched:
     """Single archive entry enriched with the original detection record.
