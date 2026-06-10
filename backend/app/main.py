@@ -56,22 +56,20 @@ async def _supervised(label: str, coro_fn):
 
 
 async def broadcast_lifecycle_event(event: dict):
-    """Broadcast lifecycle events to all connected WebSocket clients"""
+    """Broadcast lifecycle events to all connected WebSocket clients.
+
+    Non-blocking: enqueues onto per-client bounded queues (see
+    routers/websocket.broadcast). The previous implementation awaited
+    send_json per client from the ingestion path, so one slow client
+    stalled block processing for the whole process.
+    """
     if not active_connections:
         return
-    disconnected = []
-    for connection in active_connections:
-        try:
-            await connection.send_json({
-                "type": "lifecycle",
-                "data": event,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-        except Exception:
-            disconnected.append(connection)
-    for conn in disconnected:
-        if conn in active_connections:
-            active_connections.remove(conn)
+    await websocket.broadcast({
+        "type": "lifecycle",
+        "data": event,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 @asynccontextmanager

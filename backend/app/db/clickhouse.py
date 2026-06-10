@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
@@ -557,10 +558,54 @@ def execute_schema():
         # migration script).
         _assert_no_legacy_schema(client)
 
+        # Opt-in retention TTLs (CH_RETENTION_DAYS_*, default 0 = forever).
+        _apply_retention_ttls(client)
+
         logger.info("ClickHouse schema initialized")
     except ClickHouseError as e:
         logger.error(f"Failed to create ClickHouse schema: {e}")
         raise
+
+
+# table -> the settings knob holding its retention window in days.
+# tx_class_scores, archived_alerts, and baselines are deliberately absent:
+# they are the product (O(1) per tx) and are never expired.
+_RETENTION_TABLE_KNOBS: Tuple[Tuple[str, str], ...] = (
+    ("transactions", "CH_RETENTION_DAYS_TRANSACTIONS"),
+    ("transaction_inputs", "CH_RETENTION_DAYS_IO"),
+    ("transaction_outputs", "CH_RETENTION_DAYS_IO"),
+    ("address_transactions", "CH_RETENTION_DAYS_IO"),
+    ("utxo_features", "CH_RETENTION_DAYS_FEATURES"),
+    ("tx_script_features", "CH_RETENTION_DAYS_FEATURES"),
+)
+
+# Global baselines use a 180-day window (per-script 90); feature retention
+# shorter than this starves them. Loud warning, not a hard refusal: an
+# operator may intentionally run a shorter horizon on a constrained box.
+_BASELINE_WINDOW_DAYS = 180
+
+
+def _apply_retention_ttls(client: Client) -> None:
+    """Apply opt-in row TTLs from the CH_RETENTION_DAYS_* knobs (0 = off).
+
+    TTL merges expire rows without partitions. Idempotent: MODIFY TTL
+    replaces any prior clause.
+    """
+    for table, knob in _RETENTION_TABLE_KNOBS:
+        days = int(getattr(settings, knob))
+        if days <= 0:
+            continue
+        if knob == "CH_RETENTION_DAYS_FEATURES" and days < _BASELINE_WINDOW_DAYS:
+            logger.warning(
+                "%s=%d is below the %d-day global baseline window; "
+                "baselines will be computed from a truncated population.",
+                knob, days, _BASELINE_WINDOW_DAYS,
+            )
+        client.execute(
+            f"ALTER TABLE {table} MODIFY TTL "
+            f"ingestion_timestamp + INTERVAL {days} DAY"
+        )
+        logger.info("Retention TTL applied: %s expires after %d days", table, days)
 
 
 def _serialize_raw_data(raw_data: Optional[Dict[str, Any]]) -> Tuple[str, int]:
@@ -1023,10 +1068,37 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
 # Baseline read/write
 # ---------------------------------------------------------------------------
 
+# In-process TTL cache for baseline lookups. Baselines change once per
+# recompute (daily cadence) but were fetched with a point SELECT ... FINAL
+# per feature per scored transaction: the dominant N+1 in the engine's
+# per-tx query budget. Negative results are cached too (most scripts have
+# no per-script baseline, so misses dominate). insert_baselines() clears
+# the cache, so the daily recompute invalidates atomically; the TTL is the
+# backstop for out-of-band writes. Guarded by a lock: callers run on the
+# ClickHouse executor threads.
+_baseline_cache: Dict[tuple, tuple] = {}
+_baseline_cache_lock = threading.Lock()
+
+
+def _baseline_cache_clear() -> None:
+    with _baseline_cache_lock:
+        _baseline_cache.clear()
+
+
 def get_baseline(
     network: str, scope_type: str, scope_id: str, feature: str,
 ) -> Optional[Dict[str, Any]]:
     """Return the latest baseline for a given (network, scope_type, scope_id, feature)."""
+    ttl = settings.BASELINE_CACHE_TTL_SECONDS
+    cache_key = (network, scope_type, scope_id, feature)
+    if ttl > 0:
+        with _baseline_cache_lock:
+            hit = _baseline_cache.get(cache_key)
+            if hit is not None:
+                value, fetched_at = hit
+                if time.monotonic() - fetched_at < ttl:
+                    return dict(value) if value is not None else None
+                _baseline_cache.pop(cache_key, None)
     rows = _get_client().execute(
         """
         SELECT p50, p99, sample_count, computed_at, window_days
@@ -1044,10 +1116,20 @@ def get_baseline(
             "feature": feature,
         },
     )
-    if not rows:
-        return None
     keys = ("p50", "p99", "sample_count", "computed_at", "window_days")
-    return dict(zip(keys, rows[0]))
+    result = dict(zip(keys, rows[0])) if rows else None
+    if ttl > 0:
+        with _baseline_cache_lock:
+            if len(_baseline_cache) >= settings.BASELINE_CACHE_MAX_ENTRIES:
+                # Blunt overflow policy: drop everything and let the hot
+                # keys refill. Simpler than LRU bookkeeping and overflow is
+                # effectively unreachable at the configured size.
+                _baseline_cache.clear()
+            _baseline_cache[cache_key] = (
+                dict(result) if result is not None else None,
+                time.monotonic(),
+            )
+    return result
 
 
 def insert_baselines(rows: List[tuple]):
@@ -1067,6 +1149,10 @@ def insert_baselines(rows: List[tuple]):
         """,
         rows,
     )
+    # New baselines invalidate every cached lookup (recompute writes all
+    # scopes in a handful of batches; a full clear is the simple, correct
+    # granularity).
+    _baseline_cache_clear()
 
 
 def insert_baseline_drift_event(
@@ -1655,7 +1741,11 @@ async def get_baselines_for_scope_async(
     )
 
 
-def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str, Any]]:
+def get_unanalyzed_transactions(
+    network: str,
+    batch_size: int,
+    since: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
     """Return transactions that have no multi-class score yet.
 
     Fetches raw_data alongside the standard fields so that the feature
@@ -1674,26 +1764,47 @@ def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str,
     witness that the inputs side is ready. Txs with ``input_count = 0``
     (treasury / collateral-only edge cases) are admitted directly since
     they need no input enrichment.
+
+    ``since`` is the engine's watermark cursor (see engine._poll_since).
+    Without it, every poll anti-joins the ENTIRE transactions table against
+    the ENTIRE tx_class_scores table plus an unbounded transaction_inputs
+    subquery: cost grows with total table size, not backlog size. With it,
+    all three sides are bounded by ingestion/analysis time. Soundness:
+    child transaction_inputs rows carry the parent tx's ingestion_timestamp
+    (passed explicitly by the writer), and a tx ingested at >= since can
+    only have been scored at analyzed_at >= since (scoring follows
+    ingestion on the same host clock). The engine's periodic since=None
+    full rescan is the never-skip safety net.
     """
+    since_bound = "AND t.ingestion_timestamp >= %(since)s" if since else ""
+    scores_bound = "AND analyzed_at >= %(since)s" if since else ""
+    inputs_bound = "AND ingestion_timestamp >= %(since)s" if since else ""
+    params: Dict[str, Any] = {"network": network, "batch_size": batch_size}
+    if since:
+        params["since"] = since
     rows = _get_client().execute(
-        """
+        f"""
         SELECT t.tx_hash, t.network, t.fee, t.input_count, t.output_count,
                t.total_output_value, t.metadata, t.addresses, t.raw_data,
                t.raw_data_truncated, t.slot, t.block_height, t.timestamp,
                t.ingestion_timestamp
         FROM transactions t
-        LEFT ANTI JOIN tx_class_scores s
+        LEFT ANTI JOIN (
+            SELECT tx_hash, network FROM tx_class_scores
+            WHERE network = %(network)s {scores_bound}
+        ) s
           ON t.tx_hash = s.tx_hash AND t.network = s.network
         WHERE t.network = %(network)s
+          {since_bound}
           AND (t.input_count = 0
                OR t.tx_hash IN (
                    SELECT tx_hash FROM transaction_inputs
-                   WHERE network = %(network)s
+                   WHERE network = %(network)s {inputs_bound}
                ))
         ORDER BY t.ingestion_timestamp ASC
         LIMIT %(batch_size)s
         """,
-        {"network": network, "batch_size": batch_size},
+        params,
     )
     keys = ("tx_hash", "network", "fee", "input_count", "output_count",
             "total_output_value", "metadata", "addresses", "raw_data",

@@ -109,6 +109,57 @@ class Settings(BaseSettings):
     # Cap on referenced-tx raw_data lookups per enrichment batch (bounds the
     # IN-clause size); inputs past the cap simply stay unresolved for the run.
     ANALYSIS_MAX_REF_TXS: int = 2000
+    # Drain loop: batches pulled per interval tick while the poll comes back
+    # full. Caps per-tick work so a deep backlog cannot monopolise the shared
+    # ClickHouse executor; 20 x batch=100 clears 2000 txs/tick.
+    ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK: int = 20
+    # Pause between drained batches: lets ingestion inserts and API reads
+    # interleave on the 3-worker ClickHouse executor.
+    ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS: float = 0.5
+    # Watermark cursor for the unanalyzed poll. The overlap absorbs
+    # same-second ordering skew and the tx-row-before-inputs-row insert gap;
+    # the periodic full rescan (since=None) is the never-skip guarantee and
+    # the recovery path for raw-data-deferred transactions.
+    UNANALYZED_OVERLAP_SECONDS: int = 120
+    UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS: int = 600
+    # Baseline lookup cache (0 disables). Baselines change once per daily
+    # recompute but were point-SELECTed per feature per scored tx: the
+    # engine's dominant N+1. insert_baselines() clears the cache; the 1 h
+    # TTL bounds staleness from any out-of-band write to 4% of the cadence.
+    BASELINE_CACHE_TTL_SECONDS: int = 3600
+    # ~500 scripts x 8 features with generous headroom; overflow clears.
+    BASELINE_CACHE_MAX_ENTRIES: int = 50_000
+    # Token-registry refresh cadence (background task only; the scoring
+    # path never fetches). Matches the registry cache TTL.
+    TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS: int = 24
+
+    # WebSocket feed. Per-client outbound queue depth: a client lagging by
+    # more than this many events starts losing the OLDEST ones (the feed is
+    # a live view, not the system of record). Connection cap prevents
+    # resource exhaustion.
+    WS_CLIENT_QUEUE_SIZE: int = 100
+    WS_MAX_CONNECTIONS: int = 100
+
+    # Ogmios frames larger than this parse on a worker thread instead of
+    # the event loop (a busy Plutus block serialises to tens of MB and
+    # would otherwise freeze the API/WS/mempool tasks for the parse).
+    # Below it the thread handoff costs more than the parse itself.
+    OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES: int = 1_048_576  # 1 MiB
+
+    # Retention. ALL default 0 = keep forever (the audit's growth findings
+    # are addressed by giving operators knobs, not by silently expiring
+    # data). tx_class_scores / archived_alerts / baselines are never
+    # expired regardless of these settings.
+    CH_RETENTION_DAYS_TRANSACTIONS: int = 0
+    CH_RETENTION_DAYS_IO: int = 0          # inputs / outputs / address_transactions
+    CH_RETENTION_DAYS_FEATURES: int = 0    # utxo_features / tx_script_features
+    LIFECYCLE_RETENTION_DAYS: int = 0      # terminal (DROPPED/ROLLED_BACK) rows only
+    MEMPOOL_COLLISION_RETENTION_DAYS: int = 0
+    # Raw-store day-directory pruning. Refused while RAW_DATA_MAX_BYTES > 0:
+    # capped ClickHouse payloads make the raw store load-bearing for the
+    # engine's raw_data fallback.
+    RAW_STORE_RETENTION_DAYS: int = 0
+    RETENTION_SWEEP_INTERVAL_HOURS: int = 24
 
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True

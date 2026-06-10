@@ -474,6 +474,39 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
         return int(result.split()[1])
 
 
+async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
+    """Delete TERMINAL lifecycle rows (DROPPED / ROLLED_BACK) older than the
+    retention window. CONFIRMED and PENDING rows are never pruned: CONFIRMED
+    is the canonical lifecycle record and PENDING is live state. Retention
+    is opt-in (LIFECYCLE_RETENTION_DAYS=0 keeps everything).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM tx_lifecycle
+            WHERE network    = $1
+              AND status IN ('DROPPED', 'ROLLED_BACK')
+              AND updated_at < NOW() - ($2 * INTERVAL '1 day')
+        """, network, older_than_days)
+        return int(result.split()[1])
+
+
+async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
+    """Delete collision records older than the retention window.
+
+    Note the precision trade-off before enabling: the front_running
+    attacker-recurrence signal counts wins over collision HISTORY, so
+    pruning shrinks the window that signal can see. Opt-in
+    (MEMPOOL_COLLISION_RETENTION_DAYS=0 keeps everything).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM mempool_collisions
+            WHERE network    = $1
+              AND created_at < NOW() - ($2 * INTERVAL '1 day')
+        """, network, older_than_days)
+        return int(result.split()[1])
+
+
 # --- Mempool Collision Tracking (Front-Running Detection) ---
 
 async def insert_mempool_collision(

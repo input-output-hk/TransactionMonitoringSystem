@@ -127,6 +127,56 @@ async def write_mempool(network: str, tx_hash: str,
     await _write_async(_PREFIX_MEMPOOL, network, tx_hash, tx_data, ts)
 
 
+def prune_old_days(retention_days: int) -> int:
+    """Delete day directories older than the retention window (opt-in).
+
+    Layout {prefix}/{network}/{YYYYMMDD}/... makes retention a directory
+    walk: whole days are removed at once. Returns the number of day
+    directories removed.
+
+    Refuses to prune while RAW_DATA_MAX_BYTES > 0: with capped ClickHouse
+    payloads the raw store is the ONLY full copy of large transactions and
+    the engine's raw_data fallback depends on it; pruning would make those
+    transactions permanently unscorable at full fidelity.
+    """
+    if retention_days <= 0:
+        return 0
+    from app.config import settings as _settings
+    if _settings.RAW_DATA_MAX_BYTES > 0:
+        logger.warning(
+            "Raw-store retention skipped: RAW_DATA_MAX_BYTES > 0 makes the "
+            "raw store load-bearing for the engine's raw_data fallback. "
+            "Set RAW_DATA_MAX_BYTES=0 (full payloads in ClickHouse) before "
+            "enabling RAW_STORE_RETENTION_DAYS."
+        )
+        return 0
+    import shutil
+    from datetime import timezone as _tz
+    cutoff = int(
+        (datetime.now(_tz.utc) - timedelta(days=retention_days)).strftime("%Y%m%d")
+    )
+    removed = 0
+    for prefix in (_PREFIX_CONFIRMED, _PREFIX_MEMPOOL):
+        prefix_dir = os.path.join(settings.RAW_STORE_PATH, prefix)
+        if not os.path.isdir(prefix_dir):
+            continue
+        for network in os.listdir(prefix_dir):
+            net_dir = os.path.join(prefix_dir, network)
+            if not os.path.isdir(net_dir):
+                continue
+            for day in os.listdir(net_dir):
+                if not (len(day) == 8 and day.isdigit() and int(day) < cutoff):
+                    continue
+                try:
+                    shutil.rmtree(os.path.join(net_dir, day))
+                    removed += 1
+                except OSError as e:
+                    logger.warning(f"Raw-store prune failed for {network}/{day}: {e}")
+    if removed:
+        logger.info(f"Raw-store retention: removed {removed} day directories")
+    return removed
+
+
 def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[str, Any]]:
     """Read back a transaction's full Ogmios payload from the raw store.
 

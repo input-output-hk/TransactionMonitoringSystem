@@ -93,6 +93,12 @@ class OgmiosClient:
         # Front-running collision detection: tracks input ref sets of pending txs
         # Key: tx_hash, Value: (set of (input_tx_hash, input_index), first_seen_at, fee)
         self._pending_input_sets: Dict[str, tuple] = {}
+        # Inverted index over the same data: (input_tx_hash, input_index) ->
+        # {pending tx ids spending that ref}. Collision checks were O(block
+        # txs x pending entries) set intersections on the event loop; the
+        # index makes them O(refs of the tx being checked). Maintained
+        # exclusively through _pending_track / _pending_untrack.
+        self._pending_ref_index: Dict[tuple, Set[str]] = {}
 
         # Cache of resolved UTxO inputs for PENDING transactions.
         # Populated by the mempool monitor via queryLedgerState/utxo, consumed
@@ -136,11 +142,21 @@ class OgmiosClient:
         return json.dumps(msg)
 
     async def _send_recv(self, ws, method: str, params: Optional[dict] = None) -> dict:
-        """Send a JSON-RPC request and wait for the response."""
+        """Send a JSON-RPC request and wait for the response.
+
+        Large frames (a busy block of Plutus txs serialises to tens of MB;
+        the socket allows 64 MB) are parsed on the default executor so the
+        event loop — which also serves the API, WebSocket feed, and mempool
+        monitor — is not blocked for the parse duration. Small frames parse
+        inline: the thread handoff costs more than the parse below the
+        threshold.
+        """
         msg = self._jsonrpc(method, params)
         await ws.send(msg)
         raw = await ws.recv()
         self._last_msg_at = datetime.now(timezone.utc)
+        if len(raw) > settings.OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES:
+            return await asyncio.to_thread(json.loads, raw)
         return json.loads(raw)
 
     # --- WebSocket connection with resilience ---
@@ -237,6 +253,34 @@ class OgmiosClient:
             logger.debug(
                 f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
             )
+
+    # --- Pending-tx collision bookkeeping ---
+
+    def _pending_track(self, tx_id: str, entry: tuple) -> None:
+        """Register a pending tx in both the entry map and the ref index."""
+        self._pending_input_sets[tx_id] = entry
+        for ref in entry[0]:
+            self._pending_ref_index.setdefault(ref, set()).add(tx_id)
+
+    def _pending_untrack(self, tx_id: str) -> None:
+        """Remove a pending tx from the entry map and the ref index."""
+        entry = self._pending_input_sets.pop(tx_id, None)
+        if entry is None:
+            return
+        for ref in entry[0]:
+            ids = self._pending_ref_index.get(ref)
+            if ids is not None:
+                ids.discard(tx_id)
+                if not ids:
+                    self._pending_ref_index.pop(ref, None)
+
+    def _pending_ids_sharing(self, refs: Set[tuple]) -> Dict[str, Set[tuple]]:
+        """Map pending tx id -> the subset of ``refs`` it also spends."""
+        out: Dict[str, Set[tuple]] = {}
+        for ref in refs:
+            for pending_id in self._pending_ref_index.get(ref, ()):
+                out.setdefault(pending_id, set()).add(ref)
+        return out
 
     # --- Lifecycle event emission ---
 
@@ -531,10 +575,14 @@ class OgmiosClient:
                     }
                 if not conf_refs:
                     continue
-                for pending_id, (pending_refs, pending_seen, pending_fee, pending_addr, pending_ttl) in self._pending_input_sets.items():
+                for pending_id, shared in self._pending_ids_sharing(conf_refs).items():
                     if pending_id in confirmed_hashes:
                         continue  # this pending tx is also in this block
-                    shared = conf_refs & pending_refs
+                    entry = self._pending_input_sets.get(pending_id)
+                    if entry is None:
+                        continue
+                    (_pending_refs, pending_seen, pending_fee,
+                     pending_addr, pending_ttl) = entry
                     if shared:
                         delta_ms = (now_utc - pending_seen).total_seconds() * 1000
                         conf_addr = ""
@@ -571,7 +619,7 @@ class OgmiosClient:
 
             # Update collision outcomes for pre-existing collisions and clean up
             for tx in normalized_txs:
-                self._pending_input_sets.pop(tx.tx_hash, None)
+                self._pending_untrack(tx.tx_hash)
                 try:
                     await postgres.update_collision_outcome(
                         tx.tx_hash, self.network
@@ -778,8 +826,13 @@ class OgmiosClient:
 
                     if input_refs:
                         # Check for collisions with existing pending txs
-                        for other_id, (other_refs, other_seen, other_fee, other_addr, other_ttl) in self._pending_input_sets.items():
-                            shared = input_refs & other_refs
+                        # (ref-index lookup: O(refs), not O(pending entries))
+                        for other_id, shared in self._pending_ids_sharing(input_refs).items():
+                            other_entry = self._pending_input_sets.get(other_id)
+                            if other_entry is None:
+                                continue
+                            (_other_refs, other_seen, other_fee,
+                             other_addr, other_ttl) = other_entry
                             if shared:
                                 delta_ms = (now - other_seen).total_seconds() * 1000
                                 try:
@@ -802,14 +855,16 @@ class OgmiosClient:
                                 except Exception as e:
                                     logger.error(f"Failed to record collision: {e}")
 
-                        self._pending_input_sets[tx_id] = (input_refs, now, tx_fee, first_input_addr, tx_ttl)
+                        self._pending_track(
+                            tx_id, (input_refs, now, tx_fee, first_input_addr, tx_ttl),
+                        )
 
                     # Prune stale entries (throttled: every 100 txs)
                     if len(self._seen_mempool_txs) % 100 == 0:
                         cutoff = now - timedelta(hours=2)
                         stale = [k for k, v in self._pending_input_sets.items() if v[1] < cutoff]
                         for k in stale:
-                            del self._pending_input_sets[k]
+                            self._pending_untrack(k)
                             self._pending_input_cache.pop(k, None)
                         # Cap dedup set to prevent unbounded growth
                         if len(self._seen_mempool_txs) > 50_000:

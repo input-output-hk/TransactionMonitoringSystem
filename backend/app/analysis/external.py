@@ -417,12 +417,25 @@ def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
     """
     if network != "mainnet" and not settings.FAKE_TOKEN_TESTNET_MODE:
         return {}
-    cached = _get_cached("legitimate_tokens")
-    if cached is not None:
-        return cached
-    registry = _refresh_legitimate_tokens()
-    _set_cached("legitimate_tokens", registry)
-    return registry
+    # NEVER fetch inline: this is called from gate()/score() on the scoring
+    # hot path, and the remote registry refresh is ~30 sequential blocking
+    # HTTP requests (worst case minutes), which previously stalled an entire
+    # analysis batch on every 24 h cache expiry. The background task
+    # (tasks/analysis.py) refreshes on a cadence via refresh_token_registry;
+    # here we serve whatever is cached, stale included, falling back to the
+    # curated seed list before the first refresh completes.
+    entry = _cache.get("legitimate_tokens")
+    if entry is not None:
+        if time.time() - entry["ts"] >= _CACHE_TTL_SECONDS:
+            logger.debug(
+                "Token registry cache stale; serving it pending background refresh"
+            )
+        return entry["data"]
+    logger.warning(
+        "Token registry not yet fetched; serving seed list only (degraded "
+        "coverage until the background refresh completes)"
+    )
+    return dict(_SEED_TOKENS)
 
 
 def refresh_token_registry() -> int:

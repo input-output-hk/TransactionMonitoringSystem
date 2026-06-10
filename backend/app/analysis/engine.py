@@ -10,7 +10,8 @@ The public interface (run_once / run_once_async) is called by tasks/analysis.py.
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
@@ -355,6 +356,55 @@ def _enrich_collision_features(rows: List[Dict[str, Any]], network: str):
 # resets the counters, which merely delays the degraded-scoring decision.
 _raw_fallback_attempts: Dict[tuple, int] = {}
 
+# Watermark cursor for the unanalyzed poll: network -> the highest
+# ingestion_timestamp scored, minus UNANALYZED_OVERLAP_SECONDS. Bounds all
+# three sides of the poll query so its cost tracks the backlog, not the
+# total table size. In-process only: a restart starts with a full rescan.
+_unanalyzed_watermark: Dict[str, datetime] = {}
+# network -> time.monotonic() of the last since=None full rescan.
+_last_full_rescan: Dict[str, float] = {}
+
+
+def _poll_since(network: str) -> Optional[datetime]:
+    """The ``since`` bound for this poll, or None for a full rescan.
+
+    A full rescan runs on the first poll after startup and then every
+    UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS. It is the never-skip guarantee:
+    deferred raw-data txs, input-visibility-deferred txs, and anything that
+    slipped past the watermark are picked up within one rescan interval.
+    """
+    now_mono = time.monotonic()
+    last = _last_full_rescan.get(network)
+    if (
+        last is None
+        or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS
+    ):
+        _last_full_rescan[network] = now_mono
+        return None
+    return _unanalyzed_watermark.get(network)
+
+
+def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
+    """Advance the poll watermark to the newest fetched row, minus overlap.
+
+    Called only AFTER the batch's score rows are persisted, so a failed
+    insert never advances the cursor past unscored work. The overlap absorbs
+    same-second ordering skew and the tx-row-before-inputs-row insert gap.
+    """
+    newest = max(
+        (
+            r["ingestion_timestamp"] for r in rows
+            if isinstance(r.get("ingestion_timestamp"), datetime)
+        ),
+        default=None,
+    )
+    if newest is None:
+        return
+    candidate = newest - timedelta(seconds=settings.UNANALYZED_OVERLAP_SECONDS)
+    current = _unanalyzed_watermark.get(network)
+    if current is None or candidate > current:
+        _unanalyzed_watermark[network] = candidate
+
 
 def _resolve_raw_data(
     rows: List[Dict[str, Any]], network: str,
@@ -436,11 +486,12 @@ def run_once(network: str) -> int:
     if not settings.ANALYSIS_ENABLED:
         return 0
 
-    rows = clickhouse.get_unanalyzed_transactions(
-        network, settings.ANALYSIS_ENGINE_BATCH_SIZE
+    fetched = clickhouse.get_unanalyzed_transactions(
+        network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=_poll_since(network),
     )
-    if not rows:
+    if not fetched:
         return 0
+    rows = fetched
 
     scorers = _build_scorers()
 
@@ -477,6 +528,11 @@ def run_once(network: str) -> int:
         results.append(result)
 
     clickhouse.insert_class_scores(results)
+    # Only after the score rows are durably written: a failed insert raises
+    # above and the cursor stays put, so the batch is re-polled. Advanced
+    # over ALL fetched rows (including raw-data-deferred ones, which the
+    # periodic full rescan recovers).
+    _advance_watermark(network, fetched)
 
     # Log summary
     critical = sum(1 for r in results if r["risk_band"] == "Critical")
@@ -492,7 +548,10 @@ def run_once(network: str) -> int:
         f"Analysis Engine [{network}]: scored {len(results)} txs "
         f"(Critical={critical}, High={high}) classes: {class_summary}"
     )
-    return len(results)
+    # Return the FETCHED count, not the scored count: raw-data deferrals can
+    # shrink the scored set, and the drain loop keys "queue still has work"
+    # off whether the poll filled the batch.
+    return len(fetched)
 
 
 async def run_once_async(network: str) -> int:
