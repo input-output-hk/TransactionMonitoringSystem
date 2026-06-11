@@ -124,9 +124,10 @@ async def lifespan(app: FastAPI):
             )
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
 
-    # Start rate-limiter cleanup task
+    # Start rate-limiter cleanup tasks (HTTP middleware + WS handshake)
     if settings.RATE_LIMIT_ENABLED:
         _limiter.start_cleanup()
+        websocket._handshake_limiter.start_cleanup()
         logger.info(
             f"Rate limiting enabled: {settings.RATE_LIMIT_REQUESTS} req"
             f" / {settings.RATE_LIMIT_WINDOW_SECONDS}s per key"
@@ -172,6 +173,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     if settings.RATE_LIMIT_ENABLED:
         _limiter.stop_cleanup()
+        websocket._handshake_limiter.stop_cleanup()
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
     if ogmios_client:

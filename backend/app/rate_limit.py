@@ -21,8 +21,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Paths that are never rate-limited
-_EXEMPT_PATHS = {"/", "/health", "/health/ready", "/docs", "/redoc", "/openapi.json", "/ws"}
+# Paths that are never rate-limited. /ws is deliberately absent: this is a
+# BaseHTTPMiddleware, which never dispatches websocket scopes, so listing it
+# here was dead code — the WS handshake limit lives in routers/websocket.py.
+_EXEMPT_PATHS = {"/", "/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
 
 
 class RateLimiter:

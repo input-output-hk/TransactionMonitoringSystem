@@ -304,6 +304,14 @@ async def root():
             const API_KEY = "";
             const headers = API_KEY ? {{"TMS-API-Key": API_KEY}} : {{}};
 
+            // HTML-escape for every server/chain-derived value rendered via
+            // innerHTML. Quotes included so attribute contexts (onclick
+            // arguments) cannot be broken out of; & first so entities are
+            // not double-escaped. Stored XSS via archive source_label was a
+            // review finding — never interpolate a raw field.
+            const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
+                c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+
             // State
             let confirmedTxs = [];
             let txsCount = 0;
@@ -364,10 +372,10 @@ async def root():
                 }}
                 txsPanel.innerHTML = confirmedTxs.map(tx => `
                     <div class="tx-row">
-                        <span class="tx-hash">${{tx.txId.substring(0, 20)}}...${{tx.txId.substring(tx.txId.length - 10)}}</span><button class="copy-btn" onclick="copyTx(this,'${{tx.txId}}')">Copy</button>
+                        <span class="tx-hash">${{esc(tx.txId.substring(0, 20))}}...${{esc(tx.txId.substring(tx.txId.length - 10))}}</span><button class="copy-btn" onclick="copyTx(this,'${{esc(tx.txId)}}')">Copy</button>
                         <div class="tx-meta">
                             <span class="tx-status CONFIRMED">CONFIRMED</span>
-                            ${{tx.block.height ? `<span class="tx-fee">Block ${{tx.block.height}}</span>` : ''}}
+                            ${{tx.block.height ? `<span class="tx-fee">Block ${{esc(tx.block.height)}}</span>` : ''}}
                             <span class="tx-time">${{new Date(tx.observedAt).toLocaleTimeString()}}</span>
                         </div>
                     </div>
@@ -434,7 +442,7 @@ async def root():
                     .slice(0, 3);
                 if (top.length === 0) return "";
                 return top.map(([k, v]) =>
-                    `<span style="color:#aaa">${{SUB_SCORE_LABELS[k] || k}}</span> <span style="color:${{v > 0.7 ? '#ff6d00' : '#888'}}">${{(v * 100).toFixed(0)}}%</span>`
+                    `<span style="color:#aaa">${{SUB_SCORE_LABELS[k] || esc(k)}}</span> <span style="color:${{v > 0.7 ? '#ff6d00' : '#888'}}">${{(v * 100).toFixed(0)}}%</span>`
                 ).join(' &middot; ');
             }}
 
@@ -456,7 +464,7 @@ async def root():
                         .sort((x, y) => y[1] - x[1])
                         .slice(0, 3);
                     const classHtml = topClasses.map(([cls, score]) =>
-                        `<span class="attack-class">${{CLASS_LABELS[cls] || cls}}</span>
+                        `<span class="attack-class">${{CLASS_LABELS[cls] || esc(cls)}}</span>
                          <span class="class-score risk-band ${{bandOf(score)}}">${{score.toFixed(1)}}</span>`
                     ).join(' &middot; ');
 
@@ -467,10 +475,10 @@ async def root():
                     const outs = a.output_count != null ? a.output_count : "-";
                     const when = a.analyzed_at ? new Date(a.analyzed_at).toLocaleString() : "-";
                     return `
-                        <div class="risk-row ${{a.risk_band}}">
+                        <div class="risk-row ${{esc(a.risk_band)}}">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn" onclick="archiveAlert('${{a.tx_hash}}','${{a.network}}')">Archive</button>
+                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" onclick="copyTx(this,'${{esc(a.tx_hash)}}')">Copy</button><button class="archive-btn" onclick="archiveAlert('${{esc(a.tx_hash)}}','${{esc(a.network)}}')">Archive</button>
                                     <span style="color:#888;font-size:11px">Fee: ${{fee}}</span>
                                     <span style="color:#888;font-size:11px">Outputs: ${{outs}}</span>
                                     <span style="color:#666;font-size:11px">${{when}}</span>
@@ -480,10 +488,10 @@ async def root():
                             </div>
                             <div class="risk-details">
                                 <div class="score-bar">
-                                    <div class="score-bar-fill ${{a.risk_band}}" style="width:${{a.max_score}}%"></div>
+                                    <div class="score-bar-fill ${{esc(a.risk_band)}}" style="width:${{esc(a.max_score)}}%"></div>
                                 </div>
                                 <span class="risk-score">${{a.max_score.toFixed(0)}}</span>
-                                <span class="risk-band ${{a.risk_band}}">${{a.risk_band}}</span>
+                                <span class="risk-band ${{esc(a.risk_band)}}">${{esc(a.risk_band)}}</span>
                             </div>
                         </div>
                     `;
@@ -603,16 +611,16 @@ async def root():
                     const wasClass = a.max_class || "-";
                     const wasBand = a.risk_band || "-";
                     const wasScore = a.max_score != null ? a.max_score.toFixed(0) : "-";
-                    const noteHtml = a.note ? `<div class="archive-note">"${{a.note.replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}})[c])}}"</div>` : '';
+                    const noteHtml = a.note ? `<div class="archive-note">"${{esc(a.note)}}"</div>` : '';
                     return `
                         <div class="risk-row" style="border-left-color:#4527a0">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn restore" onclick="restoreAlert('${{a.tx_hash}}','${{a.network}}')">Restore</button>
-                                    <span style="color:#888;font-size:11px">By: ${{(a.archived_by || '-').replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}})[c])}}</span>
+                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" onclick="copyTx(this,'${{esc(a.tx_hash)}}')">Copy</button><button class="archive-btn restore" onclick="restoreAlert('${{esc(a.tx_hash)}}','${{esc(a.network)}}')">Restore</button>
+                                    <span style="color:#888;font-size:11px">By: ${{esc(a.archived_by || '-')}}</span>
                                     <span style="color:#666;font-size:11px">${{when}}</span>
                                 </div>
-                                <div class="risk-sub">Was: ${{wasClass}} (${{wasBand}}, ${{wasScore}}) &middot; source: ${{a.source || 'local'}}</div>
+                                <div class="risk-sub">Was: ${{esc(wasClass)}} (${{esc(wasBand)}}, ${{esc(wasScore)}}) &middot; source: ${{esc(a.source || 'local')}}</div>
                                 ${{noteHtml}}
                             </div>
                         </div>

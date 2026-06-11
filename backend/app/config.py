@@ -177,6 +177,12 @@ class Settings(BaseSettings):
     # resource exhaustion.
     WS_CLIENT_QUEUE_SIZE: int = 100
     WS_MAX_CONNECTIONS: int = 100
+    # WS handshake attempts per client IP per window. Connections are
+    # long-lived, so a legitimate dashboard needs ~1/min even with flaky
+    # networking; 30/min absorbs aggressive reconnect loops without letting
+    # rejected upgrades churn unthrottled.
+    WS_HANDSHAKE_RATE_LIMIT_REQUESTS: int = 30
+    WS_HANDSHAKE_RATE_LIMIT_WINDOW_SECONDS: int = 60
 
     # Ogmios frames larger than this parse on a worker thread instead of
     # the event loop (a busy Plutus block serialises to tens of MB and
