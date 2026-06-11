@@ -196,13 +196,19 @@ _unanalyzed_watermark: Dict[str, datetime] = {}
 _last_full_rescan: Dict[str, float] = {}
 
 
-def _poll_since(network: str) -> Optional[datetime]:
-    """The ``since`` bound for this poll, or None for a full rescan.
+def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
+    """The ``(since, is_full_rescan)`` bounds for this poll.
 
-    A full rescan runs on the first poll after startup and then every
-    UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS. It is the never-skip guarantee:
-    deferred raw-data txs, input-visibility-deferred txs, and anything that
-    slipped past the watermark are picked up within one rescan interval.
+    A full rescan (since=None) runs on the first poll after startup and
+    then every UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS. It is the
+    never-skip guarantee: deferred raw-data txs, input-visibility-deferred
+    txs, and anything that slipped past the watermark are picked up within
+    one rescan interval.
+
+    Pure: the rescan clock is armed by run_once only AFTER the rescan
+    batch succeeds. Arming it here meant a rescan that crashed mid-batch
+    (poll error, score-insert failure) was not retried for a whole
+    interval, stretching the never-skip guarantee to ~2 intervals.
     """
     now_mono = time.monotonic()
     last = _last_full_rescan.get(network)
@@ -210,9 +216,8 @@ def _poll_since(network: str) -> Optional[datetime]:
         last is None
         or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS
     ):
-        _last_full_rescan[network] = now_mono
-        return None
-    return _unanalyzed_watermark.get(network)
+        return None, True
+    return _unanalyzed_watermark.get(network), False
 
 
 def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
@@ -330,10 +335,14 @@ def run_once(network: str) -> int:
     if not settings.ANALYSIS_ENABLED:
         return 0
 
+    since, full_rescan = _poll_since(network)
     fetched = clickhouse.get_unanalyzed_transactions(
-        network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=_poll_since(network),
+        network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
     )
     if not fetched:
+        if full_rescan:
+            # An empty fetch IS a successful rescan: nothing was skipped.
+            _last_full_rescan[network] = time.monotonic()
         return 0
     rows = fetched
 
@@ -343,6 +352,11 @@ def run_once(network: str) -> int:
     # scorers receive dicts, not strings.
     rows = _resolve_raw_data(rows, network)
     if not rows:
+        if full_rescan:
+            # Every row deferred is still a SUCCESSFUL rescan (the poll ran;
+            # deferral is deliberate, paced bookkeeping) — re-running the
+            # full scan every drain tick would hammer the warehouse.
+            _last_full_rescan[network] = time.monotonic()
         return 0
     for row in rows:
         md = row.get("metadata")
@@ -377,6 +391,10 @@ def run_once(network: str) -> int:
     # over ALL fetched rows (including raw-data-deferred ones, which the
     # periodic full rescan recovers).
     _advance_watermark(network, fetched)
+    if full_rescan:
+        # Armed only now: a rescan that crashed above re-runs on the next
+        # poll instead of waiting out a full interval (never-skip guarantee).
+        _last_full_rescan[network] = time.monotonic()
 
     # Log summary
     critical = sum(1 for r in results if r["risk_band"] == "Critical")

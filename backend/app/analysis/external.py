@@ -16,7 +16,7 @@ import re
 import time
 import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import settings
 
@@ -354,10 +354,12 @@ def _fetch_token_from_registry(subject: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _refresh_legitimate_tokens() -> Dict[str, List[str]]:
+def _refresh_legitimate_tokens() -> Tuple[Dict[str, List[str]], int]:
     """Fetch well-known tokens from the Cardano Token Registry.
 
-    Merges remote results with the seed list. On failure, falls back to seeds.
+    Merges remote results with the seed list; returns ``(registry, fetched)``
+    so the caller can tell a real refresh from a total outage (seeds-only)
+    and avoid shrinking a previously complete cache.
     """
     registry: Dict[str, List[str]] = {}
 
@@ -394,7 +396,7 @@ def _refresh_legitimate_tokens() -> Dict[str, List[str]]:
     else:
         logger.warning("Token registry: remote fetch returned 0 entries, using seed list only")
 
-    return registry
+    return registry, fetched
 
 
 def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
@@ -439,8 +441,27 @@ def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
 
 
 def refresh_token_registry() -> int:
-    """Force-refresh the token registry cache. Returns the number of names registered."""
-    registry = _refresh_legitimate_tokens()
+    """Force-refresh the token registry cache. Returns the number of names registered.
+
+    A refresh that fetched 0 remote entries (total registry outage) must not
+    REPLACE a previously complete cache with the seeds-only merge: that would
+    shrink fake_token impersonation coverage for a full refresh interval
+    (recall-first). The stale-but-complete cache is kept instead; a cold
+    start with no prior cache still stores the seed merge.
+    """
+    registry, fetched = _refresh_legitimate_tokens()
+    if fetched == 0:
+        # Read the raw cache (stale included): a refresh usually runs
+        # BECAUSE the TTL expired, so the TTL-checked accessor would
+        # return None for exactly the cache this guard protects.
+        prior_entry = _cache.get("legitimate_tokens")
+        previous = prior_entry["data"] if prior_entry else None
+        if previous and len(previous) > len(registry):
+            logger.warning(
+                "Token registry outage: keeping previous cache of %d names "
+                "instead of shrinking to %d seeds", len(previous), len(registry),
+            )
+            return len(previous)
     _set_cached("legitimate_tokens", registry)
     return len(registry)
 

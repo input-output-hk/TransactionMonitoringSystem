@@ -334,7 +334,7 @@ _ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
 _LIGHTWEIGHT_DELETE_SETTINGS = {"lightweight_mutation_projection_mode": "rebuild"}
 
 
-def delete_rolled_back_txs(network: str, rollback_slot: int) -> int:
+def delete_rolled_back_txs(network: str, rollback_slot: int) -> List[str]:
     """Delete all rows for transactions confirmed after ``rollback_slot``.
 
     Called on a ChainSync rollBackward: blocks past the rollback point are
@@ -342,7 +342,13 @@ def delete_rolled_back_txs(network: str, rollback_slot: int) -> int:
     API reads forever. Uses lightweight DELETEs (ClickHouse 22.8+). If the
     transaction later re-confirms on the new fork, ChainSync re-delivers it
     and the ReplacingMergeTree insert is a clean upsert with the new block
-    coordinates. Returns the number of orphaned tx hashes.
+    coordinates. Returns the orphaned tx hashes (callers use len() for the
+    count; the rollback handler feeds them to the delayed score repurge).
+
+    tx_class_scores is deleted LAST: that minimizes — but cannot close —
+    the window where an engine batch in flight re-inserts a score row
+    after the purge, which would then block re-scoring via the unanalyzed
+    anti-join. delete_score_rows runs again after a delay for that race.
 
     Idempotent: re-running after a partial failure deletes whatever remains.
     """
@@ -356,19 +362,41 @@ def delete_rolled_back_txs(network: str, rollback_slot: int) -> int:
     )
     hashes = [r[0] for r in rows]
     if not hashes:
-        return 0
+        return []
     for table in _ROLLBACK_CLEANUP_TABLES:
         client.execute(
             f"DELETE FROM {table} WHERE network = %(network)s AND tx_hash IN %(hashes)s",
             {"network": network, "hashes": hashes},
             settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
-    return len(hashes)
+    return hashes
 
 
-async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> int:
+async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> List[str]:
     """Async wrapper for delete_rolled_back_txs (runs on the CH executor)."""
     return await _in_executor(delete_rolled_back_txs, network, rollback_slot)
+
+
+def delete_score_rows(network: str, hashes: List[str]) -> None:
+    """Targeted tx_class_scores purge: the delayed second rollback pass.
+
+    Closes the purge/score-writer race: an engine batch holding rolled-back
+    rows when the purge ran inserts its scores AFTER the first DELETE, and
+    the stale row then blocks re-scoring forever via the anti-join.
+    """
+    if not hashes:
+        return
+    _get_client().execute(
+        "DELETE FROM tx_class_scores "
+        "WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+        {"network": network, "hashes": hashes},
+        settings=_LIGHTWEIGHT_DELETE_SETTINGS,
+    )
+
+
+async def delete_score_rows_async(network: str, hashes: List[str]) -> None:
+    """Async wrapper for delete_score_rows (runs on the CH executor)."""
+    await _in_executor(delete_score_rows, network, hashes)
 
 
 def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[str, Any]]:

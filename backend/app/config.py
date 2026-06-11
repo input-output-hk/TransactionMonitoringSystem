@@ -268,6 +268,13 @@ class Settings(BaseSettings):
     # cannot feed scorers or API reads. archived_alerts is exempt (admin
     # curation, not chain state).
     ROLLBACK_CLEANUP_ENABLED: bool = True
+    # Second rollback purge pass for tx_class_scores. The first purge can
+    # race an in-flight engine batch (run_once holds its fetched rows for
+    # seconds and inserts scores at the end), leaving a stale score row that
+    # the unanalyzed anti-join treats as "already scored" forever. 60 s is
+    # comfortably longer than one batch's wall time; deleting a fresh score
+    # of a re-confirmed tx is recall-safe (the engine simply re-scores it).
+    ROLLBACK_SCORE_REPURGE_DELAY_SECONDS: int = 60
 
     # Maximum byte-length of the raw_data JSON stored per transaction.
     # 0 = no limit (store the full payload; ZSTD codec keeps it cheap).
@@ -303,6 +310,12 @@ class Settings(BaseSettings):
     # Hard cap on the seen-tx dedup set; clearing it only risks re-processing
     # (idempotent downstream), never data loss.
     MEMPOOL_SEEN_TXS_MAX: int = 50_000
+
+    # In-process TTL for the dashboard stats aggregate (full-table FINAL scan
+    # + countDistinct per call). The dashboard polls ~every 15 s; 10 s bounds
+    # the scan rate to ~1 per poll cycle however many dashboards are open.
+    # 0 disables. Staleness only affects KPI cards, never detection.
+    STATS_CACHE_TTL_SECONDS: int = 10
 
     # Lifecycle cleanup — PENDING → DROPPED sweep
     # PENDING transactions older than this threshold are marked DROPPED by the

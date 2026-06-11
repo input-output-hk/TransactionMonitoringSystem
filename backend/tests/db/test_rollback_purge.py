@@ -59,11 +59,12 @@ class TestPurgeStructure:
     def test_no_orphans_short_circuits(self, client):
         client.execute.return_value = []
         result = delete_rolled_back_txs("preprod", 100)
-        assert result == 0
+        assert result == []
         assert _delete_calls(client) == []
 
-    def test_returns_orphan_count(self, client):
+    def test_returns_orphan_hashes(self, client):
+        # The hash list (not a bare count) feeds the delayed score repurge.
         client.execute.side_effect = [[("aa" * 32,), ("bb" * 32,)]] + [None] * len(
             _ROLLBACK_CLEANUP_TABLES
         )
-        assert delete_rolled_back_txs("preprod", 100) == 2
+        assert delete_rolled_back_txs("preprod", 100) == ["aa" * 32, "bb" * 32]

@@ -16,9 +16,13 @@ every public name in this module, so callers keep using
 
 import json
 import logging
+import threading
+import time
 from datetime import datetime
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -426,12 +430,30 @@ async def get_class_scores_async(tx_hash: str) -> Optional[Dict[str, Any]]:
     return await _run(get_class_scores, tx_hash)
 
 
+# In-process TTL cache for the stats aggregate: get_class_scores_stats does
+# a full-table FINAL scan of tx_class_scores plus a countDistinct over
+# transactions (via the embedded get_pending_count) on EVERY dashboard poll
+# (~15 s), occupying one of the three executor workers with cost that grows
+# with history, not activity. Keyed (network, include_archived); staleness
+# only affects KPI cards, never detection. STATS_CACHE_TTL_SECONDS=0 disables.
+_stats_cache: Dict[Tuple[str, bool], Tuple[Dict[str, Any], float]] = {}
+_stats_cache_lock = threading.Lock()
+
+
 def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict[str, Any]:
     """Per-class distribution stats for a network.
 
     include_archived: when False (default), exclude rows whose (network, tx_hash)
         has been admin-archived so band counts reflect only currently-flagged txs.
     """
+    ttl = settings.STATS_CACHE_TTL_SECONDS
+    cache_key = (network, include_archived)
+    if ttl > 0:
+        with _stats_cache_lock:
+            entry = _stats_cache.get(cache_key)
+            if entry is not None and time.monotonic() - entry[1] < ttl:
+                return dict(entry[0])
+
     # Build per-class aggregation: count of scored (>= 0), avg, max
     agg_parts = []
     for col in _CLASS_COLS:
@@ -504,6 +526,9 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
         for col in _CLASS_COLS
     }
     result["pending_count"] = get_pending_count(network)
+    if ttl > 0:
+        with _stats_cache_lock:
+            _stats_cache[cache_key] = (dict(result), time.monotonic())
     return result
 
 

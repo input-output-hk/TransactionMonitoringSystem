@@ -240,12 +240,53 @@ class TestRollbackCleanup:
 
     def test_rollback_purges_clickhouse(self, client, monkeypatch):
         monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
-        delete = AsyncMock(return_value=3)
+        delete = AsyncMock(return_value=["aa" * 32, "bb" * 32, "cc" * 32])
         with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", AsyncMock()), \
              patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()), \
              patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async", delete):
             _run(client._handle_roll_backward(self._result(slot=500)))
         delete.assert_awaited_once_with(client.network, 500)
+
+    def test_rollback_schedules_delayed_score_repurge(self, client, monkeypatch):
+        # The first purge races an in-flight engine batch whose score insert
+        # can land just after it; the delayed second tx_class_scores pass
+        # clears the stale row that would otherwise block re-scoring forever.
+        monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        hashes = ["aa" * 32]
+        repurge = AsyncMock()
+        client._running = True
+
+        async def scenario():
+            with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", AsyncMock()), \
+                 patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()), \
+                 patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async",
+                       AsyncMock(return_value=hashes)), \
+                 patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async", repurge):
+                await client._handle_roll_backward(self._result(slot=500))
+                # Let the zero-delay repurge task run to completion.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+        _run(scenario())
+        repurge.assert_awaited_once_with(client.network, hashes)
+
+    def test_no_repurge_scheduled_for_empty_rollback(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        repurge = AsyncMock()
+
+        async def scenario():
+            with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", AsyncMock()), \
+                 patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()), \
+                 patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async",
+                       AsyncMock(return_value=[])), \
+                 patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async", repurge):
+                await client._handle_roll_backward(self._result(slot=500))
+                await asyncio.sleep(0)
+
+        _run(scenario())
+        repurge.assert_not_awaited()
 
     def test_rollback_to_origin_skips_purge(self, client, monkeypatch):
         """Rollback-to-origin is a node-resync artifact; purging the whole

@@ -76,9 +76,11 @@ def main() -> int:
             "bug is NOT fixed"
         )
         return 1
-    if purged != 1:
+    if len(purged) != 1:
         logger.error("FAIL: expected 1 purged tx, got %s", purged)
         return 1
+    # The delayed second pass must run clean on the real server too.
+    clickhouse.delete_score_rows(_VERIFY_NETWORK, purged)
 
     remaining = client.execute(
         "SELECT count() FROM transactions WHERE network = %(n)s",

@@ -30,21 +30,35 @@ def _clean_state():
 
 class TestWatermark:
     def test_first_poll_is_full_rescan(self):
-        assert engine._poll_since("preprod") is None
+        assert engine._poll_since("preprod") == (None, True)
 
     def test_subsequent_polls_use_watermark(self):
-        assert engine._poll_since("preprod") is None  # arms the rescan clock
+        import time
+        assert engine._poll_since("preprod") == (None, True)
+        # The clock is armed by run_once AFTER the rescan succeeds; arm it
+        # here the same way (pure _poll_since no longer writes it).
+        engine._last_full_rescan["preprod"] = time.monotonic()
         engine._advance_watermark("preprod", [{"ingestion_timestamp": TS}])
-        since = engine._poll_since("preprod")
+        since, full_rescan = engine._poll_since("preprod")
         expected = TS - timedelta(seconds=settings.UNANALYZED_OVERLAP_SECONDS)
         assert since == expected
+        assert full_rescan is False
 
     def test_rescan_interval_forces_full_poll(self, monkeypatch):
+        import time
         monkeypatch.setattr(settings, "UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS", 0)
         engine._poll_since("preprod")
+        engine._last_full_rescan["preprod"] = time.monotonic()
         engine._advance_watermark("preprod", [{"ingestion_timestamp": TS}])
         # Interval of 0: every poll is a full rescan (never-skip guarantee).
-        assert engine._poll_since("preprod") is None
+        assert engine._poll_since("preprod") == (None, True)
+
+    def test_failed_rescan_retried_on_next_poll(self):
+        # The clock is NOT armed by _poll_since itself: a rescan that
+        # crashes mid-batch must re-run on the next poll, not wait out a
+        # whole interval (review finding).
+        assert engine._poll_since("preprod") == (None, True)
+        assert engine._poll_since("preprod") == (None, True)
 
     def test_watermark_never_regresses(self):
         engine._advance_watermark("preprod", [{"ingestion_timestamp": TS}])

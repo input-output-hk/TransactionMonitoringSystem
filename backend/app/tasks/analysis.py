@@ -160,8 +160,17 @@ async def _loop():
 
 
 def start():
-    """Schedule the analysis loop as a background asyncio task."""
+    """Schedule the analysis loop as a background asyncio task.
+
+    Idempotent: a second call while the loop runs would leak the first
+    task and run two concurrent drain loops mutating the watermark from
+    two executor threads (duplicate scoring is RMT-absorbed, but the
+    wasted work and interleaved cursors are not worth it).
+    """
     global _task
+    if _task is not None and not _task.done():
+        logger.warning("Analysis loop already running; start() ignored")
+        return
     _task = asyncio.create_task(_loop())
 
 

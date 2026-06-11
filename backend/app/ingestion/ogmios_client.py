@@ -828,14 +828,20 @@ class OgmiosClient:
         # whole network's history on it would destroy the warehouse over a
         # transient condition.
         if settings.ROLLBACK_CLEANUP_ENABLED and not rolled_back_to_origin:
-            deleted = await clickhouse.delete_rolled_back_txs_async(
+            purged_hashes = await clickhouse.delete_rolled_back_txs_async(
                 self.network, rollback_slot,
             )
-            if deleted:
+            if purged_hashes:
                 logger.warning(
                     "Rollback cleanup: purged %d orphaned tx(s) past slot %s "
-                    "from ClickHouse", deleted, rollback_slot,
+                    "from ClickHouse", len(purged_hashes), rollback_slot,
                 )
+                # Second tx_class_scores pass after a delay: an engine batch
+                # in flight during the purge can insert a stale score row
+                # right after it, which would block re-scoring forever via
+                # the unanalyzed anti-join. Deleting a FRESH score of a
+                # re-confirmed tx is recall-safe (it just re-scores).
+                asyncio.create_task(self._delayed_score_repurge(purged_hashes))
 
         if rollback_id:
             await postgres.save_sync_point(self.network, rollback_slot, rollback_id)
@@ -850,6 +856,24 @@ class OgmiosClient:
             "observedAt": datetime.now(timezone.utc).isoformat(),
             "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
         })
+
+    async def _delayed_score_repurge(self, hashes: List[str]) -> None:
+        """Re-delete tx_class_scores rows for rolled-back txs after a delay.
+
+        Best-effort by design: a missed repurge only DELAYS re-scoring of a
+        re-confirmed tx (the periodic full rescan recovers it once the stale
+        row is gone), so failures log instead of crashing chain sync.
+        """
+        await asyncio.sleep(settings.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS)
+        if not self._running:
+            return
+        try:
+            await clickhouse.delete_score_rows_async(self.network, hashes)
+            logger.info(
+                "Rollback score repurge: re-cleared %d tx(s)", len(hashes),
+            )
+        except Exception:
+            logger.exception("Rollback score repurge failed (non-fatal)")
 
     # --- Mempool Monitoring ---
 
