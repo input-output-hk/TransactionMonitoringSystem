@@ -525,6 +525,21 @@ async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
         return int(result.split()[1])
 
 
+async def prune_audit_logs(older_than_days: int) -> int:
+    """Delete audit rows older than the retention window.
+
+    No network column on audit_logs (actions are instance-scoped); uses
+    idx_audit_logs_created_at. Opt-in: AUDIT_LOG_RETENTION_DAYS=0 keeps
+    everything (audit rows are the suppression accountability record).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM audit_logs
+            WHERE created_at < NOW() - ($1 * INTERVAL '1 day')
+        """, older_than_days)
+        return int(result.split()[1])
+
+
 async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
     """Delete collision records older than the retention window.
 

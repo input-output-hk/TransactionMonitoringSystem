@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     # origin in production.
     CORS_ALLOW_ORIGINS: str = "*"
 
+    # /docs, /redoc, /openapi.json enumerate the whole admin attack surface
+    # and are rate-limit exempt; always on in dev mode, opt-in on keyed
+    # deployments.
+    TMS_API_DOCS_ENABLED: bool = False
+
     @property
     def cors_allow_origins_list(self) -> list:
         return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
@@ -199,6 +204,9 @@ class Settings(BaseSettings):
     CH_RETENTION_DAYS_FEATURES: int = 0    # utxo_features / tx_script_features
     LIFECYCLE_RETENTION_DAYS: int = 0      # terminal (DROPPED/ROLLED_BACK) rows only
     MEMPOOL_COLLISION_RETENTION_DAYS: int = 0
+    # Audit rows are the suppression accountability record: prefer archiving
+    # the table over short retention.
+    AUDIT_LOG_RETENTION_DAYS: int = 0
     # Raw-store day-directory pruning. Refused while RAW_DATA_MAX_BYTES > 0:
     # capped ClickHouse payloads make the raw store load-bearing for the
     # engine's raw_data fallback.

@@ -155,6 +155,15 @@ async def _loop():
                     )
                 except Exception as e:
                     logger.error(f"Raw-store retention sweep failed: {e}")
+            if settings.AUDIT_LOG_RETENTION_DAYS > 0:
+                try:
+                    n = await postgres.prune_audit_logs(
+                        settings.AUDIT_LOG_RETENTION_DAYS,
+                    )
+                    if n:
+                        logger.info(f"Retention: pruned {n} audit log rows")
+                except Exception as e:
+                    logger.error(f"Audit-log retention sweep failed: {e}")
 
         await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
 

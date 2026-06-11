@@ -21,9 +21,14 @@
 
 set -euo pipefail
 
+# Dumps contain the full operational DB (audit logs, entity state): keep
+# every file owner-only readable.
+umask 077
+
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 OUT="${1:-./backups/$STAMP}"
 mkdir -p "$OUT/clickhouse"
+chmod 700 "$OUT"
 
 POSTGRES_USER="${POSTGRES_USER:-tms_user}"
 POSTGRES_DB="${POSTGRES_DB:-tms_db}"
@@ -31,8 +36,12 @@ CLICKHOUSE_DB="${CLICKHOUSE_DB:-tms_analytics}"
 CLICKHOUSE_USER="${CLICKHOUSE_USER:-default}"
 CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-}"
 
-CH_CLIENT=(docker exec tms-clickhouse clickhouse-client
-           --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD")
+# Name-only -e forwards the password from THIS shell's environment into the
+# exec'd process without putting the secret in argv (visible in host `ps`);
+# clickhouse-client natively reads the CLICKHOUSE_PASSWORD env var.
+export CLICKHOUSE_PASSWORD
+CH_CLIENT=(docker exec -e CLICKHOUSE_PASSWORD tms-clickhouse
+           clickhouse-client --user "$CLICKHOUSE_USER")
 
 # Every persistent table. tx_class_scores and archived_alerts are the
 # product; the fact tables are recoverable from the raw store in principle

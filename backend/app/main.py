@@ -131,6 +131,15 @@ def _validate_startup_settings() -> None:
             "NO full payload copy. Enable RAW_STORE_ENABLED or set "
             "RAW_DATA_MAX_BYTES=0."
         )
+    # CORS '*' (or unset) is a dev convenience, never a production posture:
+    # same fail-fast as the credentials above. Keys configured = production.
+    origins = settings.cors_allow_origins_list
+    if not _dev_mode and (not origins or "*" in origins) and not allow_dev_mode:
+        raise RuntimeError(
+            "CORS_ALLOW_ORIGINS is '*' or empty with API keys configured. "
+            "Set the explicit dashboard origin(s) for production, or "
+            "TMS_ALLOW_DEV_MODE=1 for local dev."
+        )
 
 
 @asynccontextmanager
@@ -203,10 +212,20 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
+# /docs, /redoc and /openapi.json enumerate the whole admin attack surface
+# and sit in the rate-limit exemption list, so they are exposed only in dev
+# mode or behind an explicit production opt-in.
+from app.auth import _dev_mode as _auth_dev_mode  # noqa: E402
+
+_docs_enabled = _auth_dev_mode or settings.TMS_API_DOCS_ENABLED
+
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
     description="""
     Cardano Transaction Monitoring System API.
 

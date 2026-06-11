@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 # Paths that are never rate-limited. /ws is deliberately absent: this is a
 # BaseHTTPMiddleware, which never dispatches websocket scopes, so listing it
 # here was dead code — the WS handshake limit lives in routers/websocket.py.
+# The docs paths are acceptable here because they 404 unless dev mode or
+# TMS_API_DOCS_ENABLED explicitly exposes them (see main.py).
 _EXEMPT_PATHS = {"/", "/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
 
 

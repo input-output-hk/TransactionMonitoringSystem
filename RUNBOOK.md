@@ -274,6 +274,18 @@ Variables are layered across files:
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
 | `RATE_LIMIT_REQUESTS` | `240` | Max requests per window per key |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
+| `TRUSTED_PROXY_ENABLED` | `false` (`true` in compose) | Honour forwarded headers for client IPs (rate limiting, audit). Right-most-hop parsing; headers count only when the direct peer is inside `TRUSTED_PROXY_CIDRS` |
+| `TRUSTED_PROXY_HOPS` | `1` | Trusted proxies appending to `X-Forwarded-For`; the client is HOPS entries from the right |
+| `TRUSTED_PROXY_CIDRS` | loopback + RFC1918 | CIDRs whose direct connections may carry forwarded headers |
+| `TRUSTED_PROXY_CLIENT_IP_HEADER` | _(empty)_ (`CF-Connecting-IP` in compose) | Edge-set single-value client IP header; wins over `X-Forwarded-For` when present and valid |
+| `CORS_ALLOW_ORIGINS` | `*` | Dashboard origin(s), comma-separated. The app refuses to start with `*` or empty when API keys are configured (`TMS_ALLOW_DEV_MODE=1` overrides for local dev) |
+| `TMS_API_DOCS_ENABLED` | `false` | Expose `/docs`, `/redoc`, `/openapi.json` on a keyed deployment (always on in dev mode) |
+| `WS_HANDSHAKE_RATE_LIMIT_REQUESTS` | `30` | WebSocket handshake attempts per client IP per window |
+| `WS_HANDSHAKE_RATE_LIMIT_WINDOW_SECONDS` | `60` | WebSocket handshake rate-limit window |
+| `AUDIT_LOG_RETENTION_DAYS` | `0` | Prune audit rows older than N days; `0` keeps forever (audit rows are the suppression accountability record) |
+| `STATS_CACHE_TTL_SECONDS` | `10` | In-process TTL for the dashboard stats aggregate; `0` disables |
+| `RAW_FALLBACK_RETRY_SECONDS` | `30` | Wall-clock spacing between counted raw-store fallback attempts |
+| `ROLLBACK_SCORE_REPURGE_DELAY_SECONDS` | `60` | Delay before the second `tx_class_scores` rollback purge pass |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background risk scoring |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | How often the engine polls for unscored transactions |
 | `ANALYSIS_ENGINE_BATCH_SIZE` | `100` | Transactions scored per run |
@@ -289,6 +301,12 @@ Variables are layered across files:
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by Docker Compose and rarely need changing.
+
+### Running behind Cloudflare Tunnel
+
+The compose deployment binds every port to loopback and expects a tunnel (cloudflared or similar) to terminate TLS in front of the app. Client-IP attribution works as follows: `TRUSTED_PROXY_ENABLED=true` lets the app honour forwarded headers, but only when the direct TCP peer is inside `TRUSTED_PROXY_CIDRS` (the tunnel connector / compose bridge), and the parser takes `CF-Connecting-IP` first (Cloudflare overwrites it per request) falling back to the right-most `X-Forwarded-For` hop. Client-writable left-most entries never win, so rate-limit buckets and audit rows cannot be spoofed.
+
+WebSocket note: browsers cannot set custom headers on WS upgrades, so the dashboard passes `?api_key=` in the query string, which can land in proxy and access logs. Use a dedicated key for dashboards so it can be rotated independently of automation keys.
 
 
 ## Troubleshooting
