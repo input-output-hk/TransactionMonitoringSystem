@@ -95,9 +95,31 @@ class TestFailedV6Transaction:
         tx = parse_ogmios_transaction(_v6_tx(spends="collaterals"))
         assert tx.script_valid is False
         assert tx.input_count == 1
-        # Regular (unspent) inputs are omitted from the consumed list.
-        non_flagged = [i for i in tx.inputs if not i.is_collateral and not i.is_reference]
-        assert non_flagged == []
+        # Regular inputs are persisted as ATTEMPTED spends (what a failed
+        # attack tried to consume is signal), never as consumed flows.
+        consumed = [
+            i for i in tx.inputs
+            if not i.is_collateral and not i.is_reference
+            and not i.is_unspent_attempt
+        ]
+        assert consumed == []
+        attempted = [i for i in tx.inputs if i.is_unspent_attempt]
+        assert attempted  # every regular input persists, flagged
+        # Attempted inputs come FIRST (indices aligned with raw_data["inputs"]
+        # for the enrichment patcher).
+        assert tx.inputs[0].is_unspent_attempt is True
+
+    def test_failed_tx_collateral_return_on_chain_index(self):
+        # Babbage: the collateral return's index is the regular-output
+        # count, not its position in the parsed outputs list.
+        body = _v6_tx(spends="collaterals")
+        tx = parse_ogmios_transaction(body)
+        assert tx.outputs[0].output_index == len(body["outputs"])
+
+    def test_valid_tx_outputs_have_no_explicit_index(self):
+        tx = parse_ogmios_transaction(_v6_tx())
+        assert all(o.output_index is None for o in tx.outputs)
+        assert all(not i.is_unspent_attempt for i in tx.inputs)
 
     def test_failed_tx_creates_collateral_return_only(self):
         tx = parse_ogmios_transaction(_v6_tx(spends="collaterals"))

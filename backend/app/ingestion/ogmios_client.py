@@ -365,7 +365,12 @@ class OgmiosClient:
         tx: NormalizedTransaction,
         resolved: Dict[tuple, dict],
     ) -> NormalizedTransaction:
-        """Enrich a NormalizedTransaction with previously resolved UTxO input data."""
+        """Enrich a NormalizedTransaction with previously resolved UTxO input data.
+
+        Attempted inputs of a failed tx ARE resolved (their addresses are
+        attack-attempt signal and belong in the address screen) but never
+        feed total_input_value: the ledger did not consume them.
+        """
         total = 0
         new_inputs = []
         for inp in tx.inputs:
@@ -380,8 +385,10 @@ class OgmiosClient:
                         assets=utxo.get("assets"),
                         is_reference=False,
                         is_collateral=False,
+                        is_unspent_attempt=inp.is_unspent_attempt,
                     )
-                    total += utxo["amount"]
+                    if not inp.is_unspent_attempt:
+                        total += utxo["amount"]
             new_inputs.append(inp)
 
         resolved_addrs = {
@@ -404,12 +411,15 @@ class OgmiosClient:
         3. Batch-fetch from ClickHouse for cross-block refs.
         4. Apply resolved values to each input.
         """
-        # Build intra-block output map: {(tx_hash, output_index): (address, amount)}
+        # Build intra-block output map: {(tx_hash, output_index): (address, amount)}.
+        # Collateral returns included at their EXPLICIT on-chain index (the
+        # regular-output count, Babbage): they are real spendable UTxOs and
+        # a same-block spend of one must resolve.
         intra_block: Dict[tuple, tuple] = {}
         for tx in txs:
             for idx, out in enumerate(tx.outputs):
-                if not out.is_collateral:
-                    intra_block[(tx.tx_hash, idx)] = (out.address, out.amount)
+                chain_idx = out.output_index if out.output_index is not None else idx
+                intra_block[(tx.tx_hash, chain_idx)] = (out.address, out.amount)
 
         # Collect all unresolved input refs (skip already-resolved from mempool cache)
         cross_block_refs = []
@@ -444,7 +454,8 @@ class OgmiosClient:
                     new_inputs.append(inp)
                     continue  # don't include collateral/reference in total_input_value
                 if inp.amount > 0:
-                    total += inp.amount
+                    if not inp.is_unspent_attempt:
+                        total += inp.amount
                     new_inputs.append(inp)
                     continue
                 ref = (inp.tx_hash, inp.index)
@@ -459,8 +470,13 @@ class OgmiosClient:
                         assets=inp.assets,
                         is_reference=False,
                         is_collateral=False,
+                        is_unspent_attempt=inp.is_unspent_attempt,
                     ))
-                    total += int(amt)
+                    # Attempted inputs of a failed tx resolve for address
+                    # visibility but were never consumed: keep them out of
+                    # total_input_value.
+                    if not inp.is_unspent_attempt:
+                        total += int(amt)
                     changed = True
                 else:
                     new_inputs.append(inp)

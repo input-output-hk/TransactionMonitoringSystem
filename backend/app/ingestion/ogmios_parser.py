@@ -51,26 +51,30 @@ def parse_ogmios_transaction(
     # Ogmios does not include resolved UTxO values in the transaction body, so
     # input amounts cannot be determined here.  total_input_value is left as
     # None (unknown) rather than 0 (known zero) to avoid misleading analytics.
+    # Regular inputs are ALWAYS emitted first (indices 0..k aligned with
+    # raw_data["inputs"], which the enrichment patcher keys on). For a failed
+    # tx they carry is_unspent_attempt=1: the ledger did NOT consume them
+    # (the collaterals below carry the consumption), but what a failed
+    # attack TRIED to spend is high-value signal — dropping them made failed
+    # attempts invisible to contention queries (review finding). Flow and
+    # displacement readers exclude the flag.
     inputs = []
     spending_input_count = 0
-    if script_valid:
-        for inp in tx_data.get("inputs", []):
-            inp_tx = inp.get("transaction", {})
-            inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
-            inp_index = inp.get("index", 0)
-            # Ogmios inputs don't include resolved address/value in the transaction body;
-            # address and amount are only available if resolved via UTxO queries.
-            inputs.append(TransactionInput(
-                tx_hash=inp_tx_hash,
-                index=inp_index,
-                address="",  # not resolved in Ogmios tx body
-                amount=0,
-            ))
+    for inp in tx_data.get("inputs", []):
+        inp_tx = inp.get("transaction", {})
+        inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
+        inp_index = inp.get("index", 0)
+        # Ogmios inputs don't include resolved address/value in the transaction body;
+        # address and amount are only available if resolved via UTxO queries.
+        inputs.append(TransactionInput(
+            tx_hash=inp_tx_hash,
+            index=inp_index,
+            address="",  # not resolved in Ogmios tx body
+            amount=0,
+            is_unspent_attempt=not script_valid,
+        ))
+        if script_valid:
             spending_input_count += 1
-    # When phase-2 validation failed, the regular inputs were NOT spent:
-    # they are omitted from the consumed-input list (the full body survives
-    # in raw_data) so displacement detection and flow analytics do not treat
-    # live UTxOs as consumed. The collaterals below carry the consumption.
 
     # Parse reference inputs
     for inp in tx_data.get("references", []):
@@ -129,17 +133,21 @@ def parse_ogmios_transaction(
         collateral_return = tx_data.get("collateralReturn")
         if collateral_return:
             addr = collateral_return.get("address", "")
-            val = collateral_return.get("value", {})
-            if isinstance(val, dict):
-                ada = val.get("ada")
-                lv = ada.get("lovelace", 0) if isinstance(ada, dict) else val.get("lovelace", 0)
-            else:
-                lv = 0
+            # v5/v6 shape handling lives in features.extract_lovelace (this
+            # was the last hand-rolled copy of the dual-shape branch — the
+            # duplication class that caused the v6 mempool fee bug).
+            lv = extract_lovelace(collateral_return.get("value", {}))
             addresses.add(addr)
             outputs.append(TransactionOutput(
                 address=addr,
                 amount=int(lv),
                 is_collateral=True,
+                # Babbage rule: the collateral return's on-chain index is
+                # the count of regular outputs (which never materialise for
+                # a failed tx but still occupy the index space). Storing it
+                # at enumerate-position 0 made any later spend of this UTxO
+                # unresolvable (review finding).
+                output_index=len(tx_data.get("outputs", [])),
             ))
             total_output_value += int(lv)
 

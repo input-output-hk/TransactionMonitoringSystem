@@ -63,6 +63,7 @@ def detect_cycle(
           AND network = %(network)s
           AND is_collateral = 0
           AND is_reference = 0
+          AND is_unspent_attempt = 0
           AND address != ''
         """,
         {"tx_hash": tx_hash, "network": network},
@@ -151,6 +152,7 @@ def detect_cycle(
               AND ti.network = %(network)s
               AND ti.is_collateral = 0
               AND ti.is_reference = 0
+              AND ti.is_unspent_attempt = 0
               AND to2.is_collateral = 0
               AND t.slot >= %(min_slot)s
               AND t.slot <= %(max_slot)s
@@ -247,6 +249,7 @@ def _count_origin_recurrence(
               AND s.analyzed_at >= now() - INTERVAL %(window)s DAY
               AND ti.is_collateral = 0
               AND ti.is_reference = 0
+              AND ti.is_unspent_attempt = 0
             """,
             {
                 "origin": origin_address,

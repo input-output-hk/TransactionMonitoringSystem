@@ -41,6 +41,10 @@ def enrich_inputs_with_resolved_addresses(
         return
 
     try:
+        # Deliberately NOT filtered on is_unspent_attempt: the patch below is
+        # keyed by input_index against raw_data["inputs"], and a failed tx's
+        # attempted inputs occupy indices 0..k there (parser emits them
+        # first), so the alignment depends on fetching every row.
         input_rows = clickhouse._get_client().execute(
             """SELECT tx_hash, input_index, address, amount
             FROM transaction_inputs

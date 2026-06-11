@@ -663,8 +663,8 @@ def get_unanalyzed_transactions(
         f"""
         SELECT t.tx_hash, t.network, t.fee, t.input_count, t.output_count,
                t.total_output_value, t.metadata, t.addresses, t.raw_data,
-               t.raw_data_truncated, t.slot, t.block_height, t.timestamp,
-               t.ingestion_timestamp
+               t.raw_data_truncated, t.script_valid, t.slot, t.block_height,
+               t.timestamp, t.ingestion_timestamp
         FROM transactions t
         LEFT ANTI JOIN (
             SELECT tx_hash, network FROM tx_class_scores
@@ -685,6 +685,6 @@ def get_unanalyzed_transactions(
     )
     keys = ("tx_hash", "network", "fee", "input_count", "output_count",
             "total_output_value", "metadata", "addresses", "raw_data",
-            "raw_data_truncated", "slot", "block_height", "timestamp",
-            "ingestion_timestamp")
+            "raw_data_truncated", "script_valid", "slot", "block_height",
+            "timestamp", "ingestion_timestamp")
     return [dict(zip(keys, row)) for row in rows]

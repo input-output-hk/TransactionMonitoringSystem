@@ -198,6 +198,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 json.dumps(tx.metadata) if tx.metadata else "",
                 raw_json,
                 raw_truncated,
+                1 if tx.script_valid else 0,
                 tx.ingestion_timestamp or now,
             ))
         client.execute(
@@ -205,7 +206,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
             INSERT INTO transactions (
                 tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
                 input_count, output_count, total_input_value, total_output_value,
-                addresses, metadata, raw_data, raw_data_truncated, ingestion_timestamp
+                addresses, metadata, raw_data, raw_data_truncated, script_valid, ingestion_timestamp
             ) VALUES
             """,
             tx_rows,
@@ -223,6 +224,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 json.dumps(inp.assets) if inp.assets else "",
                 1 if inp.is_reference else 0,
                 1 if inp.is_collateral else 0,
+                1 if inp.is_unspent_attempt else 0,
                 tx.ingestion_timestamp or now,
             )
             for tx in transactions
@@ -233,7 +235,8 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 """
                 INSERT INTO transaction_inputs (
                     tx_hash, network, input_index, input_tx_hash, input_index_in_tx,
-                    address, amount, assets, is_reference, is_collateral, ingestion_timestamp
+                    address, amount, assets, is_reference, is_collateral,
+                    is_unspent_attempt, ingestion_timestamp
                 ) VALUES
                 """,
                 all_inputs,
@@ -243,7 +246,9 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
             (
                 tx.tx_hash,
                 tx.network or settings.CARDANO_NETWORK,
-                idx,
+                # Explicit on-chain index wins (collateral returns sit at
+                # the regular-output count, not their list position).
+                out.output_index if out.output_index is not None else idx,
                 out.address,
                 out.amount,
                 json.dumps(out.assets) if out.assets else "",
@@ -370,7 +375,8 @@ def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[s
     """Resolve input values and unique source addresses for a batch of transactions.
 
     Joins transaction_inputs against transaction_outputs on (input_tx_hash, input_index_in_tx).
-    Only non-collateral, non-reference inputs are considered.
+    Only consumed inputs are considered (non-collateral, non-reference,
+    non-attempted: a failed tx's regular inputs were never spent).
     Returns a dict keyed by tx_hash. Missing keys = no resolvable inputs (outputs pre-date sync).
     """
     if not tx_hashes:
@@ -381,6 +387,9 @@ def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[s
     # joined table is rejected by ClickHouse; subqueries are the supported
     # form.) The inner ref-bound on to2 keeps the FINAL scan proportional to
     # the batch, not the table.
+    # Output side has NO is_collateral filter: only failed txs persist
+    # collateral-return output rows, and those ARE real spendable UTxOs;
+    # excluding them made any tx spending one unresolvable (review finding).
     rows = _get_client().execute(
         """
         SELECT
@@ -394,12 +403,12 @@ def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[s
               AND network       = %(network)s
               AND is_collateral = 0
               AND is_reference  = 0
+              AND is_unspent_attempt = 0
         ) ti
         LEFT JOIN (
             SELECT tx_hash, network, output_index, address, amount
             FROM transaction_outputs FINAL
             WHERE network = %(network)s
-              AND is_collateral = 0
               AND tx_hash IN (
                   SELECT input_tx_hash
                   FROM transaction_inputs FINAL
@@ -407,6 +416,7 @@ def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[s
                     AND network       = %(network)s
                     AND is_collateral = 0
                     AND is_reference  = 0
+                    AND is_unspent_attempt = 0
               )
         ) to2
             ON  ti.input_tx_hash     = to2.tx_hash
@@ -445,10 +455,12 @@ def get_outputs_for_refs(
         FROM transaction_outputs FINAL
         WHERE tx_hash IN %(tx_hashes)s
           AND network = %(network)s
-          AND is_collateral = 0
         """,
         {"tx_hashes": unique_tx_hashes, "network": network},
     )
+    # No is_collateral filter: only failed txs persist collateral-return
+    # output rows and those are real spendable UTxOs (Babbage); excluding
+    # them left total_input_value NULL on any tx spending one.
     # Only return rows matching requested (tx_hash, output_index) pairs
     return {
         (r[0], r[1]): (r[2], int(r[3]))

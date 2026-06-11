@@ -50,6 +50,18 @@ logger = logging.getLogger("migrate_dedup_schema")
 
 _MIG_SUFFIX = "__mig"
 
+# Collapse-step resource bounds. The GROUP BY holds argMax state per distinct
+# key — for transactions that means one full raw_data JSON string per key, so
+# an unchunked pass over a production-sized table exhausts server memory.
+# Every DEDUP_TABLE_KEYS key contains tx_hash, so hashing it into buckets
+# never splits a dedup group; 16 buckets bound the working set to ~1/16th of
+# the table under the compose 4 GiB ClickHouse mem_limit.
+_DEFAULT_HASH_BUCKETS = 16
+# Just under the compose 4 GiB container cap; the external-aggregation
+# threshold spills GROUP BY state to disk at half the budget so the merge
+# phase keeps headroom.
+_DEFAULT_MAX_MEMORY_BYTES = 3_000_000_000
+
 
 def _table_info(client, table: str):
     rows = client.execute(
@@ -87,14 +99,30 @@ def _distinct_key_count(client, table: str, key_cols) -> int:
     return int(rows[0][0])
 
 
-def migrate_table(client, table: str, apply: bool, legacy_suffix: str) -> bool:
+def migrate_table(
+    client, table: str, apply: bool, legacy_suffix: str,
+    buckets: int = _DEFAULT_HASH_BUCKETS,
+    max_memory_bytes: int = _DEFAULT_MAX_MEMORY_BYTES,
+) -> bool:
     """Migrate one table. Returns True when a swap happened."""
+    mig = f"{table}{_MIG_SUFFIX}"
     info = _table_info(client, table)
     if info is None:
         logger.info("%s: does not exist; execute_schema will create it fresh", table)
         return False
     if _is_v2(info):
-        logger.info("%s: already v2 (ReplacingMergeTree, no partition); skipping", table)
+        # Crash-recovery: a crash between EXCHANGE and the legacy RENAME
+        # leaves the post-swap legacy data stranded under the __mig name
+        # (the live table is already v2, so re-runs skipped it forever).
+        if apply and _table_info(client, mig) is not None:
+            legacy_name = f"{table}__legacy_{legacy_suffix}"
+            client.execute(f"RENAME TABLE {mig} TO {legacy_name}")
+            logger.info(
+                "%s: recovered stranded %s as %s (crash between EXCHANGE "
+                "and RENAME on a prior run)", table, mig, legacy_name,
+            )
+        else:
+            logger.info("%s: already v2 (ReplacingMergeTree, no partition); skipping", table)
         return False
 
     key_cols, version_col = clickhouse.DEDUP_TABLE_KEYS[table]
@@ -108,7 +136,6 @@ def migrate_table(client, table: str, apply: bool, legacy_suffix: str) -> bool:
     if not apply:
         return False
 
-    mig = f"{table}{_MIG_SUFFIX}"
     client.execute(f"DROP TABLE IF EXISTS {mig}")
     client.execute(clickhouse.SCHEMA_DDL[table].format(table=mig))
 
@@ -124,11 +151,24 @@ def migrate_table(client, table: str, apply: bool, legacy_suffix: str) -> bool:
             select_exprs.append(f"max({version_col}) AS {version_col}")
         else:
             select_exprs.append(f"argMax({col}, {version_col}) AS {col}")
-    client.execute(
-        f"INSERT INTO {mig} ({', '.join(insert_cols)}) "
-        f"SELECT {', '.join(select_exprs)} FROM {table} "
-        f"GROUP BY {', '.join(key_cols)}"
-    )
+    # Chunked by tx_hash bucket so the GROUP BY working set is bounded;
+    # every dedup key contains tx_hash, so a bucket never splits a group.
+    # spill threshold: external aggregation kicks in at half the memory
+    # budget so the merge phase keeps headroom (see _DEFAULT_* comments).
+    external_group_by = max_memory_bytes // 2
+    for bucket in range(buckets):
+        client.execute(
+            f"INSERT INTO {mig} ({', '.join(insert_cols)}) "
+            f"SELECT {', '.join(select_exprs)} FROM {table} "
+            f"WHERE cityHash64(tx_hash) %% %(buckets)s = %(bucket)s "
+            f"GROUP BY {', '.join(key_cols)}",
+            {"buckets": buckets, "bucket": bucket},
+            settings={
+                "max_memory_usage": max_memory_bytes,
+                "max_bytes_before_external_group_by": external_group_by,
+            },
+        )
+        logger.info("%s: collapsed bucket %d/%d", table, bucket + 1, buckets)
 
     migrated = int(client.execute(f"SELECT count() FROM {mig}")[0][0])
     if migrated != distinct_keys:
@@ -152,6 +192,14 @@ def main() -> int:
     parser.add_argument(
         "--apply", action="store_true",
         help="Perform the migration (default: dry-run that only reports counts).",
+    )
+    parser.add_argument(
+        "--buckets", type=int, default=_DEFAULT_HASH_BUCKETS,
+        help="tx_hash buckets per collapse INSERT (bounds GROUP BY memory).",
+    )
+    parser.add_argument(
+        "--max-memory-bytes", type=int, default=_DEFAULT_MAX_MEMORY_BYTES,
+        help="Per-INSERT max_memory_usage; external GROUP BY spills at half.",
     )
     args = parser.parse_args()
 
@@ -178,7 +226,10 @@ def main() -> int:
 
     swapped = 0
     for table in clickhouse.DEDUP_TABLE_KEYS:
-        if migrate_table(client, table, args.apply, legacy_suffix):
+        if migrate_table(
+            client, table, args.apply, legacy_suffix,
+            buckets=args.buckets, max_memory_bytes=args.max_memory_bytes,
+        ):
             swapped += 1
 
     if args.apply:

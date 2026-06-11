@@ -74,6 +74,7 @@ SCHEMA_DDL: Dict[str, str] = {
             metadata String,
             raw_data String CODEC(ZSTD(3)),
             raw_data_truncated UInt8 DEFAULT 0,
+            script_valid UInt8 DEFAULT 1,
             ingestion_timestamp DateTime DEFAULT now(),
             INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
             INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
@@ -98,6 +99,7 @@ SCHEMA_DDL: Dict[str, str] = {
             assets String,
             is_reference UInt8,
             is_collateral UInt8,
+            is_unspent_attempt UInt8 DEFAULT 0,
             ingestion_timestamp DateTime DEFAULT now(),
             INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
             INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
@@ -329,17 +331,43 @@ def _baseline_window_days() -> int:
     return int(baselines_config()["windows"]["global_days"])
 
 
+def _remove_table_ttl(client: Client, table: str) -> None:
+    """Drop a previously applied retention TTL when its knob returns to 0.
+
+    Without this, "0 = keep forever" was false after one enable/disable
+    cycle: the old TTL clause survived on the table and kept deleting rows
+    forever (review finding). REMOVE TTL raises on a table that never had
+    one, so the live DDL is checked first (table-level TTLs only; none of
+    our tables use column TTLs, so the substring witness is sufficient).
+    """
+    rows = client.execute(
+        "SELECT create_table_query FROM system.tables "
+        "WHERE database = currentDatabase() AND name = %(t)s",
+        {"t": table},
+    )
+    if not rows or " TTL " not in rows[0][0]:
+        return
+    try:
+        client.execute(f"ALTER TABLE {table} REMOVE TTL")
+        logger.info("Retention TTL removed: %s (knob set to 0)", table)
+    except ClickHouseError:
+        # Another instance may have removed it concurrently; never block
+        # startup over TTL housekeeping.
+        logger.warning("Failed to remove retention TTL on %s", table, exc_info=True)
+
+
 def apply_retention_ttls(client: Client) -> None:
     """Apply opt-in row TTLs from the CH_RETENTION_DAYS_* knobs (0 = off).
 
     TTL merges expire rows without partitions. Idempotent: MODIFY TTL
-    replaces any prior clause.
+    replaces any prior clause; a knob back at 0 removes any stale clause.
     """
     window_days = _baseline_window_days()
     warned_knobs = set()
     for table, knob in _RETENTION_TABLE_KNOBS:
         days = int(getattr(settings, knob))
         if days <= 0:
+            _remove_table_ttl(client, table)
             continue
         if (
             knob in _RETENTION_BASELINE_COUPLING
@@ -430,6 +458,12 @@ def create_all(client: Client) -> None:
     except Exception as e:
         logger.debug(f"total_input_value already Nullable or migration not needed: {e}")
 
+    # Phase-2 validation outcome (migration for existing tables): DEFAULT 1
+    # because historical rows predate failed-tx ingestion semantics.
+    client.execute(
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1"
+    )
+
     # Transaction inputs table
     client.execute(SCHEMA_DDL["transaction_inputs"].format(table="transaction_inputs"))
 
@@ -438,6 +472,12 @@ def create_all(client: Client) -> None:
         client.execute("ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
+
+    # Attempted-spend flag for failed txs (migration for existing tables).
+    client.execute(
+        "ALTER TABLE transaction_inputs "
+        "ADD COLUMN IF NOT EXISTS is_unspent_attempt UInt8 DEFAULT 0"
+    )
 
     # Transaction outputs table
     client.execute(SCHEMA_DDL["transaction_outputs"].format(table="transaction_outputs"))

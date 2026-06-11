@@ -73,6 +73,7 @@ def _count_attacker_history(
           AND i.input_index = 0
           AND i.is_collateral = 0
           AND i.is_reference = 0
+          AND i.is_unspent_attempt = 0
           AND o.is_collateral = 0
           AND ({like_clause})
           AND i.tx_hash IN (
@@ -130,16 +131,20 @@ def _attacker_net_ada(
             FROM transaction_inputs FINAL
             WHERE tx_hash IN %(hashes)s AND network = %(network)s
               AND address = %(addr)s AND is_collateral = 0 AND is_reference = 0
+              AND is_unspent_attempt = 0
         ) ti
         LEFT JOIN (
+            -- Parent-UTxO resolution: no is_collateral filter here, a failed
+            -- tx's collateral return is a real spendable UTxO (Babbage).
             SELECT tx_hash, network, output_index, amount
             FROM transaction_outputs FINAL
-            WHERE network = %(network)s AND is_collateral = 0
+            WHERE network = %(network)s
               AND tx_hash IN (
                   SELECT input_tx_hash FROM transaction_inputs FINAL
                   WHERE tx_hash IN %(hashes)s AND network = %(network)s
                     AND address = %(addr)s
                     AND is_collateral = 0 AND is_reference = 0
+                    AND is_unspent_attempt = 0
               )
         ) o
           ON o.tx_hash = ti.input_tx_hash
@@ -211,6 +216,7 @@ def _first_input_addresses(
           AND network = %(network)s
           AND is_collateral = 0
           AND is_reference = 0
+          AND is_unspent_attempt = 0
           AND address != ''
           AND input_index = 0
         """,
