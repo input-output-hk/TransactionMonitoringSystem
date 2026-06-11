@@ -257,3 +257,31 @@ class TestChainTimeWindows:
         assert "FROM transactions FINAL" in sql  # chain-time join, deduped
         assert "t.timestamp >=" in sql
         assert "ingestion_timestamp" not in sql
+
+    @patch("app.db.clickhouse._get_client")
+    def test_active_scripts_window_parametrized_from_config(self, mock_get_client):
+        # The per-script window is a config knob (baselines.windows), not a
+        # bare SQL literal; tuning it in detection.yaml must reach the query.
+        from app.analysis import baselines
+        client = MagicMock()
+        mock_get_client.return_value = client
+        client.execute.return_value = []
+        baselines.get_active_script_addresses("preprod")
+        sql = client.execute.call_args.args[0]
+        params = client.execute.call_args.args[1]
+        assert "INTERVAL %(days)s DAY" in sql
+        assert "INTERVAL 90" not in sql
+        assert params["days"] == baselines._PER_SCRIPT_WINDOW_DAYS
+
+    @patch("app.analysis.baselines._query_percentiles")
+    @patch("app.analysis.baselines.clickhouse")
+    def test_global_window_days_from_config(self, mock_ch, mock_qp):
+        from app.analysis import baselines
+        mock_ch.get_baseline.return_value = None
+        mock_qp.return_value = (1.0, 9.0, 500)
+        rows = baselines.compute_global_baselines("preprod")
+        assert rows
+        # Window argument and the persisted window_days column both come
+        # from the config, so the YAML is the single source of truth.
+        assert mock_qp.call_args.args[3] == baselines._GLOBAL_WINDOW_DAYS
+        assert rows[0][8] == baselines._GLOBAL_WINDOW_DAYS

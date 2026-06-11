@@ -33,6 +33,12 @@ _DRIFT_ENABLED: bool = bool(_DRIFT_CFG["enabled"])
 _DRIFT_P99_THRESHOLD: float = float(_DRIFT_CFG["p99_threshold"])
 _DRIFT_P50_THRESHOLD: float = float(_DRIFT_CFG["p50_threshold"])
 
+# Computation windows (baselines.windows in config/detection.yaml): the one
+# source of truth shared with the retention warnings in clickhouse_schema.
+_WINDOWS_CFG = baselines_config()["windows"]
+_GLOBAL_WINDOW_DAYS: int = int(_WINDOWS_CFG["global_days"])
+_PER_SCRIPT_WINDOW_DAYS: int = int(_WINDOWS_CFG["per_script_days"])
+
 # Features computed from utxo_features table
 _UTXO_FEATURES = [
     "value_cbor_bytes",
@@ -88,23 +94,27 @@ def compute_global_baselines(network: str) -> List[tuple]:
     rows = []
 
     for feature in _UTXO_FEATURES:
-        result = _query_percentiles("utxo_features", feature, network, 180)
+        result = _query_percentiles(
+            "utxo_features", feature, network, _GLOBAL_WINDOW_DAYS,
+        )
         if result is None:
             continue
         p50, p99, count = result
         rows.append((
             network, "global", "__global__", feature,
-            p50, p99, count, now, 180,
+            p50, p99, count, now, _GLOBAL_WINDOW_DAYS,
         ))
 
     for feature in _TX_FEATURES:
-        result = _query_percentiles("tx_script_features", feature, network, 180)
+        result = _query_percentiles(
+            "tx_script_features", feature, network, _GLOBAL_WINDOW_DAYS,
+        )
         if result is None:
             continue
         p50, p99, count = result
         rows.append((
             network, "global", "__global__", feature,
-            p50, p99, count, now, 180,
+            p50, p99, count, now, _GLOBAL_WINDOW_DAYS,
         ))
 
     rows = _filter_drifted(rows)
@@ -127,14 +137,14 @@ def compute_script_baselines(
     for feature in _UTXO_FEATURES:
         result = _query_percentiles_scoped(
             "utxo_features", feature, network,
-            "address", script_hash, 90,
+            "address", script_hash, _PER_SCRIPT_WINDOW_DAYS,
         )
         if result is None or result[2] < settings.BASELINE_MIN_SAMPLES:
             continue
         p50, p99, count = result
         rows.append((
             network, "per_script", script_hash, feature,
-            p50, p99, count, now, 90,
+            p50, p99, count, now, _PER_SCRIPT_WINDOW_DAYS,
         ))
 
     rows = _filter_drifted(rows)
@@ -167,7 +177,7 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
     """
     now = datetime.now(timezone.utc)
     per_script = clickhouse.query_multiple_sat_extraction_percentiles(
-        network, 90, settings.BASELINE_MIN_SAMPLES,
+        network, _PER_SCRIPT_WINDOW_DAYS, settings.BASELINE_MIN_SAMPLES,
     )
     rows = []
     for rec in per_script:
@@ -177,7 +187,7 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
             p50, p99 = rec[feature]
             rows.append((
                 network, "per_script", script, feature,
-                p50, p99, count, now, 90,
+                p50, p99, count, now, _PER_SCRIPT_WINDOW_DAYS,
             ))
 
     rows = _filter_drifted(rows)
@@ -228,7 +238,7 @@ def get_active_script_addresses(network: str, limit: int = 500) -> List[str]:
             JOIN (
                 SELECT tx_hash, network, timestamp FROM transactions FINAL
                 WHERE network = %(network)s
-                  AND timestamp >= now() - INTERVAL 90 DAY
+                  AND timestamp >= now() - INTERVAL %(days)s DAY
             ) t ON f.tx_hash = t.tx_hash AND f.network = t.network
             GROUP BY f.address
             HAVING cnt >= %(min_samples)s
@@ -237,6 +247,7 @@ def get_active_script_addresses(network: str, limit: int = 500) -> List[str]:
             """,
             {
                 "network": network,
+                "days": _PER_SCRIPT_WINDOW_DAYS,
                 "min_samples": settings.BASELINE_MIN_SAMPLES,
                 "limit": limit,
             },
@@ -394,6 +405,12 @@ def _query_percentiles(
         # FINAL on both sides: a not-yet-merged duplicate feature row (or a
         # duplicate transactions row multiplying the join) would weight the
         # quantiles. Daily-batch cadence absorbs the FINAL cost.
+        # INNER JOIN deliberately: a feature row without a transactions row
+        # has no chain timestamp, and a LEFT JOIN with an ingestion-time
+        # fallback would reintroduce exactly the backfill distortion this
+        # JOIN exists to prevent. The retention coupling (transactions
+        # retention shorter than the window silently shrinks the sample)
+        # is surfaced by the warning in clickhouse_schema.apply_retention_ttls.
         rows = client.execute(
             f"""
             SELECT

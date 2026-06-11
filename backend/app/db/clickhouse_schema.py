@@ -295,10 +295,38 @@ _RETENTION_TABLE_KNOBS: Tuple[Tuple[str, str], ...] = (
     ("tx_script_features", "CH_RETENTION_DAYS_FEATURES"),
 )
 
-# Global baselines use a 180-day window (per-script 90); feature retention
-# shorter than this starves them. Loud warning, not a hard refusal: an
+# Retention knob -> what a short window silently breaks. Every baseline
+# percentile query INNER JOINs transactions for chain-time windowing, and
+# enrichment resolves PARENT transactions of any age (dormant-funds attacks
+# spend arbitrarily old UTxOs), so retention on these tables degrades
+# detection inputs, not just history. Loud warning, not a hard refusal: an
 # operator may intentionally run a shorter horizon on a constrained box.
-_BASELINE_WINDOW_DAYS = 180
+_RETENTION_BASELINE_COUPLING: Dict[str, str] = {
+    "CH_RETENTION_DAYS_FEATURES": (
+        "baselines will be computed from a truncated population"
+    ),
+    "CH_RETENTION_DAYS_TRANSACTIONS": (
+        "the baseline percentile queries INNER JOIN transactions for "
+        "chain-time windowing, so feature rows older than this silently "
+        "vanish from percentiles AND sample counts; enrichment also "
+        "resolves parent txs of any age from this table"
+    ),
+    "CH_RETENTION_DAYS_IO": (
+        "enrichment resolves input addresses/amounts from "
+        "transaction_inputs/outputs for parent txs of any age; older "
+        "parents lose resolution"
+    ),
+}
+
+
+def _baseline_window_days() -> int:
+    # Lazy import: app.analysis.scorer_config -> normalise -> app.db.clickhouse
+    # -> this module would be a cycle at module load (same pattern as
+    # normalise._min_baseline_spread_ratio). Single source of truth is
+    # baselines.windows.global_days in config/detection.yaml.
+    from app.analysis.scorer_config import baselines_config
+
+    return int(baselines_config()["windows"]["global_days"])
 
 
 def apply_retention_ttls(client: Client) -> None:
@@ -307,15 +335,21 @@ def apply_retention_ttls(client: Client) -> None:
     TTL merges expire rows without partitions. Idempotent: MODIFY TTL
     replaces any prior clause.
     """
+    window_days = _baseline_window_days()
+    warned_knobs = set()
     for table, knob in _RETENTION_TABLE_KNOBS:
         days = int(getattr(settings, knob))
         if days <= 0:
             continue
-        if knob == "CH_RETENTION_DAYS_FEATURES" and days < _BASELINE_WINDOW_DAYS:
+        if (
+            knob in _RETENTION_BASELINE_COUPLING
+            and days < window_days
+            and knob not in warned_knobs
+        ):
+            warned_knobs.add(knob)
             logger.warning(
-                "%s=%d is below the %d-day global baseline window; "
-                "baselines will be computed from a truncated population.",
-                knob, days, _BASELINE_WINDOW_DAYS,
+                "%s=%d is below the %d-day global baseline window; %s.",
+                knob, days, window_days, _RETENTION_BASELINE_COUPLING[knob],
             )
         client.execute(
             f"ALTER TABLE {table} MODIFY TTL "

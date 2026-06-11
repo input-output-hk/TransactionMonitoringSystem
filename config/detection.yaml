@@ -69,6 +69,16 @@ baselines:
     # median is the second poisoning vector (values below the learned
     # median score 0); same relative scale as p99_threshold.
     p50_threshold: 0.50
+  # Baseline computation windows (chain-time days). Single source of truth:
+  # baselines.py windows every percentile query on these, and
+  # clickhouse_schema.py warns when a CH_RETENTION_DAYS_* knob is shorter
+  # than global_days (truncated baseline population, silently dropped JOIN
+  # rows). global covers slow-moving network-wide percentiles; per_script
+  # tracks contract evolution faster and bounds the poisoning window an
+  # attacker has to pre-train inside.
+  windows:
+    global_days: 180
+    per_script_days: 90
 
 scorers:
 

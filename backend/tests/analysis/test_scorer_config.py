@@ -30,6 +30,10 @@ def _minimal_valid_yaml() -> str:
           drift:
             enabled: true
             p99_threshold: 0.50
+            p50_threshold: 0.50
+          windows:
+            global_days: 180
+            per_script_days: 90
         scorers:
           multiple_sat:
             weights: {}
@@ -207,8 +211,43 @@ class TestValidation:
                 "baselines:\n  min_spread_ratio: 0.10\n"
                 "  per_script_p99_cap_multiplier: 5.0\n"
                 "  drift:\n    enabled: true\n    p99_threshold: 0.50\n"
+                "    p50_threshold: 0.50\n"
+                "  windows:\n    global_days: 180\n    per_script_days: 90\n"
                 "scorers:\n  multiple_sat: 'not a mapping'\n",
             )
+
+    def test_missing_baselines_drift_leaf_raises_with_path(
+        self, tmp_path, monkeypatch
+    ):
+        # Leaf validation: a missing nested tunable must fail fast with its
+        # full dotted path, not a raw KeyError at first use.
+        body = _minimal_valid_yaml().replace(
+            "    p99_threshold: 0.50\n", "",
+        )
+        with pytest.raises(RuntimeError, match=r"baselines\.drift\.p99_threshold"):
+            _reload_module(monkeypatch, tmp_path, body)
+
+    def test_missing_baselines_windows_raises_with_path(
+        self, tmp_path, monkeypatch
+    ):
+        body = _minimal_valid_yaml().replace(
+            "    global_days: 180\n", "",
+        )
+        with pytest.raises(RuntimeError, match=r"baselines\.windows\.global_days"):
+            _reload_module(monkeypatch, tmp_path, body)
+
+    def test_missing_asset_name_carrier_enabled_raises_with_path(
+        self, tmp_path, monkeypatch
+    ):
+        body = _minimal_valid_yaml().replace(
+            "    asset_name_carrier:\n      enabled: true\n",
+            "    asset_name_carrier: {}\n",
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=r"scorers\.phishing\.asset_name_carrier\.enabled",
+        ):
+            _reload_module(monkeypatch, tmp_path, body)
 
 
 class TestGet:

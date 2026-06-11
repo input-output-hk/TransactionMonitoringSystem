@@ -59,7 +59,7 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "phishing":      ("weights", "fixed_anchors", "bootstrap_anchors",
                       "similarity_suspicious_range", "social_engineering",
                       "reason_thresholds", "critical_threshold", "metadata_labels",
-                      "asset_name_carrier", "min_decoded_string_len"),
+                      "asset_name_carrier.enabled", "min_decoded_string_len"),
 }
 
 
@@ -103,11 +103,38 @@ _REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
     "corroboration_threshold",
 )
 
+# Dotted leaves so a missing nested tunable fails fast with its full path
+# at load time instead of a raw KeyError at first use.
 _REQUIRED_BASELINES: Tuple[str, ...] = (
     "min_spread_ratio",
     "per_script_p99_cap_multiplier",
-    "drift",
+    "drift.enabled",
+    "drift.p99_threshold",
+    "drift.p50_threshold",
+    "windows.global_days",
+    "windows.per_script_days",
 )
+
+
+def _missing_dotted(
+    container: Dict[str, Any], keys: Tuple[str, ...], prefix: str,
+) -> List[str]:
+    """Return the full paths of dotted ``keys`` absent from ``container``.
+
+    Dotted keys ("a.b.c") walk into nested dicts so callers can require
+    leaf tunables, not just top-level blocks; the full path in the error
+    lets YAML edits surface the precise missing field rather than a
+    downstream KeyError at import.
+    """
+    missing: List[str] = []
+    for key in keys:
+        cur: Any = container
+        for part in key.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                missing.append(f"{prefix}.{key}")
+                break
+            cur = cur[part]
+    return missing
 
 
 def _validate(path: Path, data: Dict[str, Any]) -> None:
@@ -145,35 +172,24 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
         raise RuntimeError(
             f"Detection config {path} must contain a top-level 'baselines' mapping."
         )
-    missing_bl = [k for k in _REQUIRED_BASELINES if k not in baselines]
+    missing_bl = _missing_dotted(baselines, _REQUIRED_BASELINES, "baselines")
     if missing_bl:
         raise RuntimeError(
             f"Detection config {path} missing baselines keys: "
             f"{', '.join(missing_bl)}"
         )
     scorers = data["scorers"]
-    missing: Iterable[str] = []
+    missing: List[str] = []
     for name, keys in _REQUIRED_KEYS.items():
         section = scorers.get(name)
         if section is None:
-            missing = list(missing) + [f"scorers.{name}"]
+            missing.append(f"scorers.{name}")
             continue
         if not isinstance(section, dict):
             raise RuntimeError(
                 f"Detection config {path}: scorers.{name} must be a mapping."
             )
-        for key in keys:
-            # Dotted keys ("a.b.c") walk into nested dicts so callers can
-            # require leaf tunables, not just top-level blocks. Reports the
-            # full path in the error so YAML edits surface the precise
-            # missing field rather than a downstream KeyError at import.
-            cur: Any = section
-            parts = key.split(".")
-            for part in parts:
-                if not isinstance(cur, dict) or part not in cur:
-                    missing = list(missing) + [f"scorers.{name}.{key}"]
-                    break
-                cur = cur[part]
+        missing.extend(_missing_dotted(section, keys, f"scorers.{name}"))
     if missing:
         joined = ", ".join(sorted(missing))
         raise RuntimeError(
