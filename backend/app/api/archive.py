@@ -41,6 +41,35 @@ router = APIRouter(prefix="/api/archive", tags=["archive"])
 CSV_COLUMNS = ("network", "tx_hash", "note", "archived_by", "archived_at", "source")
 
 
+async def _audit_suppression_intent(
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    details: dict,
+    request: Request,
+) -> int:
+    """Fail-closed intent audit shared by the three suppression endpoints.
+
+    A suppression that cannot be audited is refused with 503: an attacker
+    who could force the audit write to fail must not be able to hide a
+    detection silently.
+    """
+    try:
+        return await audit.record_fail_closed(
+            event_type="alert_suppression",
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details,
+            request=request,
+        )
+    except audit.AuditUnavailableError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Audit trail unavailable; alert suppression refused.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Collection routes (no path param) — registered first so that static
 # sub-paths like /bulk and /export are matched before /{tx_hash}.
@@ -73,25 +102,37 @@ async def archive_alert(entry: ArchiveEntry, request: Request) -> dict:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Transaction is already archived for this network.",
             )
-        await archive_queries.archive_insert_async(
-            entry.network, entry.tx_hash, entry.note, entry.archived_by,
-        )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error archiving {entry.tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Failed to archive alert")
     # Archiving SUPPRESSES an alert from active lists: for a monitoring
-    # system that is the highest-impact mutation, so it always leaves an
-    # audit row (actor + note + source IP).
-    await audit.record(
-        event_type="alert_suppression",
+    # system that is the highest-impact mutation, so the audit row is
+    # FAIL-CLOSED and written BEFORE the suppression (the stores live in
+    # different databases, so audit-first is the only ordering that
+    # guarantees no unaudited suppression). The outcome is patched in
+    # best-effort afterwards.
+    audit_id = await _audit_suppression_intent(
         action="archive",
         entity_type="transaction",
         entity_id=f"{entry.network}:{entry.tx_hash}",
-        details={"archived_by": entry.archived_by, "note": entry.note},
+        details={
+            "archived_by": entry.archived_by,
+            "note": entry.note,
+            "phase": "intent",
+        },
         request=request,
     )
+    try:
+        await archive_queries.archive_insert_async(
+            entry.network, entry.tx_hash, entry.note, entry.archived_by,
+        )
+    except Exception as e:
+        logger.error(f"Error archiving {entry.tx_hash}: {e}")
+        await audit.append_outcome(audit_id, {"phase": "failed"})
+        raise HTTPException(status_code=500, detail="Failed to archive alert")
+    await audit.append_outcome(audit_id, {"phase": "applied"})
     return {
         "network": entry.network,
         "tx_hash": entry.tx_hash,
@@ -146,25 +187,31 @@ async def bulk_import(payload_request: BulkArchiveRequest, request: Request) -> 
     otherwise skip. Local notes/attribution are never overwritten.
     """
     payload = [e.model_dump() for e in payload_request.entries]
+    # Fail-closed intent row before the bulk suppression (see archive_alert).
+    audit_id = await _audit_suppression_intent(
+        action="bulk_archive",
+        entity_type="archive_batch",
+        entity_id=payload_request.source_label or "bulk",
+        details={
+            "entries": len(payload),
+            "source_label": payload_request.source_label,
+            "phase": "intent",
+        },
+        request=request,
+    )
     try:
         outcome = await archive_queries.archive_bulk_insert_async(
             payload, payload_request.source_label,
         )
     except Exception as e:
         logger.error(f"Error during bulk import: {e}")
+        await audit.append_outcome(audit_id, {"phase": "failed"})
         raise HTTPException(status_code=500, detail="Failed to import archive batch")
-    await audit.record(
-        event_type="alert_suppression",
-        action="bulk_archive",
-        entity_type="archive_batch",
-        entity_id=payload_request.source_label or "bulk",
-        details={
-            "entries": len(payload),
-            "inserted": outcome["inserted"],
-            "skipped": outcome["skipped"],
-        },
-        request=request,
-    )
+    await audit.append_outcome(audit_id, {
+        "phase": "applied",
+        "inserted": outcome["inserted"],
+        "skipped": outcome["skipped"],
+    })
     return BulkArchiveResult(
         inserted=outcome["inserted"],
         skipped=outcome["skipped"],
@@ -237,24 +284,43 @@ async def restore_alert(
 ) -> Response:
     """Restore a transaction by hard-deleting its archive row."""
     query_network = network or settings.CARDANO_NETWORK
+    # Existence check first so no-op restores keep their 404 semantics
+    # without leaving intent rows; then the fail-closed intent audit (a
+    # restore mutates the suppression record, so it gets the same
+    # accountability as archiving). Benign race: a concurrent delete
+    # between check and delete yields an intent row with phase=failed.
+    try:
+        exists = await archive_queries.archive_exists_async(query_network, tx_hash)
+    except Exception as e:
+        logger.error(f"Error restoring {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to restore alert")
+    if not exists:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No archive entry found for {tx_hash} on {query_network}",
+        )
+    audit_id = await _audit_suppression_intent(
+        action="restore",
+        entity_type="transaction",
+        entity_id=f"{query_network}:{tx_hash}",
+        details={"phase": "intent"},
+        request=request,
+    )
     try:
         deleted = await archive_queries.archive_delete_async(query_network, tx_hash)
     except Exception as e:
         logger.error(f"Error restoring {tx_hash}: {e}")
+        await audit.append_outcome(audit_id, {"phase": "failed"})
         raise HTTPException(status_code=500, detail="Failed to restore alert")
+    await audit.append_outcome(
+        audit_id,
+        {"phase": "applied" if deleted else "failed", "deleted": deleted},
+    )
     if deleted == 0:
         raise HTTPException(
             status_code=404,
             detail=f"No archive entry found for {tx_hash} on {query_network}",
         )
-    await audit.record(
-        event_type="alert_suppression",
-        action="restore",
-        entity_type="transaction",
-        entity_id=f"{query_network}:{tx_hash}",
-        details={},
-        request=request,
-    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

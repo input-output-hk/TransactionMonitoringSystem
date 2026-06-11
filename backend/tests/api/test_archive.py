@@ -38,9 +38,26 @@ def store() -> FakeArchiveStore:
 
 @pytest.fixture
 def client(monkeypatch, store):
-    """TestClient with archive_queries.* patched against an in-memory store."""
+    """TestClient with archive_queries.* patched against an in-memory store.
+
+    The audit persistence is faked too: suppression endpoints are fail-closed
+    on the audit write, so without a working insert_audit_log they would all
+    503 (which test_audit_fail_closed.py covers explicitly).
+    """
     from app.main import app
-    from app.db import archive_queries
+    from app.db import archive_queries, postgres
+
+    audit_rows: List[Dict[str, Any]] = []
+
+    async def fake_insert_audit(**kwargs):
+        audit_rows.append(kwargs)
+        return len(audit_rows)
+
+    async def fake_update_audit(audit_id, outcome):
+        return None
+
+    monkeypatch.setattr(postgres, "insert_audit_log", fake_insert_audit)
+    monkeypatch.setattr(postgres, "update_audit_log_details", fake_update_audit)
 
     async def fake_exists(network, tx_hash):
         return (network, tx_hash) in store.rows

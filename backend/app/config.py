@@ -101,10 +101,35 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 240  # max requests per window per key/IP
     RATE_LIMIT_WINDOW_SECONDS: int = 60  # sliding window duration in seconds
-    # Honour X-Forwarded-For for client IPs (rate limiting, audit logs).
-    # ONLY enable behind a reverse proxy / tunnel that strips and re-sets
-    # the header; otherwise it is attacker-controlled.
+    # Honour forwarded headers for client IPs (rate limiting, audit logs).
+    # ONLY enable behind a reverse proxy / tunnel; the parsing rules below
+    # (app.net.client_ip) take the right-most untrusted hop, never the
+    # client-writable left entries.
     TRUSTED_PROXY_ENABLED: bool = False
+    # Number of trusted proxies that append entries to X-Forwarded-For. The
+    # client IP is taken HOPS entries from the RIGHT of the merged list; the
+    # leftmost entries are attacker-writable and must never win.
+    TRUSTED_PROXY_HOPS: int = 1
+    # Forwarded headers are honoured ONLY when the direct TCP peer falls
+    # inside one of these CIDRs (the proxy itself). Defaults cover loopback
+    # and the RFC1918 ranges Docker bridge networks use (cloudflared reaches
+    # the app via the published loopback port / compose bridge gateway).
+    TRUSTED_PROXY_CIDRS: str = (
+        "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    )
+    # Optional single-value client-IP header set by the edge (e.g.
+    # "CF-Connecting-IP" for Cloudflare). Empty = use X-Forwarded-For.
+    TRUSTED_PROXY_CLIENT_IP_HEADER: str = ""
+
+    @property
+    def trusted_proxy_networks(self) -> list:
+        import ipaddress
+
+        return [
+            ipaddress.ip_network(c.strip(), strict=False)
+            for c in self.TRUSTED_PROXY_CIDRS.split(",")
+            if c.strip()
+        ]
 
     # Comma-separated allowed CORS origins. "*" (default) keeps the demo
     # SPA and local vite dev servers working; tighten to the dashboard

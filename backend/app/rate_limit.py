@@ -15,6 +15,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app import net
 from app.auth import is_valid_api_key
 from app.config import settings
 
@@ -98,18 +99,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # key. Bucketing on the raw header value gave every key-guessing
         # attempt its own fresh window, so brute-forcing the key was never
         # throttled; invalid/absent keys now share the client IP's bucket.
-        # The IP is taken from X-Forwarded-For only behind a trusted proxy
-        # (the header is attacker-controlled otherwise).
+        # IP derivation (incl. trusted-proxy forwarded-header rules) lives
+        # in app.net.client_ip; spoofable left-most XFF entries never win.
         supplied = request.headers.get(settings.API_KEY_HEADER)
         if supplied and is_valid_api_key(supplied):
             key = supplied
         else:
-            ip = request.client.host if request.client else None
-            if settings.TRUSTED_PROXY_ENABLED:
-                forwarded = request.headers.get("x-forwarded-for", "")
-                if forwarded:
-                    ip = forwarded.split(",")[0].strip()
-            key = f"ip:{ip or 'unknown'}"
+            key = f"ip:{net.client_ip(request) or 'unknown'}"
 
         allowed, retry_after = await self.limiter.check(key)
 

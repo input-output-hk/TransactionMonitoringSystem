@@ -481,16 +481,32 @@ async def insert_audit_log(
     entity_id: str,
     details: str,
     ip_address: Optional[str],
-) -> None:
-    """Append one audit row. ``details`` is a JSON string; ``user_id`` stays
-    NULL until server-side accounts exist (the actor is carried in details).
+) -> int:
+    """Append one audit row and return its id. ``details`` is a JSON string;
+    ``user_id`` stays NULL until server-side accounts exist (the actor is
+    carried in details).
     """
+    # Defence-in-depth: app.net.client_ip already validates, but the ::inet
+    # cast aborts the whole insert on any malformed value reaching this
+    # layer, and for fail-closed audit callers that would block the action.
+    from app.net import parse_ip
+
+    ip_address = parse_ip(ip_address)
     async with get_connection() as conn:
-        await conn.execute("""
+        return await conn.fetchval("""
             INSERT INTO audit_logs (
                 event_type, entity_type, entity_id, action, details, ip_address
             ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::inet)
+            RETURNING id
         """, event_type, entity_type, entity_id, action, details, ip_address)
+
+
+async def update_audit_log_details(audit_id: int, outcome: str) -> None:
+    """Merge ``outcome`` (a JSON object string) into an audit row's details."""
+    async with get_connection() as conn:
+        await conn.execute("""
+            UPDATE audit_logs SET details = details || $2::jsonb WHERE id = $1
+        """, audit_id, outcome)
 
 
 async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
