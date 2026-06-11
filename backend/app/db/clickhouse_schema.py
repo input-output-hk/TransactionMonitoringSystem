@@ -35,9 +35,22 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Column list for the transactions time-ordered projection: exactly the
+# scalar columns the list/recent endpoints read, plus the RMT version column.
+# raw_data (the dominant bytes, ZSTD-compressed JSON) and metadata are
+# deliberately excluded: projecting them doubled the storage and merge IO of
+# the largest table for queries that never select them. Shared between the
+# CREATE TABLE DDL and the in-place migration so the two cannot drift.
+_TX_PROJECTION_SELECT = (
+    "SELECT tx_hash, network, slot, block_height, block_hash, block_index, "
+    "timestamp, fee, deposit, input_count, output_count, total_input_value, "
+    "total_output_value, addresses, ingestion_timestamp "
+    "ORDER BY network, timestamp"
+)
+
 SCHEMA_DDL: Dict[str, str] = {
     # Main transactions table. ORDER BY (network, tx_hash) is the dedup key;
-    # the p_by_time projection re-sorts by (network, timestamp) so the list
+    # the p_by_time_v2 projection re-sorts by (network, timestamp) so the list
     # endpoint's top-N-by-time query stays a tail read instead of a full sort.
     # raw_data is ZSTD(3)-compressed (large JSON compresses ~5-10x) and
     # raw_data_truncated flags payloads dropped under RAW_DATA_MAX_BYTES —
@@ -67,9 +80,11 @@ SCHEMA_DDL: Dict[str, str] = {
             INDEX idx_slot slot TYPE minmax GRANULARITY 1,
             INDEX idx_block_height block_height TYPE minmax GRANULARITY 1,
             INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1,
-            PROJECTION p_by_time (SELECT * ORDER BY network, timestamp)
+            PROJECTION p_by_time_v2 (""" + _TX_PROJECTION_SELECT + """)
         ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
         ORDER BY (network, tx_hash)
+        SETTINGS deduplicate_merge_projection_mode = 'rebuild',
+                 lightweight_mutation_projection_mode = 'rebuild'
     """,
     "transaction_inputs": """
         CREATE TABLE IF NOT EXISTS {table} (
@@ -309,6 +324,45 @@ def apply_retention_ttls(client: Client) -> None:
         logger.info("Retention TTL applied: %s expires after %d days", table, days)
 
 
+def migrate_transactions_projection(client: Client) -> None:
+    """One-time in-place swap of p_by_time (SELECT *) for the narrowed
+    p_by_time_v2 on existing deployments.
+
+    Gated on the live CREATE TABLE text so MATERIALIZE (a part-rewriting
+    mutation) runs once, not on every boot. Idempotent and
+    concurrency-tolerant (IF [NOT] EXISTS on every statement). Between DROP
+    and the MATERIALIZE completing, list queries fall back to the base table:
+    slower, still correct.
+    """
+    rows = client.execute(
+        "SELECT create_table_query FROM system.tables "
+        "WHERE database = currentDatabase() AND name = 'transactions'"
+    )
+    if rows and "p_by_time_v2" in rows[0][0]:
+        return
+    # ClickHouse >= 24.7 refuses projections on a ReplacingMergeTree unless
+    # the table declares how dedup merges treat them, and (verified live on
+    # 26.1.3) gates lightweight DELETE on the TABLE-level
+    # lightweight_mutation_projection_mode — the query-level setting is
+    # ignored there. 'rebuild' recomputes the projection from surviving rows
+    # (the only mode that keeps it correct). Must be set before
+    # ADD PROJECTION on existing tables.
+    client.execute(
+        "ALTER TABLE transactions "
+        "MODIFY SETTING deduplicate_merge_projection_mode = 'rebuild', "
+        "lightweight_mutation_projection_mode = 'rebuild'"
+    )
+    client.execute("ALTER TABLE transactions DROP PROJECTION IF EXISTS p_by_time")
+    client.execute(
+        "ALTER TABLE transactions ADD PROJECTION IF NOT EXISTS p_by_time_v2 ("
+        + _TX_PROJECTION_SELECT + ")"
+    )
+    # Async mutation; old parts gain the projection as it runs, new inserts
+    # build it inline.
+    client.execute("ALTER TABLE transactions MATERIALIZE PROJECTION p_by_time_v2")
+    logger.info("transactions projection migrated: p_by_time -> p_by_time_v2")
+
+
 def create_all(client: Client) -> None:
     """Create every table, the address MV, run one-off column migrations,
     verify the layout is v2, and apply retention TTLs.
@@ -317,6 +371,9 @@ def create_all(client: Client) -> None:
     """
     # Main transactions table (see SCHEMA_DDL for the layout rationale).
     client.execute(SCHEMA_DDL["transactions"].format(table="transactions"))
+
+    # Swap the legacy SELECT * projection for the narrowed v2 (no-op once done).
+    migrate_transactions_projection(client)
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:

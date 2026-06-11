@@ -317,6 +317,17 @@ _ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
     "tx_class_scores",
 )
 
+# ClickHouse >= 24.7 refuses lightweight DELETE on a table with projections
+# unless told how to handle them ('throw' is the default), which would turn
+# every rollback purge on the projected transactions table into a permanent
+# chain-sync crash loop. 'rebuild' keeps the list-endpoint projection correct
+# on surviving rows; 'drop' would silently degrade reads on mutated parts.
+# On 26.x the gate reads the TABLE-level merge-tree setting (declared in
+# clickhouse_schema's transactions DDL/migration; verified live on 26.1.3);
+# this per-query copy covers 24.7-25.x servers where the gate reads the
+# query setting. Harmless on the cleanup tables that have no projections.
+_LIGHTWEIGHT_DELETE_SETTINGS = {"lightweight_mutation_projection_mode": "rebuild"}
+
 
 def delete_rolled_back_txs(network: str, rollback_slot: int) -> int:
     """Delete all rows for transactions confirmed after ``rollback_slot``.
@@ -345,6 +356,7 @@ def delete_rolled_back_txs(network: str, rollback_slot: int) -> int:
         client.execute(
             f"DELETE FROM {table} WHERE network = %(network)s AND tx_hash IN %(hashes)s",
             {"network": network, "hashes": hashes},
+            settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
     return len(hashes)
 
