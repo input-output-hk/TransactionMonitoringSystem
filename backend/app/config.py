@@ -286,6 +286,23 @@ class Settings(BaseSettings):
     # cannot park a tx in the pending queue forever. 3 covers transient
     # filesystem hiccups across ~3 engine intervals.
     RAW_FALLBACK_MAX_ATTEMPTS: int = 3
+    # Minimum wall-clock spacing between COUNTED fallback attempts. The drain
+    # loop re-polls every ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS (0.5 s) under
+    # load, which burned the whole attempt budget in ~1.5 s instead of the
+    # intended one-attempt-per-engine-interval; 30 s matches
+    # ANALYSIS_ENGINE_INTERVAL_SECONDS, restoring the ~90 s budget.
+    RAW_FALLBACK_RETRY_SECONDS: int = 30
+
+    # Mempool pending-tx bookkeeping. The TTL matches
+    # LIFECYCLE_PENDING_TTL_SECONDS: both bound how long an unconfirmed tx
+    # stays relevant (on-chain tx TTLs cover user submissions well inside 2 h).
+    MEMPOOL_PENDING_TTL_SECONDS: int = 7200
+    # Prune cadence: amortizes the O(pending) stale scan to once per N
+    # processed mempool txs instead of per tx.
+    MEMPOOL_PRUNE_EVERY_N_TXS: int = 100
+    # Hard cap on the seen-tx dedup set; clearing it only risks re-processing
+    # (idempotent downstream), never data loss.
+    MEMPOOL_SEEN_TXS_MAX: int = 50_000
 
     # Lifecycle cleanup — PENDING → DROPPED sweep
     # PENDING transactions older than this threshold are marked DROPPED by the

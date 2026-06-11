@@ -85,17 +85,15 @@ async def broadcast_lifecycle_event(event: dict):
     })
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup and shutdown"""
-    global ogmios_client
+def _validate_startup_settings() -> None:
+    """Fail-fast configuration guards, run before any service starts.
 
-    # Emit auth dev-mode warning here so logging is already configured.
-    # Dev mode (empty API_KEYS) is useful for local work but must be an
-    # explicit choice — refuse to start without TMS_ALLOW_DEV_MODE=1 so an
-    # accidental production deploy with a blank `.env` does not end up
-    # running an open API. TMS_ALLOW_DEV_MODE is read through pydantic so
-    # it can live in the layered `.env` files, not just the shell env.
+    Dev mode (empty API_KEYS) is useful for local work but must be an
+    explicit choice — refuse to start without TMS_ALLOW_DEV_MODE=1 so an
+    accidental production deploy with a blank `.env` does not end up
+    running an open API. TMS_ALLOW_DEV_MODE is read through pydantic so
+    it can live in the layered `.env` files, not just the shell env.
+    """
     from app.auth import _dev_mode
     allow_dev_mode = (
         settings.TMS_ALLOW_DEV_MODE.strip() == "1"
@@ -123,6 +121,25 @@ async def lifespan(app: FastAPI):
                 "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
             )
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
+    # Capped ClickHouse payloads make the raw store the ONLY full copy of
+    # oversized (attack-shaped) transactions; running capped without the
+    # store means those txs could never be scored at full fidelity.
+    if settings.RAW_DATA_MAX_BYTES > 0 and not settings.RAW_STORE_ENABLED:
+        raise RuntimeError(
+            "RAW_DATA_MAX_BYTES > 0 caps ClickHouse raw_data but "
+            "RAW_STORE_ENABLED is False: oversized transactions would have "
+            "NO full payload copy. Enable RAW_STORE_ENABLED or set "
+            "RAW_DATA_MAX_BYTES=0."
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown"""
+    global ogmios_client
+
+    # Emit dev-mode warnings here so logging is already configured.
+    _validate_startup_settings()
 
     # Start rate-limiter cleanup tasks (HTTP middleware + WS handshake)
     if settings.RATE_LIMIT_ENABLED:

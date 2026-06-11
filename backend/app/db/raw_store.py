@@ -115,8 +115,13 @@ def _write_sync(prefix: str, network: str, tx_hash: str,
 async def _write_async(prefix: str, network: str, tx_hash: str,
                        data: Dict[str, Any], ts: datetime):
     """Non-blocking write: submits _write_sync to the thread pool."""
-    if not settings.RAW_STORE_ENABLED or _executor is None:
+    if not settings.RAW_STORE_ENABLED:
         return
+    if _executor is None:
+        # Silently skipping here would defeat the checkpoint-blocking
+        # contract in _write_raw_payloads: an enabled-but-uninitialized
+        # store must surface loudly, not drop payloads.
+        raise RuntimeError("raw store enabled but not initialized (init_store)")
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(_executor, _write_sync, prefix, network, tx_hash, data, ts)
 

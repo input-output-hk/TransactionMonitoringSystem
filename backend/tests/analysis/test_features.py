@@ -114,3 +114,12 @@ class TestIterAssets:
         value = {"lovelace": 1, "p1": {"aa": "garbage"}, "p2.flat": 5}
         assert list(iter_assets(value)) == []
         assert list(iter_assets(None)) == []
+
+    def test_garbage_quantities_degrade_to_zero(self):
+        # Untrusted chain data must never abort a parse (recall-first):
+        # the dict path previously raised on non-numeric quantities while
+        # the docstring promised 0.
+        from app.analysis.features import extract_lovelace
+        assert extract_lovelace({"ada": {"lovelace": "garbage"}}) == 0
+        assert extract_lovelace({"lovelace": {"x": 1}}) == 0
+        assert extract_lovelace({"ada": {"lovelace": None}}) == 0

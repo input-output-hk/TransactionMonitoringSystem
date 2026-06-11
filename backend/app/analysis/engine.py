@@ -12,7 +12,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.db import clickhouse, raw_store
@@ -179,9 +179,13 @@ def _score_transaction(
 
 
 # Defer bookkeeping for transactions whose raw_data could not be recovered:
-# (network, tx_hash) -> failed fallback attempts. In-process only; a restart
-# resets the counters, which merely delays the degraded-scoring decision.
-_raw_fallback_attempts: Dict[tuple, int] = {}
+# (network, tx_hash) -> (counted attempts, monotonic time of the last counted
+# attempt). Attempts are paced by RAW_FALLBACK_RETRY_SECONDS of wall clock:
+# the drain loop re-polls every 0.5 s under load, which previously burned
+# the whole budget in ~1.5 s and degraded-scored exactly the large
+# attack-shaped txs the fallback protects (review finding). In-process only;
+# a restart resets the counters, which merely delays degraded scoring.
+_raw_fallback_attempts: Dict[tuple, Tuple[int, float]] = {}
 
 # Watermark cursor for the unanalyzed poll: network -> the highest
 # ingestion_timestamp scored, minus UNANALYZED_OVERLAP_SECONDS. Bounds all
@@ -285,9 +289,22 @@ def _resolve_raw_data(
 
         if needs_recovery and parsed is None:
             key = (network, row["tx_hash"])
-            attempts = _raw_fallback_attempts.get(key, 0) + 1
+            entry = _raw_fallback_attempts.get(key)
+            now_mono = time.monotonic()
+            if (
+                entry is not None
+                and now_mono - entry[1] < settings.RAW_FALLBACK_RETRY_SECONDS
+            ):
+                # Re-polled inside the pacing window: defer WITHOUT counting,
+                # or a busy drain loop exhausts the budget in seconds.
+                logger.debug(
+                    "Deferring %s: raw_data unrecoverable (attempt window)",
+                    row["tx_hash"][:16],
+                )
+                continue
+            attempts = (entry[0] if entry else 0) + 1
             if attempts < settings.RAW_FALLBACK_MAX_ATTEMPTS:
-                _raw_fallback_attempts[key] = attempts
+                _raw_fallback_attempts[key] = (attempts, now_mono)
                 logger.warning(
                     "Deferring %s: raw_data unrecoverable (attempt %d/%d)",
                     row["tx_hash"][:16], attempts,

@@ -136,9 +136,15 @@ class OgmiosClient:
 
         # Cache of resolved UTxO inputs for PENDING transactions.
         # Populated by the mempool monitor via queryLedgerState/utxo, consumed
-        # by _handle_roll_forward when the tx is confirmed in a block.
-        # Key: tx_hash, Value: {(input_tx_hash, input_index): {address, amount, assets}}
-        self._pending_input_cache: Dict[str, Dict[tuple, dict]] = {}
+        # by _handle_roll_forward when the tx is confirmed in a block; popped
+        # only AFTER the block durably persists, so a retry-exhausted insert
+        # or rollback replay re-parses with the enrichment intact.
+        # Key: tx_hash, Value: ({(input_tx_hash, input_index): {address,
+        # amount, assets}}, cached_at) — the timestamp lets the prune sweep
+        # evict entries whose tx never reached the pending index (e.g.
+        # collision tracking threw before track()), which previously leaked
+        # until restart.
+        self._pending_input_cache: Dict[str, Tuple[Dict[tuple, dict], datetime]] = {}
 
         # Telemetry — used by /health and pipeline_state
         self._started_at: datetime = datetime.now(timezone.utc)
@@ -283,7 +289,9 @@ class OgmiosClient:
             cache_entry[ref] = resolved
 
         if cache_entry:
-            self._pending_input_cache[tx_id] = cache_entry
+            self._pending_input_cache[tx_id] = (
+                cache_entry, datetime.now(timezone.utc),
+            )
             logger.debug(
                 f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
             )
@@ -533,12 +541,23 @@ class OgmiosClient:
                 logger.error(f"Input amount resolution failed (non-fatal): {e}")
 
         if normalized_txs:
+            # Raw store FIRST: when RAW_DATA_MAX_BYTES caps the ClickHouse
+            # copy, the blob must exist before the row becomes visible to
+            # the engine's unanalyzed poll, or the raw-fallback path races
+            # an in-flight write. Both steps are checkpoint-blocking and
+            # idempotent on replay (write-once files, RMT upsert), so the
+            # ordering is crash-safe in either direction.
+            await self._write_raw_payloads(normalized_txs, block_slot, now)
+
             # Batch persist to ClickHouse. Checkpoint-BLOCKING: retried with
             # backoff, then raises BlockPersistError so save_sync_point below
             # is never reached and the block replays after reconnect.
             await self._insert_block_with_retry(normalized_txs, block_slot)
 
-            await self._write_raw_payloads(normalized_txs, block_slot, now)
+            # Block is durable: the mempool enrichment is consumed. A
+            # BlockPersistError above leaves the cache intact for the replay.
+            for tx in normalized_txs:
+                self._pending_input_cache.pop(tx.tx_hash, None)
 
             # Batch upsert lifecycle CONFIRMED (single DB round-trip for whole block)
             try:
@@ -583,10 +602,12 @@ class OgmiosClient:
                 )
                 tx.network = self.network
 
-                # Apply cached input resolution from mempool observation
-                resolved = self._pending_input_cache.pop(tx.tx_hash, None)
-                if resolved:
-                    tx = self._apply_resolved_inputs(tx, resolved)
+                # Apply cached input resolution from mempool observation.
+                # Read-only here: the entry is popped only after the block
+                # persists, so a failed insert replays WITH the enrichment.
+                cached = self._pending_input_cache.get(tx.tx_hash)
+                if cached:
+                    tx = self._apply_resolved_inputs(tx, cached[0])
 
                 normalized_txs.append(tx)
                 confirmed_records.append(
@@ -605,10 +626,14 @@ class OgmiosClient:
     ) -> None:
         """Write full raw payloads to the local filesystem store.
 
-        Awaited before the checkpoint save: if a write fails and the process
-        crashes before the checkpoint is committed, the block is replayed on
-        restart and the write-once guard in _write_sync skips already-written
-        files."""
+        Checkpoint-BLOCKING when RAW_DATA_MAX_BYTES > 0: ClickHouse then
+        holds an empty-with-flag payload for oversized txs and the raw
+        store is the ONLY full copy, so a swallowed write failure would
+        silently destroy the engine's fallback for exactly the large
+        attack-shaped txs it protects (review finding). Uncapped, the
+        ClickHouse copy is complete and a failure only costs redundancy.
+        Replay-safe: the write-once guard in _write_sync skips
+        already-written files."""
         if not settings.RAW_STORE_ENABLED:
             return
         try:
@@ -618,6 +643,12 @@ class OgmiosClient:
                 if tx.raw_data
             ])
         except Exception as e:
+            if settings.RAW_DATA_MAX_BYTES > 0:
+                raise BlockPersistError(
+                    f"Block at slot {block_slot}: raw-store write failed and "
+                    f"RAW_DATA_MAX_BYTES > 0 makes the raw store load-bearing; "
+                    f"checkpoint NOT advanced, block will replay."
+                ) from e
             logger.error(f"Error writing raw store for block {block_slot}: {e}")
 
     @staticmethod
@@ -913,14 +944,23 @@ class OgmiosClient:
                 tx_id, (input_refs, now, tx_fee, first_input_addr, tx_ttl),
             )
 
-        # Prune stale entries (throttled: every 100 txs)
-        if len(self._seen_mempool_txs) % 100 == 0:
-            cutoff = now - timedelta(hours=2)
+        # Prune stale entries (throttled; knobs documented in config.py)
+        if len(self._seen_mempool_txs) % settings.MEMPOOL_PRUNE_EVERY_N_TXS == 0:
+            cutoff = now - timedelta(seconds=settings.MEMPOOL_PENDING_TTL_SECONDS)
             for k in self._pending.stale_ids(cutoff):
                 self._pending.untrack(k)
                 self._pending_input_cache.pop(k, None)
+            # Sweep cache entries by their own age too: an entry whose tx
+            # never reached the pending index (collision tracking threw
+            # before track()) is invisible to stale_ids and leaked forever.
+            orphaned = [
+                k for k, (_, cached_at) in self._pending_input_cache.items()
+                if cached_at < cutoff
+            ]
+            for k in orphaned:
+                self._pending_input_cache.pop(k, None)
             # Cap dedup set to prevent unbounded growth
-            if len(self._seen_mempool_txs) > 50_000:
+            if len(self._seen_mempool_txs) > settings.MEMPOOL_SEEN_TXS_MAX:
                 self._seen_mempool_txs.clear()
 
     async def _mempool_loop(self, ws):

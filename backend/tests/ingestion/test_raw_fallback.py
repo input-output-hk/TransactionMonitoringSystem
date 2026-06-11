@@ -78,6 +78,9 @@ class TestResolveRawData:
 
     def test_unrecoverable_defers_then_degrades(self, monkeypatch):
         monkeypatch.setattr(settings, "RAW_FALLBACK_MAX_ATTEMPTS", 3)
+        # No pacing window: each poll counts (the wall-clock pacing is
+        # covered by TestAttemptPacing).
+        monkeypatch.setattr(settings, "RAW_FALLBACK_RETRY_SECONDS", 0)
         with patch("app.analysis.engine.raw_store.read_confirmed", return_value=None):
             # First two attempts: deferred (no row returned, no score written).
             assert _resolve_raw_data([_row("", truncated=1)], "preprod") == []
@@ -88,6 +91,35 @@ class TestResolveRawData:
         assert rows[0]["raw_data"] is None
         assert rows[0]["raw_data_unavailable"] is True
         # Bookkeeping is cleared so a future re-score starts fresh.
+        assert _raw_fallback_attempts == {}
+
+    def test_rapid_repolls_do_not_burn_attempts(self, monkeypatch):
+        # The drain loop re-polls every 0.5 s under load; without wall-clock
+        # pacing the 3-attempt budget burned in ~1.5 s and degraded-scored
+        # exactly the large txs the fallback protects (review finding).
+        monkeypatch.setattr(settings, "RAW_FALLBACK_MAX_ATTEMPTS", 3)
+        monkeypatch.setattr(settings, "RAW_FALLBACK_RETRY_SECONDS", 30)
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("app.analysis.engine.time.monotonic", lambda: clock["t"])
+        with patch("app.analysis.engine.raw_store.read_confirmed", return_value=None):
+            for _ in range(5):
+                assert _resolve_raw_data([_row("", truncated=1)], "preprod") == []
+                clock["t"] += 0.5  # drain-loop cadence
+        key = ("preprod", TX)
+        assert _raw_fallback_attempts[key][0] == 1  # still one counted attempt
+
+    def test_attempts_advance_with_wall_clock(self, monkeypatch):
+        monkeypatch.setattr(settings, "RAW_FALLBACK_MAX_ATTEMPTS", 3)
+        monkeypatch.setattr(settings, "RAW_FALLBACK_RETRY_SECONDS", 30)
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("app.analysis.engine.time.monotonic", lambda: clock["t"])
+        with patch("app.analysis.engine.raw_store.read_confirmed", return_value=None):
+            assert _resolve_raw_data([_row("", truncated=1)], "preprod") == []
+            clock["t"] += 31.0
+            assert _resolve_raw_data([_row("", truncated=1)], "preprod") == []
+            clock["t"] += 31.0
+            rows = _resolve_raw_data([_row("", truncated=1)], "preprod")
+        assert rows[0]["raw_data_unavailable"] is True
         assert _raw_fallback_attempts == {}
 
     def test_legitimately_absent_raw_data_not_deferred(self):

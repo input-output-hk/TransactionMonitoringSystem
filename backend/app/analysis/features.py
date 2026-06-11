@@ -114,10 +114,16 @@ def extract_lovelace(value: Any) -> int:
     Returns ``0`` on anything unrecognised so callers can default safely.
     """
     if isinstance(value, dict):
-        ada = value.get("ada")
-        if isinstance(ada, dict):
-            return int(ada.get("lovelace", 0) or 0)
-        return int(value.get("lovelace", 0) or 0)
+        # Same defensive contract as the bare path: a malformed quantity in
+        # untrusted chain data must degrade to 0 (tx still ingested and
+        # scored), never abort the parse and skip the tx (recall-first).
+        try:
+            ada = value.get("ada")
+            if isinstance(ada, dict):
+                return int(ada.get("lovelace", 0) or 0)
+            return int(value.get("lovelace", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
     if value:
         try:
             return int(value)
