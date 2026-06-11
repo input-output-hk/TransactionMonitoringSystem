@@ -136,10 +136,10 @@ class TestDriftGuard:
     baseline-poisoning path where one wide-distribution dump de-sensitises a
     per-script scorer."""
 
-    def _row(self, p99, feature="value_cbor_bytes"):
+    def _row(self, p99, feature="value_cbor_bytes", p50=5.0):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
-        return ("preprod", "per_script", "addrA", feature, 5.0, p99, 300, now, 90)
+        return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
     @patch("app.analysis.baselines.clickhouse")
     def test_drift_holds_previous_baseline(self, mock_ch):
@@ -173,6 +173,71 @@ class TestDriftGuard:
         rows = [self._row(p99=1_000_000.0)]
         assert _filter_drifted(rows) == rows
         mock_ch.insert_baseline_drift_event.assert_not_called()
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_narrowing_p99_recompute_applies_and_records(self, mock_ch):
+        # The poisoned-first-baseline recovery path: a wide stored p99
+        # narrowing back down is strictly MORE sensitive (recall-safe), so
+        # it must apply — holding it made the poisoned row self-protecting.
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 100.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        rows = [self._row(p99=10.0)]  # 90% change, narrowing
+        assert _filter_drifted(rows) == rows
+        kwargs = mock_ch.insert_baseline_drift_event.call_args.kwargs
+        assert kwargs["axis"] == "p99"
+        assert kwargs["applied"] is True
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_zero_p99_prior_never_holds(self, mock_ch):
+        # A p99=0 prior is rejected as unusable at resolution time, so it
+        # protects nothing; its first positive recompute must apply.
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 0.0, "p99": 0.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        rows = [self._row(p99=5.0, p50=0.0)]
+        assert _filter_drifted(rows) == rows
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_rising_p50_recompute_held(self, mock_ch):
+        # Median poisoning: normalise() subtracts p50 first, so raising it
+        # de-sensitises the axis exactly like widening p99.
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 10.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        kept = _filter_drifted([self._row(p99=11.0, p50=20.0)])
+        assert kept == []
+        kwargs = mock_ch.insert_baseline_drift_event.call_args.kwargs
+        assert kwargs["axis"] == "p50"
+        assert kwargs["applied"] is False
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_falling_p50_recompute_applies(self, mock_ch):
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 10.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        rows = [self._row(p99=10.0, p50=1.0)]
+        assert _filter_drifted(rows) == rows
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_rising_p50_from_zero_held(self, mock_ch):
+        # Unlike p99=0 (unusable baseline), a p50=0 prior is fully usable
+        # and maximally sensitive; holding the rise keeps it that way.
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 0.0, "p99": 10.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        kept = _filter_drifted([self._row(p99=10.0, p50=2.0)])
+        assert kept == []
 
 
 class TestChainTimeWindows:

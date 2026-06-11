@@ -900,6 +900,121 @@ class TestSuppressionEscape:
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.score == -1.0
 
+    def test_single_nft_drain_one_lovelace_return_not_silenced(self, scorer):
+        # ATTACK-MUST-FIRE boundary case: one NFT drained, 1 lovelace
+        # returned to the script, real (non-lazy) validator. The asset
+        # floor signal is normalise(1, p50=0, p99=2) = 1/(2+EPSILON)
+        # ~= 0.49999975 — a hair BELOW the old 0.5 threshold, so the
+        # strict > comparison silenced exactly this single-NFT drain.
+        inputs = [
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
+            {"address": SCRIPT,
+             "value": {"lovelace": 5_000_000, **self._nft(0)}},
+        ]
+        outputs = [
+            {"address": WALLET, "value": {
+                "lovelace": 9_500_000,
+                _NFT_POLICY: {("00" * 4): 1},
+            }},
+            {"address": SCRIPT, "value": {"lovelace": 1}},
+        ]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"payload{i}",
+             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            for i in range(2)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.sub_scores["s_exunits_inv"] < 0.8  # not lazy
+        assert result.score != -1.0
+        assert 31.0 <= result.score <= 59.0  # exactly Moderate
+        assert "extraction_escape_moderate_cap" in result.reasons
+
+    def test_small_nft_drain_under_capped_poisoned_baseline_not_silenced(
+        self, scorer, monkeypatch
+    ):
+        # ATTACK-MUST-FIRE under poisoning: a per-script n_assets baseline
+        # poisoned wide is capped at 5x the bootstrap anchor (p99=10), so a
+        # 4-NFT drain floors at normalise(4, 2, 10) = 0.25 >= 0.10 and the
+        # escape fires; with the old 0.5 threshold it was silenced.
+        _plant_baselines(monkeypatch, {
+            ("per_script", "n_assets_out_of_script"): {
+                "p50": 2.0, "p99": 1e6, "sample_count": 500,
+                "computed_at": None, "window_days": 90,
+            },
+        })
+        n = 4
+        inputs = [
+            {"address": SCRIPT,
+             "value": {"lovelace": 2_700_000, **self._nft(i)}}
+            for i in range(n)
+        ]
+        outputs = [
+            {"address": WALLET, "value": {
+                "lovelace": 10_000_000,
+                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n)},
+            }},
+            {"address": SCRIPT, "value": {"lovelace": 1}},
+        ]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"payload{i}",
+             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            for i in range(n)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.score != -1.0
+        assert 31.0 <= result.score <= 59.0
+        assert "extraction_escape_moderate_cap" in result.reasons
+
+    def test_escape_fires_at_exact_threshold(self):
+        # Structural boundary pin for >= : a floor signal exactly AT the
+        # configured threshold must escape, not suppress.
+        import app.analysis.scorers.multiple_sat as ms_mod
+
+        axes = ms_mod._ScriptAxes(
+            lovelace_in=1, lovelace_out=1, net_value=0, n_assets_out=0,
+            exunits_per_input=9e6, s_extraction_lov=0.0,
+            s_extraction_assets=0.0, s_extraction=0.0,
+            s_extraction_floor=ms_mod._SUPP_ESCAPE_FLOOR_MIN,
+            s_exunits_inv=0.0, s_inputs=0.0, s_recurrence=0.0,
+            bl_source="bootstrap",
+        )
+        suppressed, escaped = ms_mod._suppression_outcome(
+            axes, allowlisted=False, uniform_sweep=False, floored=False,
+        )
+        assert (suppressed, escaped) == (False, True)
+
+    def test_escaped_finding_always_bands_moderate(self, scorer, monkeypatch):
+        # Structural (not fixture-empirical): WHATEVER the weighted score,
+        # an escaped finding must band exactly Moderate — the floor closes
+        # the hole where a small weighted sum landed in Informational
+        # (no action) despite the escape deliberately un-silencing it.
+        import app.analysis.scorers.multiple_sat as ms_mod
+        from app.analysis.normalise import score_to_band
+
+        monkeypatch.setattr(
+            ms_mod, "_suppression_outcome", lambda *a, **k: (False, True),
+        )
+        # Low-extraction state-continuation shape: tiny weighted score.
+        inputs = [
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000}}
+            for _ in range(2)
+        ]
+        outputs = [
+            {"address": WALLET, "value": {"lovelace": 100_000}},
+            {"address": SCRIPT, "value": {"lovelace": 9_700_000}},
+        ]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"payload{i}",
+             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            for i in range(2)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert 31.0 <= result.score <= 59.0
+        assert score_to_band(result.score) == "Moderate"
+
 
 class TestBaselinePoisoningResistance:
     """A pre-trained (poisoned) wide per-script extraction baseline must not
@@ -943,5 +1058,46 @@ class TestBaselinePoisoningResistance:
         # 12 distinct NFTs drained vs capped p99 (5 x bootstrap 2 = 10):
         # extraction saturates despite the poisoned baseline, and the
         # lazy-validator floor lands the score in High.
+        assert result.score >= 60.0
+        assert "lazy_validator_band_floor" in result.reasons
+
+    def test_median_poisoned_baseline_cannot_silence_drain(self, scorer, monkeypatch):
+        # ATTACK-MUST-FIRE for the p50 vector: normalise() subtracts p50
+        # first, so a poisoned MEDIAN (p50=500 assets, p99=1000) made every
+        # real drain normalise to 0 — the p99 cap alone never touched it.
+        # With the p50 bound (derived from the capped p99), the axis stays
+        # alive and the lazy-validator floor fires.
+        poisoned = {
+            ("per_script", "net_value_out_of_script"): {
+                "p50": 1e14, "p99": 1e15, "sample_count": 500,
+                "computed_at": None, "window_days": 90,
+            },
+            ("per_script", "n_assets_out_of_script"): {
+                "p50": 500.0, "p99": 1000.0, "sample_count": 500,
+                "computed_at": None, "window_days": 90,
+            },
+        }
+        _plant_baselines(monkeypatch, poisoned)
+        n = 4
+        nft_policy = "d" * 56
+        inputs = [
+            {"address": SCRIPT,
+             "value": {"lovelace": 2_700_000,
+                       nft_policy: {f"{i:02d}" * 4: 1 for i in range(i * 3, i * 3 + 3)}}}
+            for i in range(n)
+        ]
+        outputs = [
+            {"address": WALLET,
+             "value": {"lovelace": 10_000_000,
+                       nft_policy: {f"{i:02d}" * 4: 1 for i in range(12)}}},
+            {"address": SCRIPT, "value": {"lovelace": 1}},
+        ]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"p{i}",
+             "executionUnits": {"memory": 600, "cpu": 100}}
+            for i in range(n)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.score >= 60.0
         assert "lazy_validator_band_floor" in result.reasons

@@ -72,6 +72,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
+    BAND_MODERATE_THRESHOLD,
     normalise,
     normalise_inverted,
 )
@@ -618,7 +619,10 @@ def _suppression_outcome(
     escape = (
         _SUPP_ESCAPE_ENABLED
         and not allowlisted
-        and axes.s_extraction_floor > _SUPP_ESCAPE_FLOOR_MIN
+        # >= not >: an at-threshold extraction must fire (recall-first);
+        # normalise() adds EPSILON to its denominator, so boundary cases
+        # land a hair BELOW the nominal ratio (see the config comment).
+        and axes.s_extraction_floor >= _SUPP_ESCAPE_FLOOR_MIN
     )
     return (not escape), escape
 
@@ -804,10 +808,13 @@ class MultipleSatScorer(BaseScorer):
         if escaped:
             # High extraction under a benign-looking shape: never silence
             # (recall), never elevate to High (the large-owner-sweep FP
-            # risk). The uniform-sweep cap above already lands sweeps at
-            # the top of Moderate; apply the same cap to the value-returned
-            # arm so both escape paths band identically.
-            final = min(final, BAND_MODERATE_MAX)
+            # risk). Banded EXACTLY Moderate: capped at the top of the band
+            # like the uniform-sweep guard, and FLOORED at the bottom —
+            # without the floor, an escaped finding whose weighted score
+            # fell below the Moderate threshold landed in Informational
+            # (no action), re-silencing exactly the finding the escape
+            # exists to keep.
+            final = min(max(final, BAND_MODERATE_THRESHOLD), BAND_MODERATE_MAX)
 
         redeemer_count = len(spend_redeemer_payloads)
         return ScorerResult(

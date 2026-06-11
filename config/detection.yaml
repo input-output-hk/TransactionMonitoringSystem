@@ -53,15 +53,22 @@ baselines:
   # contract may legitimately run up to K times the protocol-grounded anchor
   # but never so far that the anchor's threat model becomes unreachable.
   per_script_p99_cap_multiplier: 5.0
-  # Drift guard on baseline recomputes. A new p99 differing from the stored
-  # one by more than p99_threshold (relative) is HELD: the prior baseline
-  # stays active and the rejected candidate is logged to
-  # baseline_drift_events for analyst review. Poisoning a per-script
-  # baseline now requires moving p99 slowly under the threshold, leaving a
+  # Drift guard on baseline recomputes. Direction-aware: only moves that
+  # DE-SENSITISE detection are held (p99 widening, p50 rising); a narrowing
+  # p99 or falling p50 makes the axis MORE sensitive and always applies
+  # (holding narrowing made a poisoned first baseline self-protecting: every
+  # honest recompute that shrank it back was itself a >threshold change).
+  # Held candidates are logged to baseline_drift_events for analyst review;
+  # recall-safe drifts are applied but still logged. Poisoning a per-script
+  # baseline now requires moving it slowly under the threshold, leaving a
   # multi-day trail, instead of one wide-distribution dump.
   drift:
     enabled: true
     p99_threshold: 0.50
+    # p50 drift hold. normalise() subtracts p50 first, so RAISING the
+    # median is the second poisoning vector (values below the learned
+    # median score 0); same relative scale as p99_threshold.
+    p50_threshold: 0.50
 
 scorers:
 
@@ -176,18 +183,23 @@ scorers:
     # extraction floor signal (s_extraction_floor, raw per-script/bootstrap
     # anchors, so the per-script headroom cannot weaken it) exceeds
     # extraction_floor_min, the shape is no longer confidently benign: the
-    # finding is kept and capped at the top of Moderate instead of silenced
-    # to no-finding. The benign populations the suppressions were built for
-    # sit far below the threshold: a state machine returning value scores
-    # ~0 on extraction, and the observed small owner-sweeps ~0.002 on the
-    # lovelace axis. 0.5 leaves them suppressed while any multi-asset drain
-    # (asset axis saturates at 1.0 with >2 net assets out) or a lovelace
-    # drain above ~half the bootstrap p99 surfaces for review. Recall-first:
-    # a Moderate false positive on a large owner-sweep is strictly better
-    # than a silenced real drain.
+    # finding is kept and banded Moderate (floored AND capped) instead of
+    # silenced to no-finding. Boundary analysis (do not raise without
+    # re-running the attack-must-fire tests): the benign maximum observed
+    # is a 12-input owner sweep at ~0.053 on the lovelace axis (state
+    # machines ~0, small sweeps ~0.002). Attack minima: a single-NFT drain
+    # on the n_assets bootstrap anchor (p50=0, p99=2) normalises to
+    # ~0.49999975 — NOT 0.5, normalise() adds EPSILON to the denominator,
+    # so the old 0.5 threshold silenced it; a 2-NFT drain under a maximally
+    # poisoned per-script baseline capped at 5x the anchor (p99=10)
+    # normalises to 0.2. 0.10 sits ~2x above the worst benign and 2x below
+    # the worst capped-poisoned attack. Compared with >=, not >: an
+    # at-threshold extraction must fire (recall-first). A Moderate false
+    # positive on a large owner-sweep is strictly better than a silenced
+    # real drain.
     suppression_escape:
       enabled: true
-      extraction_floor_min: 0.5
+      extraction_floor_min: 0.10
 
   # ------------------------------------------------------------------
   large_datum:

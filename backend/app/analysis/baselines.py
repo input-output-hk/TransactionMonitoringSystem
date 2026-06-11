@@ -23,13 +23,15 @@ from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
 
-# Drift guard (baselines.drift in config/detection.yaml): a recompute whose
-# p99 jumps beyond the threshold relative to the stored baseline is HELD
-# (prior row stays active) and logged to baseline_drift_events. This is the
+# Drift guard (baselines.drift in config/detection.yaml): a recompute that
+# drifts beyond the threshold in a RECALL-HARMFUL direction (p99 widening,
+# p50 rising) is HELD (prior row stays active); recall-safe drifts apply.
+# All drift events are logged to baseline_drift_events. This is the
 # anti-poisoning control for per-script baselines; see the config comment.
 _DRIFT_CFG = baselines_config()["drift"]
 _DRIFT_ENABLED: bool = bool(_DRIFT_CFG["enabled"])
 _DRIFT_P99_THRESHOLD: float = float(_DRIFT_CFG["p99_threshold"])
+_DRIFT_P50_THRESHOLD: float = float(_DRIFT_CFG["p50_threshold"])
 
 # Features computed from utxo_features table
 _UTXO_FEATURES = [
@@ -279,22 +281,37 @@ def check_drift(
     new_p99: float,
     threshold: float = 0.50,
 ) -> bool:
-    """Return True if the new p99 drifted beyond threshold from the old one."""
+    """Return True if the new value drifted beyond threshold from the old.
+
+    Symmetric magnitude check (works for any percentile); the HOLD decision
+    is direction-aware and lives in ``_filter_drifted``.
+    """
     if old_p99 == 0:
         return new_p99 > 0
     return abs(new_p99 - old_p99) / (abs(old_p99) + 1e-9) > threshold
 
 
+def _drift_ratio(old: float, new: float) -> float:
+    return abs(new - old) / (abs(old) + 1e-9)
+
+
 def _filter_drifted(rows: List[tuple]) -> List[tuple]:
-    """Hold baseline updates whose p99 drifted beyond the configured
-    threshold from the stored baseline.
+    """Hold baseline recomputes that drift in a RECALL-HARMFUL direction.
+
+    Direction-aware: only de-sensitising moves are held — a WIDENING p99
+    (new > old) or a RISING p50 (the median-poisoning vector: normalise()
+    subtracts p50 first). A narrowing p99 or falling p50 makes detection
+    strictly more sensitive and always applies; holding those made a
+    poisoned first baseline self-protecting, because every honest recompute
+    that shrank it back was itself a >threshold change. A prior with
+    p99 == 0 never holds: _baseline_is_usable already rejects it at
+    resolution time, so it protects nothing.
 
     Held rows are NOT inserted (the ReplacingMergeTree keeps the prior row
-    as the active baseline) and are recorded in ``baseline_drift_events``
-    plus a warning log so an analyst can review and, if legitimate, apply
-    them by re-running the recompute after raising the threshold or
-    clearing the stored row. First-ever baselines (no prior row) always
-    pass: drift is only definable against history.
+    as the active baseline). Every drift event — held or applied — is
+    recorded in ``baseline_drift_events`` (axis + applied flag) so an
+    analyst can review; held ones also log a warning. First-ever baselines
+    (no prior row) always pass: drift is only definable against history.
 
     Row tuple shape: ``(network, scope_type, scope_id, feature, p50, p99,
     sample_count, computed_at, window_days)``.
@@ -303,31 +320,50 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
         return rows
     kept: List[tuple] = []
     for row in rows:
-        network, scope_type, scope_id, feature, _p50, new_p99 = row[:6]
+        network, scope_type, scope_id, feature, new_p50, new_p99 = row[:6]
+        new_p50, new_p99 = float(new_p50), float(new_p99)
         computed_at = row[7]
         prior = clickhouse.get_baseline(network, scope_type, scope_id, feature)
         if prior is None:
             kept.append(row)
             continue
-        old_p99 = float(prior["p99"])
-        if check_drift(old_p99, float(new_p99), _DRIFT_P99_THRESHOLD):
-            drift_ratio = (
-                abs(float(new_p99) - old_p99) / (abs(old_p99) + 1e-9)
-            )
+        old_p50, old_p99 = float(prior["p50"]), float(prior["p99"])
+
+        p99_drifted = check_drift(old_p99, new_p99, _DRIFT_P99_THRESHOLD)
+        p50_drifted = check_drift(old_p50, new_p50, _DRIFT_P50_THRESHOLD)
+        p99_hold = p99_drifted and new_p99 > old_p99 and old_p99 > 0
+        p50_hold = p50_drifted and new_p50 > old_p50
+        held = p99_hold or p50_hold
+
+        drifted_axes = []
+        if p99_drifted:
+            drifted_axes.append(("p99", old_p99, new_p99))
+        if p50_drifted:
+            drifted_axes.append(("p50", old_p50, new_p50))
+        for axis, old_v, new_v in drifted_axes:
             try:
                 clickhouse.insert_baseline_drift_event(
                     network, scope_type, scope_id, feature,
-                    old_p99, float(new_p99), drift_ratio, computed_at,
+                    old_v, new_v, _drift_ratio(old_v, new_v), computed_at,
+                    axis=axis, applied=not held,
                 )
             except Exception:
                 logger.exception("Failed to record baseline drift event")
+
+        if held:
+            axis, old_v, new_v = drifted_axes[0]
             logger.warning(
-                "Baseline drift HELD: %s/%s %s/%s p99 %.4g -> %.4g "
-                "(ratio %.2f > %.2f); prior baseline stays active",
+                "Baseline drift HELD: %s/%s %s/%s %s %.4g -> %.4g "
+                "(ratio %.2f); prior baseline stays active",
                 scope_type, scope_id[:16], network, feature,
-                old_p99, float(new_p99), drift_ratio, _DRIFT_P99_THRESHOLD,
+                axis, old_v, new_v, _drift_ratio(old_v, new_v),
             )
             continue
+        if drifted_axes:
+            logger.info(
+                "Baseline drift applied (recall-safe direction): %s/%s %s/%s",
+                scope_type, scope_id[:16], network, feature,
+            )
         kept.append(row)
     return kept
 

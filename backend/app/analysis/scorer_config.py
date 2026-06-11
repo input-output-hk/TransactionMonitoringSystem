@@ -221,6 +221,10 @@ _P99_CAP_MULTIPLIER: float = float(
     _CFG["baselines"]["per_script_p99_cap_multiplier"]
 )
 
+# Minimum (p99 - p50) / p50 spread for a usable baseline; reused here to
+# derive the p50 bound that keeps a capped baseline non-degenerate.
+_MIN_SPREAD_RATIO: float = float(_CFG["baselines"]["min_spread_ratio"])
+
 
 def composite_corroboration_config() -> Dict[str, Any]:
     """Return the top-level composite_corroboration block.
@@ -343,6 +347,15 @@ def resolved_or_bootstrap(
     to K times the protocol-grounded anchor, but never so far that the
     anchor's threat model becomes unreachable.
 
+    The p50 is bounded too: ``normalise(value, p50, p99)`` subtracts p50
+    first, so drifting the MEDIAN upward de-sensitises an axis exactly like
+    widening the tail (values below the learned median score 0), and the
+    p99 cap alone could even create a degenerate p50 >= p99 pair from a
+    median-poisoned baseline. The bound derives from the capped p99 and
+    min_spread_ratio (never from the anchor p50, which is legitimately 0
+    for count-like features), guaranteeing the capped pair keeps a usable
+    spread.
+
     Returns ``(p50, p99, source)`` where ``source`` is one of
     ``"per_script" | "per_policy" | "global" | "bootstrap"``.
     """
@@ -355,7 +368,8 @@ def resolved_or_bootstrap(
         source = "bootstrap"
     elif _P99_CAP_MULTIPLIER > 0:
         _, anchor_p99 = anchor(bootstrap, bootstrap_key)
-        cap = _P99_CAP_MULTIPLIER * anchor_p99
-        if anchor_p99 > 0 and p99 > cap:
-            p99 = cap
+        if anchor_p99 > 0:
+            cap = _P99_CAP_MULTIPLIER * anchor_p99
+            p99 = min(p99, cap)
+            p50 = min(p50, cap / (1.0 + _MIN_SPREAD_RATIO))
     return p50, p99, source

@@ -634,18 +634,26 @@ def insert_baseline_drift_event(
     new_p99: float,
     drift_ratio: float,
     detected_at: datetime,
+    axis: str = "p99",
+    applied: bool = False,
 ):
-    """Record a HELD baseline update (drift beyond threshold; not applied)."""
+    """Record a baseline drift event (held or applied).
+
+    ``axis`` names the drifting percentile; the legacy ``old_p99``/
+    ``new_p99`` column names are kept but hold that axis's old/new values.
+    ``applied`` is True for recall-safe drifts that were inserted anyway.
+    """
     _get_client().execute(
         """
         INSERT INTO baseline_drift_events (
             network, scope_type, scope_id, feature,
-            old_p99, new_p99, drift_ratio, detected_at
+            old_p99, new_p99, drift_ratio, detected_at, axis, applied
         ) VALUES
         """,
         [(
             network, scope_type, scope_id, feature,
             float(old_p99), float(new_p99), float(drift_ratio), detected_at,
+            axis, 1 if applied else 0,
         )],
     )
 

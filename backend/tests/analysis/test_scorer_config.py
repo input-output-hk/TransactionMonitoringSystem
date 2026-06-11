@@ -276,3 +276,56 @@ class TestPerScriptP99Cap:
             "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
         )
         assert (p50, p99, source) == (1.0, 9.0, "bootstrap")
+
+
+class TestPerScriptP50Cap:
+    """normalise() subtracts p50 first, so a poisoned MEDIAN de-sensitises
+    an axis exactly like a widened tail; the p99 cap alone left that vector
+    open (review finding). The p50 bound derives from the capped p99 and
+    min_spread_ratio, never from the anchor p50 (legitimately 0 for
+    count-like features)."""
+
+    def test_poisoned_p50_clamped_to_derived_bound(self, monkeypatch):
+        import app.analysis.scorer_config as sc
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (1e12, 1e15, "per_script"),
+        )
+        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        p50, p99, _ = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        cap = sc._P99_CAP_MULTIPLIER * 2.0
+        assert p99 == cap
+        assert p50 == pytest.approx(cap / (1.0 + sc._MIN_SPREAD_RATIO))
+        # The axis is not dead: an attack above the capped p99 still
+        # normalises positive instead of scoring 0 against the poisoned pair.
+        from app.analysis.normalise import normalise
+        assert normalise(12.0, p50=p50, p99=p99) > 0.0
+
+    def test_p50_below_bound_unchanged(self, monkeypatch):
+        import app.analysis.scorer_config as sc
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (2.0, 5.0, "per_script"),
+        )
+        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        p50, p99, _ = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        assert (p50, p99) == (2.0, 5.0)
+
+    def test_p50_bound_robust_when_anchor_p50_zero(self, monkeypatch):
+        # The bound comes from the capped p99, so an anchor p50 of 0 (the
+        # n_assets case) cannot collapse the clamp to zero.
+        import app.analysis.scorer_config as sc
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (1e6, 1e6, "per_script"),
+        )
+        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        p50, p99, _ = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        assert p50 > 0.0
+        assert p50 < p99

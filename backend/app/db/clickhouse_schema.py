@@ -552,10 +552,23 @@ def create_all(client: Client) -> None:
             old_p99     Float64,
             new_p99     Float64,
             drift_ratio Float64,
-            detected_at DateTime
+            detected_at DateTime,
+            axis        String DEFAULT 'p99',
+            applied     UInt8 DEFAULT 0
         ) ENGINE = MergeTree
         ORDER BY (network, detected_at)
     """)
+    # Direction-aware drift guard additions (migration for existing tables):
+    # axis = which percentile drifted (legacy old_p99/new_p99 columns carry
+    # that axis's values); applied = recall-safe drift inserted anyway.
+    client.execute(
+        "ALTER TABLE baseline_drift_events "
+        "ADD COLUMN IF NOT EXISTS axis String DEFAULT 'p99'"
+    )
+    client.execute(
+        "ALTER TABLE baseline_drift_events "
+        "ADD COLUMN IF NOT EXISTS applied UInt8 DEFAULT 0"
+    )
 
     # Startup guard: CREATE IF NOT EXISTS above silently keeps a legacy
     # table's engine/partitioning, so verify the live layout is v2 and
