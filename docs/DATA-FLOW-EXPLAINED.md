@@ -68,18 +68,18 @@ The filesystem holds the complete raw Ogmios payload for every transaction, both
 
 ### Analysis Engine
 
-A background process queries ClickHouse for unscored transactions and runs a multi-class detection pipeline. The query admits a transaction only when its inputs are visible — either `input_count = 0` (treasury or collateral-only edge cases that need no input enrichment) or at least one row exists in `transaction_inputs` for that tx. ClickHouse `INSERT` statements are atomic per-statement, so "any row exists" is a sufficient witness that all input rows for the tx are visible. This guarantees that downstream scorers receive complete UTxO context regardless of where in the ingestion pipeline the analysis poll lands.
+A background process queries ClickHouse for unscored transactions and runs a multi-class detection pipeline. The query admits a transaction only when its inputs are visible: either `input_count = 0` (treasury or collateral-only edge cases that need no input enrichment) or at least one row exists in `transaction_inputs` for that tx. ClickHouse `INSERT` statements are atomic per-statement, so "any row exists" is a sufficient witness that all input rows for the tx are visible. This guarantees that downstream scorers receive complete UTxO context regardless of where in the ingestion pipeline the analysis poll lands.
 
 Each batch then goes through four enrichment phases before scoring:
 
 1. **Input address resolution**: resolves input addresses from `transaction_inputs` table and patches `raw_data` in-place so scorers have complete UTxO context.
 2. **Collision enrichment**: queries PostgreSQL `mempool_collisions` for transactions involved in UTxO input collisions or displacements (feeds the Front-Running scorer).
 3. **Cycle enrichment**: runs bounded BFS in the transfer graph to detect value cycles returning to origin within 6 hops (feeds the Circular scorer).
-4. **Sandwich enrichment**: detects structural three-transaction patterns at the same script address within a 5-slot window (feeds the Sandwich scorer).
+4. **Sandwich enrichment**: detects a wallet attacker's two legs bracketing a victim's tx (in `(slot, block_index)` order) at the same script address within a 5-slot window, with a net-ADA profit floor (feeds the Sandwich scorer).
 
 After enrichment, each transaction is scored by 9 independent attack-class scorers (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing). Each scorer has a gate condition (cheap check to skip inapplicable transactions) and a score function (weighted sub-score composition producing a 0-100 risk score). Sub-scores use percentile-based normalisation against per-script or per-policy baselines, falling back to global baselines or fixed anchors.
 
-The output is a 9-element score vector per transaction, written to `tx_class_scores` in ClickHouse along with the max score, max class, risk band (Low/Moderate/High/Critical), and sub-score breakdowns.
+The output is a 9-element score vector per transaction, written to `tx_class_scores` in ClickHouse along with the max score, max class, risk band (Informational/Moderate/High/Critical), sub-score breakdowns, per-class evidence, and a cross-class corroboration count (how many distinct classes scored above the corroboration threshold). The corroboration count is a triage flag only: it does not affect the risk band.
 
 ## 3. Transaction Lifecycle: State Transitions
 

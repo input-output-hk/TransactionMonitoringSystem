@@ -162,7 +162,7 @@ export function AttacksPage() {
 						</Select>
 						<MultiSelect<Severity>
 							options={[
-								{ value: "LOW", label: "Low" },
+								{ value: "INFORMATIONAL", label: "Informational" },
 								{ value: "MEDIUM", label: "Medium" },
 								{ value: "HIGH", label: "High" },
 								{ value: "CRITICAL", label: "Critical" },

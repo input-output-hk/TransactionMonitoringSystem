@@ -4,9 +4,10 @@ import json
 import logging
 import re
 from typing import Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Security, Query
+from fastapi import APIRouter, HTTPException, Request, Security, Query
 from pydantic import BaseModel
 
+from app import audit
 from app.db import postgres
 from app.auth import verify_api_key
 from app.config import settings
@@ -78,6 +79,7 @@ async def get_entity_state(
 
 @router.put("/{entity_type}/{entity_id}")
 async def set_entity_state(
+    request: Request,
     entity_type: str,
     entity_id: str,
     state: Dict[str, Any],
@@ -109,6 +111,14 @@ async def set_entity_state(
         logger.info(
             "Entity state updated: network=%s type=%s id=%s size=%d",
             query_network, entity_type, entity_id, size,
+        )
+        await audit.record(
+            event_type="entity_state",
+            action="put",
+            entity_type=entity_type,
+            entity_id=f"{query_network}:{entity_id}",
+            details={"size_bytes": size},
+            request=request,
         )
         return {
             "message": "Entity state updated",

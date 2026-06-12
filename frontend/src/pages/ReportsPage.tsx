@@ -193,7 +193,7 @@ export function ReportsPage() {
 						</SelectTrigger>
 						<SelectContent>
 							<SelectItem value="all">All</SelectItem>
-							<SelectItem value="LOW">Low</SelectItem>
+							<SelectItem value="INFORMATIONAL">Informational</SelectItem>
 							<SelectItem value="MEDIUM">Medium</SelectItem>
 							<SelectItem value="HIGH">High</SelectItem>
 							<SelectItem value="CRITICAL">Critical</SelectItem>

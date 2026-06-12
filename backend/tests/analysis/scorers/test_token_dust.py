@@ -1,7 +1,8 @@
 """Unit tests for the Token Dust scorer (Class 1)."""
 
 import pytest
-from app.analysis.scorers.token_dust import TokenDustScorer
+from app.analysis.scorers.token_dust import TokenDustScorer, _DOS_VALUE_CBOR_MIN
+from app.analysis.features import _estimate_value_cbor_bytes
 
 
 @pytest.fixture
@@ -48,11 +49,33 @@ class TestGate:
         out = _make_output(SCRIPT_ADDR, policies={"policyA": {"tok1": 1}})
         assert scorer.gate(_features([out])) is False
 
-    def test_script_with_bundle_passes(self, scorer):
+    def test_small_benign_bundle_rejected(self, scorer):
+        # 2-6 pair protocol multi-asset UTxOs (DEX pool state, lending offers)
+        # are not plausible value-bloat DoS: too few pairs and tiny Value CBOR.
+        # They must produce no finding at all (gate False), not a band-capped
+        # Moderate alert. This is the dominant former false positive.
         out = _make_output(
             SCRIPT_ADDR,
             policies={"policyA": {"tok1": 1, "tok2": 1}},
         )
+        assert _estimate_value_cbor_bytes(out["value"]) < _DOS_VALUE_CBOR_MIN
+        assert scorer.gate(_features([out])) is False
+
+    def test_high_pair_bundle_passes_pair_branch(self, scorer):
+        # >= dos_asset_min (15) distinct pairs is the canonical DoS shape.
+        policies = {f"policy{i:03d}": {"x": 1} for i in range(15)}
+        out = _make_output(SCRIPT_ADDR, policies=policies)
+        assert scorer.gate(_features([out])) is True
+
+    def test_high_cbor_low_pair_passes_byte_branch(self, scorer):
+        # Long-asset-name evasion: fewer than 15 pairs, but the serialized
+        # Value CBOR crosses dos_value_cbor_min. The byte branch must engage so
+        # an attacker cannot dodge the pair-count branch with verbose names.
+        policies = {f"{i:056d}": {("a" * 64): 1} for i in range(10)}
+        out = _make_output(SCRIPT_ADDR, policies=policies)
+        _, token_count = (None, sum(len(v) for v in policies.values()))
+        assert token_count < 15
+        assert _estimate_value_cbor_bytes(out["value"]) >= _DOS_VALUE_CBOR_MIN
         assert scorer.gate(_features([out])) is True
 
 

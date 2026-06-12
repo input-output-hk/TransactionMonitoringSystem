@@ -23,7 +23,7 @@ built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, normalise
+from app.analysis.normalise import normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -41,7 +41,6 @@ _LINK = _CFG["link_scores"]
 _REASON_T = _CFG["reason_thresholds"]
 W_SLOTS = int(_CFG["window_slots"])
 _MIN_PROFIT_LOVELACE = int(_CFG["min_profit_lovelace"])
-_HIGH_BAND_CAP = float(_CFG["high_band_cap"])
 
 EPSILON = 1e-6
 
@@ -136,12 +135,27 @@ class SandwichScorer(BaseScorer):
         )
         final = finalise_score(raw)
 
-        # Minimum profit gate: cap below Critical band for coincidental
-        # triples. Cap and profit floor tunable via sandwich.high_band_cap /
-        # min_profit_lovelace; the Critical threshold itself is the canonical
-        # band boundary in normalise.BAND_CRITICAL_THRESHOLD.
-        if profit < _MIN_PROFIT_LOVELACE and final >= BAND_CRITICAL_THRESHOLD:
-            final = _HIGH_BAND_CAP
+        # Economic suppression: a structural triple where the attacker
+        # extracted no material ADA profit is not a sandwich. Suppress it
+        # entirely (score -1, removed from max_class selection) rather than
+        # band-capping, so it produces no alert at any band. sub_scores are
+        # retained for observability, including the raw profit that drove the
+        # decision. profit_b is computed in dex._attacker_net_ada; the
+        # detector also excludes pool/batcher (script-address) clusters, so
+        # the surviving candidates here are wallet attackers.
+        if profit < _MIN_PROFIT_LOVELACE:
+            return ScorerResult.no_finding(
+                sub_scores={
+                    "attacker_link": round(s_link, 4),
+                    "swap_rate_delta": round(s_rate, 4),
+                    "price_impact": round(s_impact, 4),
+                    "profit": round(s_profit, 4),
+                    "attacker_recurrence": round(s_recurrence, 4),
+                    "pool_id": pool_id,
+                    "attacker_profit_lovelace": int(profit),
+                },
+                baseline_source=bl_source,
+            )
 
         reasons = []
         if s_link >= float(_REASON_T["link"]):

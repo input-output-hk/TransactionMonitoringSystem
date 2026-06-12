@@ -38,6 +38,33 @@ class ScorerResult:
     target script address, datum byte count, or list of hop addresses.
     """
 
+    @classmethod
+    def no_finding(
+        cls,
+        sub_scores: Optional[Dict[str, Any]] = None,
+        baseline_source: str = "missing",
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> "ScorerResult":
+        """A gated-but-no-finding result (score -1).
+
+        The engine treats a class score of -1 as "not applicable / no finding"
+        and filters it out of ``max_class`` selection. Some scorers gate True
+        (structurally engaged) but then determine the transaction is not an
+        instance of the attack, e.g. a sandwich with no realized profit, a
+        structural-only circular cycle, or an aggregate-only datum that no single
+        output makes an alert. They return this rather than a 0+ score so the
+        class surfaces in no band. ``sub_scores`` are retained for drill-down;
+        ``reasons`` are necessarily empty. Centralises the -1 sentinel
+        convention so it is defined in one place.
+        """
+        return cls(
+            score=-1.0,
+            sub_scores=sub_scores or {},
+            reasons=[],
+            baseline_source=baseline_source,
+            evidence=evidence or {},
+        )
+
 
 def finalise_score(raw: float, scale: int = 100, ndigits: int = 2) -> float:
     """Canonical final-score contract: clip to [0, 1], scale, and round.

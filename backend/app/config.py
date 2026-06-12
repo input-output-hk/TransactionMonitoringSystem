@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
@@ -101,11 +102,126 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 240  # max requests per window per key/IP
     RATE_LIMIT_WINDOW_SECONDS: int = 60  # sliding window duration in seconds
+    # Honour forwarded headers for client IPs (rate limiting, audit logs).
+    # ONLY enable behind a reverse proxy / tunnel; the parsing rules below
+    # (app.net.client_ip) take the right-most untrusted hop, never the
+    # client-writable left entries.
+    TRUSTED_PROXY_ENABLED: bool = False
+    # Number of trusted proxies that append entries to X-Forwarded-For. The
+    # client IP is taken HOPS entries from the RIGHT of the merged list; the
+    # leftmost entries are attacker-writable and must never win. ge=1: zero
+    # or negative hops would index past the list end on every request.
+    TRUSTED_PROXY_HOPS: int = Field(default=1, ge=1)
+    # Forwarded headers are honoured ONLY when the direct TCP peer falls
+    # inside one of these CIDRs (the proxy itself). Defaults cover loopback
+    # and the RFC1918 ranges Docker bridge networks use (cloudflared reaches
+    # the app via the published loopback port / compose bridge gateway).
+    TRUSTED_PROXY_CIDRS: str = (
+        "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    )
+    # Optional single-value client-IP header set by the edge (e.g.
+    # "CF-Connecting-IP" for Cloudflare). Empty = use X-Forwarded-For.
+    TRUSTED_PROXY_CLIENT_IP_HEADER: str = ""
+
+    @property
+    def trusted_proxy_networks(self) -> list:
+        import ipaddress
+
+        return [
+            ipaddress.ip_network(c.strip(), strict=False)
+            for c in self.TRUSTED_PROXY_CIDRS.split(",")
+            if c.strip()
+        ]
+
+    # Comma-separated allowed CORS origins. "*" (default) keeps the demo
+    # SPA and local vite dev servers working; tighten to the dashboard
+    # origin in production.
+    CORS_ALLOW_ORIGINS: str = "*"
+
+    # /docs, /redoc, /openapi.json enumerate the whole admin attack surface
+    # and are rate-limit exempt; always on in dev mode, opt-in on keyed
+    # deployments.
+    TMS_API_DOCS_ENABLED: bool = False
+
+    @property
+    def cors_allow_origins_list(self) -> list:
+        return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
 
     # Analysis Engine
     ANALYSIS_ENGINE_ENABLED: bool = True
     ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30   # how often the engine polls for new txs
     ANALYSIS_ENGINE_BATCH_SIZE: int = 100         # max transactions scored per run
+    # Cap on referenced-tx raw_data lookups per enrichment batch (bounds the
+    # IN-clause size); inputs past the cap simply stay unresolved for the run.
+    ANALYSIS_MAX_REF_TXS: int = 2000
+    # Drain loop: batches pulled per interval tick while the poll comes back
+    # full. Caps per-tick work so a deep backlog cannot monopolise the shared
+    # ClickHouse executor; 20 x batch=100 clears 2000 txs/tick.
+    ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK: int = 20
+    # Pause between drained batches: lets ingestion inserts and API reads
+    # interleave on the 3-worker ClickHouse executor.
+    ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS: float = 0.5
+    # Watermark cursor for the unanalyzed poll. The overlap absorbs
+    # same-second ordering skew and the tx-row-before-inputs-row insert gap;
+    # the periodic full rescan (since=None) is the never-skip guarantee and
+    # the recovery path for raw-data-deferred transactions.
+    UNANALYZED_OVERLAP_SECONDS: int = 120
+    UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS: int = 600
+    # Baseline lookup cache (0 disables). Baselines change once per daily
+    # recompute but were point-SELECTed per feature per scored tx: the
+    # engine's dominant N+1. insert_baselines() clears the cache; the 1 h
+    # TTL bounds staleness from any out-of-band write to 4% of the cadence.
+    BASELINE_CACHE_TTL_SECONDS: int = 3600
+    # ~500 scripts x 8 features with generous headroom; overflow clears.
+    BASELINE_CACHE_MAX_ENTRIES: int = 50_000
+    # Token-registry refresh cadence (background task only; the scoring
+    # path never fetches). Matches the registry cache TTL.
+    TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS: int = 24
+
+    # WebSocket feed. Per-client outbound queue depth: a client lagging by
+    # more than this many events starts losing the OLDEST ones (the feed is
+    # a live view, not the system of record). Connection cap prevents
+    # resource exhaustion.
+    WS_CLIENT_QUEUE_SIZE: int = 100
+    WS_MAX_CONNECTIONS: int = 100
+    # WS handshake attempts per client IP per window. Connections are
+    # long-lived, so a legitimate dashboard needs ~1/min even with flaky
+    # networking; 30/min absorbs aggressive reconnect loops without letting
+    # rejected upgrades churn unthrottled.
+    WS_HANDSHAKE_RATE_LIMIT_REQUESTS: int = 30
+    WS_HANDSHAKE_RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # Ogmios frames larger than this parse on a worker thread instead of
+    # the event loop (a busy Plutus block serialises to tens of MB and
+    # would otherwise freeze the API/WS/mempool tasks for the parse).
+    # Below it the thread handoff costs more than the parse itself.
+    OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES: int = 1_048_576  # 1 MiB
+
+    # Retention. ALL default 0 = keep forever (the audit's growth findings
+    # are addressed by giving operators knobs, not by silently expiring
+    # data). tx_class_scores / archived_alerts / baselines are never
+    # expired regardless of these settings.
+    CH_RETENTION_DAYS_TRANSACTIONS: int = 0
+    CH_RETENTION_DAYS_IO: int = 0          # inputs / outputs / address_transactions
+    CH_RETENTION_DAYS_FEATURES: int = 0    # utxo_features / tx_script_features
+    LIFECYCLE_RETENTION_DAYS: int = 0      # terminal (DROPPED/ROLLED_BACK) rows only
+    MEMPOOL_COLLISION_RETENTION_DAYS: int = 0
+    # Audit rows are the suppression accountability record: prefer archiving
+    # the table over short retention.
+    AUDIT_LOG_RETENTION_DAYS: int = 0
+    # Raw-store day-directory pruning. Refused while RAW_DATA_MAX_BYTES > 0:
+    # capped ClickHouse payloads make the raw store load-bearing for the
+    # engine's raw_data fallback.
+    RAW_STORE_RETENTION_DAYS: int = 0
+    RETENTION_SWEEP_INTERVAL_HOURS: int = 24
+
+    # Background-task supervisor restart backoff. Base doubles per crash up
+    # to the ceiling; a run lasting longer than the stable-reset window
+    # resets the delay (one-off crashes recover fast, persistent bugs stop
+    # hammering logs and downstream services at a fixed cadence).
+    SUPERVISOR_BACKOFF_BASE_SECONDS: float = 5.0
+    SUPERVISOR_BACKOFF_MAX_SECONDS: float = 300.0
+    SUPERVISOR_STABLE_RESET_SECONDS: float = 600.0
 
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True
@@ -142,6 +258,79 @@ class Settings(BaseSettings):
     CYCLE_MAX_HOPS: int = 6
     CYCLE_MAX_FANOUT: int = 50
     SANDWICH_SIMPLIFIED_ENABLED: bool = True
+
+    # ClickHouse write resilience.
+    # A block whose ClickHouse insert fails must NOT have its sync checkpoint
+    # advanced (silent permanent block loss). The ingester retries the insert
+    # with exponential backoff, then raises BlockPersistError so the chain-sync
+    # loop trips its circuit breaker and replays the block from the unadvanced
+    # checkpoint (safe: all fact tables are ReplacingMergeTree).
+    CLICKHOUSE_INSERT_MAX_RETRIES: int = 5  # total attempts before giving up
+    # First retry delay; doubles per attempt. 1 s rides out a ClickHouse
+    # merge stall / brief socket drop without flooding reconnects.
+    CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS: float = 1.0
+    # Backoff ceiling: a ClickHouse restart takes tens of seconds; waiting
+    # longer than 30 s per attempt just delays the circuit-breaker handoff.
+    CLICKHOUSE_INSERT_RETRY_MAX_DELAY_SECONDS: float = 30.0
+
+    # Chain rollback cleanup: on rollBackward, delete ClickHouse rows for
+    # transactions whose slot is past the rollback point so orphaned-fork data
+    # cannot feed scorers or API reads. archived_alerts is exempt (admin
+    # curation, not chain state).
+    ROLLBACK_CLEANUP_ENABLED: bool = True
+    # Second rollback purge pass for tx_class_scores. The first purge can
+    # race an in-flight engine batch (run_once holds its fetched rows for
+    # seconds and inserts scores at the end), leaving a stale score row that
+    # the unanalyzed anti-join treats as "already scored" forever. 60 s is
+    # comfortably longer than one batch's wall time; deleting a fresh score
+    # of a re-confirmed tx is recall-safe (the engine simply re-scores it).
+    ROLLBACK_SCORE_REPURGE_DELAY_SECONDS: int = 60
+
+    # Maximum byte-length of the raw_data JSON stored per transaction.
+    # 0 = no limit (store the full payload; ZSTD codec keeps it cheap).
+    # When > 0 and the serialized JSON exceeds the limit, an EMPTY string is
+    # stored with raw_data_truncated = 1 — never an invalid JSON prefix, which
+    # previously made the scorer silently treat the tx as feature-less.
+    RAW_DATA_MAX_BYTES: int = 0
+
+    # Analysis Engine raw_data fallback: when a tx row's raw_data is missing,
+    # truncated, or unparseable, read the full payload back from the raw store
+    # (ADR-009) before scoring. On a failed read the tx is deferred (no score
+    # row written) and retried on later engine runs.
+    RAW_FALLBACK_ENABLED: bool = True
+    # After this many failed fallback attempts the tx is scored anyway with
+    # raw_data=None and a raw_data_unavailable evidence marker, so a lost blob
+    # cannot park a tx in the pending queue forever. 3 covers transient
+    # filesystem hiccups across the paced retry budget below.
+    RAW_FALLBACK_MAX_ATTEMPTS: int = 3
+    # Minimum monotonic-clock spacing between COUNTED fallback attempts
+    # (time.monotonic(), immune to NTP steps). The drain loop re-polls every
+    # ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS (0.5 s) under load, which burned
+    # the whole attempt budget in ~1.5 s instead of the intended
+    # one-attempt-per-engine-interval; 30 s matches
+    # ANALYSIS_ENGINE_INTERVAL_SECONDS. With MAX_ATTEMPTS=3 there are two
+    # paced gaps between counted attempts, so the degrade budget floor is
+    # at least 60 s after the first failure (recovery is still probed on
+    # every poll regardless).
+    RAW_FALLBACK_RETRY_SECONDS: int = 30
+
+    # Mempool pending-tx bookkeeping. The TTL matches
+    # LIFECYCLE_PENDING_TTL_SECONDS: both bound how long an unconfirmed tx
+    # stays relevant (on-chain tx TTLs cover user submissions well inside 2 h).
+    MEMPOOL_PENDING_TTL_SECONDS: int = 7200
+    # Prune cadence: amortizes the O(pending) stale scan to once per N
+    # processed mempool txs instead of per tx. ge=1: 0 would divide by zero
+    # inside the mempool loop, where the exception is swallowed at DEBUG.
+    MEMPOOL_PRUNE_EVERY_N_TXS: int = Field(default=100, ge=1)
+    # Hard cap on the seen-tx dedup set; clearing it only risks re-processing
+    # (idempotent downstream), never data loss.
+    MEMPOOL_SEEN_TXS_MAX: int = 50_000
+
+    # In-process TTL for the dashboard stats aggregate (full-table FINAL scan
+    # + countDistinct per call). The dashboard polls ~every 15 s; 10 s bounds
+    # the scan rate to ~1 per poll cycle however many dashboards are open.
+    # 0 disables. Staleness only affects KPI cards, never detection.
+    STATS_CACHE_TTL_SECONDS: int = 10
 
     # Lifecycle cleanup — PENDING → DROPPED sweep
     # PENDING transactions older than this threshold are marked DROPPED by the

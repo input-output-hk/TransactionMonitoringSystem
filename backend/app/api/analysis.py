@@ -47,6 +47,8 @@ def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
         evidence=evidence,
         analysis_version=row["analysis_version"],
         analyzed_at=row["analyzed_at"],
+        corroboration_count=int(row.get("corroboration_count", 0) or 0),
+        corroborating_classes=row.get("corroborating_classes", "") or "",
         fee=row.get("fee"),
         output_count=row.get("output_count"),
     )
@@ -99,6 +101,15 @@ async def list_analysis_results(
         None, description="Filter by attack class name (e.g. phishing, sandwich)",
     ),
     min_score: float = Query(0.0, ge=0.0, le=100.0, description="Minimum score filter"),
+    min_corroboration: int = Query(
+        0, ge=0, le=len(_CLASS_NAMES),
+        description=(
+            "Only include transactions where at least this many distinct attack "
+            "classes independently corroborated (scored above the corroboration "
+            "threshold). 0 = no filter. Surfaces multi-signal transactions; does "
+            "not change risk bands."
+        ),
+    ),
     sort: str = Query("score", description="Sort order: 'score' or 'date'"),
     analyzed_from: Optional[datetime] = Query(
         None,
@@ -134,6 +145,7 @@ async def list_analysis_results(
             analyzed_to=analyzed_to,
             limit=limit,
             offset=offset,
+            min_corroboration=min_corroboration,
         )
         total = await clickhouse.count_class_scores_async(
             network=query_network,
@@ -142,6 +154,7 @@ async def list_analysis_results(
             min_score=min_score,
             analyzed_from=analyzed_from,
             analyzed_to=analyzed_to,
+            min_corroboration=min_corroboration,
         )
         return {
             "count": len(rows),

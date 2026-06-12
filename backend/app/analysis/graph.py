@@ -21,6 +21,9 @@ _CIRCULAR_CFG = _get_cfg("circular")
 _CYCLE_CFG = _CIRCULAR_CFG["cycle"]
 _MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
 _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
+# Public alias: the engine's cycle pre-filter must key off the same knob so
+# the two sites cannot drift (the engine previously hardcoded the value).
+MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
 
 
@@ -60,6 +63,7 @@ def detect_cycle(
           AND network = %(network)s
           AND is_collateral = 0
           AND is_reference = 0
+          AND is_unspent_attempt = 0
           AND address != ''
         """,
         {"tx_hash": tx_hash, "network": network},
@@ -68,15 +72,25 @@ def detect_cycle(
     if not origin_addresses:
         return None
 
-    # Step 2: Get output addresses and amounts of this tx
+    # Step 2: Get output addresses and amounts of this tx.
+    # FINAL on both sides: origin_amount is summed from these rows, and a
+    # not-yet-merged ReplacingMergeTree duplicate (or a duplicate
+    # transactions row multiplying the join) would double it.
     out_rows = client.execute(
         """
-        SELECT address, amount, slot
-        FROM transaction_outputs o
-        JOIN transactions t ON o.tx_hash = t.tx_hash AND o.network = t.network
-        WHERE o.tx_hash = %(tx_hash)s
-          AND o.network = %(network)s
-          AND o.is_collateral = 0
+        SELECT o.address, o.amount, t.slot
+        FROM (
+            SELECT tx_hash, network, address, amount
+            FROM transaction_outputs FINAL
+            WHERE tx_hash = %(tx_hash)s
+              AND network = %(network)s
+              AND is_collateral = 0
+        ) o
+        JOIN (
+            SELECT tx_hash, network, slot
+            FROM transactions FINAL
+            WHERE tx_hash = %(tx_hash)s AND network = %(network)s
+        ) t ON o.tx_hash = t.tx_hash AND o.network = t.network
         """,
         {"tx_hash": tx_hash, "network": network},
     )
@@ -116,7 +130,12 @@ def detect_cycle(
         if not current_addresses:
             break
 
-        addr_list = list(current_addresses)[:max_fanout]
+        # Deterministic frontier: set iteration order varies across Python
+        # processes (string hash randomization), so an unsorted truncation
+        # would explore a different address subset run-to-run and silently
+        # miss cycles through the dropped legs. Same rationale as
+        # _first_sorted, applied to the cap that actually controls recall.
+        addr_list = sorted(current_addresses)[:max_fanout]
 
         # Find txs where these addresses are inputs (they spent received funds).
         # The slot window is bounded: cycles spanning >24h are almost always
@@ -133,6 +152,7 @@ def detect_cycle(
               AND ti.network = %(network)s
               AND ti.is_collateral = 0
               AND ti.is_reference = 0
+              AND ti.is_unspent_attempt = 0
               AND to2.is_collateral = 0
               AND t.slot >= %(min_slot)s
               AND t.slot <= %(max_slot)s
@@ -229,6 +249,7 @@ def _count_origin_recurrence(
               AND s.analyzed_at >= now() - INTERVAL %(window)s DAY
               AND ti.is_collateral = 0
               AND ti.is_reference = 0
+              AND ti.is_unspent_attempt = 0
             """,
             {
                 "origin": origin_address,
