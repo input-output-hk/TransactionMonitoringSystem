@@ -324,6 +324,31 @@ For production deployments:
 2. Set `APP_BASE_URL` to the public dashboard URL so emailed links resolve.
 3. Stop the Mailpit container once the stack is up: `docker compose stop mailpit`. The app only requires it at startup ordering time; SMTP failures at runtime are tolerated (logged, silent 200 to the caller).
 
+### First admin: user bootstrap
+
+A fresh install has zero users, and the dashboard's user management requires an existing Admin to invite anyone. The `create-admin` CLI breaks that chicken-and-egg: it creates (or promotes) an Admin user and issues an invite magic link, printing the link to stdout so bootstrap works even before SMTP is configured.
+
+App running on the host:
+
+```bash
+cd backend && python -m app.cli create-admin admin@example.com "Full Name"
+```
+
+App running in Docker:
+
+```bash
+docker compose --profile app run --rm app python -m app.cli create-admin admin@example.com "Full Name"
+```
+
+Notes:
+
+- The command is idempotent: if the email already exists the user is promoted to Admin (status untouched) and a fresh invite token is issued. Safe to re-run when a link expires (default TTL is `MAGIC_LINK_TTL_MINUTES`, 15 minutes).
+- Add `--no-email` to skip the SMTP send and only print the link.
+- Set `APP_BASE_URL` before running: the printed link is built from it, and the default `http://localhost:8000` produces links that do not resolve from anywhere else. The token itself is host-independent, so an already-issued link can be salvaged by swapping the host part, but fixing `APP_BASE_URL` is the real fix.
+- Open the printed link in a browser to activate the account and start a session.
+
+From there, all further users are created through the dashboard: an Admin invites them by email (role `Admin` or `Reviewer`), the invitee receives a magic link, and every later sign-in requests a fresh link from the login page. There are no passwords anywhere in the flow.
+
 
 ## Troubleshooting
 
