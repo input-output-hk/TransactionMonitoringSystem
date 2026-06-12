@@ -46,11 +46,23 @@ def report(corrected, prev_classes):
     print("new max_class:", dict(Counter(r["max_class"] or "(none)" for r in corrected)))
 
 
+# Rows per INSERT batch. Caps both peak memory and the blast radius of a
+# crash mid-write (completed chunks are durable; a re-run is a clean RMT
+# upsert), matching the chunked-backfill standard backfill_evidence.py set.
+WRITE_CHUNK_ROWS = 500
+
+
 def write(client, corrected):
-    """Insert corrected rows and OPTIMIZE each touched partition so the dedupe
-    takes effect immediately rather than waiting for background merges."""
-    clickhouse.insert_class_scores(corrected)
-    partitions = sorted({r["analyzed_at"].strftime("%Y%m%d") for r in corrected})
-    for part in partitions:
-        client.execute(f"OPTIMIZE TABLE tx_class_scores PARTITION {part} FINAL")
-    print(f"\nInserted {len(corrected)} corrected rows; merged {len(partitions)} partitions.")
+    """Insert corrected rows in chunks, then OPTIMIZE so the ReplacingMergeTree
+    dedupe takes effect immediately rather than waiting for background merges.
+
+    tx_class_scores is unpartitioned in the v2 schema (the dedup key must be
+    partition-stable), so a single table-level OPTIMIZE FINAL replaces the old
+    per-partition loop.
+    """
+    for start in range(0, len(corrected), WRITE_CHUNK_ROWS):
+        chunk = corrected[start:start + WRITE_CHUNK_ROWS]
+        clickhouse.insert_class_scores(chunk)
+        print(f"  wrote rows {start + 1}-{start + len(chunk)} / {len(corrected)}")
+    client.execute("OPTIMIZE TABLE tx_class_scores FINAL")
+    print(f"\nInserted {len(corrected)} corrected rows; table merged.")

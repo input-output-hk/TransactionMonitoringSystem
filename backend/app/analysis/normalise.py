@@ -48,18 +48,24 @@ def normalise_inverted(value: float, p50: float, p99: float) -> float:
     return 1.0 - normalise(value, p50, p99)
 
 
-# A per-script (or per-policy) baseline with near-zero spread between p50 and
-# p99 collapses the inverted-normalise axis onto p50: any value at the
-# median scores 1.0 and looks maximally suspicious. The strict-equality case
-# (p99==p50) is already handled by normalise/normalise_inverted, but
-# baselines with tiny positive spread (e.g. p50=2.52M, p99=2.59M; 2.7% of
-# p50) still saturate every normal interaction. Treat such baselines as
-# uninformative and fall through to the next tier.
-_MIN_BASELINE_SPREAD_RATIO = 0.10
+# Minimum (p99 - p50) / p50 spread for a baseline to be usable; tunable via
+# the top-level `baselines.min_spread_ratio` block in config/detection.yaml
+# (see the rationale comment there). Loaded lazily: scorer_config imports
+# this module, so a module-level import here would be circular.
+_MIN_BASELINE_SPREAD_RATIO: Optional[float] = None
+
+
+def _min_baseline_spread_ratio() -> float:
+    global _MIN_BASELINE_SPREAD_RATIO
+    if _MIN_BASELINE_SPREAD_RATIO is None:
+        from app.analysis.scorer_config import baselines_config
+        _MIN_BASELINE_SPREAD_RATIO = float(baselines_config()["min_spread_ratio"])
+    return _MIN_BASELINE_SPREAD_RATIO
 
 
 def _baseline_is_usable(row: dict) -> bool:
-    """A baseline is usable when (p99 - p50) is at least 10% of p50.
+    """A baseline is usable when (p99 - p50) is at least min_spread_ratio
+    of p50.
 
     Below that spread the per-scope distribution is too tight to
     discriminate; downstream normalisation produces degenerate scores.
@@ -69,7 +75,7 @@ def _baseline_is_usable(row: dict) -> bool:
     p50, p99 = float(row["p50"]), float(row["p99"])
     if p50 <= 0:
         return p99 > 0
-    return (p99 - p50) / p50 >= _MIN_BASELINE_SPREAD_RATIO
+    return (p99 - p50) / p50 >= _min_baseline_spread_ratio()
 
 
 def resolve_baseline(
@@ -142,6 +148,12 @@ BAND_MODERATE_THRESHOLD = 31.0
 BAND_MODERATE_MAX = BAND_HIGH_THRESHOLD - 1.0
 BAND_LOW_MAX = BAND_MODERATE_THRESHOLD - 1.0
 
+# Top of the Informational band. Scores are floats rounded to 2dp, so the
+# Moderate band test is "strictly above 30.0", not ">= 31.0": a 30.5 would
+# otherwise fall into a dead zone between the documented 0-30 and 31-59
+# bands and silently under-band toward Informational (recall-negative).
+BAND_INFORMATIONAL_MAX = BAND_MODERATE_THRESHOLD - 1.0
+
 
 def score_to_band(score: float) -> str:
     """Map a 0-100 score to the interpretive risk band.
@@ -155,6 +167,6 @@ def score_to_band(score: float) -> str:
         return "Critical"
     if score >= BAND_HIGH_THRESHOLD:
         return "High"
-    if score >= BAND_MODERATE_THRESHOLD:
+    if score > BAND_INFORMATIONAL_MAX:
         return "Moderate"
     return "Informational"

@@ -133,10 +133,12 @@ Instead of many different tokens, the attacker creates a UTxO with a single Asse
 
 | Feature | Role | Weight |
 |---------|------|--------|
-| `quantity_digits` | Primary: decimal digits in the quantity (proxy for CBOR cost). **Per-policy baseline.** | 0.40 |
-| `value_cbor_bytes` | Primary: high despite low asset count = defining anomaly. **Per-script baseline.** | 0.35 |
-| `sender_recurrence` | Contextual | 0.15 |
-| `lovelace_amount` | Secondary (inverted): minimal ADA = instrumental deposit | 0.10 |
+| `quantity_digits` | Primary: decimal digits in the quantity (proxy for CBOR cost). **Per-policy baseline.** | 0.55 |
+| `value_cbor_bytes` | Primary: high despite low asset count = defining anomaly. **Per-script baseline.** | 0.20 |
+| `lovelace_amount` | Secondary (inverted): minimal ADA = instrumental deposit | 0.15 |
+| `sender_recurrence` | Contextual | 0.10 |
+
+Weights were retuned from the Polimi starting points (0.40/0.35/0.10/0.15): a simple single-token UTxO has naturally low `value_cbor_bytes` regardless of quantity, so the byte axis only fires for multi-asset outputs; the heavier `quantity_digits` weight lets a max-quantity (near int64) attack reach High/Critical without the CBOR signal. Tunables live in `config/detection.yaml` under `large_value.weights`.
 
 ### Scoring
 
@@ -150,7 +152,7 @@ score_large_value(utxo):
     s_ada        = 1 - normalise(utxo.lovelace_amount, per_script_baselines)
     s_recurrence = normalise(utxo.sender_recurrence, per_script_baselines)
 
-    score = 0.40 * s_digits + 0.35 * s_bytes + 0.10 * s_ada + 0.15 * s_recurrence
+    score = 0.55 * s_digits + 0.20 * s_bytes + 0.15 * s_ada + 0.10 * s_recurrence
     return clip(score, 0, 1) * 100
 ```
 
@@ -299,8 +301,17 @@ score_multiple_satisfaction(tx):
     # dropped to no-finding (-1). Gated on `not floor_applies` so a floored
     # lazy-validator exploit and the CTF-01 marketplace case (uniform=False,
     # value_returned=0) are never suppressed.
+    # Escape hatch: both benign shapes are attacker-reachable (return 1
+    # lovelace to force the state-continuation arm; an identical-redeemer
+    # full drain matches the sweep fingerprint), so when the un-widened
+    # extraction floor signal reaches suppression_escape.extraction_floor_min
+    # the finding is kept and banded exactly Moderate (floored and capped).
+    escape = (suppression_escape.enabled and not allowlisted
+              and s_extraction_floor >= suppression_escape.extraction_floor_min)
     if not floor_applies and (uniform_sweep or value_returned_to_script > 0):
-        return no_finding
+        if not escape:
+            return no_finding
+        score = min(score, BAND_MODERATE_MAX)   # reason: extraction_escape_moderate_cap
 
     return score
 ```
@@ -324,6 +335,7 @@ The value-extraction axis (`net_value_out_of_script`, `n_assets_out_of_script`) 
 - **Per-script value baselines (no global tier)** judge extraction against the contract's own history, not a batcher-dominated global distribution. See above.
 - **Uniform-sweep guard**: a tx whose fingerprint is "owner sweeping their own script UTxOs" (>= `min_inputs` script inputs, identical spend redeemers, no value returned to the same script) is a UTxO consolidation, not double-satisfaction. The lazy-validator floor is suppressed and the score is capped at the top of Moderate. Each leg (uniform-redeemer, no-return, min-inputs) is independently config-gated under `uniform_sweep_guard`. Real double-satisfaction has asymmetric satisfaction arguments and writes the satisfying value to a distinct address shape that the no-return predicate rejects.
 - **State-continuation suppression**: when the floor does not apply and either the sweep guard fires or any lovelace is returned to the script (state continuation, not extraction), the finding is dropped to no-finding (`score=-1`). Gated on `not floor_applies` so the CTF-01 marketplace double-sat (uniform=False, value_returned=0, Moderate) is unaffected.
+- **Extraction-magnitude escape hatch** (`suppression_escape`): both suppression shapes are attacker-reachable (returning 1 lovelace to the script forces the state-continuation arm; a large identical-redeemer full drain matches the sweep fingerprint), so when the un-widened extraction floor signal reaches `extraction_floor_min` (default 0.10, compared with `>=`) the finding is kept and banded exactly Moderate: capped at the top of the band (reason `extraction_escape_moderate_cap`) and floored at the bottom, so a deliberately un-silenced finding can never land in Informational. The floor signal is computed against the RESOLVED baselines, after the p99 cap and the anchor-relative p50 bound, without the per-script headroom widening. The threshold sits about 2x above the worst observed benign signal (a 12-input owner sweep at ~0.053; state machines ~0) and about 1.6x below the worst capped-poisoned attack minimum: the worst poisoned per-script `n_assets` pair resolves to (p50 = 0.5 from `per_script_p50_cap_spread_fraction`, p99 = 10 from the 5x p99 cap), so a 2-NFT drain normalises to (2 - 0.5) / (10 - 0.5), about 0.158. A single-NFT drain on the bootstrap anchor lands at ~0.49999975 because `normalise()` adds EPSILON to its denominator, which is why the old 0.5 strict-greater threshold silenced it. Recall-first: a Moderate false positive on a large owner-sweep is strictly better than a silenced real drain.
 - Per-script allowlist of known batch-processing / resolution contracts **reduces** the `s_extraction` weight (redistributed proportionally to `s_inputs` and `s_recurrence`) rather than bypassing the scorer. This preserves the structural signals while suppressing the economic-magnitude signal for contracts where large extraction is legitimate.
 - The spend-redeemer gate condition excludes native-script multisig wallets, which evaluate as declarative ledger predicates per-input and are immune to multiple-satisfaction by construction.
 - **Net value linearity check**: spec-defined corroboration on the coefficient of variation of per-input extracted values, on the roadmap.
@@ -469,7 +481,7 @@ The attacker mints tokens with a TokenName identical or visually similar (Unicod
 
 ### Gate Conditions
 - TX includes a minting action (`mint_present == true`)
-- At least one minted token name has `tokenname_similarity >= 0.80` against a known legitimate token
+- At least one minted token name has `tokenname_similarity >= 0.70` against a known legitimate token (tuned down from the Polimi starting point 0.80; `fake_token.similarity_threshold` in `config/detection.yaml`)
 - `policy_id != legitimate_policy_id` for the matched token
 
 ### Detection: Two Sub-Pipelines
@@ -540,12 +552,18 @@ If no substitution fits within the 32-byte AssetName limit, a zero-width space (
 ## Attack 9: Phishing via Metadata
 
 ### Definition
-The attacker embeds malicious URLs, deceptive instructions, or social engineering messages in on-chain transaction metadata (CIP-20 label 674) or CIP-25 NFT metadata (label 721). Often delivered as mass airdrops, with small token or bare ADA sent to many recipients alongside the malicious metadata.
+The attacker embeds malicious URLs, deceptive instructions, or social engineering messages in on-chain transaction metadata (CIP-20 label 674), CIP-25 NFT metadata (label 721), inline datums, or the native-asset name itself. Often delivered as mass airdrops, with small token or bare ADA sent to many recipients alongside the malicious payload.
 
 ### Gate Conditions
-- `metadata_present == true`
-- At least one relevant metadata label present (674 or 721)
-- At least one URL extracted from metadata fields
+- At least one URL extracted from any of the three carriers below
+- Sender not on the allowlist of known legitimate protocol addresses
+
+### URL Carriers
+1. **Tx-level metadata** under a relevant label (`phishing.metadata_labels`, default 674 and 721).
+2. **Inline datums on outputs**: the Plutus-Data tree is walked and every UTF-8 decodable span is scanned. Catches CIP-68 reference-NFT phishing, where the payload lives in the datum rather than auxiliary data.
+3. **Decoded native-asset names** from the mint map and output value bundles (`phishing.asset_name_carrier.enabled`). Catches the URL-named scam-token airdrop: the dominant in-the-wild Cardano scam mints a token literally named after the phishing domain (e.g. `claim-ada.xyz`) and mass-airdrops it to wallet addresses with no metadata and no datum, so it never enters the other two carriers. Names are hex-decoded to UTF-8 first; names that fail decoding fall back to raw hex, which contains no dot and can never match. Asset names also feed the social-engineering text scan (scam tokens are routinely named with urgency or brand bait). URLs found in asset names are recorded in evidence as `asset_name_urls` and raise the `url_in_asset_name` reason flag.
+
+Bare-domain forms (`cardano-drop.io/claim`) are matched alongside scheme-prefixed URLs in every carrier, then validated against the Public Suffix List so bare-word matches like `3.14` do not survive. Mass distribution is scored by the delivery sub-pipeline below regardless of carrier (`recipient_count` counts distinct output addresses).
 
 ### Detection: Two Sub-Pipelines
 
@@ -635,7 +653,9 @@ All values are recommended starting points. Validate against production data.
 - Minimum 200 transactions per script/policy before per-entity baseline is valid
 - Below threshold → fall back to global baselines (by script type)
 - **Exception**: the Multiple Satisfaction value-extraction axis (`net_value_out_of_script`, `n_assets_out_of_script`) skips the global tier and falls back per-script → bootstrap, because a global value-extraction distribution is dominated by legitimate batchers and would de-sensitise the scorer (see Attack 4: Per-Script-Only Value Baselines).
-- **Drift check**: if new p99 differs > 50% from current, flag for analyst review before applying
+- **Drift guard** (`baselines.drift`): direction-aware. A recompute that drifts beyond the threshold in a recall-harmful direction (p99 widening beyond `p99_threshold`, or p50 rising beyond `p50_threshold`, both default 0.50 relative) is HELD: the prior baseline stays active. For pure-normalise features, recall-safe drifts (p99 narrowing, p50 falling) always apply; holding them made a poisoned first baseline self-protecting, because every honest recompute that shrank it back was itself an over-threshold change. Features with at least one `normalise_inverted()` consumer (`ada_amount` feeds the token_dust and large_value inverted-ADA axes; `value_cbor_bytes` feeds large_datum's inverted value axis) hold BOTH directions: an attacker dumping low-ADA or small-CBOR outputs at a victim script drags those percentiles DOWN, and a lower window zeroes the inverted dust/value axes, so "falling is safe" does not hold there (see `INVERTED_CONSUMER_FEATURES` in `baselines.py`). Every drift event, held or applied, is logged to `baseline_drift_events` (with `axis` and `applied` columns) for analyst review; the held-drift warning names the specific axis or axes that caused the hold. First-ever baselines always pass. This is the anti-poisoning control: pre-training a per-script distribution to de-sensitise a scorer now requires moving it slowly under the threshold across multiple recomputes, leaving a trail.
+- **Per-script p99 cap and p50 bound** (`baselines.per_script_p99_cap_multiplier`, default 5.0; `baselines.per_script_p50_cap_spread_fraction`, default 0.25): a learned baseline's p99 is capped at M times the scorer's bootstrap anchor p99 at resolution time. The resolved p99 is the normalisation saturation point, so without the cap a poisoned baseline could push it arbitrarily high and a real attack would normalise to ~0. The p50 is bounded too, at `anchor_p50 + K * (anchor_p99 - anchor_p50)`: `normalise()` subtracts p50 first, so a poisoned median de-sensitises an axis exactly like a widened tail. The bound is anchor-relative because the earlier cap-relative bound (`capped_p99 / (1 + min_spread_ratio)`, about 4.55x the anchor p99) left an in-bound median-poisoned pair enough room to zero a real drain below the suppression-escape floor. Worked for the `n_assets` axis (anchors p50=0, p99=2, M=5, K=0.25): the worst poisoned pair resolves to (0.5, 10) and a 2-NFT drain normalises to about 0.158, clearing the 0.10 escape floor with ~1.6x margin; the general form with anchor p50 = 0 is `(1 - K) / (M - K)`. An anchor p50 of 0 (count-like features) degrades naturally to `K * anchor_p99`, the bound is additionally kept below the p99 cap via `min_spread_ratio` so the capped pair always keeps a usable spread, and the combined bound can only ever lower a resolved p50 relative to the cap-relative rule (recall-positive). An established contract may legitimately run up to M times the protocol-grounded anchor, never beyond it.
+- **Windows and determinism**: baseline percentile queries window on chain time (`transactions.timestamp`, not ingestion time, so backfills cannot collapse the window) and use `quantileExact` so recomputes are deterministic and drift signals are not jitter.
 
 
 ## Normalisation Formula

@@ -56,6 +56,13 @@ class TestScoreToBand:
         assert score_to_band(31) == "Moderate"
         assert score_to_band(59) == "Moderate"
 
+    def test_fractional_scores_above_30_are_moderate(self):
+        # Scores are floats rounded to 2dp; the (30, 31) interval must not
+        # be a dead zone that silently under-bands toward Informational.
+        assert score_to_band(30.5) == "Moderate"
+        assert score_to_band(30.01) == "Moderate"
+        assert score_to_band(30.0) == "Informational"
+
     def test_high(self):
         assert score_to_band(60) == "High"
         assert score_to_band(79) == "High"

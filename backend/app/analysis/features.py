@@ -73,29 +73,32 @@ def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
     return False
 
 
+# CIP-19 Shelley address types whose PAYMENT credential is a script hash.
+# The header high nibble encodes the type; the first Bech32 data character
+# follows from it (shared by mainnet and testnet since the network bit does
+# not reach it):
+#   type 1 -> 'z' (script payment + stake key)
+#   type 3 -> 'x' (script payment + script stake)
+#   type 5 -> '2' (script payment + pointer stake, deprecated but valid)
+#   type 7 -> 'w' (script payment, no stake / enterprise)
+# Type 2 ('y') is payment-KEY + script-stake and is deliberately excluded:
+# the spending credential is a key, so script-targeted attacks do not apply.
+SCRIPT_ADDRESS_PREFIXES = (
+    "addr1w", "addr1z", "addr1x", "addr12",
+    "addr_test1w", "addr_test1z", "addr_test1x", "addr_test12",
+)
+
+
 def is_script_address(address: str) -> bool:
     """Detect whether a Cardano address is a script (validator) address.
 
-    Cardano Shelley-era addresses encode the payment credential type in the
-    header nibble.  For Bech32 addresses the human-readable prefix indicates:
-      - addr1q / addr_test1q  -> payment key (normal wallet)
-      - addr1w / addr_test1w  -> script payment credential (validator)
-      - addr1z / addr_test1z  -> script payment + staking key
-    Enterprise and pointer addresses follow similar patterns.
-
-    This heuristic covers the vast majority of addresses seen on Preprod and
-    Mainnet.  Byron-era addresses (Ae2...) are never script addresses.
+    Matches every CIP-19 address type whose payment credential is a script
+    hash (see ``SCRIPT_ADDRESS_PREFIXES``). Byron-era addresses (Ae2...,
+    DdzFF...) are never script addresses.
     """
     if not address:
         return False
-    laddr = address.lower()
-    # Script payment credential prefixes (mainnet + testnet variants)
-    return (
-        laddr.startswith("addr1w")
-        or laddr.startswith("addr_test1w")
-        or laddr.startswith("addr1z")
-        or laddr.startswith("addr_test1z")
-    )
+    return address.lower().startswith(SCRIPT_ADDRESS_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -111,16 +114,118 @@ def extract_lovelace(value: Any) -> int:
     Returns ``0`` on anything unrecognised so callers can default safely.
     """
     if isinstance(value, dict):
-        ada = value.get("ada")
-        if isinstance(ada, dict):
-            return int(ada.get("lovelace", 0) or 0)
-        return int(value.get("lovelace", 0) or 0)
+        # Same defensive contract as the bare path: a malformed quantity in
+        # untrusted chain data must degrade to 0 (tx still ingested and
+        # scored), never abort the parse and skip the tx (recall-first).
+        try:
+            ada = value.get("ada")
+            if isinstance(ada, dict):
+                return int(ada.get("lovelace", 0) or 0)
+            return int(value.get("lovelace", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
     if value:
         try:
             return int(value)
         except (TypeError, ValueError):
             return 0
     return 0
+
+
+def extract_fee(tx_data: Any) -> int:
+    """Transaction fee in lovelace, handling both Ogmios schema versions.
+
+    The fee field carries the same shape as a value's ADA component
+    (v6 ``{"ada": {"lovelace": N}}``, v5 ``{"lovelace": N}``, or a bare
+    number), so this delegates to :func:`extract_lovelace`. The two
+    previously hand-rolled copies of this branching (block parser and
+    mempool collision capture) are the exact duplication class that let
+    the v6 mempool-resolution bug ship; one shared reader removes it.
+    """
+    if not isinstance(tx_data, dict):
+        return 0
+    return extract_lovelace(tx_data.get("fee", {}))
+
+
+def flatten_assets(value: Any) -> Dict[str, int]:
+    """Flatten an Ogmios value dict's native assets to ``{"policy.name": qty}``.
+
+    Skips the ``ada`` (v6) and ``lovelace`` (v5) components; nested
+    ``{policy: {name: qty}}`` bundles flatten to dotted keys, and already-
+    flat entries (legacy v5 paths) pass through. This is the storage shape
+    used by ``transaction_inputs.assets`` / resolved-input caches; the
+    block parser and the mempool UTxO resolver previously kept
+    character-identical copies of this loop.
+    """
+    assets: Dict[str, int] = {}
+    if not isinstance(value, dict):
+        return assets
+    for key, val in value.items():
+        if key in ("lovelace", "ada"):
+            continue
+        if isinstance(val, dict):
+            for asset_name, qty in val.items():
+                assets[f"{key}.{asset_name}"] = int(qty)
+        else:
+            assets[key] = int(val)
+    return assets
+
+
+def iter_assets(val: Any):
+    """Yield ``((policy_id, asset_name), qty)`` pairs from an Ogmios value dict.
+
+    Skips the lovelace component. Handles both v5 (`{"lovelace": N, policy: {asset: qty}}`)
+    and v6 (`{"ada": {"lovelace": N}, policy: {asset: qty}}`) shapes.
+    Entries whose quantity does not parse as an integer are skipped, and
+    flat (non-dict) policy entries are ignored: callers that must also
+    honour legacy flat entries use :func:`flatten_assets` instead.
+    """
+    if not isinstance(val, dict):
+        return
+    for policy, inner in val.items():
+        if policy in ("ada", "lovelace"):
+            continue
+        if not isinstance(inner, dict):
+            continue
+        for asset_name, qty in inner.items():
+            try:
+                yield (policy, asset_name), int(qty)
+            except (TypeError, ValueError):
+                continue
+
+
+def extract_ttl(tx_data: Any) -> int:
+    """Transaction TTL (the slot after which the tx is invalid), handling both
+    Ogmios schema versions.
+
+    Ogmios v6 emits ``validityInterval.invalidAfter``; v5 emits ``timeToLive``.
+    Returns ``0`` when absent or unparseable so callers can default safely.
+    """
+    if not isinstance(tx_data, dict):
+        return 0
+    vi = tx_data.get("validityInterval")
+    if isinstance(vi, dict) and vi.get("invalidAfter") is not None:
+        try:
+            return int(vi["invalidAfter"])
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return int(tx_data.get("timeToLive", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def decode_hex_asset_name(hex_name: str) -> str:
+    """Decode a hex-encoded asset name to UTF-8, falling back to the raw string.
+
+    Ogmios emits native-asset names as hex. The fallback keeps the contract
+    total (callers always get a string back); a pure-hex fallback contains no
+    ``.`` so it can never satisfy URL/domain matching downstream.
+    """
+    try:
+        return bytes.fromhex(hex_name).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return hex_name
 
 
 def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:

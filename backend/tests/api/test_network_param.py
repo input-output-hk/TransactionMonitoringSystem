@@ -22,6 +22,20 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _dev_mode_auth(monkeypatch):
+    """Run validation tests in dev-mode auth.
+
+    Auth deliberately runs BEFORE query validation (no validation detail
+    for unauthenticated callers), so exercising the 422 contract requires
+    passing auth first; dev mode is how the suite does that regardless of
+    the local .env's API_KEYS. The auth-before-validation ordering itself
+    is locked in by test_unauthenticated_gets_403_before_validation.
+    """
+    from app import auth
+    monkeypatch.setattr(auth, "_dev_mode", True)
+
+
 # Endpoints that accept ?network=. (path, default_status_range).
 # Every endpoint should accept each valid network and reject the invalid.
 _ENDPOINTS = [
@@ -57,3 +71,13 @@ def test_omitted_network_accepted(client, endpoint):
     """Without ?network= the handler should fall back to CARDANO_NETWORK."""
     r = client.get(endpoint)
     assert r.status_code != 422
+
+
+def test_unauthenticated_gets_403_before_validation(client, monkeypatch):
+    """Auth runs before query validation: an unauthenticated caller learns
+    nothing about parameter shapes (403, not 422)."""
+    from app import auth
+    monkeypatch.setattr(auth, "_dev_mode", False)
+    monkeypatch.setattr(auth, "_valid_keys", ["sentinel-key"])
+    r = client.get("/api/analysis/results?network=testnet")
+    assert r.status_code == 403

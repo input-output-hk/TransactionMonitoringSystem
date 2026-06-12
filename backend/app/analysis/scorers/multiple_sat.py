@@ -65,12 +65,14 @@ All tunable constants live in ``config/detection.yaml`` under the
 """
 
 import logging
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
+    BAND_MODERATE_THRESHOLD,
     normalise,
     normalise_inverted,
 )
@@ -82,6 +84,9 @@ from app.analysis.scorer_config import (
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 from app.analysis.features import extract_lovelace as _extract_lovelace
+# Promoted to features.iter_assets (shared v5/v6 asset iteration); the
+# underscore alias is part of this module's test surface.
+from app.analysis.features import iter_assets as _iter_assets  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +181,9 @@ _SWEEP_GUARD_ENABLED: bool = bool(_SWEEP_GUARD["enabled"])
 _SWEEP_REQ_UNIFORM_RED: bool = bool(_SWEEP_GUARD["require_uniform_redeemer"])
 _SWEEP_REQ_NO_RETURN: bool = bool(_SWEEP_GUARD["require_no_script_return"])
 _SWEEP_MIN_INPUTS: int = int(_SWEEP_GUARD["min_inputs"])
+_SUPP_ESCAPE = _CFG["suppression_escape"]
+_SUPP_ESCAPE_ENABLED: bool = bool(_SUPP_ESCAPE["enabled"])
+_SUPP_ESCAPE_FLOOR_MIN: float = float(_SUPP_ESCAPE["extraction_floor_min"])
 
 # The floor's purpose is to guarantee the band lands at High; if config
 # drifts below the High threshold the docstring's promise breaks. Fail
@@ -295,26 +303,6 @@ def _compute_net_value_out(
     """
     value_in, value_out = _compute_lovelace_flow(inputs, outputs, script_key)
     return max(0, value_in - value_out)
-
-
-def _iter_assets(val: Any):
-    """Yield ((policy_id, asset_name), qty) pairs from an Ogmios value dict.
-
-    Skips the lovelace component. Handles both v5 (`{"lovelace": N, policy: {asset: qty}}`)
-    and v6 (`{"ada": {"lovelace": N}, policy: {asset: qty}}`) shapes.
-    """
-    if not isinstance(val, dict):
-        return
-    for policy, inner in val.items():
-        if policy in ("ada", "lovelace"):
-            continue
-        if not isinstance(inner, dict):
-            continue
-        for asset_name, qty in inner.items():
-            try:
-                yield (policy, asset_name), int(qty)
-            except (TypeError, ValueError):
-                continue
 
 
 def _compute_n_assets_out(
@@ -465,6 +453,208 @@ def _reweight_without_extraction() -> Tuple[float, float, float, float]:
     return (0.0, w_eu, w_ni + bonus_inputs, w_rc + bonus_recurrence)
 
 
+@dataclass
+class _ScriptAxes:
+    """Computed value-flow facts and normalised sub-scores for one script
+    group. Produced by :func:`_compute_axes`; consumed by the banding,
+    suppression, reason, and evidence stages so each stage reads named
+    fields instead of threading a dozen locals."""
+
+    lovelace_in: int
+    lovelace_out: int
+    net_value: int
+    n_assets_out: int
+    exunits_per_input: float
+    s_extraction_lov: float
+    s_extraction_assets: float
+    s_extraction: float
+    s_extraction_floor: float
+    s_exunits_inv: float
+    s_inputs: float
+    s_recurrence: float
+    bl_source: str
+
+
+def _compute_axes(
+    representative_addr: str,
+    script_key: str,
+    n_inputs: int,
+    total_cpu: int,
+    raw_data: Dict,
+    outputs: List[Dict],
+    sender_recurrence: float,
+    network: str,
+) -> _ScriptAxes:
+    """Value-flow facts + baseline-normalised sub-scores for one group.
+
+    Extraction is value-agnostic: take the stronger of the lovelace and
+    the native-asset axis. NFT-marketplace double-sat exploits drain
+    native assets while the script's lovelace position barely moves;
+    taking max lets either axis carry the signal without dilution.
+    Per-script anchors get headroom (see _extraction_anchor) so an
+    established contract's normal upper-range extraction does not saturate;
+    bootstrap anchors are used as-is. ``s_extraction_floor`` is the
+    UN-WIDENED variant feeding the lazy-validator floor and the
+    suppression escape, so the per-script headroom cannot weaken either
+    high-confidence path.
+    """
+    inputs = raw_data.get("inputs", [])
+    lovelace_in, lovelace_out = _compute_lovelace_flow(inputs, outputs, script_key)
+    net_value = max(0, lovelace_in - lovelace_out)
+    n_assets_out = _compute_n_assets_out(inputs, outputs, script_key)
+    exunits_per_input = total_cpu / (n_inputs + EPSILON)
+
+    # Per-script baselines still keyed by full address; use the
+    # representative address picked from the group. Per-feature resolution
+    # policy (per_script-only vs absolute) lives in _BASELINE_SPECS.
+    bl = _resolve_baselines(representative_addr, network)
+    p50_nv, p99_nv, bl_nv = bl["net_value_out_of_script"]
+    p50_na, p99_na, bl_na = bl["n_assets_out_of_script"]
+    p50_ex, p99_ex, bl_ex = bl["exunits_per_script_input"]
+    p50_ni, p99_ni, bl_ni = bl["n_inputs_same_script"]
+    p50_rc, p99_rc, bl_rc = bl["sender_recurrence"]
+
+    s_extraction_lov = normalise(
+        net_value, p50=p50_nv, p99=_extraction_anchor(p50_nv, p99_nv, bl_nv),
+    )
+    s_extraction_assets = normalise(
+        float(n_assets_out), p50=p50_na, p99=_extraction_anchor(p50_na, p99_na, bl_na),
+    )
+    s_extraction_floor = max(
+        normalise(net_value, p50=p50_nv, p99=p99_nv),
+        normalise(float(n_assets_out), p50=p50_na, p99=p99_na),
+    )
+
+    return _ScriptAxes(
+        lovelace_in=lovelace_in,
+        lovelace_out=lovelace_out,
+        net_value=net_value,
+        n_assets_out=n_assets_out,
+        exunits_per_input=exunits_per_input,
+        s_extraction_lov=s_extraction_lov,
+        s_extraction_assets=s_extraction_assets,
+        s_extraction=max(s_extraction_lov, s_extraction_assets),
+        s_extraction_floor=s_extraction_floor,
+        s_exunits_inv=normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex),
+        s_inputs=normalise(float(n_inputs), p50=p50_ni, p99=p99_ni),
+        s_recurrence=normalise(sender_recurrence, p50=p50_rc, p99=p99_rc),
+        # The baseline source reported is the "most specific tier actually
+        # used" across the features: per_script > per_policy > global > bootstrap.
+        bl_source=_dominant_source([bl_nv, bl_na, bl_ex, bl_ni, bl_rc]),
+    )
+
+
+def _group_allowlisted(inputs: List[Dict], script_key: str, network: str) -> bool:
+    """Whether ANY address in the script group is allowlisted.
+
+    Check every address in the group, not just the representative: a known
+    batcher may publish UTxOs under multiple stake-cred variants, and the
+    group must be allowlisted if any variant is.
+    """
+    group_addrs = {
+        inp.get("address", "") for inp in inputs
+        if _payment_credential(inp.get("address", "")) == script_key
+    }
+    return any(_is_allowlisted(a, network) for a in group_addrs)
+
+
+def _floor_applies(axes: _ScriptAxes, allowlisted: bool, uniform_sweep: bool) -> bool:
+    """Lazy-validator band floor predicate.
+
+    Band floor for confirmed structural double-satisfaction. The gate
+    already required >= 2 inputs from the same script plus a spend
+    redeemer; if on top of that ``s_exunits_inv`` saturates (the validator
+    did near-zero work per input), we have a high-confidence "lazy
+    validator" fingerprint that is unlikely to occur on legitimate txs.
+    The weighted score under spec 4.4.3 is biased toward value extraction,
+    so a low-value structural exploit can score in the Moderate band even
+    when the structural confirmation is strong; the floor surfaces it at
+    High. Allowlisted scripts are exempt: legitimate batchers often run
+    minimal per-input CPU by design. The extraction sanity gate keeps
+    state-machine contracts (consume own UTxOs, write state back,
+    s_extraction = 0) from flooring on every cheap iteration; the minimum
+    is well below CTF 05's small-drain signal so genuine low-value
+    exploits still floor. Uses the UN-WIDENED extraction floor signal so
+    per-script headroom cannot weaken this path. Tunables:
+    multiple_sat.lazy_validator_threshold / _floor / _extraction_min.
+    """
+    return (
+        not allowlisted
+        and not uniform_sweep
+        and axes.s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
+        and axes.s_extraction_floor > _LAZY_VALIDATOR_EXTRACTION_MIN
+    )
+
+
+def _suppression_outcome(
+    axes: _ScriptAxes,
+    allowlisted: bool,
+    uniform_sweep: bool,
+    floored: bool,
+) -> Tuple[bool, bool]:
+    """Benign-shape suppression decision: returns (suppressed, escaped).
+
+    Suppress benign multi-input script spends that are not double
+    satisfaction: an owner consolidating their own UTxOs (uniform sweep),
+    or a tx that returns value TO the script (state continuation, not
+    extraction). Gated on ``not floored`` so a high-confidence
+    lazy-validator exploit (already floored to High) is never suppressed,
+    and the CTF-01 marketplace double-sat (uniform=False, value_returned=0,
+    Moderate) is unaffected. These two signals are exactly what the
+    extraction-assets axis cannot distinguish on its own.
+
+    Extraction-magnitude escape hatch: both benign shapes are
+    attacker-reachable (return 1 lovelace to the script to force the
+    state-continuation arm; a >= min_inputs identical-redeemer full drain
+    matches the sweep fingerprint), so when the UN-WIDENED extraction
+    floor signal exceeds the configured threshold the finding is kept and
+    capped at the top of Moderate instead of silenced. The benign
+    populations sit far below the threshold (state machines ~0, observed
+    small owner-sweeps ~0.002), so they remain suppressed. See
+    multiple_sat.suppression_escape.
+    """
+    suppression_shape = uniform_sweep or axes.lovelace_out > 0
+    if floored or not suppression_shape:
+        return False, False
+    escape = (
+        _SUPP_ESCAPE_ENABLED
+        and not allowlisted
+        # >= not >: an at-threshold extraction must fire (recall-first);
+        # normalise() adds EPSILON to its denominator, so boundary cases
+        # land a hair BELOW the nominal ratio (see the config comment).
+        and axes.s_extraction_floor >= _SUPP_ESCAPE_FLOOR_MIN
+    )
+    return (not escape), escape
+
+
+def _collect_reasons(
+    axes: _ScriptAxes,
+    floored: bool,
+    allowlisted: bool,
+    uniform_sweep: bool,
+    escaped: bool,
+) -> List[str]:
+    """Operator-facing reason flags for a scored (non-suppressed) result."""
+    reasons = []
+    if axes.s_extraction_lov > _REASON_T:
+        reasons.append("large_net_value_extraction")
+    if axes.s_extraction_assets > _REASON_T:
+        reasons.append("native_asset_extraction")
+    if axes.s_exunits_inv > _REASON_T:
+        reasons.append("low_exunits_per_input")
+    if floored:
+        reasons.append("lazy_validator_band_floor")
+    if axes.s_inputs > _REASON_T:
+        reasons.append("high_n_inputs_same_script")
+    if allowlisted:
+        reasons.append("allowlisted_batch_script")
+    if uniform_sweep:
+        reasons.append("uniform_script_sweep_guard")
+    if escaped:
+        reasons.append("extraction_escape_moderate_cap")
+    return reasons
+
+
 class MultipleSatScorer(BaseScorer):
     name = "multiple_sat"
 
@@ -547,64 +737,27 @@ class MultipleSatScorer(BaseScorer):
         network: str,
         spend_redeemer_payloads: List[str],
     ) -> ScorerResult:
-        inputs = raw_data.get("inputs", [])
-        lovelace_in_at_script, lovelace_out_at_script = _compute_lovelace_flow(
-            inputs, outputs, script_key,
+        """Score one script group. Orchestration only; the stages live in
+        module helpers (axes -> weights -> floor -> sweep cap ->
+        suppression/escape -> reasons/evidence) whose docstrings carry the
+        detection rationale for each rule."""
+        axes = _compute_axes(
+            representative_addr, script_key, n_inputs, total_cpu,
+            raw_data, outputs, sender_recurrence, network,
         )
-        net_value = max(0, lovelace_in_at_script - lovelace_out_at_script)
-        n_assets_out = _compute_n_assets_out(inputs, outputs, script_key)
-        exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
-        # Per-script baselines still keyed by full address; use the
-        # representative address picked from the group. Per-feature resolution
-        # policy (per_script-only vs absolute) lives in _BASELINE_SPECS.
-        bl = _resolve_baselines(representative_addr, network)
-        p50_nv, p99_nv, bl_nv = bl["net_value_out_of_script"]
-        p50_na, p99_na, bl_na = bl["n_assets_out_of_script"]
-        p50_ex, p99_ex, bl_ex = bl["exunits_per_script_input"]
-        p50_ni, p99_ni, bl_ni = bl["n_inputs_same_script"]
-        p50_rc, p99_rc, bl_rc = bl["sender_recurrence"]
-
-        # Extraction is value-agnostic: take the stronger of the lovelace and
-        # the native-asset axis. NFT-marketplace double-sat exploits drain
-        # native assets while the script's lovelace position barely moves;
-        # taking max lets either axis carry the signal without dilution.
-        # Per-script anchors get headroom (see _extraction_anchor) so an
-        # established contract's normal upper-range extraction does not saturate;
-        # bootstrap anchors are used as-is.
-        s_extraction_lov = normalise(
-            net_value, p50=p50_nv, p99=_extraction_anchor(p50_nv, p99_nv, bl_nv),
+        # Allowlisted scripts: neutralise s_extraction and redistribute its
+        # weight. s_extraction_floor is intentionally NOT zeroed: it feeds
+        # only paths whose gates begin with `not allowlisted`, so it is
+        # never consulted for an allowlisted script anyway.
+        allowlisted = _group_allowlisted(
+            raw_data.get("inputs", []), script_key, network,
         )
-        s_extraction_assets = normalise(
-            float(n_assets_out), p50=p50_na, p99=_extraction_anchor(p50_na, p99_na, bl_na),
-        )
-        s_extraction = max(s_extraction_lov, s_extraction_assets)
-        # Un-widened extraction for the lazy-validator floor gate only, so the
-        # High-confidence floor's recall is independent of the per-script
-        # headroom (a cheap-validator low-value exploit must still floor even on
-        # an established contract).
-        s_extraction_floor = max(
-            normalise(net_value, p50=p50_nv, p99=p99_nv),
-            normalise(float(n_assets_out), p50=p50_na, p99=p99_na),
-        )
-        s_exunits_inv = normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex)
-        s_inputs = normalise(float(n_inputs), p50=p50_ni, p99=p99_ni)
-        s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
-
-        # Allowlisted scripts: neutralise s_extraction and redistribute its weight.
-        # Check every address in the group, not just the representative: a known
-        # batcher may publish UTxOs under multiple stake-cred variants, and the
-        # group must be allowlisted if any variant is.
-        group_addrs = {inp.get("address", "") for inp in inputs if _payment_credential(inp.get("address", "")) == script_key}
-        allowlisted = any(_is_allowlisted(a, network) for a in group_addrs)
         if allowlisted:
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
-            s_extraction = 0.0
-            s_extraction_lov = 0.0
-            s_extraction_assets = 0.0
-            # s_extraction_floor is intentionally NOT zeroed: it feeds only the
-            # lazy-validator floor, whose gate begins with `not allowlisted`, so
-            # it is never consulted for an allowlisted script anyway.
+            axes.s_extraction = 0.0
+            axes.s_extraction_lov = 0.0
+            axes.s_extraction_assets = 0.0
         else:
             w_ex = float(_W["extraction"])
             w_eu = float(_W["exunits_inv"])
@@ -612,52 +765,18 @@ class MultipleSatScorer(BaseScorer):
             w_rc = float(_W["recurrence"])
 
         raw = (
-            w_ex * s_extraction
-            + w_eu * s_exunits_inv
-            + w_ni * s_inputs
-            + w_rc * s_recurrence
+            w_ex * axes.s_extraction
+            + w_eu * axes.s_exunits_inv
+            + w_ni * axes.s_inputs
+            + w_rc * axes.s_recurrence
         )
         final = finalise_score(raw)
 
-        # Band floor for confirmed structural double-satisfaction. The gate
-        # already required ≥2 inputs from the same script plus a spend
-        # redeemer; if on top of that ``s_exunits_inv`` saturates (the
-        # validator did near-zero work per input), we have a high-confidence
-        # "lazy validator" fingerprint that is unlikely to occur on legitimate
-        # txs. The weighted score under §4.4.3 is biased toward value
-        # extraction, so a low-value structural exploit can score in the
-        # Moderate band even when the structural confirmation is strong.
-        # Floor the band to High in that case so operators triage the right
-        # signal first. Allowlisted scripts are exempt: legitimate batchers
-        # often run minimal per-input CPU by design. Threshold and floor
-        # tunable via multiple_sat.lazy_validator_threshold / _floor.
-        # Uniform-sweep guard. When the tx fingerprint is "owner sweeping
-        # their own script UTxOs" (many inputs, identical spend redeemers,
-        # no script return), suppress the lazy-validator floor: the gate
-        # has fired and the weighted score still records the structural
-        # signals, but we do not artificially elevate the band. Real
-        # double-satisfaction exploits have asymmetric satisfaction
-        # arguments and write the satisfying value (NFT / payment) to a
-        # distinct address shape that this predicate rejects.
         uniform_sweep = _is_uniform_sweep(
             script_key, n_inputs, outputs, spend_redeemer_payloads,
         )
-
-        # Extraction sanity gate: double-satisfaction requires value to
-        # leave the script. State-machine contracts that consume 2 of
-        # their own UTxOs and write state back have ``s_extraction = 0``
-        # and would otherwise have every cheap iteration floored to High.
-        # The minimum is well below CTF 05's small-drain extraction signal
-        # so genuine low-value exploits still floor.
-        floor_applies = (
-            not allowlisted
-            and not uniform_sweep
-            and s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
-            # Un-widened extraction: the floor is the high-confidence lazy-
-            # validator path; the per-script headroom must not weaken it.
-            and s_extraction_floor > _LAZY_VALIDATOR_EXTRACTION_MIN
-        )
-        if floor_applies:
+        floored = _floor_applies(axes, allowlisted, uniform_sweep)
+        if floored:
             final = max(final, _LAZY_VALIDATOR_FLOOR)
 
         # When the sweep guard fires AND the script is also allowlisted,
@@ -670,77 +789,60 @@ class MultipleSatScorer(BaseScorer):
         if uniform_sweep:
             final = min(final, BAND_MODERATE_MAX)
 
-        # The baseline source reported is the "most specific tier actually used"
-        # across the four features. Prefer per_script > per_policy > global > bootstrap.
-        bl_source = _dominant_source([bl_nv, bl_na, bl_ex, bl_ni, bl_rc])
-
-        # Suppress benign multi-input script spends that are not double
-        # satisfaction: an owner consolidating their own UTxOs (uniform sweep),
-        # or a tx that returns value TO the script (state continuation, not
-        # extraction). Gated on ``not floor_applies`` so a high-confidence
-        # lazy-validator exploit (already floored to High) is never suppressed,
-        # and the CTF-01 marketplace double-sat (uniform=False, value_returned=0,
-        # Moderate) is unaffected. These two signals are exactly what the
-        # extraction-assets axis cannot distinguish on its own.
-        if not floor_applies and (uniform_sweep or lovelace_out_at_script > 0):
+        suppressed, escaped = _suppression_outcome(
+            axes, allowlisted, uniform_sweep, floored,
+        )
+        if suppressed:
             return ScorerResult.no_finding(
                 sub_scores={
-                    "s_extraction": round(s_extraction, 4),
-                    "s_exunits_inv": round(s_exunits_inv, 4),
-                    "s_inputs": round(s_inputs, 4),
-                    "s_recurrence": round(s_recurrence, 4),
+                    "s_extraction": round(axes.s_extraction, 4),
+                    "s_exunits_inv": round(axes.s_exunits_inv, 4),
+                    "s_inputs": round(axes.s_inputs, 4),
+                    "s_recurrence": round(axes.s_recurrence, 4),
                     "n_inputs_same_script": float(n_inputs),
                     "uniform_sweep": bool(uniform_sweep),
-                    "value_returned_lovelace": int(lovelace_out_at_script),
+                    "value_returned_lovelace": int(axes.lovelace_out),
                 },
-                baseline_source=bl_source,
+                baseline_source=axes.bl_source,
             )
+        if escaped:
+            # High extraction under a benign-looking shape: never silence
+            # (recall), never elevate to High (the large-owner-sweep FP
+            # risk). Banded EXACTLY Moderate: capped at the top of the band
+            # like the uniform-sweep guard, and FLOORED at the bottom —
+            # without the floor, an escaped finding whose weighted score
+            # fell below the Moderate threshold landed in Informational
+            # (no action), re-silencing exactly the finding the escape
+            # exists to keep.
+            final = min(max(final, BAND_MODERATE_THRESHOLD), BAND_MODERATE_MAX)
 
-        reasons = []
-        if s_extraction_lov > _REASON_T:
-            reasons.append("large_net_value_extraction")
-        if s_extraction_assets > _REASON_T:
-            reasons.append("native_asset_extraction")
-        if s_exunits_inv > _REASON_T:
-            reasons.append("low_exunits_per_input")
-        if floor_applies:
-            reasons.append("lazy_validator_band_floor")
-        if s_inputs > _REASON_T:
-            reasons.append("high_n_inputs_same_script")
-        if allowlisted:
-            reasons.append("allowlisted_batch_script")
-        if uniform_sweep:
-            reasons.append("uniform_script_sweep_guard")
-
-        # ``lovelace_in_at_script`` / ``lovelace_out_at_script`` are already
-        # computed at the top of this method via _compute_lovelace_flow; reuse
-        # them here instead of re-iterating inputs/outputs.
         redeemer_count = len(spend_redeemer_payloads)
-
         return ScorerResult(
             score=final,
             sub_scores={
-                "s_extraction": round(s_extraction, 4),
-                "s_extraction_lov": round(s_extraction_lov, 4),
-                "s_extraction_assets": round(s_extraction_assets, 4),
-                "s_exunits_inv": round(s_exunits_inv, 4),
-                "s_inputs": round(s_inputs, 4),
-                "s_recurrence": round(s_recurrence, 4),
+                "s_extraction": round(axes.s_extraction, 4),
+                "s_extraction_lov": round(axes.s_extraction_lov, 4),
+                "s_extraction_assets": round(axes.s_extraction_assets, 4),
+                "s_exunits_inv": round(axes.s_exunits_inv, 4),
+                "s_inputs": round(axes.s_inputs, 4),
+                "s_recurrence": round(axes.s_recurrence, 4),
                 "n_inputs_same_script": float(n_inputs),
-                "n_assets_out_of_script": float(n_assets_out),
+                "n_assets_out_of_script": float(axes.n_assets_out),
             },
-            reasons=reasons,
-            baseline_source=bl_source,
+            reasons=_collect_reasons(
+                axes, floored, allowlisted, uniform_sweep, escaped,
+            ),
+            baseline_source=axes.bl_source,
             evidence={
                 "n_inputs_same_script": int(n_inputs),
                 "redeemer_count": int(redeemer_count),
                 "redeemer_input_ratio": round(redeemer_count / max(1, n_inputs), 4),
                 "cpu_units_total": int(total_cpu),
-                "cpu_units_per_input": int(exunits_per_input),
-                "value_extracted_lovelace": int(net_value),
-                "value_returned_lovelace": int(lovelace_out_at_script),
-                "value_input_lovelace": int(lovelace_in_at_script),
-                "n_assets_extracted": int(n_assets_out),
+                "cpu_units_per_input": int(axes.exunits_per_input),
+                "value_extracted_lovelace": int(axes.net_value),
+                "value_returned_lovelace": int(axes.lovelace_out),
+                "value_input_lovelace": int(axes.lovelace_in),
+                "n_assets_extracted": int(axes.n_assets_out),
                 "target_script_address": representative_addr,
                 # ``lovelace_full_drain`` is deliberately narrow: it records
                 # only that no lovelace was returned to the script. The
@@ -749,7 +851,7 @@ class MultipleSatScorer(BaseScorer):
                 # those show ``lovelace_full_drain=False`` but
                 # ``n_assets_extracted > 0``. The UI should reference both.
                 "lovelace_full_drain": bool(
-                    lovelace_out_at_script == 0 and lovelace_in_at_script > 0
+                    axes.lovelace_out == 0 and axes.lovelace_in > 0
                 ),
                 "allowlisted": bool(allowlisted),
                 "uniform_sweep": bool(uniform_sweep),

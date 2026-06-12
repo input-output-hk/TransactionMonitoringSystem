@@ -21,15 +21,19 @@ class is scored correctly, not just the changed ones, and there is no
 preserve-vs-stale subtlety. Connection comes from settings, so it runs unchanged
 on the server.
 
-Scope: currently Moderate-or-above rows (the alert surface). Every tuning change
-is suppressive (it only lowers scores; the large_datum gate is strictly more
-selective than the original byte gate), so an Informational/none row cannot
-become an alert and does not need re-scoring. Pass --all-bands to also re-score
-Informational/none rows (cosmetic; much slower).
+Scope: the default is Moderate-or-above rows (the alert surface), which was
+sufficient for the 06-01/02 tuning because every change in that set was
+suppressive (it only lowered scores), so an Informational/none row could not
+become an alert. THAT NO LONGER HOLDS for changes landed on or after
+2026-06-11: the recall fixes (anchor-relative p50 poisoning bound, drift-guard
+polarity, escape floor) are recall-POSITIVE, meaning previously silenced or
+low-banded rows can now score into the alert bands. To pick those up you MUST
+pass --all-bands; the Moderate+ default would skip exactly the rows the fixes
+exist to un-silence.
 
 tx_class_scores is a ReplacingMergeTree keyed on (network, tx_hash) deduped by
 max(analyzed_at); re-inserting with analyzed_at bumped +1s supersedes the old
-row in the same partition.
+row (the v2 table is unpartitioned).
 
   python -m scripts.oneoff.reclassify_for_tuning_2026_06_01 --network preprod              # dry-run
   python -m scripts.oneoff.reclassify_for_tuning_2026_06_01 --network preprod --count-only
@@ -127,7 +131,7 @@ def main() -> None:
             """
             SELECT tx_hash, fee, input_count, output_count, total_output_value,
                    addresses, metadata, raw_data, slot, block_height, timestamp
-            FROM transactions WHERE network = %(n)s AND tx_hash IN %(h)s
+            FROM transactions FINAL WHERE network = %(n)s AND tx_hash IN %(h)s
             """,
             {"n": args.network, "h": chunk_hashes},
         )

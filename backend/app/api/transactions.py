@@ -168,7 +168,8 @@ async def get_transaction_by_hash(
 
         inputs_results = await clickhouse.execute_query_async("""
             SELECT
-                input_tx_hash, input_index_in_tx, address, amount, assets, is_reference, is_collateral
+                input_tx_hash, input_index_in_tx, address, amount, assets,
+                is_reference, is_collateral, is_unspent_attempt
             FROM transaction_inputs
             WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             ORDER BY input_index
@@ -190,7 +191,10 @@ async def get_transaction_by_hash(
                 "amount": row[3],
                 "assets": assets,
                 "is_reference": bool(row[5]),
-                "is_collateral": bool(row[6])
+                "is_collateral": bool(row[6]),
+                # Failed-tx attempted spend: shown in the detail view (what
+                # the tx TRIED to consume), excluded from flow analytics.
+                "is_unspent_attempt": bool(row[7]),
             })
 
         outputs_results = await clickhouse.execute_query_async("""
