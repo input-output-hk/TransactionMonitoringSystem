@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.ingestion.ogmios_client import OgmiosClient
+from app.ingestion.mempool_monitor import MempoolMonitor
 from app.models.transaction import NormalizedTransaction, TransactionInput
 
 ATTEMPT_HASH = "a7" * 32      # the failed double-sat attempt
@@ -30,7 +30,13 @@ def _run(coro):
 
 @pytest.fixture
 def client():
-    return OgmiosClient()
+    return MempoolMonitor(
+        network="preprod",
+        emit=AsyncMock(),
+        query_utxo=AsyncMock(return_value=[]),
+        connect_ws=AsyncMock(),
+        send_recv=AsyncMock(),
+    )
 
 
 def _confirmed_tx(tx_hash, *, script_valid, inputs, fee=200_000):
@@ -71,7 +77,7 @@ class TestConsumedRefsForFailedAttempt:
             inputs=[_attempted_input(CONTESTED_REF),
                     _collateral_input(COLLATERAL_REF)],
         )
-        assert OgmiosClient._consumed_refs(tx) == {COLLATERAL_REF}
+        assert MempoolMonitor._consumed_refs(tx) == {COLLATERAL_REF}
 
     def test_attempted_inputs_remain_visible_on_the_parsed_tx(self):
         # The pre-fix parser DROPPED a failed tx's regular inputs, blinding
@@ -119,13 +125,13 @@ class TestFailedAttemptDisplacementSignal:
                 ATTEMPT_HASH, attempt_mempool_data, seen_at,
             )
             # Chain side: the winner confirms, consuming the contested ref.
-            await client._record_displacements(
+            await client.record_displacements(
                 [winner], datetime.now(timezone.utc),
             )
 
-        with patch("app.ingestion.ogmios_client.postgres.insert_mempool_collision",
+        with patch("app.ingestion.mempool_monitor.postgres.insert_mempool_collision",
                    insert_collision), \
-             patch("app.ingestion.ogmios_client.postgres.update_collision_outcome",
+             patch("app.ingestion.mempool_monitor.postgres.update_collision_outcome",
                    outcome):
             _run(scenario())
 
@@ -157,11 +163,11 @@ class TestFailedAttemptDisplacementSignal:
                     _collateral_input(COLLATERAL_REF)],
         )
         insert_collision = AsyncMock()
-        with patch("app.ingestion.ogmios_client.postgres.insert_mempool_collision",
+        with patch("app.ingestion.mempool_monitor.postgres.insert_mempool_collision",
                    insert_collision), \
-             patch("app.ingestion.ogmios_client.postgres.update_collision_outcome",
+             patch("app.ingestion.mempool_monitor.postgres.update_collision_outcome",
                    AsyncMock()):
-            _run(client._record_displacements(
+            _run(client.record_displacements(
                 [failed_attempt], datetime.now(timezone.utc),
             ))
 

@@ -200,7 +200,7 @@ async def lifespan(app: FastAPI):
         websocket.set_active_connections(active_connections)
 
         asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
-        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.run_mempool_monitor))
+        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
         logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
 
     except Exception as e:

@@ -179,7 +179,7 @@ class TestMempoolCacheLifetime:
     def _seed(self, client):
         from datetime import datetime, timezone
         tx_hash = "00" * 32  # first tx of _block()
-        client._pending_input_cache[tx_hash] = (
+        client.mempool._pending_input_cache[tx_hash] = (
             {("11" * 32, 0): {"address": "addr_test1qsource", "amount": 7}},
             datetime.now(timezone.utc),
         )
@@ -199,7 +199,7 @@ class TestMempoolCacheLifetime:
                    AsyncMock()):
             with pytest.raises(BlockPersistError):
                 _run(client._handle_roll_forward(_block()))
-        assert tx_hash in client._pending_input_cache  # replay keeps enrichment
+        assert tx_hash in client.mempool._pending_input_cache  # replay keeps enrichment
 
     def test_cache_popped_after_successful_persist(self, client, monkeypatch):
         monkeypatch.setattr(settings, "RAW_STORE_ENABLED", False)
@@ -211,10 +211,10 @@ class TestMempoolCacheLifetime:
                    AsyncMock(return_value={})), \
              patch("app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
                    AsyncMock()), \
-             patch.object(client, "_record_displacements", AsyncMock()), \
-             patch.object(client, "_settle_confirmed", AsyncMock()):
+             patch.object(client.mempool, "record_displacements", AsyncMock()), \
+             patch.object(client.mempool, "settle_confirmed", AsyncMock()):
             _run(client._handle_roll_forward(_block()))
-        assert tx_hash not in client._pending_input_cache
+        assert tx_hash not in client.mempool._pending_input_cache
 
     def test_cache_survives_failed_sync_point_save(self, client, monkeypatch):
         """A transient Postgres failure on save_sync_point replays the
@@ -231,11 +231,11 @@ class TestMempoolCacheLifetime:
                    AsyncMock(return_value={})), \
              patch("app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
                    AsyncMock()), \
-             patch.object(client, "_record_displacements", AsyncMock()), \
-             patch.object(client, "_settle_confirmed", AsyncMock()):
+             patch.object(client.mempool, "record_displacements", AsyncMock()), \
+             patch.object(client.mempool, "settle_confirmed", AsyncMock()):
             with pytest.raises(RuntimeError):
                 _run(client._handle_roll_forward(_block()))
-        assert tx_hash in client._pending_input_cache  # replay keeps enrichment
+        assert tx_hash in client.mempool._pending_input_cache  # replay keeps enrichment
 
     def test_cache_still_present_when_sync_point_saves(self, client, monkeypatch):
         """Ordering pin: the pop happens AFTER save_sync_point succeeds,
@@ -245,7 +245,7 @@ class TestMempoolCacheLifetime:
         present_at_save = {}
 
         async def save_sync(*a, **k):
-            present_at_save["cached"] = tx_hash in client._pending_input_cache
+            present_at_save["cached"] = tx_hash in client.mempool._pending_input_cache
 
         with patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
                    AsyncMock()), \
@@ -254,11 +254,11 @@ class TestMempoolCacheLifetime:
                    AsyncMock(return_value={})), \
              patch("app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
                    AsyncMock()), \
-             patch.object(client, "_record_displacements", AsyncMock()), \
-             patch.object(client, "_settle_confirmed", AsyncMock()):
+             patch.object(client.mempool, "record_displacements", AsyncMock()), \
+             patch.object(client.mempool, "settle_confirmed", AsyncMock()):
             _run(client._handle_roll_forward(_block()))
         assert present_at_save["cached"] is True
-        assert tx_hash not in client._pending_input_cache  # popped after success
+        assert tx_hash not in client.mempool._pending_input_cache  # popped after success
 
 
 class TestStartupValidation:

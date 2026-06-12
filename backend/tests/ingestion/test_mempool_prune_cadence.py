@@ -10,11 +10,12 @@ PROCESSED txs, independent of set-size churn.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.config import settings
-from app.ingestion.ogmios_client import OgmiosClient
+from app.ingestion.mempool_monitor import MempoolMonitor
 
 # Small sweep interval so the tests exercise several full cycles cheaply.
 PRUNE_EVERY = 3
@@ -23,7 +24,13 @@ PRUNE_EVERY = 3
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(settings, "MEMPOOL_PRUNE_EVERY_N_TXS", PRUNE_EVERY)
-    return OgmiosClient()
+    return MempoolMonitor(
+        network="preprod",
+        emit=AsyncMock(),
+        query_utxo=AsyncMock(return_value=[]),
+        connect_ws=AsyncMock(),
+        send_recv=AsyncMock(),
+    )
 
 
 def _tx(i: int) -> tuple:
