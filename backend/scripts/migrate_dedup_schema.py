@@ -31,7 +31,7 @@ WHAT IT DOES, per table in clickhouse.DEDUP_TABLE_KEYS
   4. Verify: count({table}__mig) == count of distinct keys in the legacy
      table. Abort (leaving the live table untouched) on mismatch.
   5. EXCHANGE TABLES (atomic) and rename the legacy data to
-     {table}__legacy_<UTC date>. Kept for manual inspection; drop later.
+     {table}__legacy_<UTC timestamp>. Kept for manual inspection; drop later.
 
 Plus: drops the address_transactions_mv up front (it pins the pre-swap
 table UUIDs) and the dead tx_analysis_results table (never written; see the
@@ -223,7 +223,11 @@ def main() -> int:
 
     clickhouse.init_client()
     client = clickhouse._get_client()
-    legacy_suffix = datetime.now(timezone.utc).strftime("%Y%m%d")
+    # Second-resolution suffix: a date-only suffix collides when two
+    # migrations run the same day (observed live: the count-column widening
+    # crashed on RENAME because the morning's dedup migration already owned
+    # __legacy_<date>, leaving the post-swap table stranded under __mig).
+    legacy_suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     db_engine = client.execute(
         "SELECT engine FROM system.databases WHERE name = currentDatabase()"
