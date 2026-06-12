@@ -119,6 +119,8 @@ flowchart TD
         LC[("tx_lifecycle: current status")]
         SC[("sync_checkpoint: last slot")]
         ES[("entity_state: user annotations")]
+        MC[("mempool_collisions: front-run displacements")]
+        AU[("users / magic_link_tokens / user_sessions: auth")]
     end
 
     subgraph fs["Data Lake (Filesystem)"]

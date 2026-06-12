@@ -1,6 +1,6 @@
 # Cardano Transaction Monitoring System
 
-Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), scores transactions against 9 Polimi attack classes (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing), and exposes a REST API and live WebSocket feed.
+Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), scores transactions against 9 Polimi attack classes (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing), and exposes a REST API and live WebSocket feed. Access is gated two ways: programmatic clients authenticate with a `TMS-API-Key` header, while the operator dashboard uses magic-link email login with role-based accounts (Admin / Reviewer) backed by PostgreSQL.
 
 **For step-by-step setup and operations see [RUNBOOK.md](RUNBOOK.md).**
 
@@ -50,6 +50,11 @@ docker-compose up -d
 cd backend
 python run.py
 
+# 7. Bootstrap the first dashboard account (one-time; needs PostgreSQL up).
+# Creates an Admin and emails a magic-link; --no-email prints the link to stdout
+# instead (use when SMTP is not configured yet).
+python -m app.cli create-admin you@example.com "Your Name" --no-email
+
 # Switch network at launch via TMS_ENV (loads .env.<name> on top of .env):
 #   TMS_ENV=preview python run.py   # preview — API on 8001
 #   TMS_ENV=preprod python run.py   # explicit preprod (same as default)
@@ -84,19 +89,23 @@ Selection is via `TMS_ENV=<name>` at launch; unset defaults to `preprod`. Shell 
 |---|---|---|
 | `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; the app refuses to start in that mode unless `TMS_ALLOW_DEV_MODE=1` is also set |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key rate limiting |
-| `RATE_LIMIT_REQUESTS` | `60` | Max requests per window |
+| `RATE_LIMIT_REQUESTS` | `240` | Max requests per window per key/IP |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window duration |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background analysis engine |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | Analysis poll interval |
 | `ANALYSIS_ENABLED` | `true` | Enable 9-class detection engine |
 | `LOG_LEVEL` | `INFO` | Log verbosity |
+| `APP_BASE_URL` | `http://localhost:8000` | Base URL embedded in magic-link emails |
+| `SESSION_TTL_DAYS` | `7` | Dashboard session lifetime |
+| `MAGIC_LINK_TTL_MINUTES` | `15` | Magic-link validity window |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_FROM_EMAIL` | _(compose: mailpit)_ | Outbound mail for magic-link delivery |
 
-Database defaults match the Docker Compose setup and rarely need changing. See `.env.example` for the full list.
+Postgres (`POSTGRES_*`), ClickHouse (`CLICKHOUSE_*`), the full SMTP/session/magic-link set, and trusted-proxy / CORS settings are documented in `.env.example` and the [RUNBOOK configuration reference](RUNBOOK.md#configuration-reference). Database defaults match the Docker Compose setup and rarely need changing.
 
 ## API
 
-All endpoints require a `TMS-API-Key` header. For local dev without a key set, boot with both `API_KEYS=` (empty) and `TMS_ALLOW_DEV_MODE=1`; requests are then accepted without a header.
-All endpoints accept an optional `network` query parameter (`mainnet`, `preprod`, or `preview`); defaults to the instance's `CARDANO_NETWORK`.
+The API accepts two authentication methods. Programmatic clients send a `TMS-API-Key` header. Browser/dashboard clients authenticate with a magic-link session cookie obtained via `/api/auth/*` (no API key needed). For local dev without a key set, boot with both `API_KEYS=` (empty) and `TMS_ALLOW_DEV_MODE=1`; requests are then accepted without either credential.
+All data endpoints accept an optional `network` query parameter (`mainnet`, `preprod`, or `preview`); defaults to the instance's `CARDANO_NETWORK`.
 
 Interactive docs: `http://localhost:8000/docs`
 
@@ -123,6 +132,20 @@ Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (
 | GET | `/api/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`) |
 | GET | `/api/analysis/results/{tx_hash}` | Analysis result for a single transaction |
 | GET | `/api/analysis/stats` | Risk-band distribution and per-class score stats |
+
+### Authentication & Users
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/auth/request-link` | Request a magic-link login email for an address |
+| GET | `/api/auth/verify` | Verify a magic-link token and start a session |
+| POST | `/api/auth/logout` | Invalidate the current session |
+| GET | `/api/auth/me` | Current authenticated user |
+| GET | `/api/users` | List users (Admin) |
+| POST | `/api/users` | Invite a user (Admin) |
+| DELETE | `/api/users/{user_id}` | Remove a user (Admin) |
+| POST | `/api/users/{user_id}/resend-invite` | Resend an invite magic-link (Admin) |
+
+First-admin bootstrap is done from the CLI, not the API: `python -m app.cli create-admin <email> "<name>"` (see [Setup](#setup) step 7).
 
 ### Other
 | Method | Path | Description |
@@ -158,7 +181,7 @@ Single-process FastAPI application. Three async background tasks run in the same
 | Store | Purpose |
 |---|---|
 | ClickHouse | Analytics Warehouse: transactions, inputs, outputs, 9-class score vectors, baselines |
-| PostgreSQL | Lifecycle state, sync checkpoint, entity state, mempool collisions, audit logs |
+| PostgreSQL | Lifecycle state, sync checkpoint, entity state, mempool collisions, audit logs, and the auth tables (`users`, `magic_link_tokens`, `user_sessions`) |
 | Filesystem | Data Lake: write-once gzip JSON blobs of raw Ogmios payloads |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs/C4-ARCHITECTURE.md), and [docs/TECHNOLOGY-DECISIONS.md](docs/TECHNOLOGY-DECISIONS.md) for details.
@@ -174,7 +197,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs
 ./scripts/db.sh reset       # reset all data (destructive)
 ```
 
-See [README_DOCKER.md](README_DOCKER.md) for connection details and troubleshooting.
+To wipe data for a single network rather than everything, prefer the network-aware `./scripts/reset.sh` (honours `TMS_ENV` / `--network`, with `--all` and `--yes` flags). See [README_DOCKER.md](README_DOCKER.md) for connection details and troubleshooting, and [RUNBOOK.md §Reset all data](RUNBOOK.md#reset-all-data) for the full reset procedure.
 
 ## License
 

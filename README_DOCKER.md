@@ -17,6 +17,17 @@ App + databases together:
 docker-compose --profile app up -d
 ```
 
+## Services
+
+| Service | Container | Profile | Purpose |
+|---|---|---|---|
+| `postgres` | `tms-postgres` | default | Operational database (lifecycle, auth, audit) |
+| `clickhouse` | `tms-clickhouse` | default | Analytics warehouse |
+| `mailpit` | `tms-mailpit` | default | Dev SMTP sink for magic-link emails (SMTP `:1025`, web UI `:8025`) |
+| `app` | `tms-app` | `app` | FastAPI application (host-run by default in development) |
+| `cardano-node` | `tms-cardano-node` | `ingestion` | Full node, pinned to `11.0.1` (van Rossem PV11) |
+| `ogmios` | `tms-ogmios` | `ingestion` | WebSocket bridge `:1337`, pinned to `v6.14.0` |
+
 ## Connection Details
 
 ### PostgreSQL
@@ -42,7 +53,7 @@ curl http://localhost:8123/ping
 
 ## Troubleshooting
 
-**Port conflict** (5432 / 9000 already in use): change port mapping in `docker-compose.yml` and update `.env`.
+**Port conflict** (host ports 5433 / 9000 / 8123 / 1025 / 8025 already in use): change the port mapping in `docker-compose.yml` and update `.env` (`POSTGRES_PORT` defaults to host 5433, mapped to container 5432).
 
 **Container won't start**:
 ```bash
@@ -54,3 +65,5 @@ docker-compose logs clickhouse
 ```bash
 docker-compose down -v && docker-compose up -d
 ```
+
+To reset a single network rather than all data, use `./scripts/reset.sh` (see [RUNBOOK.md §Reset all data](RUNBOOK.md#reset-all-data)).

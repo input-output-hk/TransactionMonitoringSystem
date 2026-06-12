@@ -14,9 +14,11 @@ C4Context
 
     System_Ext(cardano_node, "Cardano Node", "Full node: source of truth for chain state, mempool, and block data")
     System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano node: provides ChainSync, LocalTxMonitor, and LocalStateQuery mini-protocols via JSON-RPC 2.0")
+    System_Ext(mail, "SMTP Mail Relay", "Delivers magic-link login emails (mailpit in dev, real relay in production)")
 
-    Rel(user, tms, "Browse and investigate", "HTTPS, WebSocket")
+    Rel(user, tms, "Browse and investigate; magic-link login", "HTTPS, WebSocket")
     Rel(tms, ogmios, "Blocks + mempool + UTxO queries", "WebSocket :1337")
+    Rel(tms, mail, "Send magic-link emails", "SMTP")
     Rel(ogmios, cardano_node, "Chain state", "Node-to-Client IPC")
 ```
 
@@ -33,17 +35,18 @@ C4Container
 
     System_Boundary(tms, "Transaction Monitoring System") {
         Container(connector, "Blockchain Connector", "Python, websockets", "Ingestion layer. Three persistent Ogmios WebSocket connections: ChainSync, LocalTxMonitor, LocalStateQuery. Normalizes transactions. Resolves mempool input UTxOs. Circuit breaker + checkpoint resumption.")
-        Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. API key auth, per-key rate limiting.")
+        Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. Dual auth: TMS-API-Key (programmatic) and magic-link session cookies (dashboard, Admin/Reviewer roles). Per-key/IP rate limiting. User-management + archive APIs.")
         Container(analysis, "Analysis Engine", "Python", "Services layer. 9-class Polimi detection engine. Reads unscored transactions, assigns multi-class risk scores, writes results to Analytics Warehouse.")
         Container(ui, "TMS Dashboard", "HTML5", "Presentation layer. Real-time mempool feed, confirmed txs, lifecycle stats. Served by API Gateway.")
         ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Storage layer. Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store. Derived from the Data Lake.")
-        ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Storage layer. Mutable state: transaction lifecycle, sync checkpoint, entity state, API keys, config, audit logs.")
+        ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Storage layer. Mutable state: transaction lifecycle, sync checkpoint, entity state, mempool collisions, config, audit logs, and the auth tables (users, magic_link_tokens, user_sessions).")
         ContainerDb(rawstore, "Data Lake", "Local Filesystem → S3/MinIO", "Storage layer. Write-once gzip JSON blobs (confirmed/ and mempool/ prefixes). Schema-on-read. Source of truth for raw Ogmios payloads.")
     }
 
     System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano Node")
+    System_Ext(mail, "SMTP Mail Relay", "Magic-link email delivery (mailpit in dev)")
 
-    Rel(user, ui, "Browse and investigate", "HTTPS / WSS")
+    Rel(user, ui, "Browse and investigate; magic-link login", "HTTPS / WSS")
     Rel(ui, api, "Fetch data", "REST + WebSocket")
     Rel(connector, ogmios, "ChainSync + LocalTxMonitor + LocalStateQuery", "WebSocket :1337")
     Rel(connector, datalake, "Batch insert transactions", "Native :9000")
@@ -51,7 +54,8 @@ C4Container
     Rel(connector, rawstore, "Write raw blobs async", "gzip JSON")
     Rel(analysis, datalake, "Read / write analysis results", "Native :9000")
     Rel(api, datalake, "Query transactions + analysis results", "Native :9000")
-    Rel(api, admin_db, "Read/write lifecycle + config + entity state", "TCP :5432")
+    Rel(api, admin_db, "Read/write lifecycle + config + entity state + auth/users", "TCP :5432")
+    Rel(api, mail, "Send magic-link emails", "SMTP")
 ```
 
 ## Level 3: Component Diagram (FastAPI Application)
@@ -89,13 +93,19 @@ C4Component
 
         Component(ui_router, "UI Router", "FastAPI Router", "GET /: serves the TMS Dashboard (HTML5).")
 
-        Component(auth, "Auth Middleware", "FastAPI Security", "TMS-API-Key header validation (constant-time). Open access requires empty API_KEYS + TMS_ALLOW_DEV_MODE=1, else startup aborts.")
+        Component(auth_api, "Auth API", "FastAPI Router", "POST /api/auth/request-link, GET /api/auth/verify, POST /api/auth/logout, GET /api/auth/me. Magic-link login + session lifecycle.")
 
-        Component(rate_limiter, "Rate Limiter", "Middleware", "Per-key sliding-window rate limiter. Configurable via RATE_LIMIT_REQUESTS / RATE_LIMIT_WINDOW_SECONDS.")
+        Component(users_api, "Users API", "FastAPI Router", "GET/POST /api/users, DELETE /api/users/{id}, POST /api/users/{id}/resend-invite. Admin-gated user management.")
 
-        Component(ch_adapter, "ClickHouse Adapter", "clickhouse-driver", "Analytics Warehouse. Schema management, idempotent migrations, batch inserts, analytical queries.")
+        Component(archive_api, "Archive API", "FastAPI Router", "GET/POST/DELETE /api/archive/*. False-positive curation and export.")
 
-        Component(pg_adapter, "PostgreSQL Adapter", "asyncpg", "Operational Database. Connection pool, tx_lifecycle CRUD, sync_checkpoint, entity_state, audit logging, schema management.")
+        Component(auth, "Auth Module", "FastAPI Security (app/auth)", "Two paths: TMS-API-Key header validation (constant-time, api_key.py) and magic-link sessions (tokens.py, sessions.py, email.py). deps.py exposes require_user / require_admin. Open API-key access requires empty API_KEYS + TMS_ALLOW_DEV_MODE=1, else startup aborts.")
+
+        Component(rate_limiter, "Rate Limiter", "Middleware", "Per-key/IP sliding-window rate limiter. Configurable via RATE_LIMIT_REQUESTS / RATE_LIMIT_WINDOW_SECONDS.")
+
+        Component(ch_adapter, "ClickHouse Adapter", "clickhouse-driver", "Analytics Warehouse. Schema management (clickhouse_schema.py), idempotent migrations, batch inserts, score read/write (clickhouse_scores.py), analytical queries.")
+
+        Component(pg_adapter, "PostgreSQL Adapter", "asyncpg", "Operational Database. Connection pool, tx_lifecycle CRUD, sync_checkpoint, entity_state, audit logging, auth schema (users / magic_link_tokens / user_sessions), schema management.")
 
         Component(raw_store, "Raw Store Adapter", "gzip + ThreadPoolExecutor", "Data Lake. Async atomic writes of gzip JSON blobs to local filesystem (confirmed/ and mempool/ prefixes). Upgrade path: swap for boto3 S3 calls.")
 
@@ -103,6 +113,7 @@ C4Component
     }
 
     System_Ext(ogmios, "Ogmios v6")
+    System_Ext(mail, "SMTP Mail Relay")
     ContainerDb(datalake, "Analytics Warehouse (ClickHouse)")
     ContainerDb(admin_db, "Operational Database (PostgreSQL)")
     ContainerDb(rawstore, "Data Lake (Filesystem)")
@@ -144,6 +155,17 @@ C4Component
 
     Rel(entity_api, auth, "Validate API key")
     Rel(entity_api, pg_adapter, "Get/set entity state")
+
+    Rel(archive_api, auth, "require_user session")
+    Rel(archive_api, ch_adapter, "Read/write archive state")
+
+    Rel(auth_api, auth, "Mint/verify magic-link, issue session")
+    Rel(auth_api, pg_adapter, "Read/write users + magic_link_tokens + user_sessions")
+    Rel(auth_api, mail, "Send magic-link email", "SMTP")
+
+    Rel(users_api, auth, "require_admin session")
+    Rel(users_api, pg_adapter, "CRUD users")
+    Rel(users_api, mail, "Send invite magic-link", "SMTP")
 
     Rel(ch_adapter, datalake, "Native protocol :9000")
     Rel(pg_adapter, admin_db, "asyncpg :5432")
@@ -290,15 +312,18 @@ C4Deployment
                 ContainerDb(fs_inst, "Data Lake", "Docker named volume (raw_store_data)", "Write-once gzip JSON blobs. confirmed/ and mempool/ prefixes. Upgrade path: MinIO → S3/R2/B2.")
             }
             Deployment_Node(pg_container, "tms-postgres") {
-                ContainerDb(pg_inst, "Operational Database", "PostgreSQL 18", "tx_lifecycle, sync_checkpoint, entity_state, audit_logs, config")
+                ContainerDb(pg_inst, "Operational Database", "PostgreSQL 18", "tx_lifecycle, sync_checkpoint, entity_state, mempool_collisions, audit_logs, config, users, magic_link_tokens, user_sessions")
             }
             Deployment_Node(ch_container, "tms-clickhouse") {
                 ContainerDb(ch_inst, "Analytics Warehouse", "ClickHouse 26.1 MergeTree", "transactions, transaction_inputs, transaction_outputs, address_transactions, tx_class_scores, baselines")
             }
+            Deployment_Node(mail_container, "tms-mailpit") {
+                Container(mail_inst, "Mailpit", "Go", "Dev SMTP sink + webmail (:1025 SMTP, :8025 UI). Swap for a real relay in production.")
+            }
         }
         Deployment_Node(node_infra, "Cardano Node Infrastructure") {
-            Container(ogmios_inst, "Ogmios v6", "Haskell", "WebSocket bridge on :1337")
-            Container(node, "Cardano Node", "cardano-node", "Full node (mainnet, preprod, or preview)")
+            Container(ogmios_inst, "Ogmios v6.14.0", "Haskell", "WebSocket bridge on :1337")
+            Container(node, "Cardano Node 11.0.1", "cardano-node", "Full node (mainnet, preprod, or preview); 11.0.1 required for van Rossem PV11")
         }
     }
 
@@ -306,4 +331,5 @@ C4Deployment
     Rel(app, ogmios_inst, "JSON-RPC 2.0", "WebSocket :1337")
     Rel(app, pg_inst, "asyncpg", "TCP :5432")
     Rel(app, ch_inst, "clickhouse-driver", "Native :9000")
+    Rel(app, mail_inst, "Magic-link emails", "SMTP :1025")
 ```
