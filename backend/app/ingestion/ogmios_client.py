@@ -14,12 +14,17 @@ from typing import Callable, Awaitable, Optional, Set, Dict, Any, List, Tuple
 
 import websockets
 
-from app.analysis.features import extract_fee, extract_lovelace, extract_ttl, flatten_assets
+from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
+from app.ingestion.input_enrichment import (
+    apply_resolved_inputs,
+    parse_resolved_utxo,
+    resolve_input_amounts,
+)
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
 from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
-from app.models.transaction import NormalizedTransaction, TransactionInput
+from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -34,28 +39,6 @@ class BlockPersistError(Exception):
     The previous behaviour (log + continue to save_sync_point) permanently
     lost the block's transactions from the analytics warehouse.
     """
-
-
-def _parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
-    """Parse one resolved UTxO from queryLedgerState/utxo into
-    ``((tx_id, index), {address, amount, assets})``.
-
-    ``extract_lovelace`` handles both the v5 top-level ``{"lovelace": N}``
-    and the v6 nested ``{"ada": {"lovelace": N}}`` value shapes. The previous
-    v5-only read returned 0 for every v6 UTxO and mis-filed the ``ada``
-    sub-dict as a native asset, so every mempool-resolved input carried
-    amount=0 and total_input_value stayed NULL.
-    """
-    utxo_tx = utxo.get("transaction", {})
-    utxo_id = utxo_tx.get("id", "") if isinstance(utxo_tx, dict) else ""
-    utxo_index = utxo.get("index", 0)
-    val = utxo.get("value", {})
-    assets = flatten_assets(val)
-    return (utxo_id, utxo_index), {
-        "address": utxo.get("address", ""),
-        "amount": int(extract_lovelace(val)),
-        "assets": assets if assets else None,
-    }
 
 
 class PendingTxIndex:
@@ -300,7 +283,7 @@ class OgmiosClient:
 
         cache_entry: Dict[tuple, dict] = {}
         for utxo in utxos:
-            ref, resolved = _parse_resolved_utxo(utxo)
+            ref, resolved = parse_resolved_utxo(utxo)
             cache_entry[ref] = resolved
 
         if cache_entry:
@@ -389,140 +372,6 @@ class OgmiosClient:
             elif direction == "backward":
                 await self._handle_roll_backward(result)
 
-    @staticmethod
-    def _apply_resolved_inputs(
-        tx: NormalizedTransaction,
-        resolved: Dict[tuple, dict],
-    ) -> NormalizedTransaction:
-        """Enrich a NormalizedTransaction with previously resolved UTxO input data.
-
-        Attempted inputs of a failed tx ARE resolved (their addresses are
-        attack-attempt signal and belong in the address screen) but never
-        feed total_input_value: the ledger did not consume them.
-        """
-        total = 0
-        new_inputs = []
-        for inp in tx.inputs:
-            if not inp.is_collateral and not inp.is_reference:
-                utxo = resolved.get((inp.tx_hash, inp.index))
-                if utxo:
-                    inp = TransactionInput(
-                        tx_hash=inp.tx_hash,
-                        index=inp.index,
-                        address=utxo["address"],
-                        amount=utxo["amount"],
-                        assets=utxo.get("assets"),
-                        is_reference=False,
-                        is_collateral=False,
-                        is_unspent_attempt=inp.is_unspent_attempt,
-                    )
-                    if not inp.is_unspent_attempt:
-                        total += utxo["amount"]
-            new_inputs.append(inp)
-
-        resolved_addrs = {
-            i.address for i in new_inputs
-            if i.address and not i.is_collateral and not i.is_reference
-        }
-        return tx.model_copy(update={
-            "inputs": new_inputs,
-            "total_input_value": total if total > 0 else None,
-            "addresses": list(set(tx.addresses) | resolved_addrs),
-        })
-
-    async def _resolve_input_amounts(
-        self, txs: List[NormalizedTransaction]
-    ) -> List[NormalizedTransaction]:
-        """Resolve input addresses and amounts from ClickHouse and intra-block outputs.
-
-        1. Build an intra-block output map from earlier txs in this block.
-        2. Collect all unresolved (input_tx_hash, input_index) refs.
-        3. Batch-fetch from ClickHouse for cross-block refs.
-        4. Apply resolved values to each input.
-        """
-        # Build intra-block output map: {(tx_hash, output_index): (address, amount)}.
-        # Collateral returns included at their EXPLICIT on-chain index (the
-        # regular-output count, Babbage): they are real spendable UTxOs and
-        # a same-block spend of one must resolve.
-        intra_block: Dict[tuple, tuple] = {}
-        for tx in txs:
-            for idx, out in enumerate(tx.outputs):
-                chain_idx = out.output_index if out.output_index is not None else idx
-                intra_block[(tx.tx_hash, chain_idx)] = (out.address, out.amount)
-
-        # Collect all unresolved input refs (skip already-resolved from mempool cache)
-        cross_block_refs = []
-        for tx in txs:
-            for inp in tx.inputs:
-                if inp.is_collateral or inp.is_reference:
-                    continue
-                if inp.amount > 0:
-                    continue  # already resolved
-                ref = (inp.tx_hash, inp.index)
-                if ref not in intra_block:
-                    cross_block_refs.append(ref)
-
-        # Batch fetch from ClickHouse
-        ch_resolved: Dict[tuple, tuple] = {}
-        if cross_block_refs:
-            ch_resolved = await clickhouse.get_outputs_for_refs_async(
-                cross_block_refs, self.network
-            )
-
-        # Merge: intra-block takes priority over ClickHouse
-        all_resolved = {**ch_resolved, **intra_block}
-
-        # Apply to each tx
-        result = []
-        for tx in txs:
-            total = 0
-            new_inputs = []
-            changed = False
-            for inp in tx.inputs:
-                if inp.is_collateral or inp.is_reference:
-                    new_inputs.append(inp)
-                    continue  # don't include collateral/reference in total_input_value
-                if inp.amount > 0:
-                    if not inp.is_unspent_attempt:
-                        total += inp.amount
-                    new_inputs.append(inp)
-                    continue
-                ref = (inp.tx_hash, inp.index)
-                resolved = all_resolved.get(ref)
-                if resolved:
-                    addr, amt = resolved
-                    new_inputs.append(TransactionInput(
-                        tx_hash=inp.tx_hash,
-                        index=inp.index,
-                        address=addr,
-                        amount=int(amt),
-                        assets=inp.assets,
-                        is_reference=False,
-                        is_collateral=False,
-                        is_unspent_attempt=inp.is_unspent_attempt,
-                    ))
-                    # Attempted inputs of a failed tx resolve for address
-                    # visibility but were never consumed: keep them out of
-                    # total_input_value.
-                    if not inp.is_unspent_attempt:
-                        total += int(amt)
-                    changed = True
-                else:
-                    new_inputs.append(inp)
-
-            if changed:
-                resolved_addrs = {
-                    i.address for i in new_inputs
-                    if i.address and not i.is_collateral and not i.is_reference
-                }
-                tx = tx.model_copy(update={
-                    "inputs": new_inputs,
-                    "total_input_value": total if total > 0 else None,
-                    "addresses": list(set(tx.addresses) | resolved_addrs),
-                })
-            result.append(tx)
-        return result
-
     async def _handle_roll_forward(self, result: dict):
         """Process a new block (rollForward).
 
@@ -557,7 +406,9 @@ class OgmiosClient:
         # Resolve input amounts from ClickHouse + intra-block outputs
         if normalized_txs:
             try:
-                normalized_txs = await self._resolve_input_amounts(normalized_txs)
+                normalized_txs = await resolve_input_amounts(
+                    normalized_txs, self.network
+                )
             except Exception as e:
                 logger.error(f"Input amount resolution failed (non-fatal): {e}")
 
@@ -633,7 +484,7 @@ class OgmiosClient:
                 # checkpoint write) re-parses WITH the enrichment.
                 cached = self._pending_input_cache.get(tx.tx_hash)
                 if cached:
-                    tx = self._apply_resolved_inputs(tx, cached[0])
+                    tx = apply_resolved_inputs(tx, cached[0])
 
                 normalized_txs.append(tx)
                 confirmed_records.append(

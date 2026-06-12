@@ -1,6 +1,6 @@
 """Tests for mempool UTxO resolution parsing (queryLedgerState/utxo)."""
 
-from app.ingestion.ogmios_client import _parse_resolved_utxo
+from app.ingestion.input_enrichment import parse_resolved_utxo
 
 POLICY = "a" * 56
 
@@ -17,7 +17,7 @@ class TestParseResolvedUtxo:
             "address": "addr_test1qqowner",
             "value": {"ada": {"lovelace": 5_000_000}, POLICY: {"deadbeef": 7}},
         }
-        ref, resolved = _parse_resolved_utxo(utxo)
+        ref, resolved = parse_resolved_utxo(utxo)
         assert ref == ("11" * 32, 3)
         assert resolved["address"] == "addr_test1qqowner"
         assert resolved["amount"] == 5_000_000
@@ -31,7 +31,7 @@ class TestParseResolvedUtxo:
             "address": "addr_test1qqowner",
             "value": {"lovelace": 1_200_000},
         }
-        _, resolved = _parse_resolved_utxo(utxo)
+        _, resolved = parse_resolved_utxo(utxo)
         assert resolved["amount"] == 1_200_000
         assert resolved["assets"] is None
 
@@ -42,6 +42,6 @@ class TestParseResolvedUtxo:
             "address": "addr_test1qqowner",
             "value": {"ada": {"lovelace": 9_000_000}},
         }
-        _, resolved = _parse_resolved_utxo(utxo)
+        _, resolved = parse_resolved_utxo(utxo)
         assert resolved["amount"] == 9_000_000
         assert resolved["assets"] is None
