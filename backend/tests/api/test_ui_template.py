@@ -207,12 +207,12 @@ def esc_reference(value: str) -> str:
 def archive_client(monkeypatch):
     """TestClient with the archive ClickHouse layer and the fail-closed
     audit writes faked in memory, mirroring tests/api/test_archive.py."""
-    from app import auth
+    from app.auth import api_key
     from app.main import app
     from app.db import archive_queries, postgres
 
-    monkeypatch.setattr(auth, "_valid_keys", [])
-    monkeypatch.setattr(auth, "_dev_mode", True)
+    monkeypatch.setattr(api_key, "_valid_keys", [])
+    monkeypatch.setattr(api_key, "_dev_mode", True)
 
     async def fake_insert_audit(**kwargs):
         return 1

@@ -32,8 +32,8 @@ def _dev_mode_auth(monkeypatch):
     the local .env's API_KEYS. The auth-before-validation ordering itself
     is locked in by test_unauthenticated_gets_403_before_validation.
     """
-    from app import auth
-    monkeypatch.setattr(auth, "_dev_mode", True)
+    from app.auth import api_key
+    monkeypatch.setattr(api_key, "_dev_mode", True)
 
 
 # Endpoints that accept ?network=. (path, default_status_range).
@@ -76,8 +76,8 @@ def test_omitted_network_accepted(client, endpoint):
 def test_unauthenticated_gets_403_before_validation(client, monkeypatch):
     """Auth runs before query validation: an unauthenticated caller learns
     nothing about parameter shapes (403, not 422)."""
-    from app import auth
-    monkeypatch.setattr(auth, "_dev_mode", False)
-    monkeypatch.setattr(auth, "_valid_keys", ["sentinel-key"])
+    from app.auth import api_key
+    monkeypatch.setattr(api_key, "_dev_mode", False)
+    monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
     r = client.get("/api/analysis/results?network=testnet")
     assert r.status_code == 403

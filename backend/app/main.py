@@ -26,9 +26,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from app.rate_limit import RateLimitMiddleware, RateLimiter
+from app.rate_limit import (
+    RateLimitMiddleware,
+    RateLimiter,
+    start_all_cleanups,
+    stop_all_cleanups,
+)
 from app.db import postgres, clickhouse, raw_store
-from app.api import transactions, entities, lifecycle, analysis, archive
+from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api
 from app.tasks import analysis as analysis_task
 from app.routers import ui, websocket
 
@@ -164,10 +169,13 @@ async def lifespan(app: FastAPI):
     # Emit dev-mode warnings here so logging is already configured.
     _validate_startup_settings()
 
-    # Start rate-limiter cleanup tasks (HTTP middleware + WS handshake)
+    # Start the eviction loop for EVERY registered rate limiter (the global
+    # IP/key limiter in this module, the per-email limiter in app.api.auth,
+    # and the WS handshake limiter in app.routers.websocket). Done via the
+    # registry so no limiter is forgotten — an unstarted cleanup task means
+    # unbounded memory growth for attacker-controlled keys.
+    start_all_cleanups()
     if settings.RATE_LIMIT_ENABLED:
-        _limiter.start_cleanup()
-        websocket._handshake_limiter.start_cleanup()
         logger.info(
             f"Rate limiting enabled: {settings.RATE_LIMIT_REQUESTS} req"
             f" / {settings.RATE_LIMIT_WINDOW_SECONDS}s per key"
@@ -178,6 +186,10 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing databases...")
         await postgres.init_pool()
         await postgres.execute_schema()
+        # Magic-link auth tables (users, magic_link_tokens, user_sessions).
+        # Idempotent + handles legacy `users` table migration.
+        from app.auth.schema import execute_auth_schema
+        await execute_auth_schema()
         clickhouse.init_client()
         clickhouse.execute_schema()
         if settings.RAW_STORE_ENABLED:
@@ -211,9 +223,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down...")
-    if settings.RATE_LIMIT_ENABLED:
-        _limiter.stop_cleanup()
-        websocket._handshake_limiter.stop_cleanup()
+    stop_all_cleanups()
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
     if ogmios_client:
@@ -292,6 +302,8 @@ app.include_router(entities.router)
 app.include_router(lifecycle.router)
 app.include_router(analysis.router)
 app.include_router(archive.router)
+app.include_router(auth_api.router)
+app.include_router(users_api.router)
 
 
 @app.get("/health")

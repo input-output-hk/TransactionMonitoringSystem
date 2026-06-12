@@ -1,19 +1,20 @@
 /**
  * Shared HTTP helpers for the backend API.
  *
- * - {@link fetchWithAuth} wraps the browser `fetch` and injects the
- *   `TMS-API-Key` header when {@link VITE_TMS_API_KEY} is configured.
- *   In dev (no key set) it's a no-op so the backend's dev-mode auth bypass
- *   keeps working.
+ * - {@link fetchWithAuth} is a thin wrapper around `fetch()` that ensures
+ *   the magic-link session cookie (`tms_session`, HTTP-only) is sent on
+ *   every request. The SPA itself never reads or writes that cookie.
  * - {@link getNetwork} returns the active Cardano network (default `preprod`).
  *
- * All API modules under `lib/api/*` should go through these helpers so that
- * production builds attach the API key consistently. Direct `fetch()` calls
- * will 403 against a backend with `API_KEYS` configured.
+ * Historical note: this module used to also inject a `TMS-API-Key`
+ * header taken from the `VITE_TMS_API_KEY` build env. That key was
+ * baked into the public JS bundle — anyone opening DevTools could read
+ * it and call `/api/*` without going through the magic-link auth.
+ * Removed once session cookies became the canonical browser credential.
+ * The backend's `verify_api_key` still accepts an `API_KEYS` env for
+ * server-to-server callers (CLI, integrations), but the SPA no longer
+ * sends one.
  */
-
-const API_KEY_HEADER = "TMS-API-Key";
-const API_KEY = import.meta.env.VITE_TMS_API_KEY?.trim() || undefined;
 
 export const DEFAULT_NETWORK: "mainnet" | "preprod" | "preview" =
 	(import.meta.env.VITE_NETWORK as "mainnet" | "preprod" | "preview") ??
@@ -25,21 +26,15 @@ export function getNetwork(): "mainnet" | "preprod" | "preview" {
 }
 
 /**
- * Drop-in replacement for `fetch()` that attaches the API key header when
- * {@link VITE_TMS_API_KEY} is configured. Returns the raw `Response` — callers
- * are responsible for status checks and JSON parsing.
+ * `fetch()` with `credentials: "include"` so the session cookie rides
+ * on every request. Same-origin dev (Vite proxy) would send cookies
+ * by default anyway, but being explicit insulates us from a future
+ * cross-origin deployment. Returns the raw `Response` — callers are
+ * responsible for status checks and JSON parsing.
  */
 export function fetchWithAuth(
 	input: RequestInfo | URL,
 	init?: RequestInit,
 ): Promise<Response> {
-	if (!API_KEY) return fetch(input, init);
-
-	// Merge in the API key header without disturbing any caller-set headers
-	// (e.g. Content-Type on POST bodies).
-	const headers = new Headers(init?.headers);
-	if (!headers.has(API_KEY_HEADER)) {
-		headers.set(API_KEY_HEADER, API_KEY);
-	}
-	return fetch(input, { ...init, headers });
+	return fetch(input, { ...init, credentials: "include" });
 }
