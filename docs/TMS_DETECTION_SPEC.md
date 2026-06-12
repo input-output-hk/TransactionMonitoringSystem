@@ -176,6 +176,7 @@ The attacker attaches an oversized inline datum to a UTxO output. The Value fiel
 
   Absolute size alone cannot separate the two populations: an observed CTF bloat attack carries a 7.3 KB datum, overlapping a benign contract's ~6.9 KB datum. Content entropy and leaf concentration are the discriminators that removed the false positives, which is why the scoring axes below keep their original size-based shape.
 - **Aggregate engagement** (observability only): when no single output passes the per-output predicate but the SUM of datum bytes across outputs at the same payment credential reaches `aggregate_engagement_min` (12000), the scorer engages and records `max_script_datum_bytes` in `sub_scores` but returns `score=-1` (no alert, not selected as `max_class`). This surfaces the multi-output split-payload shape for analyst queries without firing.
+- **DatumHash-only observability** (`gate.flag_datum_hash_only`, default true): a script output that carries only a `datumHash` (the datum body is off-chain, so its size cannot be measured without an indexer) engages the gate and records `datum_hash_only_count` plus `datum_hash_only_addresses` in evidence, returning `score=-1` (no alert). Without this, hash-only bloat carriers were invisible to the scorer; the gate condition `datum_present == INLINE (or resolvable hash)` previously did not surface the unresolvable-hash case at all.
 
 ### Detection Features
 
@@ -516,6 +517,8 @@ Two-stage comparison:
 1. **Normalise**: Unicode NFKC normalisation → strip zero-width chars → map confusable chars to canonical equivalents (Unicode Consortium confusables.txt)
 2. **Compare**: Levenshtein similarity = `1 - (edit_distance / max(len(s1), len(s2)))`
 
+**ASCII homoglyph fold** (`fake_token.ascii_homoglyphs_enabled`, default true): before the similarity comparison, the O/0 and I/l/1 lookalike groups are folded to a canonical member, so `1NDY` now matches `INDY` at 1.0. The `unicode_suspicion` axis receives the homoglyph bump only when the fold strictly increases similarity to the matched name (`_ascii_fold_increases_similarity`), so purely numeric names like `HOSKY2` or `MIN100` gain nothing from digits that are not standing in for letters.
+
 ### Homoglyph Characters Used by TMS Forge
 The test tool uses these substitutions (defined in `_HOMOGLYPH_MAP`):
 
@@ -571,9 +574,11 @@ Bare-domain forms (`cardano-drop.io/claim`) are matched alongside scheme-prefixe
 
 | Feature | Role | Sub-weight |
 |---------|------|------------|
-| `url_blacklist_match` | Confidence-weighted match against threat intel feeds (OpenPhish, PhishTank). `1.0 = confirmed, 0.5 = newer feed, 0.0 = no match` | 0.40 |
-| Domain suspicion composite | `0.50 * s_age + 0.50 * s_brand`. Domain age inverted (**anchors: p50=1/365, p99=1/7 days**). Brand similarity against known protocol domains (**anchors: p50=0.0, p99=0.85**). | 0.35 |
-| `social_engineering_score` | Keyword/pattern matching for urgency language, credential requests, impersonation. **Anchors: p50=0.0, p99=0.60.** | 0.25 |
+| `social_engineering_score` | Keyword/pattern matching for urgency language, credential requests, impersonation. **Anchors: p50=0.0, p99=0.30** (saturates at 2 Tier-2 matches at `urgency_increment=0.15` each). Social text in on-chain metadata is the dominant practical signal: legitimate Cardano protocols rarely push urgency/reward language through chain metadata, so this carries the heaviest content sub-weight. | 0.40 |
+| `url_blacklist_match` | Confidence-weighted match against threat intel feeds (OpenPhish, PhishTank). `1.0 = confirmed, 0.5 = newer feed, 0.0 = no match` | 0.30 |
+| Domain suspicion composite | `0.50 * s_age + 0.50 * s_brand`. Domain age inverted (**anchors: p50=1/365, p99=1/7 days**). Brand similarity against known protocol domains (**anchors: p50=0.0, p99=0.85**). | 0.30 |
+
+Two stacking bonuses are applied to the content sub-score when a URL and Tier-2 social-engineering text co-occur in the same metadata: `url_combo_bonus` (0.25) fires whenever any URL is present alongside Tier-2 text, and `phishing_tld_bonus` (0.15) stacks on top when the URL also lives in a phishing-prone TLD (`.xyz` / `.top` / `.click` / RFC 2606 reserved). Cardano protocols do not deploy in those TLDs, so the combination is near-specific to phishing.
 
 #### Sub-Pipeline 2: Delivery Pattern (weight = 0.35)
 
@@ -636,7 +641,7 @@ All values are recommended starting points. Validate against production data.
 | Fake Token | `1 / policy_age_slots` | 1/100000 | 1/5000 | 5000 slots ≈ 2.7 hours |
 | Phishing | `1 / domain_age_days` | 1/365 | 1/7 | 7 days = very new |
 | Phishing | `brand_similarity` | 0.00 | 0.85 | Domain name Levenshtein |
-| Phishing | `social_engineering` | 0.00 | 0.60 | Keyword/pattern composite |
+| Phishing | `social_engineering` | 0.00 | 0.30 | Keyword/pattern composite; saturates at 2 Tier-2 matches |
 | Phishing | `targeting_score` | 0.05 | 0.50 | Recipient overlap with protocol |
 
 
@@ -693,6 +698,12 @@ returns only transactions where at least that many distinct classes corroborated
 
 ### Ogmios v6 Value Format
 All scorers and feature extractors handle both Ogmios v5 (`{"lovelace": N, "policyId": {...}}`) and v6 (`{"ada": {"lovelace": N}, "policyId": {...}}`) value formats. The `"ada"` key is skipped when iterating native assets.
+
+### Ogmios v6 TTL Format
+`features.extract_ttl` handles both schemas for the transaction time-to-live: v6 exposes it as `validityInterval.invalidAfter`, v5 as a top-level `timeToLive`. It feeds the mempool-collision capture and the Front-Running structural axis (`ttl_similarity`). Before this was added, `ttl_similarity` was pinned at 1.0 on v6 nodes because the v5 key was absent, silently inflating the structural sub-signal.
+
+### CIP-19 Script Address Prefixes
+`features.is_script_address` recognises every Bech32 prefix whose payment part is a script hash: `addr1w`/`addr_test1w` (script + no stake), `addr1z`/`addr_test1z` (script + stake key), `addr1x`/`addr_test1x` (script + script), and `addr12`/`addr_test12` (script + pointer). DEX and sandwich detection share the same prefix tuple. Mainnet DeFi contracts that stake their own UTxOs (address type 3, `addr1x`) were previously misclassified as wallets by every script-gated scorer.
 
 ### Baseline Resolution Order
 Scorers call `scorer_config.resolved_or_bootstrap()`, which wraps `normalise.resolve_baseline()`: a per-network dynamic baseline is tried first (per-script → global fallback within the same network). When no dynamic baseline is available, the scorer's bootstrap anchors from `config/detection.yaml` are substituted and the source is reported as `"bootstrap"`. Fixed anchors (declared in the same config file under `fixed_anchors`) are consulted directly by the scorer, not through this helper; they apply to dimensionless features like `datum_ratio` that never baseline against data. The effect: learned per-script baselines supersede bootstraps as each script accumulates ≥ `BASELINE_MIN_SAMPLES` transactions.

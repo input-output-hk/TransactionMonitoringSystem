@@ -13,8 +13,8 @@ Two options:
 
 | Component | Version | Notes |
 |---|---|---|
-| cardano-node | 8.x / 9.x | Must be fully synced to the target network |
-| Ogmios | v6.x | Must be running alongside the node, accessible over WebSocket |
+| cardano-node | 11.0.1 | Must be fully synced to the target network. 11.0.1 is required for the van Rossem PV11 hard fork; 8.x/9.x/10.x nodes stall at the PV11 boundary |
+| Ogmios | v6.14.0 | Must be running alongside the node, accessible over WebSocket |
 
 Ogmios listens on port `1337` by default. Verify it is reachable:
 
@@ -404,6 +404,19 @@ docker compose up -d
 ```
 
 On next startup the application recreates all schemas automatically and begins syncing from the chain tip.
+
+#### Network-scoped reset (preferred)
+
+`docker compose down -v` wipes every network's data at once. When you only want to clear one network (the common case on a shared box running preprod and preview side by side), use the network-aware `scripts/reset.sh`, which issues scoped `DELETE ... WHERE network = ?` statements instead of dropping volumes:
+
+```bash
+./scripts/reset.sh                 # reset only the current TMS_ENV's network (safe default)
+./scripts/reset.sh --network=preview   # reset a specific network
+./scripts/reset.sh --all           # reset every network (equivalent scope to down -v, but keeps volumes)
+./scripts/reset.sh --yes           # skip the confirmation prompt (automation)
+```
+
+The script honours `TMS_ENV`, so running it from a preview-configured terminal resets preview unless you override with `--network=`.
 
 ## Backup & restore
 

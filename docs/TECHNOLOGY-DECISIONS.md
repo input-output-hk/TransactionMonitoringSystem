@@ -112,8 +112,8 @@ Use **Ogmios v6** as the WebSocket bridge between TMS and the Cardano node. Ogmi
 
 | Component | Version | Notes |
 |---|---|---|
-| Ogmios | **v6.x** | JSON-RPC 2.0 schema used throughout `ogmios_parser.py` and `ogmios_client.py`. Ogmios v7 changes the message envelope shape; upgrading requires re-validating all parser logic. |
-| cardano-node | **8.x / 9.x** | Ogmios v6 was released targeting cardano-node 8.x (Babbage/Conway era). Test against the specific node version used in deployment before upgrading either component. |
+| Ogmios | **v6.14.0** | JSON-RPC 2.0 schema used throughout `ogmios_parser.py` and `ogmios_client.py`. Ogmios v7 changes the message envelope shape; upgrading requires re-validating all parser logic. |
+| cardano-node | **11.0.1** | Required for the van Rossem PV11 hard fork; earlier 8.x/9.x/10.x nodes stall at the PV11 boundary. Test against the specific node version used in deployment before upgrading either component. |
 | websockets (Python) | **≥16.0, <17.0** | Pinned minor series in `requirements.txt`. The `websockets` 16.x API is stable; a major bump may change the `connect()` / `recv()` interface. |
 
 **Upgrade procedure:** When the Cardano node is upgraded, check the Ogmios release notes for the matching Ogmios version. Update `OGMIOS_WS_URL`, bump the Ogmios deployment, then smoke-test all three mini-protocols before promoting to production:

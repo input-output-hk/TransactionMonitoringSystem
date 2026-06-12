@@ -77,42 +77,67 @@ All state is stored in `tx_lifecycle` (PostgreSQL). Raw payloads are written asy
 
 ## Security
 
-- `TMS-API-Key` header on all API endpoints
-- `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys)
-- Rate limiting: in-memory sliding window per API key (`RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`)
-- CORS: open (`allow_origins=["*"]`), intended for reverse-proxy TLS termination in production
+The API supports two authentication paths, both implemented under `app/auth/`:
+
+- **Programmatic: `TMS-API-Key` header** (`auth/api_key.py`, constant-time compare). `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys).
+- **Interactive: magic-link sessions** (`auth/tokens.py`, `auth/sessions.py`, `auth/email.py`). A user requests a login email (`POST /api/auth/request-link`), the link mints a session cookie on verify, and `auth/deps.py` exposes `require_user` / `require_admin` dependencies. Accounts (`users` table) carry an `Admin` or `Reviewer` role; the first Admin is bootstrapped via `python -m app.cli create-admin`. Magic-link delivery goes through SMTP (`SMTP_*` settings; `mailpit` in the dev compose stack).
+- Rate limiting: in-memory sliding window keyed per API key / IP (`RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`)
+- Audit logging: privileged actions are written to the PostgreSQL `audit_logs` table (`app/audit.py`)
+- CORS: configurable via `CORS_ALLOW_ORIGINS`, intended for reverse-proxy TLS termination in production
 
 ## Module Map
 
 ```text
 backend/app/
 ├── main.py                  FastAPI app, lifespan, router registration
-├── config.py                Pydantic Settings (reads .env)
-├── auth.py                  TMS-API-Key dependency
+├── config.py                Pydantic Settings (reads .env): API, DB, auth, SMTP, rate-limit knobs
+├── cli.py                   Admin CLI (`python -m app.cli create-admin ...`): first-user bootstrap
+├── net.py                   Network/address helpers (CIP-19 prefixes, bech32)
+├── audit.py                 Structured audit-log writer (PostgreSQL audit_logs)
 ├── rate_limit.py            Sliding-window rate limiter middleware
+├── auth/                    Authentication package
+│   ├── api_key.py           TMS-API-Key dependency (constant-time compare)
+│   ├── deps.py              require_user / require_admin session dependencies
+│   ├── tokens.py            Magic-link token mint/verify
+│   ├── sessions.py          Session-cookie issue/lookup/revoke
+│   ├── email.py             SMTP magic-link delivery
+│   ├── models.py            User / UserRole (Admin, Reviewer) Pydantic models
+│   └── schema.py            PostgreSQL users / magic_link_tokens / user_sessions DDL
 ├── models/
-│   └── transaction.py       NormalizedTransaction, TransactionInput/Output,
-│                            lifecycle and analysis Pydantic models
+│   ├── transaction.py       NormalizedTransaction, TransactionInput/Output, lifecycle + analysis models
+│   └── archive.py           Archive (false-positive curation) models
 ├── ingestion/
-│   ├── ogmios_client.py     Ogmios WS client: ChainSync + LocalTxMonitor + LocalStateQuery (UTxO input resolution)
-│   ├── ogmios_parser.py     Ogmios v6 JSON → NormalizedTransaction
+│   ├── ogmios_client.py     Ogmios WS client: ChainSync + LocalStateQuery (UTxO input resolution)
+│   ├── mempool_monitor.py   LocalTxMonitor mempool polling + collision capture
+│   ├── input_enrichment.py  Resolves output references to input UTxO values
+│   ├── ogmios_parser.py     Ogmios v6 JSON → NormalizedTransaction (v5/v6 value + TTL shapes)
 │   └── resilience.py        ExponentialBackoff, CircuitBreaker
 ├── db/
-│   ├── clickhouse.py        Analytics Warehouse: schema, batch insert, analytical queries
-│   ├── postgres.py          Operational Database: schema, tx_lifecycle CRUD, sync_checkpoint, entity_state
+│   ├── clickhouse.py        Analytics Warehouse: client/executor, batch insert, analytical queries
+│   ├── clickhouse_schema.py ClickHouse DDL, migrations, retention
+│   ├── clickhouse_scores.py tx_class_scores read/write (per-class score vectors)
+│   ├── postgres.py          Operational Database: tx_lifecycle, sync_checkpoint, entity_state, audit, schema
+│   ├── archive_queries.py   Archive list/count/export queries
 │   └── raw_store.py         Data Lake: async gzip writes, atomic rename, read-back
 ├── api/
 │   ├── transactions.py      GET /api/transactions/*
 │   ├── lifecycle.py         GET /api/lifecycle/*
 │   ├── analysis.py          GET /api/analysis/*
-│   └── entities.py          GET/PUT /api/entities/*
+│   ├── entities.py          GET/PUT /api/entities/*
+│   ├── archive.py           GET/POST/DELETE /api/archive/* (false-positive curation)
+│   ├── auth.py              POST/GET /api/auth/* (magic-link login, session, /me)
+│   └── users.py             GET/POST/DELETE /api/users/* (Admin user management)
 ├── analysis/
 │   ├── engine.py            Multi-class orchestrator (9 attack classes, enrichment, scoring)
+│   ├── scorer_config.py     Validated loader for config/detection.yaml
 │   ├── normalise.py         Percentile-based normalisation and baseline resolution
 │   ├── baselines.py         Baseline computation and drift detection
-│   ├── features.py          UTxO-level and tx-level feature extraction from raw Ogmios data
+│   ├── features.py          UTxO/tx feature extraction (incl. decode_hex_asset_name, extract_ttl, is_script_address)
+│   ├── enrichment.py        Cross-tx enrichment (collisions, cycles, ref-tx fan-in)
 │   ├── graph.py             Transfer graph cycle detection (bounded BFS) for Circular scorer
 │   ├── dex.py               Structural sandwich pattern detection
+│   ├── url_extraction.py    URL extraction + PSL/TLD validation across metadata/datum/asset-name carriers
+│   ├── plutus_text.py       Plutus-Data tree walk, UTF-8 span extraction from inline datums
 │   ├── external.py          Reference data (token registry, phishing feeds, protocol domains)
 │   └── scorers/
 │       ├── base.py          BaseScorer interface and ScorerResult dataclass
@@ -138,4 +163,4 @@ See [C4-ARCHITECTURE.md](C4-ARCHITECTURE.md) for full C4 diagrams (context, cont
 
 Databases run in Docker Compose. App can run on host or as a Docker container (`docker-compose --profile app up -d`). TLS must be handled at the reverse-proxy layer (nginx, Caddy, etc.).
 
-**Ogmios version pinning:** TMS targets **Ogmios v6.x** (JSON-RPC 2.0 interface) co-located with **cardano-node 8.x / 9.x**. The message shapes in `ogmios_parser.py` are tied to the v6 schema. When upgrading cardano-node, verify the matching Ogmios version and re-validate parser output before deploying. See ADR-004 in [TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md) for the upgrade checklist.
+**Ogmios version pinning:** TMS targets **Ogmios v6.14.0** (JSON-RPC 2.0 interface) co-located with **cardano-node 11.0.1**, which is required for the van Rossem PV11 hard fork (earlier 8.x/9.x/10.x nodes stall at the PV11 boundary). The message shapes in `ogmios_parser.py` are tied to the v6 schema. When upgrading cardano-node, verify the matching Ogmios version and re-validate parser output before deploying. See ADR-004 in [TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md) for the upgrade checklist.
