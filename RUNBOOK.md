@@ -295,6 +295,12 @@ Variables are layered across files:
 | `CYCLE_MAX_FANOUT` | `50` | Maximum addresses tracked per BFS hop |
 | `SANDWICH_SIMPLIFIED_ENABLED` | `true` | Enable structural sandwich pattern detection |
 | `BASELINE_MIN_SAMPLES` | `200` | Minimum samples before per-entity baseline is valid |
+| `SMTP_ENABLED` | `true` | Send magic-link emails over SMTP; `false` logs the link instead |
+| `SMTP_HOST` / `SMTP_PORT` | `mailpit` / `1025` (compose) | SMTP relay. The compose default is the bundled Mailpit catch-all, see "Magic-link email in production" below |
+| `SMTP_FROM_EMAIL` | `noreply@example.com` | Sender address. Not validated, but avoid `.local`/`.test` idioms: user addresses with special-use domains are rejected everywhere |
+| `APP_BASE_URL` | `http://localhost:8000` | Base URL baked into emailed magic links. Must be the public dashboard URL in production or links will not resolve |
+| `MAGIC_LINK_TTL_MINUTES` | `15` | Magic-link token lifetime |
+| `MAGIC_LINK_PER_EMAIL_LIMIT` | `5` | Link requests per address per window (silent throttle, always on) |
 | `RAW_STORE_ENABLED` | `true` | Write raw Ogmios payloads to filesystem |
 | `RAW_STORE_PATH` | `./data/raw` | Root path for the Data Lake |
 | `LIFECYCLE_PENDING_TTL_SECONDS` | `7200` | After this time a PENDING tx is marked DROPPED |
@@ -307,6 +313,16 @@ Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by 
 The compose deployment binds every port to loopback and expects a tunnel (cloudflared or similar) to terminate TLS in front of the app. Client-IP attribution works as follows: `TRUSTED_PROXY_ENABLED=true` lets the app honour forwarded headers, but only when the direct TCP peer is inside `TRUSTED_PROXY_CIDRS` (the tunnel connector / compose bridge), and the parser takes `CF-Connecting-IP` first (Cloudflare overwrites it per request) falling back to the right-most `X-Forwarded-For` hop. Client-writable left-most entries never win, so rate-limit buckets and audit rows cannot be spoofed.
 
 WebSocket note: browsers cannot set custom headers on WS upgrades, so the dashboard passes `?api_key=` in the query string, which can land in proxy and access logs. Use a dedicated key for dashboards so it can be rotated independently of automation keys.
+
+### Magic-link email in production
+
+The compose stack bundles Mailpit as a catch-all SMTP sink for development: every email the app sends is captured and viewable at `http://127.0.0.1:8025`, and nothing is forwarded. That convenience is a liability once real users sign in, because magic-link emails are login credentials. If `SMTP_HOST` is left at its `mailpit` default in production, every sign-in link accumulates in an unauthenticated inbox on the host.
+
+For production deployments:
+
+1. Point `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (plus `SMTP_USE_TLS` or `SMTP_USE_STARTTLS`) at the customer's SMTP provider.
+2. Set `APP_BASE_URL` to the public dashboard URL so emailed links resolve.
+3. Stop the Mailpit container once the stack is up: `docker compose stop mailpit`. The app only requires it at startup ordering time; SMTP failures at runtime are tolerated (logged, silent 200 to the caller).
 
 
 ## Troubleshooting

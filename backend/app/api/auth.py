@@ -165,8 +165,10 @@ async def request_link(payload: RequestLinkPayload):
         # Silent 200 — never reveal the throttle to the caller, otherwise
         # it doubles as an enumeration oracle ("address X is being
         # actively targeted → it must be a real user").
+        # %r: the email is a raw client string now (no EmailStr), so escape
+        # it to keep CRLF out of the audit trail.
         logger.warning(
-            "request-link: per-email rate limit hit for %s (silent 200)",
+            "request-link: per-email rate limit hit for %r (silent 200)",
             payload.email,
         )
         return {"status": "ok"}
@@ -184,13 +186,13 @@ async def request_link(payload: RequestLinkPayload):
         except Exception as e:
             # Catch-all: do NOT propagate. Logging is the audit trail.
             logger.error(
-                "request-link: token/email issuance failed for %s: %s",
+                "request-link: token/email issuance failed for %r: %s",
                 payload.email, e,
             )
     else:
         # Log only — never surface to client.
         logger.info(
-            "request-link: no active user for %s (silent 200)", payload.email,
+            "request-link: no active user for %r (silent 200)", payload.email,
         )
     return {"status": "ok"}
 

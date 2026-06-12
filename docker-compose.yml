@@ -168,7 +168,9 @@ services:
       # service by hostname. Customer prod overrides via .env or shell.
       - SMTP_HOST=${SMTP_HOST:-mailpit}
       - SMTP_PORT=${SMTP_PORT:-1025}
-      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@tms.local}
+      # example.com, not a .local/.test idiom: special-use domains fail
+      # EmailStr and are rejected everywhere TMS validates addresses.
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@example.com}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-TMS}
       - SMTP_ENABLED=${SMTP_ENABLED:-true}
       - APP_BASE_URL=${APP_BASE_URL:-http://localhost:8000}
@@ -201,12 +203,11 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-      # mailpit has no healthcheck (the image doesn't ship one), so we
-      # settle for `service_started`. This is enough because magic-link
-      # sends are failure-tolerant: an SMTP timeout on the first email
-      # logs an error and returns 200 silently.
+      # Current mailpit images ship a healthcheck (`/mailpit readyz`).
+      # Magic-link sends are failure-tolerant either way: an SMTP error
+      # logs and the API still returns a silent 200.
       mailpit:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     logging: *default-logging
     healthcheck:
