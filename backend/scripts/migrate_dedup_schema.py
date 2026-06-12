@@ -18,8 +18,12 @@ REQUIREMENTS
   - Apply with:  python scripts/migrate_dedup_schema.py --apply
 
 WHAT IT DOES, per table in clickhouse.DEDUP_TABLE_KEYS
-  1. Skip if the live table is already v2 (ReplacingMergeTree, no partition)
-     or does not exist (execute_schema creates it fresh) — idempotent.
+  1. Skip if the live table is already v2 (ReplacingMergeTree, no partition,
+     count/index columns matching clickhouse.WIDE_COUNT_COLUMNS) or does not
+     exist (execute_schema creates it fresh) — idempotent. Narrow UInt8-era
+     count columns force a rebuild even on a v2 engine: they overflow on
+     256+-input transactions and cannot be ALTERed in place (ORDER BY keys,
+     transactions projection).
   2. CREATE {table}__mig from clickhouse.SCHEMA_DDL (single source of truth).
   3. INSERT INTO {table}__mig SELECT <key cols>, argMax(<other cols>,
      <version>), max(<version>) FROM {table} GROUP BY <key cols> — one
@@ -110,7 +114,11 @@ def migrate_table(
     if info is None:
         logger.info("%s: does not exist; execute_schema will create it fresh", table)
         return False
-    if _is_v2(info):
+    # A v2 table can still need a rebuild when its count/index columns are
+    # narrower than the DDL (UInt8-era layout): those columns live in ORDER BY
+    # keys and the transactions projection, so ALTER MODIFY cannot widen them.
+    stale_cols = clickhouse.stale_count_columns(client, table)
+    if _is_v2(info) and not stale_cols:
         # Crash-recovery: a crash between EXCHANGE and the legacy RENAME
         # leaves the post-swap legacy data stranded under the __mig name
         # (the live table is already v2, so re-runs skipped it forever).
@@ -122,8 +130,13 @@ def migrate_table(
                 "and RENAME on a prior run)", table, mig, legacy_name,
             )
         else:
-            logger.info("%s: already v2 (ReplacingMergeTree, no partition); skipping", table)
+            logger.info(
+                "%s: already v2 (ReplacingMergeTree, no partition, wide "
+                "count columns); skipping", table,
+            )
         return False
+    if stale_cols:
+        logger.info("%s: needs rebuild — narrow column(s) %s", table, stale_cols)
 
     key_cols, version_col = clickhouse.DEDUP_TABLE_KEYS[table]
     legacy_cols = _columns(client, table)

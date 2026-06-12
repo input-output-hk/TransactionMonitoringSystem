@@ -26,7 +26,7 @@ cannot drift from what create_all() builds on a fresh install.
 """
 
 import logging
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
@@ -66,8 +66,8 @@ SCHEMA_DDL: Dict[str, str] = {
             timestamp DateTime,
             fee UInt64,
             deposit Nullable(Int64),
-            input_count UInt8,
-            output_count UInt8,
+            input_count UInt16,
+            output_count UInt16,
             total_input_value Nullable(UInt64),
             total_output_value UInt64,
             addresses Array(String),
@@ -91,9 +91,9 @@ SCHEMA_DDL: Dict[str, str] = {
         CREATE TABLE IF NOT EXISTS {table} (
             tx_hash String,
             network String,
-            input_index UInt8,
+            input_index UInt16,
             input_tx_hash String,
-            input_index_in_tx UInt8,
+            input_index_in_tx UInt16,
             address String,
             amount UInt64,
             assets String,
@@ -111,7 +111,7 @@ SCHEMA_DDL: Dict[str, str] = {
         CREATE TABLE IF NOT EXISTS {table} (
             tx_hash String,
             network String,
-            output_index UInt8,
+            output_index UInt16,
             address String,
             amount UInt64,
             assets String,
@@ -252,6 +252,44 @@ DEDUP_TABLE_KEYS: Dict[str, Tuple[Tuple[str, ...], str]] = {
 # Path of the one-shot migration named in the startup-guard error message.
 _MIGRATION_SCRIPT = "backend/scripts/migrate_dedup_schema.py"
 
+# Live column types that MUST match the DDL for ingestion to be safe.
+# History: per-transaction counts and indexes were UInt8 until a real preprod
+# transaction with more than 255 inputs overflowed them and wedged chain sync
+# (insert fails, checkpoint never advances). The protocol max transaction
+# size (16384 bytes on mainnet/preprod) admits roughly 400+ minimal inputs,
+# so UInt8 was never a valid bound; UInt16 is, with ample headroom. These
+# columns sit in ORDER BY keys and the transactions projection, so they
+# cannot be widened with ALTER MODIFY COLUMN — a mismatch requires the same
+# rebuild-and-exchange migration as a legacy engine.
+WIDE_COUNT_COLUMNS: Dict[str, Dict[str, str]] = {
+    "transactions": {"input_count": "UInt16", "output_count": "UInt16"},
+    "transaction_inputs": {"input_index": "UInt16", "input_index_in_tx": "UInt16"},
+    "transaction_outputs": {"output_index": "UInt16"},
+}
+
+
+def stale_count_columns(client: Client, table: str) -> List[str]:
+    """Return WIDE_COUNT_COLUMNS entries whose live type mismatches the DDL.
+
+    Empty list for tables that don't exist (created fresh from SCHEMA_DDL)
+    or that have no enforced columns.
+    """
+    expected = WIDE_COUNT_COLUMNS.get(table)
+    if not expected:
+        return []
+    rows = client.execute(
+        """
+        SELECT name, type FROM system.columns
+        WHERE database = currentDatabase() AND table = %(t)s
+        """,
+        {"t": table},
+    )
+    live = dict(rows)
+    return sorted(
+        col for col, want in expected.items()
+        if col in live and live[col] != want
+    )
+
 
 def assert_no_legacy_schema(client: Client) -> None:
     """Refuse to start against a half-migrated (pre-v2) ClickHouse layout.
@@ -263,6 +301,11 @@ def assert_no_legacy_schema(client: Client) -> None:
     engine AND no PARTITION BY clause (any time-based partition is unstable
     across replays and breaks FINAL dedup). Tables that don't exist yet are
     fine — create_all() just created them from SCHEMA_DDL.
+
+    Also refuses narrow count/index columns (WIDE_COUNT_COLUMNS): they make
+    every 256+-input transaction — exactly the attack-shaped traffic this
+    system exists to score — an unrecordable insert error that wedges chain
+    sync at that block forever.
     """
     rows = client.execute(
         """
@@ -282,6 +325,18 @@ def assert_no_legacy_schema(client: Client) -> None:
             f"ClickHouse tables {legacy} still use the legacy (pre-dedup) "
             f"schema. Stop ALL app instances sharing this database and run "
             f"{_MIGRATION_SCRIPT} before starting again."
+        )
+    narrow = sorted(
+        f"{table}.{col}"
+        for table in WIDE_COUNT_COLUMNS
+        for col in stale_count_columns(client, table)
+    )
+    if narrow:
+        raise RuntimeError(
+            f"ClickHouse columns {narrow} are narrower than the schema "
+            f"requires (256+-input/output transactions would fail to "
+            f"ingest). Stop ALL app instances sharing this database and "
+            f"run {_MIGRATION_SCRIPT} before starting again."
         )
 
 

@@ -37,6 +37,10 @@ def _legacy_client(mig_table_exists=False):
             if name and name.endswith("__mig"):
                 return [("MergeTree", "")] if mig_table_exists else []
             return [("MergeTree", "MergeTree ORDER BY tx_hash")]
+        if "name, type" in q:
+            # stale_count_columns probe: columns already at the DDL width,
+            # so the legacy ENGINE alone drives these migrations.
+            return []
         if "FROM system.columns" in q:
             return [("tx_hash",), ("network",), ("ingestion_timestamp",)]
         if q.startswith("SELECT count() FROM (SELECT"):
@@ -127,6 +131,8 @@ class TestStrandedMigRecovery:
                 if name.endswith("__mig"):
                     return [("MergeTree", "MergeTree ORDER BY tx_hash")]
                 return [("ReplacingMergeTree", "ReplacingMergeTree(ingestion_timestamp) ORDER BY tx_hash")]
+            if "name, type" in q:
+                return []  # columns already wide
             return None
 
         client.execute.side_effect = execute
@@ -151,6 +157,8 @@ class TestStrandedMigRecovery:
                 if name.endswith("__mig"):
                     return []
                 return [("ReplacingMergeTree", "ReplacingMergeTree(x) ORDER BY tx_hash")]
+            if "name, type" in q:
+                return []  # columns already wide
             return None
 
         client.execute.side_effect = execute
@@ -159,4 +167,49 @@ class TestStrandedMigRecovery:
         ) is False
         assert not any(
             c.args[0].startswith("RENAME") for c in client.execute.call_args_list
+        )
+
+
+class TestNarrowColumnRebuild:
+    """A v2 engine with UInt8-era count columns must still be rebuilt: the
+    columns overflow on 256+-input transactions and sit in ORDER BY keys /
+    the transactions projection, so ALTER MODIFY cannot widen them."""
+
+    @staticmethod
+    def _v2_narrow_client():
+        client = MagicMock()
+        state = {"count_calls": 0}
+
+        def execute(q, *a, **k):
+            if "FROM system.tables" in q:
+                name = a[0]["t"] if a else None
+                if name and name.endswith("__mig"):
+                    return []
+                return [(
+                    "ReplacingMergeTree",
+                    "ReplacingMergeTree(ingestion_timestamp) ORDER BY (network, tx_hash)",
+                )]
+            if "name, type" in q:
+                return [("input_count", "UInt8"), ("output_count", "UInt16")]
+            if "FROM system.columns" in q:
+                return [("tx_hash",), ("network",), ("ingestion_timestamp",)]
+            if q.startswith("SELECT count() FROM (SELECT"):
+                return [(100,)]
+            if q.startswith("SELECT count() FROM"):
+                state["count_calls"] += 1
+                return [(100,)]
+            return None
+
+        client.execute.side_effect = execute
+        return client
+
+    def test_v2_engine_with_narrow_columns_is_rebuilt(self, mig):
+        client = self._v2_narrow_client()
+        swapped = mig.migrate_table(
+            client, "transactions", apply=True, legacy_suffix="20260612",
+        )
+        assert swapped is True
+        assert any(
+            c.args[0] == "EXCHANGE TABLES transactions AND transactions__mig"
+            for c in client.execute.call_args_list
         )

@@ -16,6 +16,8 @@ from app.db import clickhouse_schema
 from app.db.clickhouse_schema import (  # noqa: F401  (re-exported API)
     DEDUP_TABLE_KEYS,
     SCHEMA_DDL,
+    WIDE_COUNT_COLUMNS,
+    stale_count_columns,
 )
 from app.models.transaction import NormalizedTransaction
 
