@@ -120,16 +120,31 @@ services:
     profiles:
       - ingestion
 
+  # Local SMTP catch-all for magic-link emails. Anything sent to port 1025
+  # is captured (never forwarded) and viewable in the web UI at :8025.
+  # Customer prod deployments swap this for a real SMTP server via the
+  # SMTP_* env vars on the `app` service.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: tms-mailpit
+    ports:
+      - "127.0.0.1:1025:1025"  # SMTP submission
+      - "127.0.0.1:8025:8025"  # Web UI
+    restart: unless-stopped
+    networks:
+      - tms-network
+    # No `profiles:` here — Mailpit is harmless and convenient enough
+    # that we want it up by default during `docker compose up`.
+
   # Application service (optional - can run on host or in Docker)
   app:
     build:
       context: .
       dockerfile: backend/Dockerfile
       args:
-        # Baked into the SPA bundle at build time. Use a single API key
-        # for both the backend's API_KEYS allowlist and the frontend's
-        # outgoing TMS-API-Key header so they always match.
-        VITE_TMS_API_KEY: ${VITE_TMS_API_KEY:-}
+        # Only the Cardano network identifier needs to be baked into the
+        # SPA bundle. Browser auth is the session cookie set by the
+        # magic-link flow — no key is shipped to the client.
         VITE_NETWORK: ${VITE_NETWORK:-preprod}
     container_name: tms-app
     env_file:
@@ -149,6 +164,14 @@ services:
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
       - RAW_STORE_PATH=/data/raw
       - RAW_STORE_ENABLED=${RAW_STORE_ENABLED:-true}
+      # Magic-link SMTP defaults — point to the docker-compose mailpit
+      # service by hostname. Customer prod overrides via .env or shell.
+      - SMTP_HOST=${SMTP_HOST:-mailpit}
+      - SMTP_PORT=${SMTP_PORT:-1025}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@tms.local}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-TMS}
+      - SMTP_ENABLED=${SMTP_ENABLED:-true}
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:8000}
       # Client-IP trust for rate limiting + audit logs. The default path is
       # the append-safe right-most X-Forwarded-For hop, honoured only when
       # the direct peer is inside TRUSTED_PROXY_CIDRS (set via .env).
@@ -178,6 +201,12 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      # mailpit has no healthcheck (the image doesn't ship one), so we
+      # settle for `service_started`. This is enough because magic-link
+      # sends are failure-tolerant: an SMTP timeout on the first email
+      # logs an error and returns 200 silently.
+      mailpit:
+        condition: service_started
     restart: unless-stopped
     logging: *default-logging
     healthcheck:

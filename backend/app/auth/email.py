@@ -1,0 +1,119 @@
+"""SMTP delivery for magic-link emails.
+
+Uses :mod:`aiosmtplib` for async send so we don't block the FastAPI
+event loop. Three failure-tolerant behaviors built in:
+
+- ``SMTP_ENABLED=False`` or ``SMTP_HOST`` empty → log the link instead
+  of sending. Useful during local bootstrap before SMTP is configured.
+- Send errors don't propagate to the caller's HTTP response — the
+  ``request-link`` endpoint must always return 200 (no user enumeration
+  by email-existence side-channel), so an SMTP outage degrades to a
+  silent log entry.
+- Per-call connection rather than a long-lived pool. Magic-link volume
+  is low (a few mails per minute at most), and a fresh connection
+  avoids dangling sockets if the SMTP provider drops idle peers.
+
+Templates are plain text. HTML can be layered on later by accepting an
+``html`` arg in :func:`send_magic_link` — the wire format already
+supports multipart via aiosmtplib.
+"""
+from __future__ import annotations
+
+import logging
+from email.message import EmailMessage
+from typing import Literal
+
+import aiosmtplib
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+EmailPurpose = Literal["invite", "login"]
+
+
+def _build_link(token: str) -> str:
+    """Construct the user-facing verification URL.
+
+    Keeps the path consistent with the frontend route registered in
+    Phase 4 (``/auth/verify?token=...``). ``APP_BASE_URL`` carries no
+    trailing slash by convention.
+    """
+    base = settings.APP_BASE_URL.rstrip("/")
+    return f"{base}/auth/verify?token={token}"
+
+
+def _render(
+    purpose: EmailPurpose, full_name: str, link: str, ttl_minutes: int,
+) -> tuple[str, str]:
+    """Return ``(subject, body)`` for the given purpose."""
+    if purpose == "invite":
+        subject = "You're invited to TMS"
+        body = (
+            f"Hi {full_name},\n\n"
+            f"You've been invited to the TMS dashboard.\n"
+            f"Click the link below to activate your account and sign in:\n\n"
+            f"  {link}\n\n"
+            f"This link expires in {ttl_minutes} minutes and can be used only once.\n"
+            f"If you weren't expecting this email, you can safely ignore it.\n\n"
+            f"— TMS\n"
+        )
+    else:  # login
+        subject = "Your TMS sign-in link"
+        body = (
+            f"Hi {full_name},\n\n"
+            f"Click the link below to sign in to TMS:\n\n"
+            f"  {link}\n\n"
+            f"This link expires in {ttl_minutes} minutes and can be used only once.\n"
+            f"If you didn't request this email, you can safely ignore it.\n\n"
+            f"— TMS\n"
+        )
+    return subject, body
+
+
+async def send_magic_link(
+    to_email: str, full_name: str, token: str, purpose: EmailPurpose,
+) -> bool:
+    """Deliver a magic-link email. Never raises — see module docstring.
+
+    Returns True on successful SMTP delivery, False otherwise (so the
+    caller can record a metric without changing user-facing behaviour).
+    """
+    link = _build_link(token)
+    subject, body = _render(
+        purpose, full_name, link, settings.MAGIC_LINK_TTL_MINUTES,
+    )
+
+    if not settings.SMTP_ENABLED or not settings.SMTP_HOST:
+        # Bootstrap / dev fallback: surface the link in logs so the admin
+        # can click through before SMTP is wired up.
+        logger.warning(
+            "SMTP disabled — magic link for %s (%s): %s",
+            to_email, purpose, link,
+        )
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    try:
+        await aiosmtplib.send(
+            msg,
+            hostname=settings.SMTP_HOST,
+            port=settings.SMTP_PORT,
+            username=settings.SMTP_USER or None,
+            password=settings.SMTP_PASSWORD or None,
+            use_tls=settings.SMTP_USE_TLS,
+            start_tls=settings.SMTP_USE_STARTTLS,
+            timeout=10,
+        )
+        logger.info("Sent %s magic-link email to %s", purpose, to_email)
+        return True
+    except Exception as e:
+        # Critical to swallow: the public endpoint must not leak whether an
+        # email matched a real user via different timings or status codes.
+        logger.error("SMTP send failed for %s (%s): %s", to_email, purpose, e)
+        return False

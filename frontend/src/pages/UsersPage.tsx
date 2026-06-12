@@ -1,5 +1,3 @@
-import { useMemo, useState } from "react";
-import { Copy, Minus, Plus, Trash2 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,25 +25,73 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { USER_ROLES, type ManagedUser, type UserRole } from "@/mocks/users";
-import { addUser, removeUser, useUsers } from "@/lib/users-store";
-import { initials } from "@/lib/utils/strings";
 import { TableFooter } from "@/components/ui/table-footer";
+import {
+	createUser,
+	deleteUser,
+	listUsers,
+	resendInvite,
+	type User as ApiUser,
+	type UserRole,
+} from "@/lib/api/auth";
+import { initials } from "@/lib/utils/strings";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Minus, Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
+
+const USER_ROLES: UserRole[] = ["Admin", "Reviewer"];
+
+const USERS_QUERY_KEY = ["users", "list"] as const;
 
 export function UsersPage() {
-	const users = useUsers();
 	const [page, setPage] = useState(0);
 	const [pageSize, setPageSize] = useState(10);
 	const [removeMode, setRemoveMode] = useState(false);
 	const [addOpen, setAddOpen] = useState(false);
-	const [pendingRemove, setPendingRemove] = useState<ManagedUser | null>(null);
+	const [pendingRemove, setPendingRemove] = useState<ApiUser | null>(null);
+	const qc = useQueryClient();
 
-	const pageCount = Math.max(1, Math.ceil(users.length / pageSize));
+	// Server-side pagination via `/api/users?limit&offset` — see backend
+	// list_users for the {count,total,data} shape.
+	const { data, isPending, isError } = useQuery({
+		queryKey: [...USERS_QUERY_KEY, page, pageSize],
+		queryFn: () => listUsers({ limit: pageSize, offset: page * pageSize }),
+		staleTime: 30_000,
+	});
+
+	const rows = data?.data ?? [];
+	const total = data?.total ?? 0;
+	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
-	const pageRows = useMemo(
-		() => users.slice(currentPage * pageSize, (currentPage + 1) * pageSize),
-		[users, currentPage, pageSize],
-	);
+
+	// Snap back to a populated page whenever the current one ends up empty
+	// (last row deleted, or rows removed elsewhere). Done as a render-phase
+	// update rather than in an effect: React applies it before committing,
+	// so there's no cascading-render warning and no flash of "No users".
+	// Guarded so it converges to 0 without looping; `data &&` skips the
+	// in-flight window where a page change has reset `data` to undefined.
+	if (data && data.data.length === 0 && page > 0) {
+		setPage((p) => Math.max(0, p - 1));
+	}
+
+	const removeMutation = useMutation({
+		mutationFn: (id: string) => deleteUser(id),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+			toast.success("User removed");
+		},
+		onError: (err) =>
+			toast.error(err instanceof Error ? err.message : "Remove failed"),
+	});
+
+	const resendMutation = useMutation({
+		mutationFn: (id: string) => resendInvite(id),
+		onSuccess: () =>
+			toast.success("Invitation link resent — expires in 15 minutes."),
+		onError: (err) =>
+			toast.error(err instanceof Error ? err.message : "Resend failed"),
+	});
 
 	return (
 		<div className="flex flex-col gap-4">
@@ -84,7 +130,7 @@ export function UsersPage() {
 						</TableRow>
 					</TableHeader>
 					<TableBody>
-						{pageRows.map((u) => (
+						{rows.map((u) => (
 							<TableRow key={u.id}>
 								<TableCell>
 									<div className="flex items-center gap-3">
@@ -95,7 +141,35 @@ export function UsersPage() {
 									</div>
 								</TableCell>
 								<TableCell className="text-foreground">{u.email}</TableCell>
-								<TableCell className="text-foreground">{u.role}</TableCell>
+								<TableCell className="text-foreground">
+									<div className="flex items-center gap-2">
+										<span>{u.role}</span>
+										{u.status === "pending" && (
+											<>
+												{/* Compact "PENDING" pill — keeps the admin aware
+												    that the user hasn't activated yet without
+												    needing a dedicated column. */}
+												<span className="border-border text-muted-foreground rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase">
+													Pending
+												</span>
+												<button
+													type="button"
+													onClick={() => resendMutation.mutate(u.id)}
+													disabled={
+														resendMutation.isPending &&
+														resendMutation.variables === u.id
+													}
+													className="text-brand hover:text-foreground text-xs underline-offset-2 hover:underline disabled:opacity-50"
+												>
+													{resendMutation.isPending &&
+													resendMutation.variables === u.id
+														? "Sending…"
+														: "Resend invite"}
+												</button>
+											</>
+										)}
+									</div>
+								</TableCell>
 								{removeMode && (
 									<TableCell className="text-right">
 										<button
@@ -110,13 +184,17 @@ export function UsersPage() {
 								)}
 							</TableRow>
 						))}
-						{pageRows.length === 0 && (
+						{rows.length === 0 && (
 							<TableRow>
 								<TableCell
 									colSpan={removeMode ? 4 : 3}
 									className="text-muted-foreground py-10 text-center"
 								>
-									No users.
+									{isPending
+										? "Loading users…"
+										: isError
+											? "Failed to load users."
+											: "No users."}
 								</TableCell>
 							</TableRow>
 						)}
@@ -129,7 +207,7 @@ export function UsersPage() {
 						setPageSize(n);
 						setPage(0);
 					}}
-					centerLabel={`Total Users: ${users.length}`}
+					centerLabel={`Total Users: ${total}`}
 					page={currentPage}
 					pageCount={pageCount}
 					onPageChange={setPage}
@@ -139,8 +217,9 @@ export function UsersPage() {
 			<AddUserFlow
 				open={addOpen}
 				onOpenChange={setAddOpen}
-				onConfirmed={(u) => {
-					addUser(u);
+				onConfirmed={() => {
+					// AddUserFlow has already POST-ed and invalidated the cache;
+					// just close the dialog here.
 					setAddOpen(false);
 				}}
 			/>
@@ -149,7 +228,7 @@ export function UsersPage() {
 				user={pendingRemove}
 				onOpenChange={(open) => !open && setPendingRemove(null)}
 				onConfirm={(id) => {
-					removeUser(id);
+					removeMutation.mutate(id);
 					setPendingRemove(null);
 				}}
 			/>
@@ -157,7 +236,7 @@ export function UsersPage() {
 	);
 }
 
-/* ---------- Add User: 2-step flow (form → invitation link) ---------- */
+/* ---------- Add User: 2-step flow (form → "invitation sent" confirmation) ---------- */
 
 type AddDraft = { fullName: string; email: string; role: UserRole };
 
@@ -170,42 +249,60 @@ function AddUserFlow({
 	onOpenChange: (v: boolean) => void;
 	onConfirmed: (u: AddDraft) => void;
 }) {
-	const [step, setStep] = useState<"form" | "link">("form");
+	const [step, setStep] = useState<"form" | "sent">("form");
 	const [draft, setDraft] = useState<AddDraft>({
 		fullName: "",
 		email: "",
 		role: "Reviewer",
 	});
+	const qc = useQueryClient();
+
+	const createMutation = useMutation({
+		mutationFn: () =>
+			createUser({
+				email: draft.email.trim(),
+				fullName: draft.fullName.trim(),
+				role: draft.role,
+			}),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+			setStep("sent");
+		},
+		onError: (err) =>
+			toast.error(err instanceof Error ? err.message : "Create failed"),
+	});
 
 	const close = () => {
+		// Reset eagerly — the previous `setTimeout(…, 200)` was a guess at
+		// the dialog's exit animation and races a quick reopen click. The
+		// dialog is being closed in the same tick anyway, so React batches
+		// these state updates with the unmount and there's no visible
+		// stale-render artifact.
 		onOpenChange(false);
-		// Reset only after the dialog has closed visually
-		setTimeout(() => {
-			setStep("form");
-			setDraft({ fullName: "", email: "", role: "Reviewer" });
-		}, 200);
+		setStep("form");
+		setDraft({ fullName: "", email: "", role: "Reviewer" });
+		createMutation.reset();
 	};
 
-	const canConfirmForm = draft.fullName.trim() && draft.email.trim();
+	const canConfirmForm =
+		draft.fullName.trim() && draft.email.trim() && !createMutation.isPending;
 
 	return (
 		<Dialog
 			open={open}
 			onOpenChange={(v) => (v ? onOpenChange(true) : close())}
 		>
-			{/* Same #373D3F frame as the Delete/Restore dialogs so the modal
-			    family stays consistent. Inputs and buttons sit on bg-card
-			    (#292929) for the recessed look. */}
 			<DialogContent
 				showClose={false}
 				className="max-w-md bg-white dark:bg-[#373D3F]"
+				aria-describedby={undefined}
 			>
 				{step === "form" ? (
 					<>
 						<DialogHeader>
 							<DialogTitle className="text-foreground text-sm font-normal">
-								To add new user, please fill the sections below to generate the
-								invitation link.
+								To add a new user, fill in the details below. We'll email
+								them an invitation link to set up their account.
 							</DialogTitle>
 						</DialogHeader>
 
@@ -263,26 +360,21 @@ function AddUserFlow({
 
 						{/* Cancel left, Confirm right — same layout as Delete dialog. */}
 						<DialogFooter className="justify-between">
-							<Button
-								variant="outline"
-								onClick={close}
-								className="bg-card"
-							>
+							<Button variant="outline" onClick={close} className="bg-card">
 								Cancel
 							</Button>
 							<Button
 								disabled={!canConfirmForm}
-								onClick={() => setStep("link")}
+								onClick={() => createMutation.mutate()}
 								className="text-brand border-border hover:bg-accent hover:text-brand bg-card border"
 							>
-								Confirm
+								{createMutation.isPending ? "Sending…" : "Confirm"}
 							</Button>
 						</DialogFooter>
 					</>
 				) : (
-					<InvitationLinkStep
+					<InvitationSentStep
 						draft={draft}
-						onCancel={close}
 						onSend={() => {
 							onConfirmed(draft);
 							close();
@@ -294,25 +386,22 @@ function AddUserFlow({
 	);
 }
 
-function InvitationLinkStep({
+function InvitationSentStep({
 	draft,
-	onCancel,
 	onSend,
 }: {
 	draft: AddDraft;
-	onCancel: () => void;
 	onSend: () => void;
 }) {
-	const [link] = useState(
-		() =>
-			`/invitationlink${Math.random().toString(36).slice(2, 11)}.sghaa${Math.random().toString(36).slice(2, 6)}`,
-	);
-
+	// Confirmation screen after `POST /api/users` succeeded. The backend
+	// has already emailed the invite — the admin doesn't need to copy a
+	// link manually. We keep a single "Done" affordance instead of the
+	// old fake "Send invitation" button.
 	return (
 		<>
 			<DialogHeader>
 				<DialogTitle className="text-foreground text-sm font-normal">
-					An invitation link has been successfully generated to add new user.
+					An invitation email has been sent to {draft.email}.
 				</DialogTitle>
 			</DialogHeader>
 
@@ -327,37 +416,18 @@ function InvitationLinkStep({
 				</dl>
 			</div>
 
-			<div className="flex flex-col gap-1.5">
-				<Label htmlFor="invite-link" className="text-xs font-semibold">
-					User invitation link
-				</Label>
-				<div className="relative">
-					<Input
-						id="invite-link"
-						value={link}
-						readOnly
-						className="truncate pr-10"
-					/>
-					<button
-						type="button"
-						onClick={() => navigator.clipboard?.writeText(link)}
-						className="text-muted-foreground hover:bg-accent hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 rounded-sm p-1.5"
-						title="Copy link"
-					>
-						<Copy className="h-3.5 w-3.5" />
-					</button>
-				</div>
-			</div>
+			<p className="text-muted-foreground text-xs">
+				The recipient has 15 minutes to click the magic link in their email
+				to activate their account. Re-send the invite from the users list
+				if it expires.
+			</p>
 
-			<DialogFooter className="justify-between">
-				<Button variant="outline" onClick={onCancel} className="bg-card">
-					Cancel
-				</Button>
+			<DialogFooter className="justify-end">
 				<Button
 					onClick={onSend}
 					className="text-brand border-border hover:bg-accent hover:text-brand bg-card border"
 				>
-					Send Invitation
+					Done
 				</Button>
 			</DialogFooter>
 		</>
@@ -380,7 +450,7 @@ function RemoveUserDialog({
 	onOpenChange,
 	onConfirm,
 }: {
-	user: ManagedUser | null;
+	user: ApiUser | null;
 	onOpenChange: (open: boolean) => void;
 	onConfirm: (id: string) => void;
 }) {

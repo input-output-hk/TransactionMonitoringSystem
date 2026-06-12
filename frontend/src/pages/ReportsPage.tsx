@@ -37,6 +37,7 @@ import {
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
 import { fetchAlertsForExport, useRiskAlerts } from "@/lib/api/analysis";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 import { downloadCsv } from "@/lib/utils/csv";
 import {
 	defaultEnd,
@@ -270,7 +271,7 @@ export function ReportsPage() {
 												title="Copy"
 												onClick={(e) => {
 													e.stopPropagation();
-													navigator.clipboard?.writeText(a.id);
+													copyToClipboard(a.fullHash);
 												}}
 											>
 												<Copy className="h-3.5 w-3.5" />

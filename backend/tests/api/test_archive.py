@@ -154,9 +154,9 @@ def client(monkeypatch, store):
 @pytest.fixture
 def auth_open(monkeypatch):
     """Run the API in dev mode (no API-key required) for the happy-path tests."""
-    from app import auth
-    monkeypatch.setattr(auth, "_valid_keys", [])
-    monkeypatch.setattr(auth, "_dev_mode", True)
+    from app.auth import api_key
+    monkeypatch.setattr(api_key, "_valid_keys", [])
+    monkeypatch.setattr(api_key, "_dev_mode", True)
 
 
 VALID_HASH = "a" * 64
@@ -340,9 +340,9 @@ def test_empty_note_rejected(client, auth_open):
 
 
 def test_archive_requires_api_key_when_keys_configured(client, monkeypatch):
-    from app import auth
-    monkeypatch.setattr(auth, "_valid_keys", ["sentinel-key"])
-    monkeypatch.setattr(auth, "_dev_mode", False)
+    from app.auth import api_key
+    monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
+    monkeypatch.setattr(api_key, "_dev_mode", False)
     r = client.post("/api/archive", json={
         "network": "preprod", "tx_hash": VALID_HASH,
         "note": "n", "archived_by": "me",
@@ -351,9 +351,10 @@ def test_archive_requires_api_key_when_keys_configured(client, monkeypatch):
 
 
 def test_archive_accepts_valid_api_key(client, monkeypatch):
-    from app import auth, config
-    monkeypatch.setattr(auth, "_valid_keys", ["sentinel-key"])
-    monkeypatch.setattr(auth, "_dev_mode", False)
+    from app import config
+    from app.auth import api_key
+    monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
+    monkeypatch.setattr(api_key, "_dev_mode", False)
     r = client.post(
         "/api/archive",
         json={

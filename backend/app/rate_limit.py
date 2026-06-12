@@ -28,6 +28,31 @@ logger = logging.getLogger(__name__)
 # TMS_API_DOCS_ENABLED explicitly exposes them (see main.py).
 _EXEMPT_PATHS = {"/", "/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
 
+# Every RateLimiter registers itself here at construction. The app lifespan
+# then calls start_all_cleanups()/stop_all_cleanups() so each limiter's
+# background eviction loop is managed without main.py needing to know about
+# every limiter instance (some live in feature modules, e.g. the per-email
+# limiter in app.api.auth). Without this, a limiter whose cleanup task is
+# never started leaks one dict entry per distinct key forever — a real
+# concern for attacker-controlled keys like email addresses.
+_REGISTRY: "list[RateLimiter]" = []
+
+
+def start_all_cleanups() -> None:
+    """Start the background eviction loop for every registered limiter.
+
+    Must be called from within a running event loop (app lifespan startup),
+    because each limiter schedules an asyncio task.
+    """
+    for limiter in _REGISTRY:
+        limiter.start_cleanup()
+
+
+def stop_all_cleanups() -> None:
+    """Cancel every registered limiter's eviction loop (lifespan shutdown)."""
+    for limiter in _REGISTRY:
+        limiter.stop_cleanup()
+
 
 class RateLimiter:
     """Sliding window counter, one deque per identity key."""
@@ -38,6 +63,9 @@ class RateLimiter:
         self._windows: dict[str, deque] = defaultdict(deque)
         self._lock = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
+        # Auto-register so the lifespan can manage our cleanup task. See
+        # _REGISTRY above for why this matters.
+        _REGISTRY.append(self)
 
     async def check(self, key: str) -> tuple[bool, int]:
         """Return (allowed, retry_after_seconds).
@@ -78,7 +106,14 @@ class RateLimiter:
                 logger.debug(f"Rate limiter: pruned {len(stale)} stale window(s)")
 
     def start_cleanup(self):
-        """Schedule the background cleanup coroutine. Call from app lifespan."""
+        """Schedule the background cleanup coroutine. Call from app lifespan.
+
+        Idempotent: a second call while a task is already running is a
+        no-op, so it's safe whether invoked directly or via
+        start_all_cleanups().
+        """
+        if self._cleanup_task and not self._cleanup_task.done():
+            return
         self._cleanup_task = asyncio.create_task(self._run_cleanup())
 
     def stop_cleanup(self):

@@ -35,6 +35,7 @@ import {
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 import type { RiskAlert } from "@/mocks/attacks";
 import {
 	ARCHIVE_REASONS,
@@ -199,6 +200,7 @@ function DetailCard({
 						type="button"
 						className="text-muted-foreground hover:text-foreground"
 						title="Copy"
+						onClick={() => copyToClipboard(alert.fullHash)}
 					>
 						<Copy className="h-3.5 w-3.5" />
 					</button>
