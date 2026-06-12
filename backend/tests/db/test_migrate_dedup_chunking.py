@@ -72,6 +72,28 @@ class TestChunkedCollapse:
             # Spill threshold at half the budget keeps merge-phase headroom.
             assert settings["max_bytes_before_external_group_by"] == 500_000
 
+    def test_collapse_select_never_aliases_aggregates(self, mig):
+        # Regression: aliasing max(ingestion_timestamp) AS ingestion_timestamp
+        # made the ClickHouse analyzer substitute the alias into the sibling
+        # argMax(col, ingestion_timestamp) expressions and reject the query
+        # as a nested aggregate (Code 184; reproduced live on 26.1.3). The
+        # INSERT's explicit column list maps positionally, so the SELECT
+        # aggregates must carry no AS aliases at all.
+        client = _legacy_client()
+        mig.migrate_table(
+            client, "transactions", apply=True, legacy_suffix="20260612",
+            buckets=1, max_memory_bytes=1_000_000,
+        )
+        inserts = [
+            c.args[0] for c in client.execute.call_args_list
+            if c.args[0].startswith("INSERT INTO transactions__mig")
+        ]
+        assert inserts
+        for sql in inserts:
+            select_part = sql.split("SELECT", 1)[1].split("FROM", 1)[0]
+            assert " AS " not in select_part, sql
+            assert "max(ingestion_timestamp)" in select_part
+
     def test_count_mismatch_still_aborts(self, mig):
         client = _legacy_client()
         original = client.execute.side_effect

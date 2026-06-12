@@ -143,14 +143,19 @@ def migrate_table(
     # (e.g. raw_data_truncated) take their DEFAULT.
     v2_cols = _columns(client, mig)
     insert_cols = [c for c in v2_cols if c in legacy_cols]
+    # No AS aliases on the aggregate expressions: the INSERT's explicit
+    # column list maps positionally, and aliasing max(version) back to the
+    # version column's own name makes the ClickHouse analyzer substitute
+    # the alias into the sibling argMax(col, version) expressions, which it
+    # then rejects as a nested aggregate (Code 184; reproduced on 26.1).
     select_exprs = []
     for col in insert_cols:
         if col in key_cols:
             select_exprs.append(col)
         elif col == version_col:
-            select_exprs.append(f"max({version_col}) AS {version_col}")
+            select_exprs.append(f"max({version_col})")
         else:
-            select_exprs.append(f"argMax({col}, {version_col}) AS {col}")
+            select_exprs.append(f"argMax({col}, {version_col})")
     # Chunked by tx_hash bucket so the GROUP BY working set is bounded;
     # every dedup key contains tx_hash, so a bucket never splits a group.
     # spill threshold: external aggregation kicks in at half the memory
