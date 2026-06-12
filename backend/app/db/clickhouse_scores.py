@@ -14,6 +14,7 @@ every public name in this module, so callers keep using
 ``clickhouse.insert_class_scores`` etc. unchanged.
 """
 
+import copy
 import json
 import logging
 import threading
@@ -452,7 +453,11 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
         with _stats_cache_lock:
             entry = _stats_cache.get(cache_key)
             if entry is not None and time.monotonic() - entry[1] < ttl:
-                return dict(entry[0])
+                # deepcopy, not dict(): the per_class values are nested
+                # dicts, and a shallow copy shares them, so a mutating
+                # caller would poison the cache for the whole TTL window.
+                # The dict is a few dozen scalars, so the cost is trivial.
+                return copy.deepcopy(entry[0])
 
     # Build per-class aggregation: count of scored (>= 0), avg, max
     agg_parts = []
@@ -528,7 +533,11 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
     result["pending_count"] = get_pending_count(network)
     if ttl > 0:
         with _stats_cache_lock:
-            _stats_cache[cache_key] = (dict(result), time.monotonic())
+            # deepcopy on store too: the caller receives ``result`` itself,
+            # and a shallow-copied cache entry would share its nested
+            # per_class dicts with that caller (same poisoning risk as on
+            # the read path above).
+            _stats_cache[cache_key] = (copy.deepcopy(result), time.monotonic())
     return result
 
 

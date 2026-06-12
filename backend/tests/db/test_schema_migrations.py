@@ -53,6 +53,55 @@ class TestProjectionMigrationGate:
         assert "ingestion_timestamp" in _TX_PROJECTION_SELECT  # RMT version column
 
 
+class TestCreateAllMigrationOrder:
+    """The projection swap's ADD PROJECTION selects the network column, so
+    create_all must run it AFTER the transactions column migrations: on a
+    pre-network-column deployment the unguarded ALTER crashed startup."""
+
+    def test_projection_migration_runs_after_column_migrations(self):
+        from app.db.clickhouse_schema import create_all
+
+        legacy_tx_ddl = (
+            "CREATE TABLE transactions (... PROJECTION p_by_time "
+            "(SELECT * ORDER BY network, timestamp) ...) "
+            "ENGINE = ReplacingMergeTree ..."
+        )
+        client = MagicMock()
+
+        def execute(q, *a, **k):
+            if "create_table_query" in q:
+                # Projection gate + TTL-removal check both read the live DDL;
+                # the legacy text (no p_by_time_v2) forces the migration.
+                return [(legacy_tx_ddl,)]
+            if "engine_full" in q:
+                return []  # assert_no_legacy_schema: nothing legacy
+            if "system.columns" in q:
+                return []  # baselines table absent
+            return None
+
+        client.execute.side_effect = execute
+        create_all(client)
+
+        statements = [c.args[0] for c in client.execute.call_args_list]
+        idx_projection = next(
+            i for i, s in enumerate(statements)
+            if "ADD PROJECTION IF NOT EXISTS p_by_time_v2" in s
+        )
+        for needle in (
+            "ADD COLUMN IF NOT EXISTS network",
+            "ADD COLUMN IF NOT EXISTS block_index",
+            "MODIFY COLUMN total_input_value",
+            "ADD COLUMN IF NOT EXISTS script_valid",
+        ):
+            idx_col = next(
+                i for i, s in enumerate(statements)
+                if s.startswith("ALTER TABLE transactions ") and needle in s
+            )
+            assert idx_col < idx_projection, (
+                f"'{needle}' must run before the projection migration"
+            )
+
+
 class TestRetentionTtlRemoval:
     """A knob back at 0 must REMOVE any stale TTL clause; otherwise
     "0 = keep forever" is false after one enable/disable cycle and the old

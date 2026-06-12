@@ -180,7 +180,8 @@ def _score_transaction(
 
 # Defer bookkeeping for transactions whose raw_data could not be recovered:
 # (network, tx_hash) -> (counted attempts, monotonic time of the last counted
-# attempt). Attempts are paced by RAW_FALLBACK_RETRY_SECONDS of wall clock:
+# attempt). Attempts are paced by RAW_FALLBACK_RETRY_SECONDS measured on the
+# monotonic clock (NTP-step immune):
 # the drain loop re-polls every 0.5 s under load, which previously burned
 # the whole budget in ~1.5 s and degraded-scored exactly the large
 # attack-shaped txs the fallback protects (review finding). In-process only;

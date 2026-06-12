@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
@@ -108,8 +109,9 @@ class Settings(BaseSettings):
     TRUSTED_PROXY_ENABLED: bool = False
     # Number of trusted proxies that append entries to X-Forwarded-For. The
     # client IP is taken HOPS entries from the RIGHT of the merged list; the
-    # leftmost entries are attacker-writable and must never win.
-    TRUSTED_PROXY_HOPS: int = 1
+    # leftmost entries are attacker-writable and must never win. ge=1: zero
+    # or negative hops would index past the list end on every request.
+    TRUSTED_PROXY_HOPS: int = Field(default=1, ge=1)
     # Forwarded headers are honoured ONLY when the direct TCP peer falls
     # inside one of these CIDRs (the proxy itself). Defaults cover loopback
     # and the RFC1918 ranges Docker bridge networks use (cloudflared reaches
@@ -299,13 +301,17 @@ class Settings(BaseSettings):
     # After this many failed fallback attempts the tx is scored anyway with
     # raw_data=None and a raw_data_unavailable evidence marker, so a lost blob
     # cannot park a tx in the pending queue forever. 3 covers transient
-    # filesystem hiccups across ~3 engine intervals.
+    # filesystem hiccups across the paced retry budget below.
     RAW_FALLBACK_MAX_ATTEMPTS: int = 3
-    # Minimum wall-clock spacing between COUNTED fallback attempts. The drain
-    # loop re-polls every ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS (0.5 s) under
-    # load, which burned the whole attempt budget in ~1.5 s instead of the
-    # intended one-attempt-per-engine-interval; 30 s matches
-    # ANALYSIS_ENGINE_INTERVAL_SECONDS, restoring the ~90 s budget.
+    # Minimum monotonic-clock spacing between COUNTED fallback attempts
+    # (time.monotonic(), immune to NTP steps). The drain loop re-polls every
+    # ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS (0.5 s) under load, which burned
+    # the whole attempt budget in ~1.5 s instead of the intended
+    # one-attempt-per-engine-interval; 30 s matches
+    # ANALYSIS_ENGINE_INTERVAL_SECONDS. With MAX_ATTEMPTS=3 there are two
+    # paced gaps between counted attempts, so the degrade budget floor is
+    # at least 60 s after the first failure (recovery is still probed on
+    # every poll regardless).
     RAW_FALLBACK_RETRY_SECONDS: int = 30
 
     # Mempool pending-tx bookkeeping. The TTL matches
@@ -313,8 +319,9 @@ class Settings(BaseSettings):
     # stays relevant (on-chain tx TTLs cover user submissions well inside 2 h).
     MEMPOOL_PENDING_TTL_SECONDS: int = 7200
     # Prune cadence: amortizes the O(pending) stale scan to once per N
-    # processed mempool txs instead of per tx.
-    MEMPOOL_PRUNE_EVERY_N_TXS: int = 100
+    # processed mempool txs instead of per tx. ge=1: 0 would divide by zero
+    # inside the mempool loop, where the exception is swallowed at DEBUG.
+    MEMPOOL_PRUNE_EVERY_N_TXS: int = Field(default=100, ge=1)
     # Hard cap on the seen-tx dedup set; clearing it only risks re-processing
     # (idempotent downstream), never data loss.
     MEMPOOL_SEEN_TXS_MAX: int = 50_000

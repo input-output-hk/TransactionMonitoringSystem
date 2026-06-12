@@ -89,6 +89,18 @@ def client(monkeypatch, store):
         items.sort(key=lambda r: r["archived_at"], reverse=True)
         return items[offset : offset + limit]
 
+    async def fake_count(network, date_from=None, date_to=None):
+        # Mirrors fake_list's filter; without this patch the list endpoint's
+        # archive_count_async call reaches the real ClickHouse driver and the
+        # tests stop being hermetic.
+        return sum(
+            1
+            for key, row in store.rows.items()
+            if key[0] == network
+            and (date_from is None or row["archived_at"] >= date_from)
+            and (date_to is None or row["archived_at"] <= date_to)
+        )
+
     async def fake_get(network, tx_hash):
         return store.rows.get((network, tx_hash))
 
@@ -131,6 +143,7 @@ def client(monkeypatch, store):
     monkeypatch.setattr(archive_queries, "archive_insert_async", fake_insert)
     monkeypatch.setattr(archive_queries, "archive_delete_async", fake_delete)
     monkeypatch.setattr(archive_queries, "archive_list_async", fake_list)
+    monkeypatch.setattr(archive_queries, "archive_count_async", fake_count)
     monkeypatch.setattr(archive_queries, "archive_get_async", fake_get)
     monkeypatch.setattr(archive_queries, "archive_bulk_insert_async", fake_bulk_insert)
     monkeypatch.setattr(archive_queries, "archive_export_rows_async", fake_export)

@@ -67,9 +67,21 @@ class TestStatsCache:
         assert client.execute.call_count == 3
 
     def test_cache_returns_copy(self, client, monkeypatch):
-        # A caller mutating the returned dict must not poison the cache.
+        # A caller mutating the returned dict must not poison the cache:
+        # neither at the top level nor through the NESTED per_class dicts,
+        # which a shallow dict() copy would share with the cache entry.
         monkeypatch.setattr(settings, "STATS_CACHE_TTL_SECONDS", 60)
         first = clickhouse_scores.get_class_scores_stats("preprod")
         first["pending_count"] = -999
+        some_class = next(iter(first["per_class"]))
+        first["per_class"][some_class]["scored_count"] = -999
+        first["per_class"]["injected_class"] = {"scored_count": -1}
         second = clickhouse_scores.get_class_scores_stats("preprod")
         assert second["pending_count"] == 5
+        assert second["per_class"][some_class]["scored_count"] == 0
+        assert "injected_class" not in second["per_class"]
+        # The fresh (pre-store) return value must not share nested dicts
+        # with the cache either: mutate it and re-read.
+        second["per_class"][some_class]["max_score"] = 12345.0
+        third = clickhouse_scores.get_class_scores_stats("preprod")
+        assert third["per_class"][some_class]["max_score"] == 0.0

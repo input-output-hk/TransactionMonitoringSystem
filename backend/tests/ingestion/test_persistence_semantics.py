@@ -216,6 +216,50 @@ class TestMempoolCacheLifetime:
             _run(client._handle_roll_forward(_block()))
         assert tx_hash not in client._pending_input_cache
 
+    def test_cache_survives_failed_sync_point_save(self, client, monkeypatch):
+        """A transient Postgres failure on save_sync_point replays the
+        block; popping the enrichment before the checkpoint advanced would
+        make the un-enriched replay (fresh ingestion_timestamp) win the
+        ReplacingMergeTree merge permanently."""
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", False)
+        tx_hash = self._seed(client)
+        with patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
+                   AsyncMock()), \
+             patch("app.ingestion.ogmios_client.postgres.save_sync_point",
+                   AsyncMock(side_effect=RuntimeError("pg blip"))), \
+             patch("app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async",
+                   AsyncMock(return_value={})), \
+             patch("app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
+                   AsyncMock()), \
+             patch.object(client, "_record_displacements", AsyncMock()), \
+             patch.object(client, "_settle_confirmed", AsyncMock()):
+            with pytest.raises(RuntimeError):
+                _run(client._handle_roll_forward(_block()))
+        assert tx_hash in client._pending_input_cache  # replay keeps enrichment
+
+    def test_cache_still_present_when_sync_point_saves(self, client, monkeypatch):
+        """Ordering pin: the pop happens AFTER save_sync_point succeeds,
+        so at checkpoint-write time the enrichment must still be cached."""
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", False)
+        tx_hash = self._seed(client)
+        present_at_save = {}
+
+        async def save_sync(*a, **k):
+            present_at_save["cached"] = tx_hash in client._pending_input_cache
+
+        with patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
+                   AsyncMock()), \
+             patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync), \
+             patch("app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async",
+                   AsyncMock(return_value={})), \
+             patch("app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
+                   AsyncMock()), \
+             patch.object(client, "_record_displacements", AsyncMock()), \
+             patch.object(client, "_settle_confirmed", AsyncMock()):
+            _run(client._handle_roll_forward(_block()))
+        assert present_at_save["cached"] is True
+        assert tx_hash not in client._pending_input_cache  # popped after success
+
 
 class TestStartupValidation:
     def test_capped_payloads_require_raw_store(self, monkeypatch):
@@ -243,6 +287,7 @@ class TestRollbackCleanup:
         delete = AsyncMock(return_value=["aa" * 32, "bb" * 32, "cc" * 32])
         with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", AsyncMock()), \
              patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()), \
+             patch("app.ingestion.ogmios_client.postgres.add_pending_score_repurges", AsyncMock()), \
              patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async", delete):
             _run(client._handle_roll_backward(self._result(slot=500)))
         delete.assert_awaited_once_with(client.network, 500)
@@ -260,6 +305,8 @@ class TestRollbackCleanup:
         async def scenario():
             with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", AsyncMock()), \
                  patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()), \
+                 patch("app.ingestion.ogmios_client.postgres.add_pending_score_repurges", AsyncMock()), \
+                 patch("app.ingestion.ogmios_client.postgres.clear_pending_score_repurges", AsyncMock()), \
                  patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async",
                        AsyncMock(return_value=hashes)), \
                  patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async", repurge):
@@ -306,6 +353,198 @@ class TestRollbackCleanup:
              patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async", delete):
             _run(client._handle_roll_backward(self._result()))
         delete.assert_not_awaited()
+
+
+class TestDurableScoreRepurge:
+    """The delayed tx_class_scores repurge must be durable: persisted to
+    Postgres before the volatile asyncio task is scheduled, cleared only
+    after the ClickHouse delete succeeds, replayed on chain-sync
+    (re)connect, and strongly referenced so GC cannot drop it. A lost
+    repurge leaves a stale score row permanently blocking re-scoring of a
+    re-confirmed tx (missed attack)."""
+
+    HASHES = ["aa" * 32, "bb" * 32]
+
+    def _result(self, slot=500):
+        return {"point": {"slot": slot, "id": "cd" * 32}, "tip": {"slot": slot + 5}}
+
+    def _patches(self, add_pending=None, clear_pending=None, repurge=None):
+        return [
+            patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back",
+                  AsyncMock()),
+            patch("app.ingestion.ogmios_client.postgres.save_sync_point",
+                  AsyncMock()),
+            patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async",
+                  AsyncMock(return_value=list(self.HASHES))),
+            patch("app.ingestion.ogmios_client.postgres.add_pending_score_repurges",
+                  add_pending or AsyncMock()),
+            patch("app.ingestion.ogmios_client.postgres.clear_pending_score_repurges",
+                  clear_pending or AsyncMock()),
+            patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async",
+                  repurge or AsyncMock()),
+        ]
+
+    def _rollback(self, client, monkeypatch, patches, extra_ticks=2,
+                  stop_before_ticks=False):
+        monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
+
+        async def scenario():
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                await client._handle_roll_backward(self._result())
+                if stop_before_ticks:
+                    client._running = False
+                for _ in range(extra_ticks):
+                    await asyncio.sleep(0)
+
+        _run(scenario())
+
+    def test_pending_rows_persisted_before_repurge_runs(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        order = []
+        add_pending = AsyncMock(side_effect=lambda *a, **k: order.append("persist"))
+        repurge = AsyncMock(side_effect=lambda *a, **k: order.append("repurge"))
+        self._rollback(client, monkeypatch,
+                       self._patches(add_pending=add_pending, repurge=repurge))
+        add_pending.assert_awaited_once_with(client.network, self.HASHES)
+        assert order == ["persist", "repurge"]
+
+    def test_persist_failure_propagates_and_skips_scheduling(self, client, monkeypatch):
+        # The persisted row is the durability guarantee; if it cannot be
+        # written the rollback handler must fail (connection resets, the
+        # node re-sends the rollback) rather than schedule a volatile task.
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        repurge = AsyncMock()
+        with pytest.raises(RuntimeError):
+            self._rollback(
+                client, monkeypatch,
+                self._patches(
+                    add_pending=AsyncMock(side_effect=RuntimeError("pg down")),
+                    repurge=repurge,
+                ),
+            )
+        repurge.assert_not_awaited()
+        assert client._repurge_tasks == set()
+
+    def test_pending_rows_cleared_only_after_repurge_succeeds(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        order = []
+        repurge = AsyncMock(side_effect=lambda *a, **k: order.append("repurge"))
+        clear = AsyncMock(side_effect=lambda *a, **k: order.append("clear"))
+        self._rollback(client, monkeypatch,
+                       self._patches(clear_pending=clear, repurge=repurge),
+                       extra_ticks=3)
+        clear.assert_awaited_once_with(client.network, self.HASHES)
+        assert order == ["repurge", "clear"]
+
+    def test_failed_repurge_keeps_pending_row(self, client, monkeypatch):
+        # The row must stay queued for the reconnect replay when the
+        # ClickHouse delete fails; clearing it would lose the repurge.
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        clear = AsyncMock()
+        self._rollback(
+            client, monkeypatch,
+            self._patches(
+                clear_pending=clear,
+                repurge=AsyncMock(side_effect=RuntimeError("ch down")),
+            ),
+            extra_ticks=3,
+        )
+        clear.assert_not_awaited()
+
+    def test_shutdown_inside_delay_window_keeps_pending_row(self, client, monkeypatch):
+        # disconnect() inside the delay window: the task returns without
+        # repurging, and the persisted row covers the replay on next start.
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        repurge = AsyncMock()
+        clear = AsyncMock()
+        self._rollback(client, monkeypatch,
+                       self._patches(clear_pending=clear, repurge=repurge),
+                       extra_ticks=3, stop_before_ticks=True)
+        repurge.assert_not_awaited()
+        clear.assert_not_awaited()
+
+    def test_task_reference_held_then_discarded(self, client, monkeypatch):
+        # A bare create_task result is only weakly referenced by the loop
+        # and can be GC'd mid-flight, silently dropping the delayed pass.
+        monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 3600)
+
+        async def scenario():
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                for p in self._patches():
+                    stack.enter_context(p)
+                await client._handle_roll_backward(self._result())
+                assert len(client._repurge_tasks) == 1  # strong ref held
+                task = next(iter(client._repurge_tasks))
+                task.cancel()
+                for _ in range(3):
+                    await asyncio.sleep(0)
+                # Done-callback discards the reference once the task ends.
+                assert client._repurge_tasks == set()
+
+        _run(scenario())
+
+    def test_replay_executes_and_clears_pending(self, client):
+        order = []
+        get_pending = AsyncMock(return_value=list(self.HASHES))
+        repurge = AsyncMock(side_effect=lambda *a, **k: order.append("repurge"))
+        clear = AsyncMock(side_effect=lambda *a, **k: order.append("clear"))
+        with patch("app.ingestion.ogmios_client.postgres.get_pending_score_repurges",
+                   get_pending), \
+             patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async",
+                   repurge), \
+             patch("app.ingestion.ogmios_client.postgres.clear_pending_score_repurges",
+                   clear):
+            _run(client._replay_pending_score_repurges())
+        repurge.assert_awaited_once_with(client.network, self.HASHES)
+        clear.assert_awaited_once_with(client.network, self.HASHES)
+        assert order == ["repurge", "clear"]
+
+    def test_replay_noop_when_nothing_pending(self, client):
+        repurge = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.get_pending_score_repurges",
+                   AsyncMock(return_value=[])), \
+             patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async",
+                   repurge):
+            _run(client._replay_pending_score_repurges())
+        repurge.assert_not_awaited()
+
+    def test_replay_failure_keeps_rows_and_does_not_crash_sync(self, client):
+        # The reconnect path IS the retry mechanism: a failed replay leaves
+        # the rows queued and must not take down the chain-sync loop.
+        clear = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.get_pending_score_repurges",
+                   AsyncMock(return_value=list(self.HASHES))), \
+             patch("app.ingestion.ogmios_client.clickhouse.delete_score_rows_async",
+                   AsyncMock(side_effect=RuntimeError("ch down"))), \
+             patch("app.ingestion.ogmios_client.postgres.clear_pending_score_repurges",
+                   clear):
+            _run(client._replay_pending_score_repurges())  # must not raise
+        clear.assert_not_awaited()
+
+    def test_chain_sync_connect_replays_before_processing(self, client):
+        # Restart/reconnect inside the delay window: the persisted repurge
+        # must run before any chain messages are exchanged.
+        order = []
+
+        async def replay():
+            order.append("replay")
+
+        async def send_recv(ws, method, params=None):
+            order.append(method)
+            return {"result": {}}
+
+        client._running = False  # skip the nextBlock loop body
+        with patch.object(client, "_replay_pending_score_repurges", replay), \
+             patch.object(client, "_send_recv", send_recv), \
+             patch("app.ingestion.ogmios_client.postgres.get_sync_point",
+                   AsyncMock(return_value=None)):
+            _run(client._chain_sync_loop(ws=object()))
+        assert order and order[0] == "replay"
 
 
 class TestSerializeRawData:

@@ -312,14 +312,23 @@ async def insert_transactions_batch_async(transactions: List[NormalizedTransacti
 # Tables holding per-transaction chain facts that must be purged when the
 # chain rolls back past their slot. archived_alerts is deliberately absent:
 # it is admin curation, not chain state.
+#
+# Order is load-bearing for idempotency: transactions is the table the orphan
+# hashes are SELECTed from, so it must be deleted LAST. If it were deleted
+# earlier and a later table's DELETE failed, the retry would re-select from
+# transactions, find nothing, and leave the remaining tables holding orphans
+# forever (a surviving stale tx_class_scores row then permanently blocks
+# re-scoring via the unanalyzed anti-join). tx_class_scores stays as late as
+# possible (second-to-last) to minimize the window where an in-flight engine
+# batch re-inserts a score row after its purge.
 _ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
-    "transactions",
     "transaction_inputs",
     "transaction_outputs",
     "utxo_features",
     "tx_script_features",
     "address_transactions",
     "tx_class_scores",
+    "transactions",
 )
 
 # ClickHouse >= 24.7 refuses lightweight DELETE on a table with projections
@@ -345,12 +354,14 @@ def delete_rolled_back_txs(network: str, rollback_slot: int) -> List[str]:
     coordinates. Returns the orphaned tx hashes (callers use len() for the
     count; the rollback handler feeds them to the delayed score repurge).
 
-    tx_class_scores is deleted LAST: that minimizes — but cannot close —
-    the window where an engine batch in flight re-inserts a score row
-    after the purge, which would then block re-scoring via the unanalyzed
-    anti-join. delete_score_rows runs again after a delay for that race.
-
-    Idempotent: re-running after a partial failure deletes whatever remains.
+    Idempotent under partial failure: the orphan hashes are selected from
+    transactions, and transactions is deleted LAST (see
+    _ROLLBACK_CLEANUP_TABLES). If any earlier table's DELETE fails, the
+    hash source is still intact, so a retry re-selects the same hashes and
+    deletes whatever remains. tx_class_scores is second-to-last, which
+    minimizes (but cannot close) the window where an engine batch in
+    flight re-inserts a score row after the purge; delete_score_rows runs
+    again after a delay for that race.
     """
     client = _get_client()
     rows = client.execute(

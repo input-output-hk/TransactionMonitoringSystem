@@ -241,6 +241,23 @@ async def execute_schema():
                 ON mempool_collisions(created_at);
         """)
 
+        # Durable queue for the delayed tx_class_scores rollback repurge.
+        # The in-memory asyncio task that performs the delayed second purge
+        # pass is volatile (lost on restart/shutdown inside the delay
+        # window); a lost repurge leaves a stale score row that permanently
+        # blocks re-scoring of a re-confirmed tx (missed-attack risk). Rows
+        # are written BEFORE the task is scheduled and deleted only after
+        # the ClickHouse delete succeeds; chain-sync (re)connect replays
+        # whatever is left.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_score_repurges (
+                network     TEXT NOT NULL,
+                tx_hash     TEXT NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, tx_hash)
+            )
+        """)
+
         logger.info("PostgreSQL schema initialized")
 
 
@@ -421,6 +438,51 @@ async def get_sync_point(network: str) -> Optional[Dict[str, Any]]:
         if row:
             return {"slot": row["slot"], "id": row["block_id"]}
         return None
+
+
+# --- Pending score repurges (durable rollback second pass) ---
+
+async def add_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+    """Persist tx hashes awaiting the delayed tx_class_scores repurge.
+
+    Written BEFORE the in-memory repurge task is scheduled so a restart or
+    shutdown inside the delay window cannot lose the repurge. ON CONFLICT
+    DO NOTHING: a rollback re-delivered by the node (the cleanup path is
+    idempotent) may enqueue the same hashes twice.
+    """
+    if not tx_hashes:
+        return
+    async with get_connection() as conn:
+        await conn.executemany("""
+            INSERT INTO pending_score_repurges (network, tx_hash)
+            VALUES ($1, $2)
+            ON CONFLICT (network, tx_hash) DO NOTHING
+        """, [(network, h) for h in tx_hashes])
+
+
+async def get_pending_score_repurges(network: str) -> List[str]:
+    """All tx hashes whose delayed score repurge has not completed yet."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            "SELECT tx_hash FROM pending_score_repurges WHERE network = $1",
+            network,
+        )
+        return [r["tx_hash"] for r in rows]
+
+
+async def clear_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+    """Remove hashes whose tx_class_scores repurge succeeded in ClickHouse.
+
+    Called only AFTER delete_score_rows_async returns: clearing first would
+    reopen the lost-repurge window this table exists to close.
+    """
+    if not tx_hashes:
+        return
+    async with get_connection() as conn:
+        await conn.execute("""
+            DELETE FROM pending_score_repurges
+            WHERE network = $1 AND tx_hash = ANY($2)
+        """, network, tx_hashes)
 
 
 # --- Entity State ---

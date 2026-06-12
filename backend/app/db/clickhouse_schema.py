@@ -434,9 +434,6 @@ def create_all(client: Client) -> None:
     # Main transactions table (see SCHEMA_DDL for the layout rationale).
     client.execute(SCHEMA_DDL["transactions"].format(table="transactions"))
 
-    # Swap the legacy SELECT * projection for the narrowed v2 (no-op once done).
-    migrate_transactions_projection(client)
-
     # Add network column if it doesn't exist (migration for existing tables)
     try:
         client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
@@ -463,6 +460,13 @@ def create_all(client: Client) -> None:
     client.execute(
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1"
     )
+
+    # Swap the legacy SELECT * projection for the narrowed v2 (no-op once
+    # done). Must run AFTER the column migrations above: the v2 projection
+    # SELECT references the network column, so on a pre-network-column
+    # deployment running it first crashes startup with an unknown-column
+    # error before the ADD COLUMN migration can fix the table.
+    migrate_transactions_projection(client)
 
     # Transaction inputs table
     client.execute(SCHEMA_DDL["transaction_inputs"].format(table="transaction_inputs"))

@@ -126,6 +126,20 @@ class OgmiosClient:
         # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
         self._seen_mempool_txs: Set[str] = set()
 
+        # Deterministic prune cadence: counts every processed mempool tx and
+        # triggers the TTL/cap sweep at MEMPOOL_PRUNE_EVERY_N_TXS. The old
+        # trigger (len(_seen_mempool_txs) % N == 0) stalled indefinitely
+        # because the set length is not monotonic (confirms discard entries,
+        # rollbacks and reconnects clear it), so the sweep could never fire
+        # in a quiet mempool.
+        self._mempool_txs_since_prune = 0
+
+        # Strong references to in-flight delayed score-repurge tasks: a bare
+        # asyncio.create_task result is only weakly referenced by the loop
+        # and can be garbage-collected mid-flight, silently dropping the
+        # repurge. Tasks discard themselves on completion.
+        self._repurge_tasks: Set[asyncio.Task] = set()
+
         # LocalStateQuery connection for UTxO input resolution (on-demand)
         self._query_ws = None
         self._query_lock = asyncio.Lock()
@@ -137,8 +151,9 @@ class OgmiosClient:
         # Cache of resolved UTxO inputs for PENDING transactions.
         # Populated by the mempool monitor via queryLedgerState/utxo, consumed
         # by _handle_roll_forward when the tx is confirmed in a block; popped
-        # only AFTER the block durably persists, so a retry-exhausted insert
-        # or rollback replay re-parses with the enrichment intact.
+        # only AFTER the sync checkpoint advances, so a retry-exhausted
+        # insert, a failed checkpoint write, or a rollback replay re-parses
+        # with the enrichment intact.
         # Key: tx_hash, Value: ({(input_tx_hash, input_index): {address,
         # amount, assets}}, cached_at) — the timestamp lets the prune sweep
         # evict entries whose tx never reached the pending index (e.g.
@@ -341,6 +356,12 @@ class OgmiosClient:
 
     async def _chain_sync_loop(self, ws):
         """ChainSync: findIntersection → nextBlock loop."""
+        # Replay any score repurges persisted before a restart/disconnect
+        # BEFORE normal block processing resumes: a repurge lost inside the
+        # delay window would leave a stale tx_class_scores row permanently
+        # blocking re-scoring of a re-confirmed tx.
+        await self._replay_pending_score_repurges()
+
         sync_point = await postgres.get_sync_point(self.network)
 
         if sync_point:
@@ -554,11 +575,6 @@ class OgmiosClient:
             # is never reached and the block replays after reconnect.
             await self._insert_block_with_retry(normalized_txs, block_slot)
 
-            # Block is durable: the mempool enrichment is consumed. A
-            # BlockPersistError above leaves the cache intact for the replay.
-            for tx in normalized_txs:
-                self._pending_input_cache.pop(tx.tx_hash, None)
-
             # Batch upsert lifecycle CONFIRMED (single DB round-trip for whole block)
             try:
                 await postgres.batch_upsert_lifecycle_confirmed(confirmed_records)
@@ -571,6 +587,15 @@ class OgmiosClient:
             )
 
         await postgres.save_sync_point(self.network, block_slot, block_id)
+
+        # Checkpoint advanced: the block can no longer replay, so the mempool
+        # enrichment is consumed only now. Popping before save_sync_point
+        # succeeds would let a transient Postgres failure replay the block
+        # WITHOUT enrichment, and the replay's fresh ingestion_timestamp
+        # would make the un-enriched copy permanently win the
+        # ReplacingMergeTree merge (lost input addresses / total_input_value).
+        for tx in normalized_txs:
+            self._pending_input_cache.pop(tx.tx_hash, None)
 
         logger.info(
             f"Block {block_height} (slot {block_slot}): "
@@ -603,8 +628,9 @@ class OgmiosClient:
                 tx.network = self.network
 
                 # Apply cached input resolution from mempool observation.
-                # Read-only here: the entry is popped only after the block
-                # persists, so a failed insert replays WITH the enrichment.
+                # Read-only here: the entry is popped only after the sync
+                # checkpoint advances, so any replay (failed insert OR failed
+                # checkpoint write) re-parses WITH the enrichment.
                 cached = self._pending_input_cache.get(tx.tx_hash)
                 if cached:
                     tx = self._apply_resolved_inputs(tx, cached[0])
@@ -841,7 +867,26 @@ class OgmiosClient:
                 # right after it, which would block re-scoring forever via
                 # the unanalyzed anti-join. Deleting a FRESH score of a
                 # re-confirmed tx is recall-safe (it just re-scores).
-                asyncio.create_task(self._delayed_score_repurge(purged_hashes))
+                #
+                # Persist the hashes BEFORE scheduling the in-memory task:
+                # the task is volatile (restart, shutdown inside the delay
+                # window, task failure) and the persisted row is what
+                # guarantees the repurge is replayed on the next chain-sync
+                # (re)connect. Deliberately NOT wrapped in try/except, like
+                # the purge above: a write failure propagates, the
+                # connection resets, and the node re-sends the rollback.
+                await postgres.add_pending_score_repurges(
+                    self.network, purged_hashes,
+                )
+                task = asyncio.create_task(
+                    self._delayed_score_repurge(purged_hashes)
+                )
+                # Strong reference until completion: the event loop only
+                # holds tasks weakly, and a GC'd task silently drops the
+                # delayed pass (the persisted row would still recover it on
+                # the next reconnect, but only after an unbounded delay).
+                self._repurge_tasks.add(task)
+                task.add_done_callback(self._repurge_tasks.discard)
 
         if rollback_id:
             await postgres.save_sync_point(self.network, rollback_slot, rollback_id)
@@ -860,20 +905,60 @@ class OgmiosClient:
     async def _delayed_score_repurge(self, hashes: List[str]) -> None:
         """Re-delete tx_class_scores rows for rolled-back txs after a delay.
 
-        Best-effort by design: a missed repurge only DELAYS re-scoring of a
-        re-confirmed tx (the periodic full rescan recovers it once the stale
-        row is gone), so failures log instead of crashing chain sync.
+        Durable, not best-effort: the hashes were persisted to
+        pending_score_repurges BEFORE this task was scheduled, and the row
+        is cleared only AFTER the ClickHouse delete succeeds. If this task
+        never completes (failure, shutdown inside the delay window), the
+        persisted row replays the repurge on the next chain-sync
+        (re)connect via _replay_pending_score_repurges, so a stale score
+        row cannot permanently block re-scoring of a re-confirmed tx
+        (missed-attack risk). Failures log instead of crashing chain sync
+        precisely because the persisted row guarantees the retry.
         """
         await asyncio.sleep(settings.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS)
         if not self._running:
+            # Shutting down inside the delay window: nothing is lost. The
+            # persisted pending_score_repurges row replays this repurge on
+            # the next startup's chain-sync connect.
             return
         try:
             await clickhouse.delete_score_rows_async(self.network, hashes)
+            await postgres.clear_pending_score_repurges(self.network, hashes)
             logger.info(
                 "Rollback score repurge: re-cleared %d tx(s)", len(hashes),
             )
         except Exception:
-            logger.exception("Rollback score repurge failed (non-fatal)")
+            logger.exception(
+                "Rollback score repurge failed; the persisted pending row "
+                "will replay it on the next chain-sync (re)connect"
+            )
+
+    async def _replay_pending_score_repurges(self) -> None:
+        """Execute score repurges persisted before a restart or disconnect.
+
+        Runs on every chain-sync (re)connect, before block processing
+        resumes: it covers the window where _delayed_score_repurge was
+        scheduled but never completed (process restart, shutdown during
+        the delay, ClickHouse outage). Rows are cleared only after the
+        delete succeeds; on failure they stay queued for the next
+        (re)connect rather than crashing the sync loop, since the chain
+        reconnect path is the retry mechanism.
+        """
+        try:
+            pending = await postgres.get_pending_score_repurges(self.network)
+            if not pending:
+                return
+            await clickhouse.delete_score_rows_async(self.network, pending)
+            await postgres.clear_pending_score_repurges(self.network, pending)
+            logger.info(
+                "Replayed %d pending score repurge(s) from before restart",
+                len(pending),
+            )
+        except Exception:
+            logger.exception(
+                "Pending score repurge replay failed; rows stay queued for "
+                "the next chain-sync (re)connect"
+            )
 
     # --- Mempool Monitoring ---
 
@@ -968,8 +1053,14 @@ class OgmiosClient:
                 tx_id, (input_refs, now, tx_fee, first_input_addr, tx_ttl),
             )
 
-        # Prune stale entries (throttled; knobs documented in config.py)
-        if len(self._seen_mempool_txs) % settings.MEMPOOL_PRUNE_EVERY_N_TXS == 0:
+        # Prune stale entries (throttled; knobs documented in config.py).
+        # Deterministic per-call counter, NOT len(_seen_mempool_txs) % N: the
+        # set length is non-monotonic (confirms discard entries, rollbacks
+        # and reconnects clear it), so the modulo trigger could skip the
+        # sweep indefinitely and the TTL/cap eviction would never run.
+        self._mempool_txs_since_prune += 1
+        if self._mempool_txs_since_prune >= settings.MEMPOOL_PRUNE_EVERY_N_TXS:
+            self._mempool_txs_since_prune = 0
             cutoff = now - timedelta(seconds=settings.MEMPOOL_PENDING_TTL_SECONDS)
             for k in self._pending.stale_ids(cutoff):
                 self._pending.untrack(k)
