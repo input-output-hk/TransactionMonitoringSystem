@@ -29,6 +29,7 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
+from app.analysis.features import decode_hex_asset_name as _decode_hex_asset_name
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ _BOOT = _CFG["bootstrap_anchors"]
 _UNI_SCORES = _CFG["unicode_scores"]
 _REASON_T = _CFG["reason_thresholds"]
 T_SIM_MIN = float(_CFG["similarity_threshold"])
+_ASCII_HOMOGLYPHS_ENABLED = bool(_CFG["ascii_homoglyphs_enabled"])
 
 # Curated high-value tokens (stablecoins above all) whose impersonation is
 # escalated: see ``fake_token.critical_assets`` in detection.yaml for the
@@ -114,6 +116,20 @@ _CONFUSABLES = str.maketrans({
 })
 
 
+# ASCII visual lookalikes (TMS Forge / spec homoglyph table: O->0, I->l,
+# l->1). Applied to LOWERCASED names, each group collapses to one canonical
+# glyph so any mix of the group's members normalises onto the legitimate
+# name ("1NDY", "lNDY" and "INDY" all fold to "1ndy"). Used only inside the
+# similarity comparison and the fold-gain test below, never as a bare
+# presence test: every name containing the letter i/l or a digit would
+# otherwise trip it.
+_ASCII_CONFUSABLES_LC = str.maketrans({
+    "o": "0",
+    "i": "1",
+    "l": "1",
+})
+
+
 def _normalize_token_name(name: str) -> str:
     """NFKC normalize, strip zero-width characters, and fold visual
     confusables to Latin equivalents.
@@ -127,12 +143,43 @@ def _normalize_token_name(name: str) -> str:
     return normalized.translate(_CONFUSABLES)
 
 
+def _ascii_fold_increases_similarity(name: str, legit_name: str) -> bool:
+    """ASCII-homoglyph substitution evidence: folding the O/0 and I/l/1
+    lookalike groups STRICTLY increases similarity to the matched
+    legitimate name.
+
+    A name that merely contains digits ("MIN100") folds the same way on
+    both sides and shows no gain; a forged "1NDY" folds onto "INDY" and
+    jumps to 1.0. This is the false-positive guard for the suspicion
+    axis: presence of a lookalike glyph alone is not evidence, the glyph
+    standing in for the legitimate name's letter is.
+    """
+    n1 = _normalize_token_name(name).lower()
+    n2 = _normalize_token_name(legit_name).lower()
+    if not n1 or not n2:
+        return False
+    sim_without = fuzz.ratio(n1, n2)
+    sim_with = fuzz.ratio(
+        n1.translate(_ASCII_CONFUSABLES_LC), n2.translate(_ASCII_CONFUSABLES_LC),
+    )
+    return sim_with > sim_without
+
+
 def _compute_tokenname_similarity(name: str, legit_name: str) -> float:
-    """Levenshtein similarity after Unicode normalization."""
+    """Levenshtein similarity after Unicode normalization.
+
+    With the ASCII fold enabled, both sides additionally collapse the
+    O/0 and I/l/1 lookalike groups so digit-for-letter forgeries match
+    the legitimate name at full similarity (recall); both sides fold
+    identically, so legitimately numeric names gain nothing.
+    """
     n1 = _normalize_token_name(name).lower()
     n2 = _normalize_token_name(legit_name).lower()
     if not n1 or not n2:
         return 0.0
+    if _ASCII_HOMOGLYPHS_ENABLED:
+        n1 = n1.translate(_ASCII_CONFUSABLES_LC)
+        n2 = n2.translate(_ASCII_CONFUSABLES_LC)
     return fuzz.ratio(n1, n2) / 100.0
 
 
@@ -212,14 +259,6 @@ def _flatten_cip25(obj: Any, parts: List[str], depth: int = 0):
     elif isinstance(obj, list):
         for item in obj:
             _flatten_cip25(item, parts, depth + 1)
-
-
-def _decode_hex_asset_name(hex_name: str) -> str:
-    """Decode a hex-encoded asset name to UTF-8, falling back to the raw string."""
-    try:
-        return bytes.fromhex(hex_name).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return hex_name
 
 
 def _extract_minted_assets(raw_data: Dict, metadata: Optional[Dict] = None) -> List[Dict[str, Any]]:
@@ -325,6 +364,14 @@ class FakeTokenScorer(BaseScorer):
         # Check unicode suspicion on the decoded hex name (preserves zero-width chars)
         hex_decoded = _decode_hex_asset_name(best_candidate.get("token_name_hex", ""))
         unicode_score = _compute_unicode_suspicion(hex_decoded or best_candidate["token_name"])
+        # ASCII-homoglyph substitution: contributes the same homoglyph bump
+        # as a cross-script confusable, but only when the fold-gain test
+        # proves the lookalike glyph stands in for the matched name's letter.
+        ascii_homoglyph = _ASCII_HOMOGLYPHS_ENABLED and _ascii_fold_increases_similarity(
+            hex_decoded or best_candidate["token_name"], best_legit_name,
+        )
+        if ascii_homoglyph:
+            unicode_score = min(1.0, unicode_score + float(_UNI_SCORES["homoglyphs"]))
         p50_u, p99_u = _anchor(_FIXED, "unicode")
         s_unicode = normalise(unicode_score, p50=p50_u, p99=p99_u)
 
@@ -475,6 +522,14 @@ class FakeTokenScorer(BaseScorer):
                 "kind": "mixed_script",
                 "from_char": ", ".join(sorted(scripts)),
                 "to_char": "",
+            })
+        # ASCII-homoglyph fold evidence: mirrors the unicode_score bump so
+        # the UI shows WHY a pure-ASCII forgery ("1NDY") carries suspicion.
+        if ascii_homoglyph:
+            confusables.append({
+                "kind": "ascii_homoglyph",
+                "from_char": best_candidate.get("token_name", ""),
+                "to_char": best_legit_name,
             })
 
         return ScorerResult(

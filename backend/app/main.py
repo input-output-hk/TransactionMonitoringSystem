@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
@@ -43,48 +43,57 @@ async def _supervised(label: str, coro_fn):
     Normal shutdown (self._running = False) causes the coroutine to return
     without raising, so we don't restart in that case.
     asyncio.CancelledError propagates to let the task be properly cancelled.
+
+    Restart delay backs off exponentially (a persistent bug previously
+    became an infinite fixed 5 s crash loop hammering logs and downstream
+    services) and resets after a stable run, so a one-off crash recovers
+    fast while a hard failure settles at the ceiling.
     """
+    delay = settings.SUPERVISOR_BACKOFF_BASE_SECONDS
+    loop = asyncio.get_running_loop()
     while True:
+        started = loop.time()
         try:
             await coro_fn()
             return  # clean return means disconnect() was called
         except asyncio.CancelledError:
             return
         except Exception as e:
-            logger.error(f"[supervisor] {label} crashed: {e!r} — restarting in 5 s")
-            await asyncio.sleep(5)
+            if loop.time() - started >= settings.SUPERVISOR_STABLE_RESET_SECONDS:
+                delay = settings.SUPERVISOR_BACKOFF_BASE_SECONDS
+            logger.error(
+                f"[supervisor] {label} crashed: {e!r} — restarting in {delay:.0f} s"
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, settings.SUPERVISOR_BACKOFF_MAX_SECONDS)
 
 
 async def broadcast_lifecycle_event(event: dict):
-    """Broadcast lifecycle events to all connected WebSocket clients"""
+    """Broadcast lifecycle events to all connected WebSocket clients.
+
+    Non-blocking: enqueues onto per-client bounded queues (see
+    routers/websocket.broadcast). The previous implementation awaited
+    send_json per client from the ingestion path, so one slow client
+    stalled block processing for the whole process.
+    """
     if not active_connections:
         return
-    disconnected = []
-    for connection in active_connections:
-        try:
-            await connection.send_json({
-                "type": "lifecycle",
-                "data": event,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-        except Exception:
-            disconnected.append(connection)
-    for conn in disconnected:
-        if conn in active_connections:
-            active_connections.remove(conn)
+    await websocket.broadcast({
+        "type": "lifecycle",
+        "data": event,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup and shutdown"""
-    global ogmios_client
+def _validate_startup_settings() -> None:
+    """Fail-fast configuration guards, run before any service starts.
 
-    # Emit auth dev-mode warning here so logging is already configured.
-    # Dev mode (empty API_KEYS) is useful for local work but must be an
-    # explicit choice — refuse to start without TMS_ALLOW_DEV_MODE=1 so an
-    # accidental production deploy with a blank `.env` does not end up
-    # running an open API. TMS_ALLOW_DEV_MODE is read through pydantic so
-    # it can live in the layered `.env` files, not just the shell env.
+    Dev mode (empty API_KEYS) is useful for local work but must be an
+    explicit choice — refuse to start without TMS_ALLOW_DEV_MODE=1 so an
+    accidental production deploy with a blank `.env` does not end up
+    running an open API. TMS_ALLOW_DEV_MODE is read through pydantic so
+    it can live in the layered `.env` files, not just the shell env.
+    """
     from app.auth import _dev_mode
     allow_dev_mode = (
         settings.TMS_ALLOW_DEV_MODE.strip() == "1"
@@ -99,12 +108,66 @@ async def lifespan(app: FastAPI):
                 "shell environment) for local dev."
             )
         logger.warning("No API keys configured — API is open (development mode)")
+    # Same fail-fast posture as API_KEYS: an empty ClickHouse password is a
+    # deliberate dev-mode choice, never an accident a production deploy
+    # discovers later. (The port binds to loopback in compose, so this is
+    # defence-in-depth against other local processes/containers.)
     if not settings.CLICKHOUSE_PASSWORD:
+        if not allow_dev_mode:
+            raise RuntimeError(
+                "CLICKHOUSE_PASSWORD is empty and TMS_ALLOW_DEV_MODE != '1'. "
+                "Refusing to start against an unauthenticated ClickHouse. "
+                "Set CLICKHOUSE_PASSWORD (and the matching docker-compose "
+                "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
+            )
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
+    # Capped ClickHouse payloads make the raw store the ONLY full copy of
+    # oversized (attack-shaped) transactions; running capped without the
+    # store means those txs could never be scored at full fidelity.
+    if settings.RAW_DATA_MAX_BYTES > 0 and not settings.RAW_STORE_ENABLED:
+        raise RuntimeError(
+            "RAW_DATA_MAX_BYTES > 0 caps ClickHouse raw_data but "
+            "RAW_STORE_ENABLED is False: oversized transactions would have "
+            "NO full payload copy. Enable RAW_STORE_ENABLED or set "
+            "RAW_DATA_MAX_BYTES=0."
+        )
+    # CORS '*' (or unset) is a dev convenience, never a production posture:
+    # same fail-fast as the credentials above. Keys configured = production.
+    origins = settings.cors_allow_origins_list
+    if not _dev_mode and (not origins or "*" in origins) and not allow_dev_mode:
+        raise RuntimeError(
+            "CORS_ALLOW_ORIGINS is '*' or empty with API keys configured. "
+            "Set the explicit dashboard origin(s) for production, or "
+            "TMS_ALLOW_DEV_MODE=1 for local dev."
+        )
+    # trusted_proxy_networks re-parses TRUSTED_PROXY_CIDRS on every request;
+    # a malformed CIDR would otherwise surface as a per-request failure
+    # (app.net degrades it to untrusted-peer, silently disabling proxy
+    # trust). Parse once here so a typo refuses to start with a clear
+    # message instead.
+    if settings.TRUSTED_PROXY_ENABLED:
+        try:
+            settings.trusted_proxy_networks
+        except ValueError as exc:
+            raise RuntimeError(
+                f"TRUSTED_PROXY_CIDRS is malformed: {exc}. Fix the CIDR "
+                "list (comma-separated networks such as 172.18.0.1/32) or "
+                "set TRUSTED_PROXY_ENABLED=false."
+            ) from exc
 
-    # Start rate-limiter cleanup task
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown"""
+    global ogmios_client
+
+    # Emit dev-mode warnings here so logging is already configured.
+    _validate_startup_settings()
+
+    # Start rate-limiter cleanup tasks (HTTP middleware + WS handshake)
     if settings.RATE_LIMIT_ENABLED:
         _limiter.start_cleanup()
+        websocket._handshake_limiter.start_cleanup()
         logger.info(
             f"Rate limiting enabled: {settings.RATE_LIMIT_REQUESTS} req"
             f" / {settings.RATE_LIMIT_WINDOW_SECONDS}s per key"
@@ -137,7 +200,7 @@ async def lifespan(app: FastAPI):
         websocket.set_active_connections(active_connections)
 
         asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
-        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.run_mempool_monitor))
+        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
         logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
 
     except Exception as e:
@@ -150,6 +213,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     if settings.RATE_LIMIT_ENABLED:
         _limiter.stop_cleanup()
+        websocket._handshake_limiter.stop_cleanup()
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
     if ogmios_client:
@@ -162,10 +226,20 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
+# /docs, /redoc and /openapi.json enumerate the whole admin attack surface
+# and sit in the rate-limit exemption list, so they are exposed only in dev
+# mode or behind an explicit production opt-in.
+from app.auth import _dev_mode as _auth_dev_mode  # noqa: E402
+
+_docs_enabled = _auth_dev_mode or settings.TMS_API_DOCS_ENABLED
+
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
     description="""
     Cardano Transaction Monitoring System API.
 
@@ -191,10 +265,13 @@ if settings.RATE_LIMIT_ENABLED:
     )
     app.add_middleware(RateLimitMiddleware, limiter=_limiter)
 
-# CORS: registered last → outermost → executes first, wraps rate limiter
+# CORS: registered last → outermost → executes first, wraps rate limiter.
+# Origins are configurable (CORS_ALLOW_ORIGINS, comma-separated); the "*"
+# default keeps the demo SPA / local vite dev server working. Tighten to
+# the dashboard origin in production deployments.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_allow_origins_list,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -227,6 +304,27 @@ async def health():
     an API key so external scanners cannot enumerate internals.
     """
     return {"status": "healthy"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness probe: 503 while the ingestion pipeline is DOWN.
+
+    /health stays a pure liveness signal (the process is up), which kept
+    load balancers routing to an instance that was ingesting nothing
+    (audit finding). Orchestrators should gate traffic on THIS endpoint.
+    Unauthenticated like /health, but exposes only the coarse state word,
+    no internals.
+    """
+    state = "UNKNOWN"
+    if ogmios_client:
+        state = ogmios_client.status["pipeline_state"]
+    if state == "DOWN":
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "pipeline_state": state},
+        )
+    return {"status": "ready", "pipeline_state": state}
 
 
 @app.get("/health/detail")

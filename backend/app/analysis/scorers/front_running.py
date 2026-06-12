@@ -22,6 +22,7 @@ Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
+from app.analysis.features import extract_ttl
 from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
@@ -109,7 +110,7 @@ class FrontRunningScorer(BaseScorer):
             abs(fee - counterpart_fee), p50=p50_f, p99=p99_f,
         )
 
-        ttl = features.get("raw_data", {}).get("timeToLive", 0) or 0
+        ttl = extract_ttl(features.get("raw_data", {}))
         counterpart_ttl = collision.get("counterpart_ttl", 0)
         p50_t, p99_t = _anchor(_FIXED, "ttl_delta")
         ttl_sim = 1.0 - normalise(

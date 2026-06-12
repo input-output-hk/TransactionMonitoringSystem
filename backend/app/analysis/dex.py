@@ -12,6 +12,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.scorer_config import get as _get_cfg
+from app.analysis.features import SCRIPT_ADDRESS_PREFIXES
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
@@ -21,14 +22,25 @@ logger = logging.getLogger(__name__)
 # and the scorer (previously hardcoded here AND defined in detection.yaml as
 # sandwich.window_slots, allowing silent drift).
 _SLOT_WINDOW = int(_get_cfg("sandwich")["window_slots"])
+# Cap on neighbour rows fetched around a victim tx. Bounds the per-tx query
+# cost; a busier window than this is batcher traffic, not a 3-leg sandwich.
+_NEIGHBOR_LIMIT = int(_get_cfg("sandwich")["neighbor_limit"])
 
-# Cardano script address Bech32 prefixes (Shelley era type bytes 0x11, 0x31, etc.)
-_SCRIPT_ADDR_PREFIXES = ("addr1w", "addr1z", "addr_test1w", "addr_test1z")
+# Single source of truth for script-address prefixes: features.py owns the
+# CIP-19 enumeration so the detector and the scorers cannot drift.
+_SCRIPT_ADDR_PREFIXES = SCRIPT_ADDRESS_PREFIXES
 
 
 def _is_script_address(addr: str) -> bool:
     """Check if a Cardano address is a script address by Bech32 prefix."""
-    return addr.startswith(_SCRIPT_ADDR_PREFIXES)
+    return addr.lower().startswith(_SCRIPT_ADDR_PREFIXES)
+
+
+def _network_script_prefixes(network: str) -> List[str]:
+    """The script prefixes valid for ``network`` (testnet variants for
+    preprod/preview, mainnet variants otherwise)."""
+    is_testnet = network.startswith("pre")
+    return [p for p in _SCRIPT_ADDR_PREFIXES if ("_test" in p) == is_testnet]
 
 
 def _count_attacker_history(
@@ -40,8 +52,19 @@ def _count_attacker_history(
     """Count how many prior txs from this address cluster appeared as the
     front leg of a potential sandwich (2+ txs at the same script address
     within a slot window, before the current slot)."""
+    prefixes = _network_script_prefixes(network)
+    like_clause = " OR ".join(
+        f"o.address LIKE %(script_prefix_{i})s" for i in range(len(prefixes))
+    )
+    params: Dict[str, Any] = {
+        "network": network,
+        "addr": attacker_addr,
+        "slot": current_slot,
+    }
+    for i, prefix in enumerate(prefixes):
+        params[f"script_prefix_{i}"] = f"{prefix}%"
     rows = client.execute(
-        """
+        f"""
         SELECT count(DISTINCT i.tx_hash)
         FROM transaction_inputs i
         JOIN transaction_outputs o ON i.tx_hash = o.tx_hash AND i.network = o.network
@@ -50,19 +73,15 @@ def _count_attacker_history(
           AND i.input_index = 0
           AND i.is_collateral = 0
           AND i.is_reference = 0
+          AND i.is_unspent_attempt = 0
           AND o.is_collateral = 0
-          AND o.address LIKE %(script_prefix)s
+          AND ({like_clause})
           AND i.tx_hash IN (
               SELECT tx_hash FROM transactions
               WHERE network = %(network)s AND slot < %(slot)s
           )
         """,
-        {
-            "network": network,
-            "addr": attacker_addr,
-            "slot": current_slot,
-            "script_prefix": "addr1w%" if not network.startswith("pre") else "addr_test1w%",
-        },
+        params,
     )
     return rows[0][0] if rows else 0
 
@@ -92,9 +111,12 @@ def _attacker_net_ada(
     back to the join keeps an unresolved input from understating cost and
     overstating profit.
     """
+    # FINAL on every summed table: this is the sandwich economic gate, so a
+    # not-yet-merged ReplacingMergeTree duplicate would inflate "profit" and
+    # fabricate confirmations. (FINAL inside a join must be a subquery.)
     out_rows = client.execute(
         """
-        SELECT sum(amount) FROM transaction_outputs
+        SELECT sum(amount) FROM transaction_outputs FINAL
         WHERE tx_hash IN %(hashes)s AND network = %(network)s
           AND address = %(addr)s AND is_collateral = 0
         """,
@@ -103,13 +125,31 @@ def _attacker_net_ada(
     in_rows = client.execute(
         """
         SELECT sum(coalesce(o.amount, ti.amount))
-        FROM transaction_inputs ti
-        LEFT JOIN transaction_outputs o
+        FROM (
+            SELECT tx_hash, network, address, amount,
+                   input_tx_hash, input_index_in_tx
+            FROM transaction_inputs FINAL
+            WHERE tx_hash IN %(hashes)s AND network = %(network)s
+              AND address = %(addr)s AND is_collateral = 0 AND is_reference = 0
+              AND is_unspent_attempt = 0
+        ) ti
+        LEFT JOIN (
+            -- Parent-UTxO resolution: no is_collateral filter here, a failed
+            -- tx's collateral return is a real spendable UTxO (Babbage).
+            SELECT tx_hash, network, output_index, amount
+            FROM transaction_outputs FINAL
+            WHERE network = %(network)s
+              AND tx_hash IN (
+                  SELECT input_tx_hash FROM transaction_inputs FINAL
+                  WHERE tx_hash IN %(hashes)s AND network = %(network)s
+                    AND address = %(addr)s
+                    AND is_collateral = 0 AND is_reference = 0
+                    AND is_unspent_attempt = 0
+              )
+        ) o
           ON o.tx_hash = ti.input_tx_hash
          AND o.output_index = ti.input_index_in_tx
          AND o.network = ti.network
-        WHERE ti.tx_hash IN %(hashes)s AND ti.network = %(network)s
-          AND ti.address = %(addr)s AND ti.is_collateral = 0 AND ti.is_reference = 0
         """,
         {"hashes": leg_hashes, "network": network, "addr": attacker_addr},
     )
@@ -137,9 +177,10 @@ def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: 
     """Txs paying into the same pool addresses within +/- _SLOT_WINDOW slots.
 
     Returns rows of (tx_hash, slot, block_index, fee) ordered by
-    (slot, block_index), capped at 20. block_index is the tx's position within
-    its block, giving intra-block ordering so a same-slot front/victim/back can
-    be sequenced; coalesced to 0 for rows ingested before the column existed.
+    (slot, block_index), capped at ``sandwich.neighbor_limit``. block_index is
+    the tx's position within its block, giving intra-block ordering so a
+    same-slot front/victim/back can be sequenced; coalesced to 0 for rows
+    ingested before the column existed.
     """
     return client.execute(
         """
@@ -151,13 +192,14 @@ def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: 
           AND t.slot BETWEEN %(min_slot)s AND %(max_slot)s
           AND o.is_collateral = 0
         ORDER BY t.slot ASC, block_index ASC
-        LIMIT 20
+        LIMIT %(neighbor_limit)s
         """,
         {
             "network": network,
             "addresses": addresses,
             "min_slot": slot - _SLOT_WINDOW,
             "max_slot": slot + _SLOT_WINDOW,
+            "neighbor_limit": _NEIGHBOR_LIMIT,
         },
     )
 
@@ -174,6 +216,7 @@ def _first_input_addresses(
           AND network = %(network)s
           AND is_collateral = 0
           AND is_reference = 0
+          AND is_unspent_attempt = 0
           AND address != ''
           AND input_index = 0
         """,

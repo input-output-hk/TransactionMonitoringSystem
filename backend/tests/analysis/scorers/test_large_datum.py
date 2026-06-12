@@ -46,9 +46,21 @@ class TestGate:
     def test_wallet_rejected(self, scorer):
         assert scorer.gate(_features([_out(WALLET, datum=_low_entropy_datum(9000))])) is False
 
-    def test_datum_hash_only_rejected(self, scorer):
-        """datumHash without inline datum has 0 bytes, gate should fail."""
-        assert scorer.gate(_features([_out(SCRIPT, datum_hash="abc123")])) is False
+    def test_datum_hash_only_engages_observability(self, scorer):
+        """datumHash without inline datum has 0 bytes (unsizable without an
+        indexer): the gate engages so the shape is recorded, but score()
+        returns a no-finding (-1) and never alerts."""
+        feats = _features([_out(SCRIPT, datum_hash="abc123")])
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        assert result.score == -1.0
+        assert result.sub_scores["datum_hash_only_count"] == 1.0
+        assert result.evidence["datum_hash_only_addresses"] == [SCRIPT]
+        assert result.reasons == []
+
+    def test_datum_hash_only_at_wallet_still_rejected(self, scorer):
+        """The observability path is script-gated like everything else."""
+        assert scorer.gate(_features([_out(WALLET, datum_hash="abc123")])) is False
 
     def test_low_entropy_datum_above_floor_gates(self, scorer):
         # A large, low-entropy (repetitive padding) datum is a bloat candidate.
@@ -192,7 +204,10 @@ class TestAggregateEngagement:
         # large_datum (the default -1 sentinel means "no finding").
         assert result.score == -1.0
         assert result.reasons == []
-        assert result.sub_scores == {"max_script_datum_bytes": 14000.0}
+        assert result.sub_scores == {
+            "max_script_datum_bytes": 14000.0,
+            "datum_hash_only_count": 0.0,
+        }
 
     def test_aggregate_across_distinct_scripts_does_not_engage(self, scorer):
         # 4 outputs of 3500 bytes split 2/2 across two unrelated scripts.

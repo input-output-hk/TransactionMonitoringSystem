@@ -2,26 +2,26 @@
 
 Detects malicious URLs, social engineering content, and deceptive instructions
 embedded in on-chain transaction metadata (CIP-0020 label 674, CIP-0025 label
-721).  Scores via two sub-pipelines:
+721), in inline datums, or in native-asset names.  Scores via two
+sub-pipelines:
 
   Content   (weight 0.65): URL blacklist match, domain suspicion, social
                            engineering keyword patterns.
   Delivery  (weight 0.35): mass distribution indicators (output count,
                            recipient uniformity, URL recurrence).
 
-Gate condition: metadata must be present with at least one relevant label
-containing at least one URL.
+Gate condition: at least one URL extracted from any carrier (relevant
+metadata label, inline datum, or decoded asset name).
 """
 
-import os
 import re
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
-import tldextract
 from rapidfuzz import fuzz
 
 from app.analysis.normalise import normalise
+from app.analysis.plutus_text import decode_datum_strings
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -29,50 +29,14 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import external
-from app.analysis.features import get_cbor2
-from app.config import settings
-
-# No-network tldextract: use the PSL snapshot bundled with the wheel rather
-# than hitting the network on first use. Safer for offline / sandboxed envs.
-#
-# Cache dir: the container runs as a non-root user with no home directory
-# (Dockerfile uses ``--no-create-home``), so tldextract's default
-# ``~/.cache/python-tldextract`` is unwritable and every init logs a
-# "Permission denied" warning + re-loads the snapshot. Point the cache at
-# a writable dir derived from RAW_STORE_PATH (a mounted, appuser-owned
-# volume in Docker). Best-effort: if the dir can't be created we fall back
-# to ``cache_dir=None`` (snapshot-only, no disk persistence) so the scorer
-# never fails to import over a cache-path problem.
-def _build_tld_extractor() -> tldextract.TLDExtract:
-    try:
-        cache_dir = os.path.join(settings.RAW_STORE_PATH, "tldextract")
-        os.makedirs(cache_dir, exist_ok=True)
-    except OSError:
-        cache_dir = None
-    return tldextract.TLDExtract(
-        suffix_list_urls=(),
-        fallback_to_snapshot=True,
-        cache_dir=cache_dir,
-    )
-
-
-_tld = _build_tld_extractor()
-
-
-def _registrable_domain(url_or_domain: str) -> Optional[str]:
-    """Return the registrable domain (brand + public suffix), e.g.
-    'api.andamio.io' -> 'andamio.io', 'foo.co.uk' -> 'foo.co.uk'.
-    Returns None for IP addresses or unparseable input."""
-    ext = _tld(url_or_domain)
-    if not ext.domain or not ext.suffix:
-        return None  # IP address, localhost, or non-domain
-    return f"{ext.domain}.{ext.suffix}"
-
-
-def _brand(url_or_domain: str) -> Optional[str]:
-    """Return the brand (registrable domain minus public suffix)."""
-    ext = _tld(url_or_domain)
-    return ext.domain or None
+from app.analysis.features import decode_hex_asset_name
+from app.analysis.url_extraction import (
+    brand as _brand,
+    has_phishing_prone_tld as _has_phishing_prone_tld,
+    registrable_domain as _registrable_domain,
+    url_candidates as _url_candidates,
+    validate_candidates as _validate_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,278 +53,71 @@ _PHISHING_TLD_BONUS = float(_SE["phishing_tld_bonus"])
 _REASON_T = _CFG["reason_thresholds"]
 _CRITICAL_T = float(_CFG["critical_threshold"])
 _RELEVANT_LABELS = set(str(x) for x in _CFG["metadata_labels"])
-
-# URL extraction regexes.
-#
-# _URL_RE: strict http(s) URL form. Always preferred when a scheme is present.
-# _BARE_DOMAIN_RE: 2+ dot-separated DNS labels with an optional path. Used to
-#   catch scheme-less phishing payloads like ``cardano-drop.io/claim`` that
-#   CIP-20 messages routinely carry. Matches get validated against
-#   tldextract's PSL snapshot (see ``_looks_like_domain``) so bare-word
-#   constructs like ``3.14`` or ``version.py`` don't produce false positives.
-_URL_RE = re.compile(
-    r'https?://[^\s"\'<>\]\)}{,]+',
-    re.IGNORECASE,
-)
-_BARE_DOMAIN_RE = re.compile(
-    r'\b(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.)+[a-z]{2,24}(?:/[^\s"\'<>\]\)}{,]*)?',
-    re.IGNORECASE,
-)
-
-# Minimum candidate length to consider, post-TLD-validation. Rules out very
-# short matches where tldextract's PSL recognises a 2-letter TLD (e.g. ``a.io``
-# is technically parseable but almost always noise).
-_BARE_DOMAIN_MIN_LEN = 6
-
-# RFC 2606 reserved TLDs. Not in Mozilla's Public Suffix List (and so rejected
-# by tldextract) but frequently appear in phishing-harness output and the
-# occasional real on-chain simulation. Accepting them closes a detection gap
-# without meaningfully expanding the FP surface — these TLDs don't resolve,
-# so any on-chain URL using them is almost certainly test / simulation /
-# deliberate fake.
-_RFC2606_RESERVED_TLDS = frozenset({"test", "example", "invalid", "localhost"})
-
-# TLDs disproportionately used by phishing campaigns. Cheap / free / bulk
-# registration plus loose abuse enforcement drives the asymmetry. Cardano's
-# legitimate protocol domains concentrate in .org / .io / .com / .finance /
-# .net / .store — a URL in an on-chain phishing payload landing on one of
-# these TLDs is extra evidence of intent. Bonus only applies when there's
-# also Tier-2 phishing text in the same tx, to avoid flagging every legit
-# .xyz ENS-adjacent project.
-#
-# RFC 2606 reserved TLDs (.test, .example, .invalid, .localhost) are also
-# included here: no legitimate service can live there, so any on-chain
-# URL pointing at one is either a simulation, a test fixture, or an
-# attacker-placeholder — all worth boosting score on.
-_PHISHING_PRONE_TLDS = frozenset({
-    # Cheap / bulk / free registration
-    "xyz", "top", "click", "link", "live", "online", "site",
-    "space", "loan", "download", "stream", "tk", "ml", "ga", "cf",
-    "gdn", "work", "party", "trade", "date", "science",
-    # RFC 2606 reserved — non-routable, placeholder use only
-    "test", "example", "invalid", "localhost",
-})
-
-
-def _url_host(url: str) -> str:
-    """Return the lowercase host portion of ``url``, stripping any
-    ``scheme://`` prefix and trailing ``/path`` / ``?query``. Mirrors what
-    ``tldextract`` would feed its parser, but produced manually so callers
-    can also operate on inputs that tldextract doesn't recognise (e.g.
-    RFC 2606 reserved TLDs like ``.test``).
-    """
-    after_scheme = url.split("://", 1)[-1]
-    return after_scheme.split("/", 1)[0].split("?", 1)[0].lower()
-
-
-def _has_phishing_prone_tld(url: str) -> bool:
-    """Return True if ``url``'s registered TLD is in the phishing-prone list."""
-    ext = _tld(url)
-    if ext.suffix:
-        return ext.suffix.lower() in _PHISHING_PRONE_TLDS
-    # Fallback when tldextract doesn't recognise the suffix (RFC 2606
-    # reserved TLDs: .test / .example / .invalid / .localhost). The PSL
-    # path above handles every routable TLD; this branch only fires for
-    # placeholders, so the manual host split is safe enough.
-    host = _url_host(url)
-    parts = host.split(".")
-    return len(parts) >= 2 and parts[-1] in _PHISHING_PRONE_TLDS
-
-
-def _looks_like_domain(candidate: str) -> bool:
-    """Return True if ``candidate`` parses as a real registrable domain via
-    the PSL snapshot, or falls back to an RFC 2606 reserved TLD. Filters out
-    bare-word regex matches whose 'TLD' isn't actually a public suffix
-    (``3.14`` -> suffix='14' -> rejected)."""
-    if len(candidate) < _BARE_DOMAIN_MIN_LEN:
-        return False
-    ext = _tld(candidate)
-    if ext.suffix and ext.domain:
-        return True
-    # Fallback for reserved TLDs (RFC 2606). tldextract's fallback behaviour
-    # for unknown suffixes puts the last label in ``.domain`` with no
-    # ``.suffix``, so we recover the last label ourselves from the host part.
-    host = candidate.split("/", 1)[0].lower()
-    parts = host.split(".")
-    if len(parts) >= 2 and parts[-1] in _RFC2606_RESERVED_TLDS:
-        return True
-    return False
-
+_ASSET_CARRIER_ENABLED = bool(_CFG["asset_name_carrier"]["enabled"])
+# Minimum length for a decoded datum text span to be kept for URL / SE
+# scanning. Shorter spans are CBOR structural noise, not content.
+_MIN_DECODED_STR_LEN = int(_CFG["min_decoded_string_len"])
 
 def _decode_datum_strings(datum: Any) -> List[str]:
-    """Walk a Plutus-Data inline datum and collect every UTF-8 decodable
-    text span. Handles two representations produced by ingestion:
+    """Datum text spans for the URL / social-engineering scans.
 
-      - hex-encoded CBOR string (the shape Ogmios v6 emits for most inline
-        datums). Decoded via cbor2 so map/list/constructor structure is
-        preserved and each leaf bytes/text value comes out cleanly; a
-        previous byte-scan implementation concatenated adjacent values
-        because CBOR length-prefix bytes (``0x40``-``0x57`` for byte
-        strings) fall in printable ASCII and looked like part of the
-        next text run, producing strings like
-        ``walletEimageTclaim-reward-ada.xyz``.
-      - nested dict in Ogmios' Plutus-Data-JSON representation
-        (``{"bytes": "..."}``, ``{"list": [...]}``, ``{"map": [...]}``,
-        ``{"constructor": n, "fields": [...]}``). Recurse and decode.
+    Thin delegate to :func:`app.analysis.plutus_text.decode_datum_strings`
+    binding this scorer's configured minimum span length; kept under the
+    historical name because it is part of this module's test surface.
     """
-    results: List[str] = []
+    return decode_datum_strings(datum, _MIN_DECODED_STR_LEN)
 
-    _MIN_LEN = 4
 
-    def _emit_bytes(blob: bytes) -> None:
-        """Try to UTF-8 decode and emit; fall back to a byte-scan of
-        printable-ASCII runs when the blob isn't valid UTF-8."""
-        try:
-            decoded = blob.decode("utf-8")
-        except UnicodeDecodeError:
-            _scan_bytes_for_strings(blob)
-            return
-        if len(decoded) >= _MIN_LEN:
-            results.append(decoded)
+def _decode_asset_name_strings(raw_data: Any) -> List[str]:
+    """Collect decoded (hex -> UTF-8) native-asset names from a tx's mint map
+    and output value bundles.
 
-    def _scan_bytes_for_strings(blob: bytes) -> None:
-        """Last-resort printable-ASCII scan. Only used when a byte
-        string isn't valid UTF-8 so cbor2 / direct decode can't surface
-        it cleanly."""
-        start: Optional[int] = None
-        for i, b in enumerate(blob):
-            if 0x20 <= b < 0x7f:
-                if start is None:
-                    start = i
-            else:
-                if start is not None and i - start >= _MIN_LEN:
-                    try:
-                        results.append(blob[start:i].decode("utf-8"))
-                    except UnicodeDecodeError:
-                        pass
-                start = None
-        if start is not None and len(blob) - start >= _MIN_LEN:
-            try:
-                results.append(blob[start:].decode("utf-8"))
-            except UnicodeDecodeError:
-                pass
+    The dominant in-the-wild Cardano phishing shape delivers the URL in the
+    token name itself (a token literally named ``claim-ada.xyz``), airdropped
+    to wallet addresses with NO metadata and NO datum, so it never enters the
+    other two carriers. Both the ``mint`` map and every output ``value``
+    bundle are scanned: an airdrop tx usually carries the name in both, but a
+    re-distribution of a previously minted scam token only shows in outputs.
 
-    def _walk_cbor(node: Any) -> None:
-        """Walk the cbor2-parsed structure. CBOR text strings come out
-        as ``str``, byte strings as ``bytes``, maps as ``dict``, arrays
-        as ``list``, and Plutus-Data constructors as ``cbor2.CBORTag``
-        whose ``.value`` is the fields array."""
-        if isinstance(node, bytes):
-            _emit_bytes(node)
-            return
-        if isinstance(node, str):
-            if len(node) >= _MIN_LEN:
-                results.append(node)
-            return
-        if isinstance(node, dict):
-            for k, v in node.items():
-                _walk_cbor(k)
-                _walk_cbor(v)
-            return
-        if isinstance(node, (list, tuple)):
-            for item in node:
-                _walk_cbor(item)
-            return
-        # cbor2.CBORTag has ``.value``; duck-type to avoid an import
-        # dependency at this module's top.
-        inner = getattr(node, "value", None)
-        if inner is not None and not isinstance(node, (int, float, bool)):
-            _walk_cbor(inner)
+    Skips the ``ada`` (Ogmios v6) and ``lovelace`` (v5) keys when iterating
+    value bundles. Asset names that do not decode as UTF-8 fall back to their
+    raw hex form, which contains no ``.`` and therefore can never satisfy the
+    downstream URL/domain matching.
+    """
+    if not isinstance(raw_data, dict):
+        return []
+    names: List[str] = []
+    seen: set = set()
 
-    def _try_cbor(blob: bytes) -> bool:
-        """Best-effort CBOR parse + structural walk.
+    def _collect(bundle: Any) -> None:
+        if not isinstance(bundle, dict):
+            return
+        for policy_key, token_map in bundle.items():
+            if policy_key in ("ada", "lovelace") or not isinstance(token_map, dict):
+                continue
+            for hex_name in token_map.keys():
+                decoded = decode_hex_asset_name(str(hex_name))
+                if decoded not in seen:
+                    seen.add(decoded)
+                    names.append(decoded)
 
-        Returns True if cbor2 parsed the blob and the walk completed,
-        regardless of whether any string leaves were appended (a numeric-
-        only blob is still considered "successfully handled" — the byte
-        scan wouldn't find anything either). Returns False if cbor2 is
-        unavailable or the blob isn't valid CBOR, so the caller can fall
-        back to the printable-ASCII scan for untyped payloads.
-        """
-        try:
-            cbor2 = get_cbor2()
-        except Exception:
-            return False
-        try:
-            decoded = cbor2.loads(blob)
-        except Exception:
-            return False
-        _walk_cbor(decoded)
-        return True
-
-    def _walk(node: Any) -> None:
-        if node is None:
-            return
-        if isinstance(node, bytes):
-            if not _try_cbor(node):
-                _emit_bytes(node)
-            return
-        if isinstance(node, str):
-            # Long hex strings are typically CBOR-encoded datum bodies.
-            # Decode and walk the parsed CBOR so each leaf string comes
-            # out cleanly. Falls back to the byte-scan if cbor2 can't
-            # parse it. Non-hex strings we keep as-is.
-            stripped = node.strip()
-            if len(stripped) >= 8 and all(c in "0123456789abcdefABCDEF" for c in stripped):
-                try:
-                    raw = bytes.fromhex(stripped)
-                except ValueError:
-                    raw = None
-                if raw is not None:
-                    if not _try_cbor(raw):
-                        _emit_bytes(raw)
-                    return
-            if len(node) >= _MIN_LEN:
-                results.append(node)
-            return
-        if isinstance(node, dict):
-            # Ogmios Plutus-Data-JSON node types. Inside this shape, a
-            # ``{"bytes": ...}`` node is a *leaf* byte-string already
-            # disentangled from its enclosing CBOR — never re-parse it as
-            # CBOR (cbor2 would happily interpret an ASCII URL like
-            # ``https://...`` as a random text-string + trailing garbage).
-            if "bytes" in node and isinstance(node["bytes"], str):
-                try:
-                    raw = bytes.fromhex(node["bytes"])
-                except ValueError:
-                    return
-                _emit_bytes(raw)
-                return
-            if "list" in node and isinstance(node["list"], list):
-                for item in node["list"]:
-                    _walk(item)
-                return
-            if "map" in node and isinstance(node["map"], list):
-                for entry in node["map"]:
-                    if isinstance(entry, dict):
-                        _walk(entry.get("k"))
-                        _walk(entry.get("v"))
-                return
-            if "fields" in node and isinstance(node["fields"], list):
-                for field in node["fields"]:
-                    _walk(field)
-                return
-            # Fallback for generic dicts
-            for k, v in node.items():
-                _walk(k)
-                _walk(v)
-            return
-        if isinstance(node, list):
-            for item in node:
-                _walk(item)
-            return
-
-    _walk(datum)
-    return results
+    _collect(raw_data.get("mint"))
+    outputs = raw_data.get("outputs")
+    if isinstance(outputs, list):
+        for out in outputs:
+            if isinstance(out, dict):
+                _collect(out.get("value"))
+    return names
 
 
 class PhishingScorer(BaseScorer):
     name = "phishing"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """Fire when phishing URLs appear in EITHER tx-level metadata
-        (CIP-20 label 674 / CIP-25 label 721) OR an output's inline datum
-        (CIP-68 reference-NFT pattern and similar datum-carried payloads).
+        """Fire when phishing URLs appear in tx-level metadata (CIP-20 label
+        674 / CIP-25 label 721), in an output's inline datum (CIP-68
+        reference-NFT pattern and similar datum-carried payloads), or in a
+        decoded native-asset name (URL-named scam-token airdrops).
 
         Sender allowlist: if any input address matches a known legitimate
         sender, skip scoring to reduce false positives (Polimi Section 4.9.4).
@@ -379,6 +136,13 @@ class PhishingScorer(BaseScorer):
         urls = self._extract_urls(features)
         if not urls:
             return ScorerResult(score=0.0)
+
+        # URLs delivered inside asset names, tracked separately for the
+        # reason flag and evidence panel. Always a subset of ``urls``.
+        asset_name_urls = (
+            _validate_candidates(self._asset_name_candidates(features))
+            if _ASSET_CARRIER_ENABLED else []
+        )
 
         # ----- Content sub-pipeline (weight = 0.65) -----
 
@@ -499,6 +263,8 @@ class PhishingScorer(BaseScorer):
             reasons.append("social_engineering_language")
         if s_recipients > float(_REASON_T["recipients"]):
             reasons.append("mass_distribution")
+        if asset_name_urls:
+            reasons.append("url_in_asset_name")
 
         # Severity classification (Polimi Section 4.9.3)
         severity = None
@@ -541,6 +307,7 @@ class PhishingScorer(BaseScorer):
                 "se_tier": se_tier,
                 "urls": url_records,
                 "url_count": len(urls),
+                "asset_name_urls": asset_name_urls,
                 "recipient_count": recipient_count,
                 "metadata_labels": metadata_labels,
             },
@@ -561,9 +328,13 @@ class PhishingScorer(BaseScorer):
              collects any UTF-8 decodable span. Catches CIP-68
              reference-NFT phishing (metadata lives in the datum, not in
              auxiliary data).
-          3. Bare-domain forms (``cardano-drop.io/claim``) alongside
-             scheme-prefixed URLs. Filtered through the PSL snapshot so
-             bare-word matches like ``3.14`` don't survive.
+          3. Decoded native-asset names from the mint map and output value
+             bundles. Catches the URL-named scam-token airdrop, which
+             carries no metadata or datum at all.
+
+        Bare-domain forms (``cardano-drop.io/claim``) are matched alongside
+        scheme-prefixed URLs in every carrier, then filtered through the PSL
+        snapshot so bare-word matches like ``3.14`` don't survive.
         """
         candidates: List[str] = []
 
@@ -575,8 +346,7 @@ class PhishingScorer(BaseScorer):
                 if content is None:
                     continue
                 text = self._flatten_to_text(content)
-                candidates.extend(_URL_RE.findall(text))
-                candidates.extend(_BARE_DOMAIN_RE.findall(text))
+                candidates.extend(_url_candidates(text))
 
         # --- Carrier 2: inline datums on outputs ------------------------
         raw_data = features.get("raw_data") or {}
@@ -589,41 +359,20 @@ class PhishingScorer(BaseScorer):
                 if datum is None:
                     continue
                 for decoded in _decode_datum_strings(datum):
-                    candidates.extend(_URL_RE.findall(decoded))
-                    candidates.extend(_BARE_DOMAIN_RE.findall(decoded))
+                    candidates.extend(_url_candidates(decoded))
 
-        # Validate each candidate through tldextract's PSL. Scheme-prefixed
-        # hits pass trivially; bare-domain hits only survive if their TLD
-        # is a real public suffix.
-        seen: set = set()
-        validated: List[str] = []
-        for cand in candidates:
-            if cand in seen:
-                continue
-            seen.add(cand)
-            if cand.lower().startswith(("http://", "https://")):
-                validated.append(cand)
-                continue
-            if _looks_like_domain(cand):
-                validated.append(cand)
+        # --- Carrier 3: decoded native-asset names -----------------------
+        if _ASSET_CARRIER_ENABLED:
+            candidates.extend(self._asset_name_candidates(features))
 
-        # Collapse bare-domain duplicates that are already represented in
-        # their scheme-prefixed form (CIP-20 messages often carry both
-        # ``https://x.app/path`` AND ``x.app/path`` because the bare regex
-        # also matches the part after the scheme). The operator sees one
-        # URL per real link instead of two.
-        scheme_strip = {
-            u[len("https://"):] if u.lower().startswith("https://")
-            else u[len("http://"):] if u.lower().startswith("http://")
-            else None
-            for u in validated
-        }
-        scheme_strip.discard(None)
-        return [
-            u for u in validated
-            if u.lower().startswith(("http://", "https://"))
-            or u not in scheme_strip
-        ]
+        return _validate_candidates(candidates)
+
+    def _asset_name_candidates(self, features: Dict[str, Any]) -> List[str]:
+        """Raw URL/domain regex hits inside decoded asset names (un-validated)."""
+        hits: List[str] = []
+        for name in _decode_asset_name_strings(features.get("raw_data") or {}):
+            hits.extend(_url_candidates(name))
+        return hits
 
     def _flatten_to_text(self, obj: Any) -> str:
         """Recursively flatten a metadata value to a single string.
@@ -741,6 +490,12 @@ class PhishingScorer(BaseScorer):
                     continue
                 for span in _decode_datum_strings(datum):
                     text += " " + span.lower()
+
+        # Asset names are a social-engineering carrier too: scam tokens are
+        # routinely named with urgency/brand bait ("ClaimADARewards").
+        if _ASSET_CARRIER_ENABLED:
+            for name in _decode_asset_name_strings(raw_data):
+                text += " " + name.lower()
 
         if not text:
             return 0.0, "None"

@@ -43,6 +43,7 @@ class ScorerResult:
         cls,
         sub_scores: Optional[Dict[str, Any]] = None,
         baseline_source: str = "missing",
+        evidence: Optional[Dict[str, Any]] = None,
     ) -> "ScorerResult":
         """A gated-but-no-finding result (score -1).
 
@@ -61,6 +62,7 @@ class ScorerResult:
             sub_scores=sub_scores or {},
             reasons=[],
             baseline_source=baseline_source,
+            evidence=evidence or {},
         )
 
 

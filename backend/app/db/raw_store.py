@@ -26,7 +26,7 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from app.config import settings
@@ -66,8 +66,14 @@ def _build_path(prefix: str, network: str, tx_hash: str, date: datetime) -> str:
     shard prefix distributes PUTs across multiple index partitions, avoiding
     the hot-prefix throttling that occurs when millions of keys share a prefix.
     """
-    # Validate tx_hash to prevent path traversal (Ogmios data is untrusted)
-    if not tx_hash or not all(c in "0123456789abcdef" for c in tx_hash):
+    # Validate tx_hash to prevent path traversal (Ogmios data is untrusted).
+    # Cardano tx ids are exactly 64 hex chars (Blake2b-256); the length check
+    # also blocks pathological all-hex strings becoming huge filenames.
+    if (
+        not tx_hash
+        or len(tx_hash) != 64
+        or not all(c in "0123456789abcdef" for c in tx_hash)
+    ):
         logger.warning(f"Invalid tx_hash for raw store: {tx_hash[:20]!r}")
         return ""
     day_dir = date.strftime("%Y%m%d")
@@ -109,8 +115,13 @@ def _write_sync(prefix: str, network: str, tx_hash: str,
 async def _write_async(prefix: str, network: str, tx_hash: str,
                        data: Dict[str, Any], ts: datetime):
     """Non-blocking write: submits _write_sync to the thread pool."""
-    if not settings.RAW_STORE_ENABLED or _executor is None:
+    if not settings.RAW_STORE_ENABLED:
         return
+    if _executor is None:
+        # Silently skipping here would defeat the checkpoint-blocking
+        # contract in _write_raw_payloads: an enabled-but-uninitialized
+        # store must surface loudly, not drop payloads.
+        raise RuntimeError("raw store enabled but not initialized (init_store)")
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(_executor, _write_sync, prefix, network, tx_hash, data, ts)
 
@@ -125,5 +136,92 @@ async def write_mempool(network: str, tx_hash: str,
                         tx_data: Dict[str, Any], ts: datetime):
     """Write a mempool-observed transaction's full Ogmios payload."""
     await _write_async(_PREFIX_MEMPOOL, network, tx_hash, tx_data, ts)
+
+
+def prune_old_days(retention_days: int) -> int:
+    """Delete day directories older than the retention window (opt-in).
+
+    Layout {prefix}/{network}/{YYYYMMDD}/... makes retention a directory
+    walk: whole days are removed at once. Returns the number of day
+    directories removed.
+
+    Refuses to prune while RAW_DATA_MAX_BYTES > 0: with capped ClickHouse
+    payloads the raw store is the ONLY full copy of large transactions and
+    the engine's raw_data fallback depends on it; pruning would make those
+    transactions permanently unscorable at full fidelity.
+    """
+    if retention_days <= 0:
+        return 0
+    from app.config import settings as _settings
+    if _settings.RAW_DATA_MAX_BYTES > 0:
+        logger.warning(
+            "Raw-store retention skipped: RAW_DATA_MAX_BYTES > 0 makes the "
+            "raw store load-bearing for the engine's raw_data fallback. "
+            "Set RAW_DATA_MAX_BYTES=0 (full payloads in ClickHouse) before "
+            "enabling RAW_STORE_RETENTION_DAYS."
+        )
+        return 0
+    import shutil
+    from datetime import timezone as _tz
+    cutoff = int(
+        (datetime.now(_tz.utc) - timedelta(days=retention_days)).strftime("%Y%m%d")
+    )
+    removed = 0
+    for prefix in (_PREFIX_CONFIRMED, _PREFIX_MEMPOOL):
+        prefix_dir = os.path.join(settings.RAW_STORE_PATH, prefix)
+        if not os.path.isdir(prefix_dir):
+            continue
+        for network in os.listdir(prefix_dir):
+            net_dir = os.path.join(prefix_dir, network)
+            if not os.path.isdir(net_dir):
+                continue
+            for day in os.listdir(net_dir):
+                if not (len(day) == 8 and day.isdigit() and int(day) < cutoff):
+                    continue
+                try:
+                    shutil.rmtree(os.path.join(net_dir, day))
+                    removed += 1
+                except OSError as e:
+                    logger.warning(f"Raw-store prune failed for {network}/{day}: {e}")
+    if removed:
+        logger.info(f"Raw-store retention: removed {removed} day directories")
+    return removed
+
+
+def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[str, Any]]:
+    """Read back a transaction's full Ogmios payload from the raw store.
+
+    ``ts`` is the transaction row's ``timestamp``: the ingester passes the
+    same ``now`` to both the ClickHouse row and ``write_confirmed``, so the
+    day directory is derivable. Probe order covers clock-edge skew and
+    mempool-only observation:
+
+      1. ``confirmed/{YYYYMMDD(ts)}``
+      2. ``confirmed/{YYYYMMDD(ts +/- 1 day)}`` (midnight-boundary writes)
+      3. ``mempool/`` same three days (tx observed in mempool, confirmed
+         payload write failed)
+
+    Returns the parsed dict, or None when no blob is found or parseable.
+    Synchronous by design: the analysis engine calls it from the ClickHouse
+    executor thread, never from the event loop.
+    """
+    candidates = []
+    for prefix in (_PREFIX_CONFIRMED, _PREFIX_MEMPOOL):
+        for day_offset in (0, -1, 1):
+            candidates.append(
+                _build_path(
+                    prefix, network, tx_hash,
+                    ts + timedelta(days=day_offset),
+                )
+            )
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError, EOFError) as e:
+            logger.warning(f"Raw store read failed for {path}: {e}")
+    return None
 
 

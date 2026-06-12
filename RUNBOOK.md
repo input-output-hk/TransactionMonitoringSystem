@@ -247,7 +247,7 @@ docker compose ps
 
 ### Restart after a crash
 
-The application reconnects to Ogmios automatically on restart using an exponential backoff circuit breaker. After a restart it reads the last saved `sync_checkpoint` from PostgreSQL and resumes from that slot, so no blocks are missed.
+The application reconnects to Ogmios automatically on restart using an exponential backoff circuit breaker. After a restart it reads the last saved `sync_checkpoint` from PostgreSQL and resumes from that slot. The checkpoint only advances after the block's ClickHouse insert succeeds (failed inserts retry with backoff, then force a reconnect and replay), so confirmed blocks are not lost across restarts or transient ClickHouse outages. Replayed blocks deduplicate via the ReplacingMergeTree schema.
 
 ```bash
 # Restart just the app (databases keep running)
@@ -272,8 +272,20 @@ Variables are layered across files:
 | `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
 | `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; requires `TMS_ALLOW_DEV_MODE=1` or the app refuses to start |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
-| `RATE_LIMIT_REQUESTS` | `60` | Max requests per window per key |
+| `RATE_LIMIT_REQUESTS` | `240` | Max requests per window per key |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
+| `TRUSTED_PROXY_ENABLED` | `false` (`true` in compose) | Honour forwarded headers for client IPs (rate limiting, audit). Right-most-hop parsing; headers count only when the direct peer is inside `TRUSTED_PROXY_CIDRS` |
+| `TRUSTED_PROXY_HOPS` | `1` | Trusted proxies appending to `X-Forwarded-For`; the client is HOPS entries from the right |
+| `TRUSTED_PROXY_CIDRS` | loopback + RFC1918 | CIDRs whose direct connections may carry forwarded headers |
+| `TRUSTED_PROXY_CLIENT_IP_HEADER` | _(empty)_ (`CF-Connecting-IP` in compose) | Edge-set single-value client IP header; wins over `X-Forwarded-For` when present and valid |
+| `CORS_ALLOW_ORIGINS` | `*` | Dashboard origin(s), comma-separated. The app refuses to start with `*` or empty when API keys are configured (`TMS_ALLOW_DEV_MODE=1` overrides for local dev) |
+| `TMS_API_DOCS_ENABLED` | `false` | Expose `/docs`, `/redoc`, `/openapi.json` on a keyed deployment (always on in dev mode) |
+| `WS_HANDSHAKE_RATE_LIMIT_REQUESTS` | `30` | WebSocket handshake attempts per client IP per window |
+| `WS_HANDSHAKE_RATE_LIMIT_WINDOW_SECONDS` | `60` | WebSocket handshake rate-limit window |
+| `AUDIT_LOG_RETENTION_DAYS` | `0` | Prune audit rows older than N days; `0` keeps forever (audit rows are the suppression accountability record) |
+| `STATS_CACHE_TTL_SECONDS` | `10` | In-process TTL for the dashboard stats aggregate; `0` disables |
+| `RAW_FALLBACK_RETRY_SECONDS` | `30` | Wall-clock spacing between counted raw-store fallback attempts |
+| `ROLLBACK_SCORE_REPURGE_DELAY_SECONDS` | `60` | Delay before the second `tx_class_scores` rollback purge pass |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background risk scoring |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | How often the engine polls for unscored transactions |
 | `ANALYSIS_ENGINE_BATCH_SIZE` | `100` | Transactions scored per run |
@@ -289,6 +301,12 @@ Variables are layered across files:
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by Docker Compose and rarely need changing.
+
+### Running behind Cloudflare Tunnel
+
+The compose deployment binds every port to loopback and expects a tunnel (cloudflared or similar) to terminate TLS in front of the app. Client-IP attribution works as follows: `TRUSTED_PROXY_ENABLED=true` lets the app honour forwarded headers, but only when the direct TCP peer is inside `TRUSTED_PROXY_CIDRS` (the tunnel connector / compose bridge), and the parser takes `CF-Connecting-IP` first (Cloudflare overwrites it per request) falling back to the right-most `X-Forwarded-For` hop. Client-writable left-most entries never win, so rate-limit buckets and audit rows cannot be spoofed.
+
+WebSocket note: browsers cannot set custom headers on WS upgrades, so the dashboard passes `?api_key=` in the query string, which can land in proxy and access logs. Use a dedicated key for dashboards so it can be rotated independently of automation keys.
 
 
 ## Troubleshooting
@@ -310,7 +328,7 @@ ConnectionRefusedError / WebSocket connection failed
 curl -H "TMS-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
-Check the `ogmios` field for `chain_circuit_state` and `mempool_circuit_state`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
+Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempool`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
 
 ### Database containers won't start
 
@@ -337,7 +355,7 @@ Update `POSTGRES_PORT` in `.env` to match.
 
 ### Reset all data
 
-**Destructive: deletes everything in the databases and the raw data volume.**
+**Destructive: deletes everything in the databases and the raw data volume.** Take a backup first (next section).
 
 ```bash
 docker compose down -v
@@ -346,6 +364,31 @@ docker compose up -d
 
 On next startup the application recreates all schemas automatically and begins syncing from the chain tip.
 
+## Backup & restore
+
+Run `./scripts/backup.sh [output-dir]` with the databases up. It produces:
+
+- `postgres.sql.gz`: full dump of the operational DB (lifecycle, sync checkpoints, collisions, audit logs, entity state)
+- `clickhouse/<table>.native.gz`: per-table Native-format export of the analytics warehouse, including `tx_class_scores` and `archived_alerts` (the detection product)
+- `MANIFEST`: row counts at backup time
+
+The raw store (Data Lake) is write-once files; back it up incrementally with rsync or restic against the `raw_store_data` volume (host runs: `RAW_STORE_PATH`). Schedule the script via cron on the host; daily is appropriate at preprod volume.
+
+Restore:
+
+1. Start empty databases (`docker compose up -d`), let the app create schemas once, then stop the app.
+2. PostgreSQL: `gunzip -c postgres.sql.gz | docker exec -i tms-postgres psql -U $POSTGRES_USER $POSTGRES_DB`
+3. ClickHouse, per table: `gunzip -c clickhouse/<t>.native.gz | docker exec -i tms-clickhouse clickhouse-client --query "INSERT INTO tms_analytics.<t> FORMAT Native"`
+4. Restore the raw-store files into the volume, then start the app. The sync checkpoint in the Postgres dump makes ingestion resume from the backed-up slot; any gap replays from the chain.
+
+## Schema migration (dedup-safe v2)
+
+Deployments created before the ReplacingMergeTree schema must run the one-shot migration before the app will start (the startup guard refuses a legacy layout and names the script):
+
+1. Stop ALL app instances sharing the ClickHouse database (preprod and preview).
+2. Dry-run: `cd backend && python scripts/migrate_dedup_schema.py` (prints per-table row and duplicate counts).
+3. Apply: `python scripts/migrate_dedup_schema.py --apply`
+4. Restart the instances. Legacy data is preserved as `<table>__legacy_<date>`; drop those tables manually after a verification window.
 
 ## API quick reference
 

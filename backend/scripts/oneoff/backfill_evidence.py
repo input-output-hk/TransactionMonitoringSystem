@@ -179,7 +179,10 @@ def main() -> None:
               {band_clause}
               {days_clause}
         ) AS s
-        JOIN transactions t ON t.tx_hash = s.tx_hash AND t.network = s.network
+        JOIN (
+            SELECT * FROM transactions FINAL
+            WHERE network = %(network)s
+        ) AS t ON t.tx_hash = s.tx_hash AND t.network = s.network
         ORDER BY s.analyzed_at DESC, s.tx_hash ASC
         {limit_clause}
         """,
@@ -261,7 +264,6 @@ def main() -> None:
     processed = 0
     score_drifted = 0
     inserted = 0
-    partitions: set = set()
 
     for chunk_start in range(0, total, _CHUNK):
         chunk = feature_rows[chunk_start : chunk_start + _CHUNK]
@@ -283,9 +285,8 @@ def main() -> None:
             prev_max, prev_class, prev_at = metadata_by_tx[tx_hash]
 
             result = _score_transaction(feature_row, scorers)
-            # Same calendar-day partition as the original row so the
-            # ReplacingMergeTree dedupe kicks in; bump by 1s so the new row
-            # wins max(analyzed_at).
+            # Bump by 1s so the new row wins the ReplacingMergeTree's
+            # max(analyzed_at) dedupe over the original.
             result["analyzed_at"] = prev_at + timedelta(seconds=1)
             chunk_results.append(result)
             processed += 1
@@ -310,9 +311,6 @@ def main() -> None:
         if args.apply:
             clickhouse.insert_class_scores(chunk_results)
             inserted += len(chunk_results)
-            partitions.update(
-                r["analyzed_at"].strftime("%Y%m%d") for r in chunk_results
-            )
 
         print(f"  ...processed {processed}/{total} rows", flush=True)
 
@@ -326,18 +324,13 @@ def main() -> None:
         print("Dry run. Pass --apply to insert.")
         return
 
-    # Force a merge per affected partition so the dedupe takes effect now
-    # instead of waiting for background merges. Done once at the end so each
-    # partition is optimised a single time regardless of how many chunks
-    # touched it.
-    for part in sorted(partitions):
-        client.execute(
-            f"OPTIMIZE TABLE tx_class_scores PARTITION {part} FINAL"
-        )
-    print(
-        f"Inserted {inserted} rows; "
-        f"merged partitions: {', '.join(sorted(partitions))}"
-    )
+    # Force the merge so the dedupe takes effect now instead of waiting for
+    # background merges. tx_class_scores is unpartitioned in the v2 schema
+    # (the dedup key must be partition-stable), so this is a single
+    # table-level OPTIMIZE; the old per-calendar-day PARTITION loop raises
+    # on the v2 table.
+    client.execute("OPTIMIZE TABLE tx_class_scores FINAL")
+    print(f"Inserted {inserted} rows; table merged.")
 
 
 if __name__ == "__main__":

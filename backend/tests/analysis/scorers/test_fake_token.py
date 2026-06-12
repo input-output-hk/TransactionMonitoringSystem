@@ -177,3 +177,56 @@ class TestConfusablesFold:
         # Pure ASCII case-spoof has no confusables, no zero-width, no
         # mixed scripts. Score must be 0.
         assert _compute_unicode_suspicion("nTX") == 0.0
+
+
+class TestAsciiHomoglyphs:
+    """ASCII visual lookalikes (spec table: O/0, I/l/1). The similarity fold
+    must catch digit-for-letter forgeries (recall), while the fold-gain test
+    keeps legitimately numeric names off the suspicion axis (precision)."""
+
+    def _outputs(self, n=5):
+        return [
+            {"address": f"addr{i}", "value": {"lovelace": 1_500_000}}
+            for i in range(n)
+        ]
+
+    def test_zero_for_O_forgery_detected(self, scorer):
+        # "H0SKY" (digit zero) impersonating HOSKY under a wrong policy.
+        mint = {FAKE_POLICY: {"H0SKY": 1000}}
+        feats = _features(mint=mint, outputs=self._outputs())
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        # The fold makes the match exact, and the fold-gain test adds the
+        # homoglyph bump to the suspicion axis.
+        assert result.evidence["matched_similarity"] == 1.0
+        assert result.sub_scores["unicode_suspicion"] > 0.0
+        kinds = {c["kind"] for c in result.evidence["unicode_confusables"]}
+        assert "ascii_homoglyph" in kinds
+
+    def test_one_for_I_forgery_detected(self, scorer):
+        # "1NDY" (digit one) impersonating INDY.
+        mint = {FAKE_POLICY: {"1NDY": 1000}}
+        feats = _features(mint=mint, outputs=self._outputs())
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        assert result.evidence["matched_token"] == "INDY"
+        assert result.evidence["matched_similarity"] == 1.0
+        assert result.sub_scores["unicode_suspicion"] > 0.0
+
+    def test_numeric_suffix_gets_no_suspicion_bump(self, scorer):
+        # "HOSKY2" is name-similar (gates on plain Levenshtein) but its digit
+        # is appended, not substituted: the ASCII fold gains nothing, so the
+        # suspicion axis must stay at zero.
+        mint = {FAKE_POLICY: {"HOSKY2": 1000}}
+        feats = _features(mint=mint, outputs=self._outputs())
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        assert result.sub_scores["unicode_suspicion"] == 0.0
+        kinds = {c["kind"] for c in result.evidence["unicode_confusables"]}
+        assert "ascii_homoglyph" not in kinds
+
+    def test_unrelated_numeric_name_not_gated(self, scorer):
+        # A numeric token name far from every registry entry must not gate
+        # just because the fold maps its letters onto digits.
+        mint = {FAKE_POLICY: {"X100PULL": 1000}}
+        assert scorer.gate(_features(mint=mint)) is False

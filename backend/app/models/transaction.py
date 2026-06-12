@@ -111,6 +111,14 @@ class TransactionInput(BaseModel):
     assets: Optional[Dict[str, int]] = None
     is_reference: bool = Field(default=False, description="True if this is a reference input (read-only)")
     is_collateral: bool = Field(default=False, description="True if this is a collateral input")
+    is_unspent_attempt: bool = Field(
+        default=False,
+        description=(
+            "Regular input of a phase-2-failed tx: referenced but NOT "
+            "consumed on-chain (Babbage; the collaterals carried the "
+            "consumption). Excluded from flow/displacement reads."
+        ),
+    )
 
 
 class TransactionOutput(BaseModel):
@@ -119,6 +127,14 @@ class TransactionOutput(BaseModel):
     amount: int
     assets: Optional[Dict[str, int]] = None
     is_collateral: bool = Field(default=False, description="True if this is a collateral return output")
+    output_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "Explicit on-chain output index; None = position in the "
+            "outputs list. Set for collateral returns, whose on-chain "
+            "index is the regular-output count (Babbage), not 0."
+        ),
+    )
 
 
 
@@ -191,5 +207,13 @@ class NormalizedTransaction(BaseModel):
     total_output_value: int = Field(0, description="Total output value in lovelace")
     addresses: List[str] = Field(default_factory=list, description="All addresses involved")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Transaction metadata")
+    script_valid: bool = Field(
+        True,
+        description=(
+            "Phase-2 validation outcome (Ogmios v6 'spends' marker). False "
+            "means a Plutus script failed: the ledger consumed the collateral "
+            "inputs and created only the collateralReturn output."
+        ),
+    )
     raw_data: Optional[Dict[str, Any]] = Field(None, description="Raw transaction data for audit")
     ingestion_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

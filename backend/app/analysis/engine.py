@@ -10,11 +10,19 @@ The public interface (run_once / run_once_async) is called by tasks/analysis.py.
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
-from app.db import clickhouse, postgres
+from app.db import clickhouse, raw_store
+from app.analysis.enrichment import (
+    enrich_collision_features as _enrich_collision_features,
+    enrich_cycle_features as _enrich_cycle_features,
+    enrich_inputs_with_resolved_addresses as _enrich_inputs_with_resolved_addresses,
+    enrich_sandwich_features as _enrich_sandwich_features,
+    set_main_loop,
+)
 from app.analysis.normalise import score_to_band
 from app.analysis.scorer_config import composite_corroboration_config
 from app.analysis.scorers.base import BaseScorer
@@ -80,96 +88,6 @@ def _build_scorers() -> List[BaseScorer]:
     return scorers
 
 
-def _enrich_inputs_with_resolved_addresses(
-    rows: List[Dict[str, Any]],
-    network: str,
-) -> None:
-    """Inject resolved input addresses from transaction_inputs into raw_data.
-
-    Ogmios v6 raw_data only contains input references (tx_hash + index) without
-    addresses.  Scorers like multiple_sat need input addresses to group by script.
-    The resolved addresses are stored in the transaction_inputs ClickHouse table
-    at ingestion time, so we batch-fetch them and patch raw_data in-place.
-
-    Both queries are scoped by network to prevent cross-network pollution when
-    multiple instances (e.g. preprod + preview) share the same ClickHouse.
-    """
-    tx_hashes = [r["tx_hash"] for r in rows if r.get("raw_data")]
-    if not tx_hashes:
-        return
-
-    try:
-        input_rows = clickhouse._get_client().execute(
-            """SELECT tx_hash, input_index, address, amount
-            FROM transaction_inputs
-            WHERE tx_hash IN %(hashes)s
-              AND network = %(network)s""",
-            {"hashes": tx_hashes, "network": network},
-        )
-    except Exception:
-        logger.warning("Failed to fetch resolved input addresses", exc_info=True)
-        return
-
-    # Build lookup: tx_hash -> {input_index -> (address, amount)}
-    lookup: Dict[str, Dict[int, tuple]] = {}
-    for tx_h, idx, addr, amt in input_rows:
-        lookup.setdefault(tx_h, {})[idx] = (addr, amt)
-
-    # Collect referenced tx hashes to resolve input values from their outputs
-    ref_tx_hashes = set()
-    for row in rows:
-        rd = row.get("raw_data")
-        if isinstance(rd, dict):
-            for inp in rd.get("inputs", []):
-                ref = inp.get("transaction", {}).get("id")
-                if ref:
-                    ref_tx_hashes.add(ref)
-
-    # Fetch raw_data of referenced txs to extract output values
-    # Cap to avoid oversized IN clauses; remaining inputs just won't have values
-    _MAX_REF_TXS = 2000
-    if len(ref_tx_hashes) > _MAX_REF_TXS:
-        logger.warning(
-            "Capping ref tx lookups: %d -> %d", len(ref_tx_hashes), _MAX_REF_TXS,
-        )
-        ref_tx_hashes = set(list(ref_tx_hashes)[:_MAX_REF_TXS])
-
-    ref_outputs: Dict[str, Dict[int, Dict]] = {}  # ref_tx -> {index -> output}
-    if ref_tx_hashes:
-        try:
-            ref_rows = clickhouse._get_client().execute(
-                "SELECT tx_hash, raw_data FROM transactions "
-                "WHERE tx_hash IN %(hashes)s AND network = %(network)s",
-                {"hashes": list(ref_tx_hashes), "network": network},
-            )
-            for ref_hash, ref_rd in ref_rows:
-                if isinstance(ref_rd, str):
-                    ref_rd = json.loads(ref_rd)
-                if isinstance(ref_rd, dict):
-                    for i, out in enumerate(ref_rd.get("outputs", [])):
-                        ref_outputs.setdefault(ref_hash, {})[i] = out
-        except Exception:
-            logger.warning("Failed to fetch referenced tx outputs", exc_info=True)
-
-    for row in rows:
-        tx_hash = row["tx_hash"]
-        rd = row.get("raw_data")
-        if not isinstance(rd, dict):
-            continue
-        addr_map = lookup.get(tx_hash, {})
-        for i, inp in enumerate(rd.get("inputs", [])):
-            if "address" not in inp and i in addr_map:
-                inp["address"] = addr_map[i][0]
-            # Resolve input value from the referenced output
-            if "value" not in inp:
-                ref_hash = inp.get("transaction", {}).get("id")
-                ref_idx = inp.get("index")
-                if ref_hash and ref_idx is not None:
-                    ref_out = ref_outputs.get(ref_hash, {}).get(ref_idx)
-                    if ref_out and "value" in ref_out:
-                        inp["value"] = ref_out["value"]
-
-
 def _score_transaction(
     row: Dict[str, Any],
     scorers: List[BaseScorer],
@@ -210,6 +128,11 @@ def _score_transaction(
     scores: Dict[str, float] = {name: -1.0 for name in _CLASS_NAMES}
     sub_scores: Dict[str, Dict[str, float]] = {}
     evidence: Dict[str, Dict[str, Any]] = {}
+    if row.get("raw_data_unavailable"):
+        # The raw payload could not be recovered after the fallback budget:
+        # raw_data-gated scorers will skip, so mark the degradation in
+        # evidence to make it visible and filterable rather than silent.
+        evidence["_meta"] = {"raw_data_unavailable": True}
 
     for scorer in scorers:
         try:
@@ -255,92 +178,157 @@ def _score_transaction(
     }
 
 
-def _enrich_sandwich_features(rows: List[Dict[str, Any]], network: str):
-    """Enrich rows with structural sandwich pattern detection."""
-    if not settings.SCORER_SANDWICH_ENABLED or not settings.SANDWICH_SIMPLIFIED_ENABLED:
-        return
-    try:
-        from app.analysis.dex import detect_sandwich_pattern
-    except ImportError:
-        return
+# Defer bookkeeping for transactions whose raw_data could not be recovered:
+# (network, tx_hash) -> (counted attempts, monotonic time of the last counted
+# attempt). Attempts are paced by RAW_FALLBACK_RETRY_SECONDS measured on the
+# monotonic clock (NTP-step immune):
+# the drain loop re-polls every 0.5 s under load, which previously burned
+# the whole budget in ~1.5 s and degraded-scored exactly the large
+# attack-shaped txs the fallback protects (review finding). In-process only;
+# a restart resets the counters, which merely delays degraded scoring.
+_raw_fallback_attempts: Dict[tuple, Tuple[int, float]] = {}
 
-    for row in rows:
-        slot = row.get("slot", 0)
-        if not slot:
-            continue
-        try:
-            sw = detect_sandwich_pattern(row["tx_hash"], network, slot)
-            if sw:
-                row["sandwich"] = sw
-        except Exception as e:
-            logger.debug(f"Sandwich detection failed for {row['tx_hash'][:16]}: {e}")
+# Watermark cursor for the unanalyzed poll: network -> the highest
+# ingestion_timestamp scored, minus UNANALYZED_OVERLAP_SECONDS. Bounds all
+# three sides of the poll query so its cost tracks the backlog, not the
+# total table size. In-process only: a restart starts with a full rescan.
+_unanalyzed_watermark: Dict[str, datetime] = {}
+# network -> time.monotonic() of the last since=None full rescan.
+_last_full_rescan: Dict[str, float] = {}
 
 
-def _enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
-    """Enrich rows with cycle detection data for circular transfer scoring."""
-    if not settings.SCORER_CIRCULAR_ENABLED or not settings.CYCLE_DETECTION_ENABLED:
-        return
-    try:
-        from app.analysis.graph import detect_cycle
-    except ImportError:
-        return
+def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
+    """The ``(since, is_full_rescan)`` bounds for this poll.
 
-    for row in rows:
-        # Pre-filter: skip txs with many outputs (unlikely circular)
-        output_count = row.get("output_count", 0)
-        if output_count > 20:
-            continue
-        try:
-            cycle = detect_cycle(row["tx_hash"], network)
-            if cycle:
-                row["cycle"] = cycle
-        except Exception as e:
-            logger.debug(f"Cycle detection failed for {row['tx_hash'][:16]}: {e}")
+    A full rescan (since=None) runs on the first poll after startup and
+    then every UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS. It is the
+    never-skip guarantee: deferred raw-data txs, input-visibility-deferred
+    txs, and anything that slipped past the watermark are picked up within
+    one rescan interval.
 
-
-# Captured by run_once_async() so that _enrich_collision_features (running on
-# a clickhouse worker thread) can schedule async postgres calls back onto the
-# main event loop. Module-level mutable state assumes a single asyncio loop
-# per process, which matches our production deployment. Tests that drive the
-# engine directly without run_once_async() will see collision enrichment
-# skipped (debug log emitted); call set_main_loop() manually if that path
-# matters for the test.
-_main_loop: Optional[asyncio.AbstractEventLoop] = None
-
-
-def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
-    """Test hook: explicitly set or clear the captured main event loop."""
-    global _main_loop
-    _main_loop = loop
-
-
-def _enrich_collision_features(rows: List[Dict[str, Any]], network: str):
-    """Enrich rows with mempool collision data for front-running detection.
-
-    Called from the sync run_once() context (on a clickhouse worker thread),
-    schedules the async postgres call on the main event loop captured by
-    run_once_async().
+    Pure: the rescan clock is armed by run_once only AFTER the rescan
+    batch succeeds. Arming it here meant a rescan that crashed mid-batch
+    (poll error, score-insert failure) was not retried for a whole
+    interval, stretching the never-skip guarantee to ~2 intervals.
     """
-    if not settings.SCORER_FRONT_RUNNING_ENABLED:
-        return
-    loop = _main_loop
-    if loop is None or not loop.is_running():
-        logger.debug("Collision enrichment skipped: main event loop unavailable")
-        return
-    tx_hashes = [r["tx_hash"] for r in rows]
-    try:
-        future = asyncio.run_coroutine_threadsafe(
-            postgres.get_collisions_for_txs(tx_hashes, network), loop
-        )
-        collisions = future.result(timeout=30)
-    except Exception as e:
-        logger.warning(f"Collision enrichment failed (non-fatal): {e}")
-        return
+    now_mono = time.monotonic()
+    last = _last_full_rescan.get(network)
+    if (
+        last is None
+        or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS
+    ):
+        return None, True
+    return _unanalyzed_watermark.get(network), False
 
+
+def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
+    """Advance the poll watermark to the newest fetched row, minus overlap.
+
+    Called only AFTER the batch's score rows are persisted, so a failed
+    insert never advances the cursor past unscored work. The overlap absorbs
+    same-second ordering skew and the tx-row-before-inputs-row insert gap.
+    """
+    newest = max(
+        (
+            r["ingestion_timestamp"] for r in rows
+            if isinstance(r.get("ingestion_timestamp"), datetime)
+        ),
+        default=None,
+    )
+    if newest is None:
+        return
+    candidate = newest - timedelta(seconds=settings.UNANALYZED_OVERLAP_SECONDS)
+    current = _unanalyzed_watermark.get(network)
+    if current is None or candidate > current:
+        _unanalyzed_watermark[network] = candidate
+
+
+def _resolve_raw_data(
+    rows: List[Dict[str, Any]], network: str,
+) -> List[Dict[str, Any]]:
+    """Parse each row's raw_data, recovering from the raw store when needed.
+
+    The stored column may be empty-with-flag (payload over RAW_DATA_MAX_BYTES)
+    or unparseable (legacy rows written with the old mid-JSON truncation).
+    Previously such rows were scored with raw_data=None: every raw_data-gated
+    scorer silently skipped, the tx was written all -1, and it was NEVER
+    re-evaluated — exactly the large, attack-shaped transactions. Now:
+
+      1. Recover the full payload from the raw store (read_confirmed probes
+         the day directories derived from the row's timestamp).
+      2. On a failed read, DEFER the tx (drop it from this batch, no score
+         row written) so the next engine poll retries, up to
+         RAW_FALLBACK_MAX_ATTEMPTS.
+      3. After the attempt budget, score degraded with raw_data=None and a
+         raw_data_unavailable evidence marker, so a lost blob cannot park
+         the tx in the unanalyzed queue forever and the degradation is
+         visible/filterable instead of silent.
+
+    Returns the rows to score this run (deferred rows removed).
+    """
+    kept: List[Dict[str, Any]] = []
     for row in rows:
-        collision = collisions.get(row["tx_hash"])
-        if collision:
-            row["collision"] = collision
+        rd = row.get("raw_data")
+        truncated = bool(row.get("raw_data_truncated"))
+        parsed: Optional[Dict[str, Any]] = None
+        if isinstance(rd, dict):
+            parsed = rd
+        elif isinstance(rd, str) and rd:
+            try:
+                parsed = json.loads(rd)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+
+        needs_recovery = parsed is None and (
+            truncated or (isinstance(rd, str) and bool(rd))
+        )
+        if needs_recovery and settings.RAW_FALLBACK_ENABLED:
+            ts = row.get("timestamp")
+            if isinstance(ts, datetime):
+                try:
+                    parsed = raw_store.read_confirmed(network, row["tx_hash"], ts)
+                except Exception:
+                    logger.exception(
+                        "Raw store fallback failed for %s", row["tx_hash"][:16],
+                    )
+                    parsed = None
+
+        if needs_recovery and parsed is None:
+            key = (network, row["tx_hash"])
+            entry = _raw_fallback_attempts.get(key)
+            now_mono = time.monotonic()
+            if (
+                entry is not None
+                and now_mono - entry[1] < settings.RAW_FALLBACK_RETRY_SECONDS
+            ):
+                # Re-polled inside the pacing window: defer WITHOUT counting,
+                # or a busy drain loop exhausts the budget in seconds.
+                logger.debug(
+                    "Deferring %s: raw_data unrecoverable (attempt window)",
+                    row["tx_hash"][:16],
+                )
+                continue
+            attempts = (entry[0] if entry else 0) + 1
+            if attempts < settings.RAW_FALLBACK_MAX_ATTEMPTS:
+                _raw_fallback_attempts[key] = (attempts, now_mono)
+                logger.warning(
+                    "Deferring %s: raw_data unrecoverable (attempt %d/%d)",
+                    row["tx_hash"][:16], attempts,
+                    settings.RAW_FALLBACK_MAX_ATTEMPTS,
+                )
+                continue
+            _raw_fallback_attempts.pop(key, None)
+            row["raw_data_unavailable"] = True
+            logger.error(
+                "Scoring %s degraded: raw_data unrecoverable after %d attempts",
+                row["tx_hash"][:16], attempts,
+            )
+        elif needs_recovery:
+            _raw_fallback_attempts.pop((network, row["tx_hash"]), None)
+
+        row["raw_data"] = parsed
+        kept.append(row)
+    return kept
 
 
 def run_once(network: str) -> int:
@@ -348,22 +336,30 @@ def run_once(network: str) -> int:
     if not settings.ANALYSIS_ENABLED:
         return 0
 
-    rows = clickhouse.get_unanalyzed_transactions(
-        network, settings.ANALYSIS_ENGINE_BATCH_SIZE
+    since, full_rescan = _poll_since(network)
+    fetched = clickhouse.get_unanalyzed_transactions(
+        network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
     )
-    if not rows:
+    if not fetched:
+        if full_rescan:
+            # An empty fetch IS a successful rescan: nothing was skipped.
+            _last_full_rescan[network] = time.monotonic()
         return 0
+    rows = fetched
 
     scorers = _build_scorers()
 
-    # Pre-parse JSON string fields so scorers receive dicts, not strings
+    # Parse raw_data (with raw-store recovery / deferral) and metadata so
+    # scorers receive dicts, not strings.
+    rows = _resolve_raw_data(rows, network)
+    if not rows:
+        if full_rescan:
+            # Every row deferred is still a SUCCESSFUL rescan (the poll ran;
+            # deferral is deliberate, paced bookkeeping) — re-running the
+            # full scan every drain tick would hammer the warehouse.
+            _last_full_rescan[network] = time.monotonic()
+        return 0
     for row in rows:
-        rd = row.get("raw_data")
-        if isinstance(rd, str) and rd:
-            try:
-                row["raw_data"] = json.loads(rd)
-            except (json.JSONDecodeError, TypeError):
-                row["raw_data"] = None
         md = row.get("metadata")
         if isinstance(md, str) and md not in ("", "{}"):
             try:
@@ -391,6 +387,15 @@ def run_once(network: str) -> int:
         results.append(result)
 
     clickhouse.insert_class_scores(results)
+    # Only after the score rows are durably written: a failed insert raises
+    # above and the cursor stays put, so the batch is re-polled. Advanced
+    # over ALL fetched rows (including raw-data-deferred ones, which the
+    # periodic full rescan recovers).
+    _advance_watermark(network, fetched)
+    if full_rescan:
+        # Armed only now: a rescan that crashed above re-runs on the next
+        # poll instead of waiting out a full interval (never-skip guarantee).
+        _last_full_rescan[network] = time.monotonic()
 
     # Log summary
     critical = sum(1 for r in results if r["risk_band"] == "Critical")
@@ -406,12 +411,16 @@ def run_once(network: str) -> int:
         f"Analysis Engine [{network}]: scored {len(results)} txs "
         f"(Critical={critical}, High={high}) classes: {class_summary}"
     )
-    return len(results)
+    # Return the FETCHED count, not the scored count: raw-data deferrals can
+    # shrink the scored set, and the drain loop keys "queue still has work"
+    # off whether the poll filled the batch.
+    return len(fetched)
 
 
 async def run_once_async(network: str) -> int:
     """Non-blocking wrapper: runs run_once on the dedicated ClickHouse executor."""
-    global _main_loop
     loop = asyncio.get_running_loop()
-    _main_loop = loop
+    # Collision enrichment runs on a worker thread and bridges async postgres
+    # calls back onto this loop (see app.analysis.enrichment).
+    set_main_loop(loop)
     return await loop.run_in_executor(clickhouse._ch_executor, run_once, network)

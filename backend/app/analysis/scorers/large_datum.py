@@ -57,6 +57,23 @@ _SIZE_BACKSTOP = _fraction_of_limit(
     _CFG["gate"]["size_backstop_fraction"], "max_tx_size_bytes"
 )
 _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
+# Observability flag for datumHash-only outputs at script addresses. The
+# referenced datum cannot be sized without an indexer, so a bloat-by-hash
+# attack is invisible to the byte gates; when enabled, the scorer engages
+# and records datum_hash_only_count (score stays -1: never alerts).
+_FLAG_DATUM_HASH_ONLY = bool(_CFG["gate"]["flag_datum_hash_only"])
+
+
+def _datum_hash_only_addresses(outputs) -> list:
+    """Script-output addresses whose datum is a hash reference (flag 1):
+    present but unsizable without an indexer."""
+    return [
+        out.get("address", "")
+        for out in outputs
+        if isinstance(out, dict)
+        and feat_mod.is_script_address(out.get("address", ""))
+        and feat_mod._extract_datum_info(out)[0] == 1
+    ]
 
 
 def _is_bloat_datum(output: Dict[str, Any], datum_bytes: int) -> bool:
@@ -129,10 +146,6 @@ class LargeDatumScorer(BaseScorer):
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
             return False
-        # Blind spot: a datum-hash-only output reports 0 bytes here
-        # (_extract_datum_info cannot size it without an indexer), so a bloat
-        # attack that references its datum by hash rather than inlining it is
-        # invisible to this gate. Inline datums (the common case) are sized.
         outputs = raw_data.get("outputs", [])
         for out in outputs:
             addr = out.get("address", "")
@@ -142,7 +155,16 @@ class LargeDatumScorer(BaseScorer):
             if _is_bloat_datum(out, datum_bytes):
                 return True
         per_script = _per_script_datum_bytes(outputs)
-        return any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values())
+        if any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values()):
+            return True
+        # Observability path: a datum-hash-only output reports 0 bytes
+        # (_extract_datum_info cannot size the referenced datum without an
+        # indexer), so a bloat-by-hash attack is invisible to the byte gates
+        # above. Engage so score() records datum_hash_only_count; the result
+        # stays a no-finding (-1) and never alerts.
+        if _FLAG_DATUM_HASH_ONLY and _datum_hash_only_addresses(outputs):
+            return True
+        return False
 
     def score(self, features: Dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
@@ -190,16 +212,26 @@ class LargeDatumScorer(BaseScorer):
                 evidence=best_evidence,
             )
 
-        # Aggregate-only engagement path: gate fired because the
-        # per-script aggregate crossed `aggregate_engagement_min`, but no
-        # single output passed the per-output threshold. Surface the
-        # observability metric while returning score=-1 so the engine
-        # does NOT select `large_datum` as `max_class` (-1 is filtered
-        # out by `applicable = {k: v ... if v >= 0}`); writing -1 to the
-        # column matches the existing "scorer didn't produce a finding"
-        # convention.
+        # Aggregate-only / hash-only engagement path: gate fired because the
+        # per-script aggregate crossed `aggregate_engagement_min` or a
+        # datum-hash-only script output was present, but no single output
+        # passed the per-output threshold. Surface the observability metrics
+        # while returning score=-1 so the engine does NOT select
+        # `large_datum` as `max_class` (-1 is filtered out by
+        # `applicable = {k: v ... if v >= 0}`); writing -1 to the column
+        # matches the existing "scorer didn't produce a finding" convention.
+        hash_only_addrs = (
+            _datum_hash_only_addresses(outputs) if _FLAG_DATUM_HASH_ONLY else []
+        )
         return ScorerResult.no_finding(
-            sub_scores={"max_script_datum_bytes": float(max_script_datum_bytes)},
+            sub_scores={
+                "max_script_datum_bytes": float(max_script_datum_bytes),
+                "datum_hash_only_count": float(len(hash_only_addrs)),
+            },
+            evidence=(
+                {"datum_hash_only_addresses": hash_only_addrs}
+                if hash_only_addrs else {}
+            ),
         )
 
     def _score_utxo(

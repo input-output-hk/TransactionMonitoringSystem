@@ -7,8 +7,10 @@ import time
 from app.config import settings
 from app.analysis import engine
 from app.analysis import baselines
+from app.analysis import external
 from app.db import clickhouse
 from app.db import postgres
+from app.db import raw_store
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +19,18 @@ _task: asyncio.Task | None = None
 # Timestamp of last baseline recomputation (epoch seconds)
 _last_baseline_recompute: float = 0.0
 
+# Timestamp of last token-registry refresh (epoch seconds). 0.0 forces a
+# refresh on the first tick so fake_token starts with full registry coverage
+# instead of the seed list.
+_last_registry_refresh: float = 0.0
+
+# Timestamp of last retention sweep (epoch seconds).
+_last_retention_sweep: float = 0.0
+
 
 async def _loop():
     """Continuously score unanalyzed transactions and drop stale PENDING ones."""
-    global _last_baseline_recompute
+    global _last_baseline_recompute, _last_registry_refresh, _last_retention_sweep
 
     logger.info(
         f"Analysis Engine background task started "
@@ -40,8 +50,19 @@ async def _loop():
 
     while True:
         try:
-            scored = await engine.run_once_async(settings.CARDANO_NETWORK)
-            if scored == 0:
+            # Drain loop: keep pulling batches while the poll comes back
+            # full, up to a per-tick cap so a deep backlog cannot starve
+            # the other duties below (and the shared ClickHouse executor).
+            # Previously one fixed batch per interval capped throughput at
+            # BATCH_SIZE / INTERVAL regardless of backlog depth.
+            batches = 0
+            while batches < settings.ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK:
+                processed = await engine.run_once_async(settings.CARDANO_NETWORK)
+                batches += 1
+                if processed < settings.ANALYSIS_ENGINE_BATCH_SIZE:
+                    break
+                await asyncio.sleep(settings.ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS)
+            if batches == 1 and processed == 0:
                 logger.debug("Analysis Engine: no new transactions to score")
         except Exception as e:
             logger.error(f"Analysis Engine error: {e}")
@@ -63,6 +84,27 @@ async def _loop():
         except Exception as e:
             logger.error(f"Lifecycle cleanup error: {e}")
 
+        # Periodic token-registry refresh. The fetch never runs on the
+        # scoring path (external.get_legitimate_tokens serves the cache,
+        # stale included); this is the only place it happens, on the default
+        # thread-pool executor so the blocking HTTP work occupies neither
+        # the event loop nor the ClickHouse workers.
+        registry_needed = settings.SCORER_FAKE_TOKEN_ENABLED and (
+            settings.CARDANO_NETWORK == "mainnet"
+            or settings.FAKE_TOKEN_TESTNET_MODE
+        )
+        refresh_interval = settings.TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS * 3600
+        if registry_needed and time.time() - _last_registry_refresh > refresh_interval:
+            try:
+                count = await asyncio.to_thread(external.refresh_token_registry)
+                _last_registry_refresh = time.time()
+                logger.info(f"Token registry refreshed: {count} names")
+            except Exception as e:
+                logger.error(f"Token registry refresh failed (serving cache/seeds): {e}")
+                # Back off a full interval on failure too; the scorer keeps
+                # serving the previous cache or the seed list meanwhile.
+                _last_registry_refresh = time.time()
+
         # Periodic baseline recomputation
         recompute_interval = settings.BASELINE_RECOMPUTE_INTERVAL_HOURS * 3600
         if time.time() - _last_baseline_recompute > recompute_interval:
@@ -80,12 +122,64 @@ async def _loop():
             except Exception as e:
                 logger.error(f"Baseline recomputation failed: {e}")
 
+        # Opt-in retention sweep (all knobs default 0 = off), throttled to
+        # RETENTION_SWEEP_INTERVAL_HOURS. ClickHouse retention is TTL-based
+        # (applied at schema init), so only Postgres and the raw store need
+        # an active sweep.
+        sweep_interval = settings.RETENTION_SWEEP_INTERVAL_HOURS * 3600
+        if time.time() - _last_retention_sweep > sweep_interval:
+            _last_retention_sweep = time.time()
+            network = settings.CARDANO_NETWORK
+            if settings.LIFECYCLE_RETENTION_DAYS > 0:
+                try:
+                    n = await postgres.prune_terminal_lifecycle(
+                        network, settings.LIFECYCLE_RETENTION_DAYS,
+                    )
+                    if n:
+                        logger.info(f"Retention: pruned {n} terminal lifecycle rows")
+                except Exception as e:
+                    logger.error(f"Lifecycle retention sweep failed: {e}")
+            if settings.MEMPOOL_COLLISION_RETENTION_DAYS > 0:
+                try:
+                    n = await postgres.prune_mempool_collisions(
+                        network, settings.MEMPOOL_COLLISION_RETENTION_DAYS,
+                    )
+                    if n:
+                        logger.info(f"Retention: pruned {n} mempool collisions")
+                except Exception as e:
+                    logger.error(f"Collision retention sweep failed: {e}")
+            if settings.RAW_STORE_RETENTION_DAYS > 0:
+                try:
+                    await asyncio.to_thread(
+                        raw_store.prune_old_days, settings.RAW_STORE_RETENTION_DAYS,
+                    )
+                except Exception as e:
+                    logger.error(f"Raw-store retention sweep failed: {e}")
+            if settings.AUDIT_LOG_RETENTION_DAYS > 0:
+                try:
+                    n = await postgres.prune_audit_logs(
+                        settings.AUDIT_LOG_RETENTION_DAYS,
+                    )
+                    if n:
+                        logger.info(f"Retention: pruned {n} audit log rows")
+                except Exception as e:
+                    logger.error(f"Audit-log retention sweep failed: {e}")
+
         await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
 
 
 def start():
-    """Schedule the analysis loop as a background asyncio task."""
+    """Schedule the analysis loop as a background asyncio task.
+
+    Idempotent: a second call while the loop runs would leak the first
+    task and run two concurrent drain loops mutating the watermark from
+    two executor threads (duplicate scoring is RMT-absorbed, but the
+    wasted work and interleaved cursors are not worth it).
+    """
     global _task
+    if _task is not None and not _task.done():
+        logger.warning("Analysis loop already running; start() ignored")
+        return
     _task = asyncio.create_task(_loop())
 
 
