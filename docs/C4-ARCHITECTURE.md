@@ -10,7 +10,7 @@ C4Context
 
     Person(user, "User", "Monitors, queries, and investigates Cardano transactions via dashboard and REST API")
 
-    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides 9-class Polimi detection engine for risk scoring, clustering, and anomaly detection.")
+    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides the 9-class Polimi detection engine for risk scoring. Entity clustering and unsupervised anomaly detection are deferred (see internal/DEFERRED-WORK.md).")
 
     System_Ext(cardano_node, "Cardano Node", "Full node: source of truth for chain state, mempool, and block data")
     System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano node: provides ChainSync, LocalTxMonitor, and LocalStateQuery mini-protocols via JSON-RPC 2.0")

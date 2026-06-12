@@ -1,4 +1,4 @@
-# Detection scorer configuration. This file is tracked in git — changes to
+# Detection scorer configuration. This file is tracked in git: changes to
 # weights, anchors, allowlists, and band caps are reviewed like any other
 # code change. Edit freely and commit alongside the scorer change it supports.
 #
@@ -9,6 +9,99 @@
 # Bootstrap anchors are used only when the per-script / global baseline in
 # ClickHouse has fewer than BASELINE_MIN_SAMPLES rows. Real baselines, once
 # populated, supersede bootstraps automatically.
+
+# Cardano ledger protocol parameters (mainnet and preprod share these values
+# as of the Conway era, 2026). Sourced from the on-chain protocol parameters
+# (cardano.org parameter guide). Detection thresholds that encode a resource-
+# exhaustion threat model reference these named limits rather than repeating
+# the raw byte counts, so a single edit propagates and there are no magic
+# numbers buried in scorer code.
+protocol_limits:
+  max_value_size_bytes: 5000    # maxValueSize: per-output serialized Value CBOR cap
+  max_tx_size_bytes: 16384      # maxTxSize: per-transaction serialized size cap
+
+# Cross-class corroboration signal. The risk band is driven solely by the
+# single highest class score (max_score), so a transaction that independently
+# trips two different attack detectors is banded the same as one that trips
+# only the strongest. That agreement is itself evidence worth surfacing. This
+# block does NOT change the band or alerting; it only records how many distinct
+# classes scored at or above corroboration_threshold, so multi-signal
+# transactions are filterable for analyst review (API: min_corroboration).
+# threshold tuned to 40 so a class must be a real partial signal (top of
+# Informational / into Moderate), not noise.
+composite_corroboration:
+  corroboration_threshold: 40.0
+
+# Baseline-resolution tunables shared by every percentile-baselined scorer
+# (consumed by normalise.py / scorer_config.py, not by a single scorer).
+baselines:
+  # A per-script (or per-policy) baseline with near-zero spread between p50
+  # and p99 collapses the inverted-normalise axis onto p50: any value at the
+  # median scores 1.0 and looks maximally suspicious. The strict-equality
+  # case (p99 == p50) is handled inside normalise(); baselines with a tiny
+  # positive spread (e.g. p50=2.52M, p99=2.59M; 2.7% of p50) still saturate
+  # every normal interaction. A baseline whose spread is below this fraction
+  # of p50 is treated as uninformative and resolution falls through to the
+  # next tier (global / bootstrap).
+  min_spread_ratio: 0.10
+  # Cap on a LEARNED (per-script / per-policy / global) baseline's p99
+  # relative to the scorer's bootstrap anchor p99; 0 disables. The resolved
+  # p99 is the normalisation saturation point, so an attacker who pre-trains
+  # a wide per-script distribution (~200 outputs over the 90-day window,
+  # roughly tens of ADA in fees) could otherwise push p99 arbitrarily high
+  # and have a real attack normalise to ~0. With the cap, an established
+  # contract may legitimately run up to K times the protocol-grounded anchor
+  # but never so far that the anchor's threat model becomes unreachable.
+  per_script_p99_cap_multiplier: 5.0
+  # Anchor-relative bound on a LEARNED baseline's p50, as a fraction K of
+  # the bootstrap anchor spread: resolved p50 is clamped to
+  # anchor_p50 + K * (anchor_p99 - anchor_p50). normalise() subtracts p50
+  # first, so a poisoned MEDIAN de-sensitises an axis exactly like a
+  # widened tail; the p99 cap alone left the median bounded only relative
+  # to the CAP (about 4.55x the anchor p99), wide enough that an in-bound
+  # poisoned pair could zero a real drain. Derivation of the recall
+  # guarantee, worked for the multiple_sat n_assets axis (anchors p50=0,
+  # p99=2, cap = 5 x 2 = 10): the worst capped-poisoned pair resolves to
+  # (p50 = K*2 = 0.5, p99 = 10), so the canonical 2-NFT drain normalises
+  # to (2 - 0.5) / (10 - 0.5) ~= 0.158, which clears the
+  # suppression_escape.extraction_floor_min of 0.10 with ~1.6x margin
+  # (general form with anchor p50 = 0: (1 - K) / (cap_multiplier - K)).
+  # The bound can only ever LOWER a resolved p50 (recall-positive); it is
+  # additionally kept below the p99 cap via min_spread_ratio so a capped
+  # pair never collapses to a degenerate spread. Raise K only with a test
+  # proving the worst-case poisoned drain still clears the escape floor.
+  per_script_p50_cap_spread_fraction: 0.25
+  # Drift guard on baseline recomputes. Direction-aware: only moves that
+  # DE-SENSITISE detection are held (p99 widening, p50 rising); a narrowing
+  # p99 or falling p50 makes a plain-normalise axis MORE sensitive and
+  # applies (holding narrowing made a poisoned first baseline
+  # self-protecting: every honest recompute that shrank it back was itself
+  # a >threshold change). Exception: features with at least one
+  # normalise_inverted() consumer (ada_amount, value_cbor_bytes; see
+  # INVERTED_CONSUMER_FEATURES in baselines.py) hold BOTH directions,
+  # because dumping low-ADA / small-CBOR outputs at a victim script drags
+  # their percentiles DOWN and zeroes the inverted dust/value axes.
+  # Held candidates are logged to baseline_drift_events for analyst review;
+  # recall-safe drifts are applied but still logged. Poisoning a per-script
+  # baseline now requires moving it slowly under the threshold, leaving a
+  # multi-day trail, instead of one wide-distribution dump.
+  drift:
+    enabled: true
+    p99_threshold: 0.50
+    # p50 drift hold. normalise() subtracts p50 first, so RAISING the
+    # median is the second poisoning vector (values below the learned
+    # median score 0); same relative scale as p99_threshold.
+    p50_threshold: 0.50
+  # Baseline computation windows (chain-time days). Single source of truth:
+  # baselines.py windows every percentile query on these, and
+  # clickhouse_schema.py warns when a CH_RETENTION_DAYS_* knob is shorter
+  # than global_days (truncated baseline population, silently dropped JOIN
+  # rows). global covers slow-moving network-wide percentiles; per_script
+  # tracks contract evolution faster and bounds the poisoning window an
+  # attacker has to pre-train inside.
+  windows:
+    global_days: 180
+    per_script_days: 90
 
 scorers:
 
@@ -22,6 +115,18 @@ scorers:
       exunits_inv: 0.28    # exunits_per_script_input, inverted
       inputs: 0.16         # n_inputs_same_script
       recurrence: 0.14     # sender_recurrence
+    # Headroom multiplier applied to the upper anchor of the VALUE-extraction
+    # axis (net_value / n_assets) when, and only when, a PER-SCRIPT baseline is
+    # used. The extraction features are discrete and low-cardinality, so a
+    # per-script p99 often sits ~1 above p50 (e.g. n_assets p50=2, p99=3);
+    # normalise() then saturates on the contract's COMMON upper-normal value
+    # (a 3-asset spend), flagging routine activity. Widening the saturation
+    # point to p50 + (p99-p50)*headroom means only extraction well above the
+    # contract's own normal range scores, while rare/novel scripts on the
+    # conservative bootstrap anchor are unaffected (preserving CTF-01-class
+    # recall). Tune against the per-script extraction distribution; raise to be
+    # more permissive on established contracts, lower to alert sooner.
+    per_script_extraction_headroom: 3.0
     bootstrap_anchors:
       net_value_out_of_script:  { p50: 5_000_000,   p99: 500_000_000 }
       # Distinct native-asset (policy, name) pairs net-leaving the script.
@@ -103,14 +208,81 @@ scorers:
       require_uniform_redeemer: true      # all spend redeemer payloads identical
       require_no_script_return: true      # no output back to the same payment cred
       min_inputs: 10                      # only kick in above this input count
+    # Extraction-magnitude escape hatch on the two benign-shape suppressions
+    # (uniform sweep, value-returned state continuation). Both shapes are
+    # attacker-reachable: returning 1 lovelace to the script forces the
+    # state-continuation suppression, and a >= min_inputs identical-redeemer
+    # full drain matches the sweep fingerprint exactly. When the UN-WIDENED
+    # extraction floor signal (s_extraction_floor, computed against the
+    # RESOLVED baselines after the p99 cap and p50 bound, without the
+    # per-script headroom widening, so the headroom cannot weaken it)
+    # exceeds extraction_floor_min, the shape is no longer confidently
+    # benign: the finding is kept and banded Moderate (floored AND capped)
+    # instead of silenced to no-finding. Boundary analysis (do not raise
+    # without re-running the attack-must-fire tests): the benign maximum
+    # observed is a 12-input owner sweep at ~0.053 on the lovelace axis
+    # (state machines ~0, small sweeps ~0.002). Attack minima: a single-NFT
+    # drain on the n_assets bootstrap anchor (p50=0, p99=2) normalises to
+    # ~0.49999975, NOT 0.5: normalise() adds EPSILON to the denominator,
+    # so the old 0.5 threshold silenced it. The worst capped-poisoned
+    # per-script baseline resolves to (p50 = 0.5 from
+    # per_script_p50_cap_spread_fraction, p99 = 10 from the 5x p99 cap), so
+    # a 2-NFT drain normalises to (2 - 0.5) / (10 - 0.5) ~= 0.158. 0.10
+    # sits ~2x above the worst benign and ~1.6x below the worst
+    # capped-poisoned attack minimum; the two knobs above are calibrated
+    # together (see the baselines block derivation). Compared with >=,
+    # not >: an at-threshold extraction must fire (recall-first). A
+    # Moderate false positive on a large owner-sweep is strictly better
+    # than a silenced real drain.
+    suppression_escape:
+      enabled: true
+      extraction_floor_min: 0.10
 
   # ------------------------------------------------------------------
   large_datum:
-    # Gate: only score script UTxOs whose datum exceeds this byte floor.
-    # Below this, the output is a normal Plutus state-carrier, not a bloat
-    # attack candidate. Roughly the p50 of the bootstrap distribution.
+    # Gate: a script datum is a bloat-DoS candidate only when it is BOTH large
+    # (>= min_datum_bytes) AND low-information (Shannon entropy of its bytes
+    # <= bloat_entropy_max bits/byte). Absolute size alone cannot separate a
+    # real attack from benign state: an observed CTF datum-bloat attack carries
+    # a 7.3 KB datum, overlapping a benign protocol contract's ~6.9 KB datum.
+    # The discriminator is content entropy: a bloat attack pads with repetitive
+    # bytes (observed ~0.3-1.5 bits/byte) to inflate size cheaply, while a
+    # legitimate large datum holds structured state (~7 bits/byte). The 4.0
+    # threshold sits in the wide empty gap between the two populations.
+    # Limitation: random high-entropy padding would evade this; per-script
+    # size baselines / recurrence are the complementary defence (deferred).
     gate:
       min_datum_bytes: 6000
+      bloat_entropy_max: 4.0
+      # Structural bloat trigger, OR-ed with the entropy gate. A datum-bloat
+      # attack concentrates its bytes in one oversized CBOR leaf (a giant
+      # ByteArray): largest-leaf / total-datum-bytes near 1.0. Legitimate large
+      # PlutusData spreads bytes across many small nested leaves (observed
+      # ~0.005). Unlike entropy this is structural, so it catches a single leaf
+      # padded with RANDOM (high-entropy) bytes, the evasion the entropy gate
+      # misses. Observed gap is wide (attack 0.96 vs legit 0.005); 0.5 sits
+      # safely between. Does NOT separate a flat list of many distinct
+      # high-entropy elements from a legitimate registry; that needs provenance.
+      leaf_concentration_max: 0.5
+      # Absolute-size backstop. A datum at this fraction of
+      # protocol_limits.max_tx_size_bytes (0.75 * 16384 = 12288 bytes) is
+      # flagged unconditionally, IGNORING entropy: once the datum plus a minimal
+      # consuming tx's inputs/outputs/redeemers/witnesses approaches the 16384
+      # tx-size ceiling, the UTxO cannot be spent regardless of what the padding
+      # bytes are. This catches a high-entropy (random-padded) bloat attack that
+      # would otherwise evade the entropy gate. Sits above the observed
+      # legitimate maximum (benign per-script p99 ~7.4 KB) with margin. Lower it
+      # to catch more high-entropy bloat, at the cost of false positives on
+      # large legitimate datums. Mid-range (6-12 KB) high-entropy datums that
+      # overlap legitimate state remain a known gap (needs recurrence/semantics).
+      size_backstop_fraction: 0.75
+      # Observability flag for datumHash-only outputs at script addresses.
+      # The referenced datum cannot be sized without an indexer, so a
+      # bloat-by-hash attack is invisible to the byte gates above. When on,
+      # the scorer engages and records datum_hash_only_count in sub_scores
+      # plus the addresses in evidence; the result stays a no-finding (-1)
+      # and never alerts. Kill switch only.
+      flag_datum_hash_only: true
     # Observability-only engagement threshold for the multi-output
     # datum-bloat shape (an attacker splits the bloat payload across N
     # script-address outputs of the same contract, each individually
@@ -123,10 +295,14 @@ scorers:
     # meaningful (sum of 2x 3KB doesn't engage; 4x 3KB does).
     aggregate_engagement_min: 12000
     weights:
+      # The entropy gate (above) is what removes the false positives, so the
+      # score axes can keep their original shape: a confirmed bloat datum is
+      # both large (datum_bytes) and occupies most of the UTxO (datum_ratio).
+      # Both saturate for a genuine padding attack, driving it to Critical.
       datum_bytes: 0.50
       datum_ratio: 0.35
       value_cbor_inv: 0.05
-      recurrence: 0.10
+      recurrence: 0.10      # stubbed to 0 in code (entity clustering deferred)
     fixed_anchors:
       datum_ratio: { p50: 0.70, p99: 0.97 }
     bootstrap_anchors:
@@ -143,6 +319,17 @@ scorers:
       # outputs carry 0-1 assets) saturate the assets axis on any NFT deposit.
       # Set to 2 to require a real bundle. Raise if false positives persist.
       min_token_count: 2
+    # Engagement discriminator. A bundle only enters scoring when it is a
+    # plausible value-bloat DoS: either it carries >= dos_asset_min distinct
+    # (policy, name) pairs, OR its serialized Value CBOR reaches
+    # dos_value_cbor_fraction of protocol_limits.max_value_size_bytes (5000).
+    # The byte branch is what makes the gate robust to the long-asset-name
+    # evasion (few pairs, long names => high CBOR). Normal protocol multi-asset
+    # UTxOs (2-6 pairs) sit at <=0.5 KB of Value CBOR and well under both
+    # thresholds, so they produce no finding at all (not even Low). At 0.20 the
+    # byte floor is 1000 bytes: observed benign bundles on preprod top out at
+    # ~0.5 KB, genuine high-pair DoS at ~1.9-2.5 KB.
+    dos_value_cbor_fraction: 0.20
     weights:
       bytes: 0.35
       assets: 0.35
@@ -240,6 +427,16 @@ scorers:
       value_cbor_bytes:  { p50: 100,       p99: 1500 }
       ada_amount:        { p50: 1_200_000, p99: 2_000_000 }
     reason_threshold: 0.5
+    # Digits is the only reliable signal for this class (see weights). When the
+    # quantity-digits sub-score is at or below this floor the quantity is at or
+    # below the median normal supply (p50 = 13 digits, ~10^13), i.e. not a
+    # large-quantity outlier; the score is then capped at the top of the
+    # Informational band so the
+    # secondary axes (inverted-ADA, value-CBOR) cannot alone push a normal
+    # min-ADA token UTxO into Moderate. A genuine overflow toward the 19-digit
+    # int64 ceiling has a high digits sub-score and is unaffected. Set just
+    # above 0 so any above-median supply (>= 14 digits) still scores normally.
+    min_digits_subscore: 0.05
 
   # ------------------------------------------------------------------
   front_running:
@@ -285,11 +482,23 @@ scorers:
       swap_profit:         { p50: 0,   p99: 5_000_000 }
       attacker_recurrence: { p50: 0,   p99: 5 }
     window_slots: 5              # gate: structural triplet must fit within N slots
+    # Cap on neighbour rows fetched around a victim tx during structural
+    # detection. Bounds the per-tx query cost; a window busier than this is
+    # batcher traffic, not a 3-leg sandwich.
+    neighbor_limit: 20
     link_scores:
       linked: 1.0                # attacker_linked flag present
       unlinked: 0.2              # triplet present but no linkage evidence
-    min_profit_lovelace: 200_000 # score capped at high_band_cap below this
-    high_band_cap: 79.0
+    # Below this attacker net-ADA profit the candidate is suppressed entirely
+    # (score -1, no finding), not merely band-capped: a sandwich that extracts
+    # no value is not an attack. Net profit is computed in dex.py from the
+    # attacker wallet's input/output ADA across the front and back legs. The
+    # detector also requires the attacker cluster to be a non-script (wallet)
+    # address, which excludes pool/batcher self-interaction (the dominant
+    # structural false positive). Blind spot: a sandwich whose profit is in a
+    # non-ADA token nets ~0 ADA and is missed; price-impact confirmation needs
+    # DEX datum parsing and is out of scope.
+    min_profit_lovelace: 200_000
     reason_thresholds:
       link: 0.8
       rate: 0.5
@@ -311,7 +520,12 @@ scorers:
     bootstrap_anchors:
       attacker_recurrence: { p50: 0, p99: 5 }
     cycle:
-      min_length: 2                     # gate: minimum cycle hop count
+      # Minimum cycle hop count to alert. A 2-hop "cycle" is a round-trip
+      # (A -> script -> A): a deposit/withdraw or swap-and-change, not circular
+      # layering. Real laundering moves value through >= 3 distinct hops to
+      # obscure it, so 2-hop round-trips (the dominant false positive) are not
+      # alerted. The detector still finds them; the gate filters them out.
+      min_length: 3                     # gate: minimum cycle hop count
       max_length: 6                     # gate: maximum cycle hop count
       fee_tolerance_multiplier: 4.0     # max allowed net_loss / expected_fee at gate
       fee_tolerance_strict: 2.0         # above which score is capped at moderate_cap
@@ -371,6 +585,27 @@ scorers:
       name: 0.3
       unicode: 0.3
       recipients: 0.5
+    # Impersonating a high-value asset is more dangerous than cloning a meme
+    # coin: a fake stablecoin redirects DeFi collateral that users trust as
+    # worth $1, so an exact-name clone deserves more weight even when its
+    # distribution is still small (the attacker may be staging). The plain
+    # name axis treats every impersonation equally; this amplifies the
+    # identity signal for the curated token names below. multiplier >= 1.0 and
+    # the identity score is capped at 1.0, so it can only raise a score, never
+    # lower a detection. names must match the registry token names in
+    # backend/app/analysis/external.py (currently the stablecoins iUSD/DJED and
+    # the Djed reserve coin SHEN); extend as the registry gains USDM/USDA/USDC.
+    critical_assets:
+      multiplier: 1.8
+      names: ["iUSD", "DJED", "SHEN"]
+    # ASCII visual lookalikes (spec homoglyph table: O/0, I/l/1). When on,
+    # the similarity comparison folds both sides through the lookalike
+    # groups so a digit-for-letter forgery ("1NDY") matches the legitimate
+    # name at full similarity, and the unicode-suspicion axis gets the
+    # homoglyph bump only when the fold STRICTLY increases similarity to
+    # the matched name (a name that merely contains digits gains nothing,
+    # so legitimately numeric names like MIN100 are unaffected).
+    ascii_homoglyphs_enabled: true
 
   # ------------------------------------------------------------------
   phishing:
@@ -397,8 +632,8 @@ scorers:
       domain_age_inv: { p50: 0.00273972602739726, p99: 0.14285714285714285 } # 1/365, 1/7
       brand_sim:      { p50: 0.0,     p99: 0.85 }
       # Saturate at 2 Tier-2 matches (each worth urgency_increment=0.15,
-      # so 2 matches = 0.30 raw). Prior anchor p99=0.60 required 4 matches
-      # which is rare — most phishing txs carry 2-3 patterns.
+      # so 2 matches = 0.30 raw). Prior anchor p99=0.60 required 4 matches,
+      # which is rare: most phishing txs carry 2-3 patterns.
       social_score:   { p50: 0.0,     p99: 0.30 }
       # `targeting` anchors will be wired up when the
       # recipient-to-protocol interaction graph lands (§5.3 is deferred).
@@ -406,7 +641,7 @@ scorers:
       recipient_count: { p50: 1, p99: 50 }
     similarity_suspicious_range:
       lo: 0.5                # domain_similarity below this is noise
-      hi: 1.0                # above this is exact match (own brand) — excluded
+      hi: 1.0                # above this is exact match (own brand), excluded
     social_engineering:
       urgency_increment: 0.15
       urgency_cap: 0.6
@@ -428,3 +663,17 @@ scorers:
       recipients: 0.5
     critical_threshold: 0.60         # content_score above this → severity=Critical
     metadata_labels: ["674", "721"]  # CIP-20 message label, CIP-25 NFT metadata
+    # Carrier 3: native-asset names. The dominant in-the-wild Cardano scam
+    # delivers the URL in the token name itself (a token literally named
+    # "claim-ada.xyz"), mass-airdropped to wallet addresses with no metadata
+    # and no datum, so it never enters the other two carriers. Decoded
+    # (hex to UTF-8) names from the mint map and output value bundles go
+    # through the same URL extraction + PSL validation as metadata text, and
+    # feed the social-engineering scan. Names that fail UTF-8 decoding fall
+    # back to raw hex, which has no dot and can never match. Kill switch
+    # only; thresholds are shared with the other carriers.
+    asset_name_carrier:
+      enabled: true
+    # Minimum length for a decoded datum text span to be kept for URL and
+    # social-engineering scanning; shorter spans are CBOR structural noise.
+    min_decoded_string_len: 4

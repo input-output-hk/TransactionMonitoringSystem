@@ -219,3 +219,116 @@ class TestBareDomainAndDatum:
     def test_prose_without_urls_is_not_phishing(self, scorer):
         meta = {"674": {"msg": ["Thanks for the gift. See you soon."]}}
         assert scorer.gate(_features(metadata=meta)) is False
+
+
+class TestAssetNameCarrier:
+    """Carrier 3: phishing URLs delivered in the native-asset name itself.
+
+    The canonical in-the-wild Cardano scam mints a token literally named
+    after the phishing domain and mass-airdrops it to wallet addresses with
+    NO metadata and NO datum, so the metadata and datum carriers never see
+    it. These are the attack-must-fire cases for that shape, plus the
+    benign-name guards.
+    """
+
+    _POLICY = "f" * 56
+
+    def _airdrop_features(self, token_name, recipients=40, with_mint=True):
+        hex_name = token_name.encode("utf-8").hex()
+        outputs = [
+            {
+                "address": f"addr_test1qq_victim_{i:03d}",
+                "value": {
+                    "ada": {"lovelace": 1_200_000},
+                    self._POLICY: {hex_name: 1},
+                },
+            }
+            for i in range(recipients)
+        ]
+        raw = {"outputs": outputs}
+        if with_mint:
+            raw["mint"] = {self._POLICY: {hex_name: recipients}}
+        return _features(metadata=None, raw_data=raw, output_count=recipients)
+
+    def test_url_named_airdrop_gates_with_no_metadata(self, scorer):
+        feats = self._airdrop_features("claim-ada-reward.xyz")
+        assert scorer.gate(feats) is True
+
+    def test_url_named_airdrop_scores_and_flags(self, scorer):
+        result = scorer.score(self._airdrop_features("claim-ada-reward.xyz"))
+        assert result.score > 0
+        assert "url_in_asset_name" in result.reasons
+        assert "claim-ada-reward.xyz" in result.evidence["asset_name_urls"]
+        # 40 distinct recipients against the {p50: 1, p99: 50} bootstrap
+        # anchor: the mass-distribution axis must be engaged.
+        assert result.sub_scores["recipients"] > 0.5
+
+    def test_outputs_only_redistribution_gates(self, scorer):
+        # Re-distribution of a previously minted scam token: no mint map,
+        # the name only appears in the output value bundles.
+        feats = self._airdrop_features("cardano-drop.io", with_mint=False)
+        assert scorer.gate(feats) is True
+
+    def test_mint_only_gates(self, scorer):
+        hex_name = "visit-ada.top".encode("utf-8").hex()
+        raw = {"mint": {self._POLICY: {hex_name: 5}}}
+        assert scorer.gate(_features(metadata=None, raw_data=raw)) is True
+
+    def test_v5_value_shape_gates(self, scorer):
+        # Ogmios v5 puts lovelace at the top level of the value dict.
+        hex_name = "claim-ada-reward.xyz".encode("utf-8").hex()
+        raw = {
+            "outputs": [
+                {
+                    "address": "addr_test1qq_victim",
+                    "value": {"lovelace": 1_200_000, self._POLICY: {hex_name: 1}},
+                }
+            ]
+        }
+        assert scorer.gate(_features(metadata=None, raw_data=raw)) is True
+
+    def test_plain_token_name_does_not_gate(self, scorer):
+        assert scorer.gate(self._airdrop_features("SUNDAE")) is False
+
+    def test_version_like_name_does_not_gate(self, scorer):
+        # "token.v1.2" matches the bare-domain regex shape but "2" is not a
+        # public suffix; the PSL filter must reject it.
+        assert scorer.gate(self._airdrop_features("token.v1.2")) is False
+
+    def test_non_utf8_hex_name_does_not_gate(self, scorer):
+        raw = {
+            "outputs": [
+                {
+                    "address": "addr_test1qq_victim",
+                    "value": {self._POLICY: {"ff00ff00": 1}},
+                }
+            ]
+        }
+        assert scorer.gate(_features(metadata=None, raw_data=raw)) is False
+
+
+class TestDefangedUrls:
+    """Defanged URLs (bracketed dots, Unicode dot lookalikes, hxxp schemes)
+    must be re-fanged before extraction; otherwise a trivially obfuscated
+    payload evades the gate entirely."""
+
+    def test_bracket_dot_defang_detected(self, scorer):
+        meta = {"674": {"msg": ["claim rewards at cardano-drop[.]io/claim"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_dot_word_defang_detected(self, scorer):
+        meta = {"674": {"msg": ["visit claim-ada-reward[dot]xyz now"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_ideographic_dot_detected(self, scorer):
+        # U+3002 IDEOGRAPHIC FULL STOP standing in for the dot.
+        meta = {"674": {"msg": ["visit cardano-drop。io for rewards"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_hxxp_scheme_detected(self, scorer):
+        meta = {"674": {"msg": ["hxxps://evil-claim.example/wallet"]}}
+        assert scorer.gate(_features(metadata=meta)) is True
+
+    def test_plain_text_still_not_gated(self, scorer):
+        meta = {"674": {"msg": ["thanks for the great meetup[no urls here]"]}}
+        assert scorer.gate(_features(metadata=meta)) is False

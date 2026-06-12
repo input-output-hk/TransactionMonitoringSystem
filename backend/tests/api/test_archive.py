@@ -38,9 +38,26 @@ def store() -> FakeArchiveStore:
 
 @pytest.fixture
 def client(monkeypatch, store):
-    """TestClient with archive_queries.* patched against an in-memory store."""
+    """TestClient with archive_queries.* patched against an in-memory store.
+
+    The audit persistence is faked too: suppression endpoints are fail-closed
+    on the audit write, so without a working insert_audit_log they would all
+    503 (which test_audit_fail_closed.py covers explicitly).
+    """
     from app.main import app
-    from app.db import archive_queries
+    from app.db import archive_queries, postgres
+
+    audit_rows: List[Dict[str, Any]] = []
+
+    async def fake_insert_audit(**kwargs):
+        audit_rows.append(kwargs)
+        return len(audit_rows)
+
+    async def fake_update_audit(audit_id, outcome):
+        return None
+
+    monkeypatch.setattr(postgres, "insert_audit_log", fake_insert_audit)
+    monkeypatch.setattr(postgres, "update_audit_log_details", fake_update_audit)
 
     async def fake_exists(network, tx_hash):
         return (network, tx_hash) in store.rows
@@ -71,6 +88,18 @@ def client(monkeypatch, store):
         ]
         items.sort(key=lambda r: r["archived_at"], reverse=True)
         return items[offset : offset + limit]
+
+    async def fake_count(network, date_from=None, date_to=None):
+        # Mirrors fake_list's filter; without this patch the list endpoint's
+        # archive_count_async call reaches the real ClickHouse driver and the
+        # tests stop being hermetic.
+        return sum(
+            1
+            for key, row in store.rows.items()
+            if key[0] == network
+            and (date_from is None or row["archived_at"] >= date_from)
+            and (date_to is None or row["archived_at"] <= date_to)
+        )
 
     async def fake_get(network, tx_hash):
         return store.rows.get((network, tx_hash))
@@ -114,6 +143,7 @@ def client(monkeypatch, store):
     monkeypatch.setattr(archive_queries, "archive_insert_async", fake_insert)
     monkeypatch.setattr(archive_queries, "archive_delete_async", fake_delete)
     monkeypatch.setattr(archive_queries, "archive_list_async", fake_list)
+    monkeypatch.setattr(archive_queries, "archive_count_async", fake_count)
     monkeypatch.setattr(archive_queries, "archive_get_async", fake_get)
     monkeypatch.setattr(archive_queries, "archive_bulk_insert_async", fake_bulk_insert)
     monkeypatch.setattr(archive_queries, "archive_export_rows_async", fake_export)
@@ -342,7 +372,7 @@ def test_archive_accepts_valid_api_key(client, monkeypatch):
 
 def test_list_filters_by_date_range(client, auth_open, store):
     """The from/to query params must constrain archived_at on the list."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
     older = datetime(2026, 1, 1)
     newer = datetime(2026, 4, 1)
     store.rows[("preprod", VALID_HASH)] = {
@@ -478,17 +508,64 @@ def test_class_scores_list_sql_includes_archived_when_requested():
     assert "archived_alerts" not in captured["queries"][0]
 
 
+def test_count_class_scores_sql_excludes_archived_by_default():
+    """count_class_scores shares the list query's WHERE builder, so it must
+    apply the same archive anti-join — otherwise pagination totals would count
+    archived rows the list itself drops."""
+    from unittest.mock import patch
+    from app.db import clickhouse
+
+    captured = {"queries": []}
+
+    class FakeClient:
+        def execute(self, query, params=None):
+            captured["queries"].append(query)
+            return [(0,)]
+
+    with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
+        clickhouse.count_class_scores(
+            network="preprod", risk_band=None, attack_class=None, min_score=0.0,
+        )
+
+    count_sql = captured["queries"][0]
+    assert "archived_alerts" in count_sql
+    assert "NOT IN" in count_sql
+
+
+def test_count_class_scores_sql_includes_archived_when_requested():
+    from unittest.mock import patch
+    from app.db import clickhouse
+
+    captured = {"queries": []}
+
+    class FakeClient:
+        def execute(self, query, params=None):
+            captured["queries"].append(query)
+            return [(0,)]
+
+    with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
+        clickhouse.count_class_scores(
+            network="preprod", risk_band=None, attack_class=None, min_score=0.0,
+            include_archived=True,
+        )
+
+    assert "archived_alerts" not in captured["queries"][0]
+
+
 def test_class_scores_stats_sql_excludes_archived_by_default():
     """Same contract for /api/analysis/stats: band counts must not include
     archived transactions."""
     from unittest.mock import patch
     from app.db import clickhouse
 
-    captured = {}
+    captured = {"queries": []}
 
     class FakeClient:
         def execute(self, query, params=None):
-            captured["query"] = query
+            # Capture every query: get_class_scores_stats issues the stats query
+            # first, then get_pending_count issues its own. Asserting on the
+            # stats query (the first) avoids checking the unrelated pending one.
+            captured["queries"].append(query)
             # Return a single row matching the schema the parser expects.
             zero_per_class = [0, 0.0, 0.0] * 9
             return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
@@ -496,23 +573,26 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod")
 
-    assert "archived_alerts" in captured["query"]
-    assert "NOT IN" in captured["query"]
+    stats_query = captured["queries"][0]
+    assert "archived_alerts" in stats_query
+    assert "NOT IN" in stats_query
 
 
 def test_class_scores_stats_sql_skips_filter_when_include_archived():
     from unittest.mock import patch
     from app.db import clickhouse
 
-    captured = {}
+    captured = {"queries": []}
 
     class FakeClient:
         def execute(self, query, params=None):
-            captured["query"] = query
+            captured["queries"].append(query)
             zero_per_class = [0, 0.0, 0.0] * 9
             return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
 
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod", include_archived=True)
 
-    assert "archived_alerts" not in captured["query"]
+    # The stats query (first) must omit the archive clause; the later
+    # get_pending_count query is unrelated.
+    assert "archived_alerts" not in captured["queries"][0]

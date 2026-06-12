@@ -24,6 +24,7 @@ from app.analysis.normalise import (
 )
 from app.analysis.scorer_config import (
     get as _get_cfg,
+    fraction_of_limit as _fraction_of_limit,
     load_network_map as _load_network_map,
     resolved_or_bootstrap as _resolve,
 )
@@ -38,6 +39,15 @@ _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MIN_TOKEN_COUNT = int(_CFG["gate"]["min_token_count"])
 _DOS_ASSET_MIN = int(_CFG["dos_asset_min"])
+
+# Serialized-Value CBOR floor that, on its own, qualifies a bundle as a
+# plausible value-bloat DoS regardless of pair count. Derived from the ledger's
+# per-output Value cap so the threshold tracks the protocol limit rather than a
+# bare byte count, and so a few long-named assets (high CBOR, low pair count)
+# cannot evade the pair-count branch of the gate.
+_DOS_VALUE_CBOR_MIN = _fraction_of_limit(
+    _CFG["dos_value_cbor_fraction"], "max_value_size_bytes"
+)
 
 
 def _max_assets_per_policy(value: Dict[str, Any]) -> int:
@@ -103,11 +113,15 @@ class TokenDustScorer(BaseScorer):
     name = "token_dust"
 
     def gate(self, features: Dict[str, Any]) -> bool:
-        """At least one script output must carry >= min_token_count live assets.
+        """Engage only on a plausible value-bloat DoS shape at a script output.
 
-        A single-NFT UTxO cannot bloat the Value field's CBOR enough to be a
-        dust-of-many-tokens attack, so we require a small bundle to enter
-        scoring. Threshold lives in ``detection.yaml`` (``gate.min_token_count``).
+        A script output must carry at least ``min_token_count`` live assets
+        (a single-NFT UTxO cannot bloat the Value field) AND be a plausible
+        DoS: either ``>= dos_asset_min`` distinct (policy, name) pairs, or a
+        serialized Value CBOR footprint reaching ``dos_value_cbor_min``. Normal
+        protocol multi-asset UTxOs (2-6 small-named pairs) clear neither and
+        produce no finding at all, rather than a band-capped Moderate alert.
+        Thresholds live in ``detection.yaml``.
         """
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
@@ -121,7 +135,11 @@ class TokenDustScorer(BaseScorer):
             if not isinstance(value, dict):
                 continue
             _, token_count = feat_mod.count_assets(value)
-            if token_count >= _MIN_TOKEN_COUNT:
+            if token_count < _MIN_TOKEN_COUNT:
+                continue
+            if token_count >= _DOS_ASSET_MIN:
+                return True
+            if feat_mod._estimate_value_cbor_bytes(value) >= _DOS_VALUE_CBOR_MIN:
                 return True
         return False
 
@@ -144,6 +162,12 @@ class TokenDustScorer(BaseScorer):
             if not isinstance(value, dict):
                 continue
             policy_count, token_count = feat_mod.count_assets(value)
+            # gate() already decided the tx is a plausible DoS (some output
+            # crosses the pair-count or value-CBOR threshold). Here we score
+            # every bundled output >= min_token_count and take the max across
+            # them, so a benign secondary output cannot exceed the qualifying
+            # one; the dos_asset_min cap below still holds sub-threshold bundles
+            # to Moderate.
             if token_count < _MIN_TOKEN_COUNT:
                 continue
             if _is_allowlisted_utxo(addr, value, network):

@@ -105,6 +105,36 @@ class TestScore:
         result = scorer.score(_features(mint=mint))
         assert result.score == 0.0
 
+    def test_critical_asset_clone_scores_higher_than_standard(self, scorer):
+        """An exact-name clone of a critical stablecoin (iUSD) must score
+        strictly higher than an identical clone of a non-critical token
+        (HOSKY): same fake policy, same quantity, same recipients, so the only
+        difference is the criticality amplification on the identity axis. This
+        pins the recall-positive escalation. iUSD/HOSKY are both in the mainnet
+        registry; HOSKY is intentionally absent from fake_token.critical_assets.
+        """
+        outputs = [{"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(5)]
+        r_critical = scorer.score(_features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=outputs))
+        r_standard = scorer.score(_features(mint={FAKE_POLICY: {"HOSKY": 10_000}}, outputs=outputs))
+
+        assert r_critical.evidence["matched_token_criticality"] == "critical"
+        assert r_standard.evidence["matched_token_criticality"] == "standard"
+        # Identity is amplified for the critical asset, lifting the final score.
+        assert r_critical.sub_scores["identity_composite"] > r_standard.sub_scores["identity_composite"]
+        assert r_critical.score > r_standard.score
+
+    def test_criticality_never_lowers_score(self, scorer):
+        """The amplification is monotonic (multiplier >= 1.0, capped at 1.0):
+        a critical-asset clone is never scored below the same clone without the
+        bonus. Compared against the multiplier=1.0 (no-op) baseline."""
+        from unittest.mock import patch
+        outputs = [{"address": "addr1", "value": {"lovelace": 1_500_000}}]
+        feats = _features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=outputs)
+        with_bonus = scorer.score(feats).score
+        with patch("app.analysis.scorers.fake_token._CRITICALITY_MULTIPLIER", 1.0):
+            no_bonus = scorer.score(feats).score
+        assert with_bonus >= no_bonus
+
 
 class TestConfusablesFold:
     """Confusables fold for cross-script visual homoglyphs.
@@ -147,3 +177,56 @@ class TestConfusablesFold:
         # Pure ASCII case-spoof has no confusables, no zero-width, no
         # mixed scripts. Score must be 0.
         assert _compute_unicode_suspicion("nTX") == 0.0
+
+
+class TestAsciiHomoglyphs:
+    """ASCII visual lookalikes (spec table: O/0, I/l/1). The similarity fold
+    must catch digit-for-letter forgeries (recall), while the fold-gain test
+    keeps legitimately numeric names off the suspicion axis (precision)."""
+
+    def _outputs(self, n=5):
+        return [
+            {"address": f"addr{i}", "value": {"lovelace": 1_500_000}}
+            for i in range(n)
+        ]
+
+    def test_zero_for_O_forgery_detected(self, scorer):
+        # "H0SKY" (digit zero) impersonating HOSKY under a wrong policy.
+        mint = {FAKE_POLICY: {"H0SKY": 1000}}
+        feats = _features(mint=mint, outputs=self._outputs())
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        # The fold makes the match exact, and the fold-gain test adds the
+        # homoglyph bump to the suspicion axis.
+        assert result.evidence["matched_similarity"] == 1.0
+        assert result.sub_scores["unicode_suspicion"] > 0.0
+        kinds = {c["kind"] for c in result.evidence["unicode_confusables"]}
+        assert "ascii_homoglyph" in kinds
+
+    def test_one_for_I_forgery_detected(self, scorer):
+        # "1NDY" (digit one) impersonating INDY.
+        mint = {FAKE_POLICY: {"1NDY": 1000}}
+        feats = _features(mint=mint, outputs=self._outputs())
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        assert result.evidence["matched_token"] == "INDY"
+        assert result.evidence["matched_similarity"] == 1.0
+        assert result.sub_scores["unicode_suspicion"] > 0.0
+
+    def test_numeric_suffix_gets_no_suspicion_bump(self, scorer):
+        # "HOSKY2" is name-similar (gates on plain Levenshtein) but its digit
+        # is appended, not substituted: the ASCII fold gains nothing, so the
+        # suspicion axis must stay at zero.
+        mint = {FAKE_POLICY: {"HOSKY2": 1000}}
+        feats = _features(mint=mint, outputs=self._outputs())
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        assert result.sub_scores["unicode_suspicion"] == 0.0
+        kinds = {c["kind"] for c in result.evidence["unicode_confusables"]}
+        assert "ascii_homoglyph" not in kinds
+
+    def test_unrelated_numeric_name_not_gated(self, scorer):
+        # A numeric token name far from every registry entry must not gate
+        # just because the fold maps its letters onto digits.
+        mint = {FAKE_POLICY: {"X100PULL": 1000}}
+        assert scorer.gate(_features(mint=mint)) is False

@@ -11,9 +11,23 @@ router = APIRouter()
 @router.get("/")
 async def root():
     """Serve the real-time transaction monitoring UI"""
-    network = settings.CARDANO_NETWORK
+    return HTMLResponse(content=_build_page(settings.CARDANO_NETWORK))
 
-    html_content = f"""
+
+def _build_page(network: str) -> str:
+    """Assemble the fallback dashboard page from its sections.
+
+    The sections concatenate to output byte-identical to the previous
+    single-f-string template; every section MUST stay an f-string so the
+    {{ }} brace escaping for CSS/JS keeps its meaning.
+    """
+    closing = "    </body>\n    </html>\n    "
+    return _head(network) + _body(network) + _page_script() + closing
+
+
+def _head(network: str) -> str:
+    """Document head: page title and the full stylesheet."""
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -155,7 +169,7 @@ async def root():
             .risk-band.Critical {{ background: #ff1744; color: #fff; }}
             .risk-band.High {{ background: #ff6d00; color: #fff; }}
             .risk-band.Moderate {{ background: #ffab00; color: #000; }}
-            .risk-band.Low {{ background: #00c853; color: #000; }}
+            .risk-band.Informational {{ background: #00c853; color: #000; }}
             .attack-class {{ color: #ce93d8; font-size: 12px; font-weight: 600; }}
             .filter-label {{ color: #888; font-size: 11px; margin-right: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
             .band-swatch {{
@@ -190,7 +204,7 @@ async def root():
             .risk-row.Critical {{ border-left-color: #ff1744; }}
             .risk-row.High {{ border-left-color: #ff6d00; }}
             .risk-row.Moderate {{ border-left-color: #ffab00; }}
-            .risk-row.Low {{ border-left-color: #00c853; }}
+            .risk-row.Informational {{ border-left-color: #00c853; }}
 
             /* Filters */
             .filters {{
@@ -219,7 +233,7 @@ async def root():
             .score-bar-fill.Critical {{ background: #ff1744; }}
             .score-bar-fill.High {{ background: #ff6d00; }}
             .score-bar-fill.Moderate {{ background: #ffab00; }}
-            .score-bar-fill.Low {{ background: #00c853; }}
+            .score-bar-fill.Informational {{ background: #00c853; }}
 
             /* Scrollbar */
             ::-webkit-scrollbar {{ width: 6px; }}
@@ -227,7 +241,13 @@ async def root():
             ::-webkit-scrollbar-thumb {{ background: #2a2f4a; border-radius: 3px; }}
         </style>
     </head>
-    <body>
+"""
+
+
+def _body(network: str) -> str:
+    """Static page skeleton: header, status bar, and the three panels
+    (transactions, risk alerts, archive). Rows are rendered client-side."""
+    return f"""    <body>
         <div class="header">
             <h1>Cardano Transaction Monitoring System</h1>
             <div class="header-right">
@@ -255,7 +275,7 @@ async def root():
                         <span class="band-swatch" style="background:#ffab00"></span>Moderate and above
                     </button>
                     <button class="filter-btn band-btn" data-band="1">
-                        <span class="band-swatch" style="background:#00c853"></span>All (inc. Low)
+                        <span class="band-swatch" style="background:#00c853"></span>All (inc. Informational)
                     </button>
                     <span style="border-left:1px solid #3a3f5a;height:20px;margin:0 4px"></span>
                     <button class="filter-btn active" data-attack="">All classes</button>
@@ -300,9 +320,31 @@ async def root():
             </div>
         </div>
 
-        <script>
+"""
+
+
+def _page_script() -> str:
+    """The dashboard's JavaScript: WebSocket feed, render functions (all
+    API-derived values pass through esc(); see test_ui_template.py for the
+    interpolation guard), filters, and archive actions."""
+    return f"""        <script>
             const API_KEY = "";
             const headers = API_KEY ? {{"TMS-API-Key": API_KEY}} : {{}};
+
+            // HTML-escape for every server/chain-derived value rendered via
+            // innerHTML. Quotes included so plain attribute values (data-*
+            // sinks) cannot be broken out of; & first so entities are not
+            // double-escaped. NOTE: entity encoding only protects HTML text
+            // and attribute-value contexts. It does NOT make a JS-string
+            // sink (an inline onclick handler body) safe: the HTML parser
+            // entity-decodes the attribute before the JS engine parses it,
+            // so &#39;);evil()// decodes back into a string breakout. That
+            // is why this template uses NO inline event handlers: values
+            // ride data-* attributes and behavior is attached with
+            // addEventListener. Stored XSS via archive source_label was a
+            // review finding; never interpolate a raw field.
+            const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
+                c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
 
             // State
             let confirmedTxs = [];
@@ -319,6 +361,26 @@ async def root():
                     setTimeout(() => {{ btn.textContent = "Copy"; btn.classList.remove("copied"); }}, 1500);
                 }});
             }}
+
+            // Row-button behavior via event delegation (one listener for all
+            // three panels, surviving every innerHTML re-render). Values
+            // travel through data-* attributes, an HTML attribute-value sink
+            // where esc() is the correct encoder, and are read back from
+            // dataset. Inline onclick handlers are banned: their body is a
+            // JS-string sink that entity encoding cannot protect (the HTML
+            // parser decodes entities before the JS engine parses the
+            // handler body).
+            document.addEventListener("click", (e) => {{
+                const btn = e.target.closest(".copy-btn, .archive-btn");
+                if (!btn) return;
+                if (btn.classList.contains("copy-btn")) {{
+                    copyTx(btn, btn.dataset.tx);
+                }} else if (btn.classList.contains("restore")) {{
+                    restoreAlert(btn.dataset.tx, btn.dataset.network);
+                }} else {{
+                    archiveAlert(btn.dataset.tx, btn.dataset.network);
+                }}
+            }});
 
             // --- WebSocket ---
             const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -364,10 +426,10 @@ async def root():
                 }}
                 txsPanel.innerHTML = confirmedTxs.map(tx => `
                     <div class="tx-row">
-                        <span class="tx-hash">${{tx.txId.substring(0, 20)}}...${{tx.txId.substring(tx.txId.length - 10)}}</span><button class="copy-btn" onclick="copyTx(this,'${{tx.txId}}')">Copy</button>
+                        <span class="tx-hash">${{esc(tx.txId.substring(0, 20))}}...${{esc(tx.txId.substring(tx.txId.length - 10))}}</span><button class="copy-btn" data-tx="${{esc(tx.txId)}}">Copy</button>
                         <div class="tx-meta">
                             <span class="tx-status CONFIRMED">CONFIRMED</span>
-                            ${{tx.block.height ? `<span class="tx-fee">Block ${{tx.block.height}}</span>` : ''}}
+                            ${{tx.block.height ? `<span class="tx-fee">Block ${{esc(tx.block.height)}}</span>` : ''}}
                             <span class="tx-time">${{new Date(tx.observedAt).toLocaleTimeString()}}</span>
                         </div>
                     </div>
@@ -434,7 +496,7 @@ async def root():
                     .slice(0, 3);
                 if (top.length === 0) return "";
                 return top.map(([k, v]) =>
-                    `<span style="color:#aaa">${{SUB_SCORE_LABELS[k] || k}}</span> <span style="color:${{v > 0.7 ? '#ff6d00' : '#888'}}">${{(v * 100).toFixed(0)}}%</span>`
+                    `<span style="color:#aaa">${{SUB_SCORE_LABELS[k] || esc(k)}}</span> <span style="color:${{v > 0.7 ? '#ff6d00' : '#888'}}">${{(v * 100).toFixed(0)}}%</span>`
                 ).join(' &middot; ');
             }}
 
@@ -448,7 +510,7 @@ async def root():
                     if (s >= 80) return 'Critical';
                     if (s >= 60) return 'High';
                     if (s >= 31) return 'Moderate';
-                    return 'Low';
+                    return 'Informational';
                 }};
                 riskPanel.innerHTML = alerts.map(a => {{
                     const topClasses = Object.entries(a.scores)
@@ -456,7 +518,7 @@ async def root():
                         .sort((x, y) => y[1] - x[1])
                         .slice(0, 3);
                     const classHtml = topClasses.map(([cls, score]) =>
-                        `<span class="attack-class">${{CLASS_LABELS[cls] || cls}}</span>
+                        `<span class="attack-class">${{CLASS_LABELS[cls] || esc(cls)}}</span>
                          <span class="class-score risk-band ${{bandOf(score)}}">${{score.toFixed(1)}}</span>`
                     ).join(' &middot; ');
 
@@ -467,23 +529,23 @@ async def root():
                     const outs = a.output_count != null ? a.output_count : "-";
                     const when = a.analyzed_at ? new Date(a.analyzed_at).toLocaleString() : "-";
                     return `
-                        <div class="risk-row ${{a.risk_band}}">
+                        <div class="risk-row ${{esc(a.risk_band)}}">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn" onclick="archiveAlert('${{a.tx_hash}}','${{a.network}}')">Archive</button>
-                                    <span style="color:#888;font-size:11px">Fee: ${{fee}}</span>
-                                    <span style="color:#888;font-size:11px">Outputs: ${{outs}}</span>
-                                    <span style="color:#666;font-size:11px">${{when}}</span>
+                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" data-tx="${{esc(a.tx_hash)}}">Copy</button><button class="archive-btn" data-tx="${{esc(a.tx_hash)}}" data-network="${{esc(a.network)}}">Archive</button>
+                                    <span style="color:#888;font-size:11px">Fee: ${{esc(fee)}}</span>
+                                    <span style="color:#888;font-size:11px">Outputs: ${{esc(outs)}}</span>
+                                    <span style="color:#666;font-size:11px">${{esc(when)}}</span>
                                 </div>
                                 <div class="risk-sub">${{classHtml}}</div>
                                 ${{explain ? `<div class="risk-sub" style="margin-top:2px">${{explain}}</div>` : ''}}
                             </div>
                             <div class="risk-details">
                                 <div class="score-bar">
-                                    <div class="score-bar-fill ${{a.risk_band}}" style="width:${{a.max_score}}%"></div>
+                                    <div class="score-bar-fill ${{esc(a.risk_band)}}" style="width:${{esc(a.max_score)}}%"></div>
                                 </div>
                                 <span class="risk-score">${{a.max_score.toFixed(0)}}</span>
-                                <span class="risk-band ${{a.risk_band}}">${{a.risk_band}}</span>
+                                <span class="risk-band ${{esc(a.risk_band)}}">${{esc(a.risk_band)}}</span>
                             </div>
                         </div>
                     `;
@@ -603,16 +665,16 @@ async def root():
                     const wasClass = a.max_class || "-";
                     const wasBand = a.risk_band || "-";
                     const wasScore = a.max_score != null ? a.max_score.toFixed(0) : "-";
-                    const noteHtml = a.note ? `<div class="archive-note">"${{a.note.replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}})[c])}}"</div>` : '';
+                    const noteHtml = a.note ? `<div class="archive-note">"${{esc(a.note)}}"</div>` : '';
                     return `
                         <div class="risk-row" style="border-left-color:#4527a0">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{a.tx_hash.substring(0, 16)}}...${{a.tx_hash.substring(a.tx_hash.length - 8)}}</span><button class="copy-btn" onclick="copyTx(this,'${{a.tx_hash}}')">Copy</button><button class="archive-btn restore" onclick="restoreAlert('${{a.tx_hash}}','${{a.network}}')">Restore</button>
-                                    <span style="color:#888;font-size:11px">By: ${{a.archived_by || '-'}}</span>
-                                    <span style="color:#666;font-size:11px">${{when}}</span>
+                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" data-tx="${{esc(a.tx_hash)}}">Copy</button><button class="archive-btn restore" data-tx="${{esc(a.tx_hash)}}" data-network="${{esc(a.network)}}">Restore</button>
+                                    <span style="color:#888;font-size:11px">By: ${{esc(a.archived_by || '-')}}</span>
+                                    <span style="color:#666;font-size:11px">${{esc(when)}}</span>
                                 </div>
-                                <div class="risk-sub">Was: ${{wasClass}} (${{wasBand}}, ${{wasScore}}) &middot; source: ${{a.source || 'local'}}</div>
+                                <div class="risk-sub">Was: ${{esc(wasClass)}} (${{esc(wasBand)}}, ${{esc(wasScore)}}) &middot; source: ${{esc(a.source || 'local')}}</div>
                                 ${{noteHtml}}
                             </div>
                         </div>
@@ -652,7 +714,4 @@ async def root():
                 }} catch(e) {{}}
             }})();
         </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+"""

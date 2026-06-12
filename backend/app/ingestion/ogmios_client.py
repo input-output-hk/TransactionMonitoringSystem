@@ -1,26 +1,45 @@
-"""Ogmios v6 WebSocket client for mempool monitoring and chain sync.
+"""Ogmios v6 WebSocket client: chain sync, block persistence, rollback.
 
 Uses three separate WebSocket connections (Ogmios multiplexes one mini-protocol per connection):
-- Connection 1: LocalTxMonitor (mempool) — acquireMempool + nextTransaction loop
-- Connection 2: ChainSync — findIntersection + nextBlock loop
+- Connection 1: ChainSync — findIntersection + nextBlock loop (this class)
+- Connection 2: LocalTxMonitor — owned by the composed MempoolMonitor
+  (app.ingestion.mempool_monitor), constructed here with the shared
+  protocol helpers injected
 - Connection 3: LocalStateQuery (on-demand) — queryLedgerState/utxo for input resolution
 """
 
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Callable, Awaitable, Optional, Set, Dict, Any, List
+from datetime import datetime, timezone
+from typing import Callable, Awaitable, Optional, Set, List, Tuple
 
 import websockets
 
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
+from app.ingestion.input_enrichment import (
+    apply_resolved_inputs,
+    resolve_input_amounts,
+)
+from app.ingestion.mempool_monitor import MempoolMonitor
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
 from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
-from app.models.transaction import NormalizedTransaction, TransactionInput
+from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
+
+
+class BlockPersistError(Exception):
+    """A block's ClickHouse persistence failed after all retries.
+
+    Raised INSTEAD of advancing the sync checkpoint: the exception propagates
+    to run_chain_sync's error handler, trips the chain circuit breaker, and
+    the reconnect replays the block from the unadvanced checkpoint. Replay is
+    safe because every fact table is ReplacingMergeTree (idempotent insert).
+    The previous behaviour (log + continue to save_sync_point) permanently
+    lost the block's transactions from the analytics warehouse.
+    """
 
 
 class OgmiosClient:
@@ -33,27 +52,18 @@ class OgmiosClient:
 
         # Connection state
         self._chain_ws = None
-        self._mempool_ws = None
         self._running = True   # set once here; disconnect() sets it False to stop loops
         self._connected_chain = False
-        self._connected_mempool = False
 
-        # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
-        self._seen_mempool_txs: Set[str] = set()
+        # Strong references to in-flight delayed score-repurge tasks: a bare
+        # asyncio.create_task result is only weakly referenced by the loop
+        # and can be garbage-collected mid-flight, silently dropping the
+        # repurge. Tasks discard themselves on completion.
+        self._repurge_tasks: Set[asyncio.Task] = set()
 
         # LocalStateQuery connection for UTxO input resolution (on-demand)
         self._query_ws = None
         self._query_lock = asyncio.Lock()
-
-        # Front-running collision detection: tracks input ref sets of pending txs
-        # Key: tx_hash, Value: (set of (input_tx_hash, input_index), first_seen_at, fee)
-        self._pending_input_sets: Dict[str, tuple] = {}
-
-        # Cache of resolved UTxO inputs for PENDING transactions.
-        # Populated by the mempool monitor via queryLedgerState/utxo, consumed
-        # by _handle_roll_forward when the tx is confirmed in a block.
-        # Key: tx_hash, Value: {(input_tx_hash, input_index): {address, amount, assets}}
-        self._pending_input_cache: Dict[str, Dict[tuple, dict]] = {}
 
         # Telemetry — used by /health and pipeline_state
         self._started_at: datetime = datetime.now(timezone.utc)
@@ -62,17 +72,23 @@ class OgmiosClient:
         self._last_processed_slot: Optional[int] = None    # slot of last confirmed block
         self._tip_slot: Optional[int] = None               # chain tip reported by Ogmios
 
-        # Resilience — separate circuit breakers so chain and mempool failures
-        # are isolated from each other
+        # Resilience for the chain-sync connection; the mempool monitor owns
+        # its own breaker so chain and mempool failures stay isolated.
         self._backoff_chain = ExponentialBackoff(max_delay=settings.OGMIOS_RECONNECT_MAX_DELAY)
-        self._backoff_mempool = ExponentialBackoff(max_delay=settings.OGMIOS_RECONNECT_MAX_DELAY)
         self._circuit_breaker_chain = CircuitBreaker(
             failure_threshold=settings.OGMIOS_CIRCUIT_BREAKER_THRESHOLD,
             cooldown=settings.OGMIOS_CIRCUIT_BREAKER_COOLDOWN,
         )
-        self._circuit_breaker_mempool = CircuitBreaker(
-            failure_threshold=settings.OGMIOS_CIRCUIT_BREAKER_THRESHOLD,
-            cooldown=settings.OGMIOS_CIRCUIT_BREAKER_COOLDOWN,
+
+        # The mempool side (LocalTxMonitor loop, pending-tx index, enrichment
+        # cache, dedup set) lives in its own class; the protocol helpers and
+        # the LocalStateQuery connection stay here, injected as bound methods.
+        self.mempool = MempoolMonitor(
+            network=self.network,
+            emit=self._emit,
+            query_utxo=self._query_utxo,
+            connect_ws=self._connect_ws,
+            send_recv=self._send_recv,
         )
 
         # JSON-RPC request counter
@@ -91,11 +107,21 @@ class OgmiosClient:
         return json.dumps(msg)
 
     async def _send_recv(self, ws, method: str, params: Optional[dict] = None) -> dict:
-        """Send a JSON-RPC request and wait for the response."""
+        """Send a JSON-RPC request and wait for the response.
+
+        Large frames (a busy block of Plutus txs serialises to tens of MB;
+        the socket allows 64 MB) are parsed on the default executor so the
+        event loop — which also serves the API, WebSocket feed, and mempool
+        monitor — is not blocked for the parse duration. Small frames parse
+        inline: the thread handoff costs more than the parse below the
+        threshold.
+        """
         msg = self._jsonrpc(method, params)
         await ws.send(msg)
         raw = await ws.recv()
         self._last_msg_at = datetime.now(timezone.utc)
+        if len(raw) > settings.OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES:
+            return await asyncio.to_thread(json.loads, raw)
         return json.loads(raw)
 
     # --- WebSocket connection with resilience ---
@@ -154,67 +180,6 @@ class OgmiosClient:
                 self._query_ws = None
                 return []
 
-    async def _resolve_mempool_inputs(self, tx_id: str, tx_data: dict):
-        """Resolve UTxO inputs for a PENDING transaction and cache the results.
-
-        When a tx is in the mempool, its inputs are guaranteed unspent (the node
-        validated this). We query Ogmios LocalStateQuery to get each input's
-        address and lovelace value, then store the mapping in _pending_input_cache
-        for use when ChainSync confirms the tx.
-        """
-        raw_inputs = tx_data.get("inputs", [])
-        if not raw_inputs:
-            return
-
-        output_refs = []
-        for inp in raw_inputs:
-            tx_obj = inp.get("transaction", {})
-            if isinstance(tx_obj, dict) and tx_obj.get("id"):
-                output_refs.append({
-                    "transaction": {"id": tx_obj["id"]},
-                    "index": inp.get("index", 0),
-                })
-
-        if not output_refs:
-            return
-
-        utxos = await self._query_utxo(output_refs)
-        if not utxos:
-            return
-
-        cache_entry: Dict[tuple, dict] = {}
-        for utxo in utxos:
-            utxo_tx = utxo.get("transaction", {})
-            utxo_id = utxo_tx.get("id", "") if isinstance(utxo_tx, dict) else ""
-            utxo_index = utxo.get("index", 0)
-            val = utxo.get("value", {})
-            if isinstance(val, dict):
-                lovelace = val.get("lovelace", 0)
-                assets = {}
-                for k, v in val.items():
-                    if k == "lovelace":
-                        continue
-                    if isinstance(v, dict):
-                        for asset_name, qty in v.items():
-                            assets[f"{k}.{asset_name}"] = int(qty)
-                    else:
-                        assets[k] = int(v)
-            else:
-                lovelace = int(val) if val else 0
-                assets = {}
-
-            cache_entry[(utxo_id, utxo_index)] = {
-                "address": utxo.get("address", ""),
-                "amount": int(lovelace),
-                "assets": assets if assets else None,
-            }
-
-        if cache_entry:
-            self._pending_input_cache[tx_id] = cache_entry
-            logger.debug(
-                f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
-            )
-
     # --- Lifecycle event emission ---
 
     async def _emit(self, event: dict):
@@ -260,6 +225,12 @@ class OgmiosClient:
 
     async def _chain_sync_loop(self, ws):
         """ChainSync: findIntersection → nextBlock loop."""
+        # Replay any score repurges persisted before a restart/disconnect
+        # BEFORE normal block processing resumes: a repurge lost inside the
+        # delay window would leave a stale tx_class_scores row permanently
+        # blocking re-scoring of a re-confirmed tx.
+        await self._replay_pending_score_repurges()
+
         sync_point = await postgres.get_sync_point(self.network)
 
         if sync_point:
@@ -287,126 +258,14 @@ class OgmiosClient:
             elif direction == "backward":
                 await self._handle_roll_backward(result)
 
-    @staticmethod
-    def _apply_resolved_inputs(
-        tx: NormalizedTransaction,
-        resolved: Dict[tuple, dict],
-    ) -> NormalizedTransaction:
-        """Enrich a NormalizedTransaction with previously resolved UTxO input data."""
-        total = 0
-        new_inputs = []
-        for inp in tx.inputs:
-            if not inp.is_collateral and not inp.is_reference:
-                utxo = resolved.get((inp.tx_hash, inp.index))
-                if utxo:
-                    inp = TransactionInput(
-                        tx_hash=inp.tx_hash,
-                        index=inp.index,
-                        address=utxo["address"],
-                        amount=utxo["amount"],
-                        assets=utxo.get("assets"),
-                        is_reference=False,
-                        is_collateral=False,
-                    )
-                    total += utxo["amount"]
-            new_inputs.append(inp)
-
-        resolved_addrs = {
-            i.address for i in new_inputs
-            if i.address and not i.is_collateral and not i.is_reference
-        }
-        return tx.model_copy(update={
-            "inputs": new_inputs,
-            "total_input_value": total if total > 0 else None,
-            "addresses": list(set(tx.addresses) | resolved_addrs),
-        })
-
-    async def _resolve_input_amounts(
-        self, txs: List[NormalizedTransaction]
-    ) -> List[NormalizedTransaction]:
-        """Resolve input addresses and amounts from ClickHouse and intra-block outputs.
-
-        1. Build an intra-block output map from earlier txs in this block.
-        2. Collect all unresolved (input_tx_hash, input_index) refs.
-        3. Batch-fetch from ClickHouse for cross-block refs.
-        4. Apply resolved values to each input.
-        """
-        # Build intra-block output map: {(tx_hash, output_index): (address, amount)}
-        intra_block: Dict[tuple, tuple] = {}
-        for tx in txs:
-            for idx, out in enumerate(tx.outputs):
-                if not out.is_collateral:
-                    intra_block[(tx.tx_hash, idx)] = (out.address, out.amount)
-
-        # Collect all unresolved input refs (skip already-resolved from mempool cache)
-        cross_block_refs = []
-        for tx in txs:
-            for inp in tx.inputs:
-                if inp.is_collateral or inp.is_reference:
-                    continue
-                if inp.amount > 0:
-                    continue  # already resolved
-                ref = (inp.tx_hash, inp.index)
-                if ref not in intra_block:
-                    cross_block_refs.append(ref)
-
-        # Batch fetch from ClickHouse
-        ch_resolved: Dict[tuple, tuple] = {}
-        if cross_block_refs:
-            ch_resolved = await clickhouse.get_outputs_for_refs_async(
-                cross_block_refs, self.network
-            )
-
-        # Merge: intra-block takes priority over ClickHouse
-        all_resolved = {**ch_resolved, **intra_block}
-
-        # Apply to each tx
-        result = []
-        for tx in txs:
-            total = 0
-            new_inputs = []
-            changed = False
-            for inp in tx.inputs:
-                if inp.is_collateral or inp.is_reference:
-                    new_inputs.append(inp)
-                    continue  # don't include collateral/reference in total_input_value
-                if inp.amount > 0:
-                    total += inp.amount
-                    new_inputs.append(inp)
-                    continue
-                ref = (inp.tx_hash, inp.index)
-                resolved = all_resolved.get(ref)
-                if resolved:
-                    addr, amt = resolved
-                    new_inputs.append(TransactionInput(
-                        tx_hash=inp.tx_hash,
-                        index=inp.index,
-                        address=addr,
-                        amount=int(amt),
-                        assets=inp.assets,
-                        is_reference=False,
-                        is_collateral=False,
-                    ))
-                    total += int(amt)
-                    changed = True
-                else:
-                    new_inputs.append(inp)
-
-            if changed:
-                resolved_addrs = {
-                    i.address for i in new_inputs
-                    if i.address and not i.is_collateral and not i.is_reference
-                }
-                tx = tx.model_copy(update={
-                    "inputs": new_inputs,
-                    "total_input_value": total if total > 0 else None,
-                    "addresses": list(set(tx.addresses) | resolved_addrs),
-                })
-            result.append(tx)
-        return result
-
     async def _handle_roll_forward(self, result: dict):
-        """Process a new block (rollForward)."""
+        """Process a new block (rollForward).
+
+        Orchestration only; each step lives in a focused helper. Order is
+        load-bearing: persistence (checkpoint-blocking) comes before the
+        observability writes, and save_sync_point is last so a failure
+        anywhere above replays the block after reconnect.
+        """
         block = result.get("block", {})
         block_id = block.get("id", "")
         block_slot = block.get("slot", 0)
@@ -426,9 +285,73 @@ class OgmiosClient:
             return
 
         now = datetime.now(timezone.utc)
+        normalized_txs, confirmed_records = self._parse_block_txs(
+            transactions, block_id, block_slot, block_height, now,
+        )
+
+        # Resolve input amounts from ClickHouse + intra-block outputs
+        if normalized_txs:
+            try:
+                normalized_txs = await resolve_input_amounts(
+                    normalized_txs, self.network
+                )
+            except Exception as e:
+                logger.error(f"Input amount resolution failed (non-fatal): {e}")
+
+        if normalized_txs:
+            # Raw store FIRST: when RAW_DATA_MAX_BYTES caps the ClickHouse
+            # copy, the blob must exist before the row becomes visible to
+            # the engine's unanalyzed poll, or the raw-fallback path races
+            # an in-flight write. Both steps are checkpoint-blocking and
+            # idempotent on replay (write-once files, RMT upsert), so the
+            # ordering is crash-safe in either direction.
+            await self._write_raw_payloads(normalized_txs, block_slot, now)
+
+            # Batch persist to ClickHouse. Checkpoint-BLOCKING: retried with
+            # backoff, then raises BlockPersistError so save_sync_point below
+            # is never reached and the block replays after reconnect.
+            await self._insert_block_with_retry(normalized_txs, block_slot)
+
+            # Batch upsert lifecycle CONFIRMED (single DB round-trip for whole block)
+            try:
+                await postgres.batch_upsert_lifecycle_confirmed(confirmed_records)
+            except Exception as e:
+                logger.error(f"Error updating lifecycle for block {block_slot}: {e}")
+
+            await self.mempool.record_displacements(normalized_txs, now_utc)
+            await self.mempool.settle_confirmed(
+                normalized_txs, now, block_id, block_slot, block_height,
+            )
+
+        await postgres.save_sync_point(self.network, block_slot, block_id)
+
+        # Checkpoint advanced: the block can no longer replay, so the mempool
+        # enrichment is consumed only now. Popping before save_sync_point
+        # succeeds would let a transient Postgres failure replay the block
+        # WITHOUT enrichment, and the replay's fresh ingestion_timestamp
+        # would make the un-enriched copy permanently win the
+        # ReplacingMergeTree merge (lost input addresses / total_input_value).
+        for tx in normalized_txs:
+            self.mempool.consume_enrichment(tx.tx_hash)
+
+        logger.info(
+            f"Block {block_height} (slot {block_slot}): "
+            f"{len(normalized_txs)} transactions confirmed"
+        )
+
+    def _parse_block_txs(
+        self,
+        transactions: List[dict],
+        block_id: str,
+        block_slot: int,
+        block_height: int,
+        now: datetime,
+    ) -> Tuple[List[NormalizedTransaction], List[tuple]]:
+        """Parse a block's raw txs, applying any cached mempool input
+        resolution. Returns (normalized txs, lifecycle CONFIRMED records);
+        a tx that fails to parse is logged and skipped, never fatal."""
         normalized_txs: List[NormalizedTransaction] = []
         confirmed_records: List[tuple] = []
-
         for block_index, tx_data in enumerate(transactions):
             try:
                 tx = parse_ogmios_transaction(
@@ -441,10 +364,13 @@ class OgmiosClient:
                 )
                 tx.network = self.network
 
-                # Apply cached input resolution from mempool observation
-                resolved = self._pending_input_cache.pop(tx.tx_hash, None)
-                if resolved:
-                    tx = self._apply_resolved_inputs(tx, resolved)
+                # Apply cached input resolution from mempool observation.
+                # Read-only here: the entry is popped only after the sync
+                # checkpoint advances, so any replay (failed insert OR failed
+                # checkpoint write) re-parses WITH the enrichment.
+                cached = self.mempool.peek_enrichment(tx.tx_hash)
+                if cached:
+                    tx = apply_resolved_inputs(tx, cached[0])
 
                 normalized_txs.append(tx)
                 confirmed_records.append(
@@ -453,121 +379,74 @@ class OgmiosClient:
             except Exception as e:
                 tx_id = tx_data.get("id", "unknown")
                 logger.error(f"Error parsing transaction {tx_id}: {e}")
+        return normalized_txs, confirmed_records
 
-        # Resolve input amounts from ClickHouse + intra-block outputs
-        if normalized_txs:
-            try:
-                normalized_txs = await self._resolve_input_amounts(normalized_txs)
-            except Exception as e:
-                logger.error(f"Input amount resolution failed (non-fatal): {e}")
+    async def _write_raw_payloads(
+        self,
+        normalized_txs: List[NormalizedTransaction],
+        block_slot: int,
+        now: datetime,
+    ) -> None:
+        """Write full raw payloads to the local filesystem store.
 
-        if normalized_txs:
-            # Batch persist to ClickHouse (non-blocking — runs in thread pool)
+        Checkpoint-BLOCKING when RAW_DATA_MAX_BYTES > 0: ClickHouse then
+        holds an empty-with-flag payload for oversized txs and the raw
+        store is the ONLY full copy, so a swallowed write failure would
+        silently destroy the engine's fallback for exactly the large
+        attack-shaped txs it protects (review finding). Uncapped, the
+        ClickHouse copy is complete and a failure only costs redundancy.
+        Replay-safe: the write-once guard in _write_sync skips
+        already-written files."""
+        if not settings.RAW_STORE_ENABLED:
+            return
+        try:
+            await asyncio.gather(*[
+                raw_store.write_confirmed(self.network, tx.tx_hash, tx.raw_data, now)
+                for tx in normalized_txs
+                if tx.raw_data
+            ])
+        except Exception as e:
+            if settings.RAW_DATA_MAX_BYTES > 0:
+                raise BlockPersistError(
+                    f"Block at slot {block_slot}: raw-store write failed and "
+                    f"RAW_DATA_MAX_BYTES > 0 makes the raw store load-bearing; "
+                    f"checkpoint NOT advanced, block will replay."
+                ) from e
+            logger.error(f"Error writing raw store for block {block_slot}: {e}")
+
+    async def _insert_block_with_retry(
+        self, normalized_txs: List[NormalizedTransaction], block_slot: int,
+    ) -> None:
+        """Persist a block's transactions to ClickHouse, retrying with
+        exponential backoff; raise BlockPersistError on exhaustion.
+
+        See BlockPersistError for why this must never be swallowed: a caught
+        insert failure followed by save_sync_point loses the block forever.
+        """
+        delay = settings.CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS
+        max_attempts = settings.CLICKHOUSE_INSERT_MAX_RETRIES
+        last_err: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
             try:
                 await clickhouse.insert_transactions_batch_async(normalized_txs)
+                return
             except Exception as e:
-                logger.error(f"Error persisting block {block_slot} to ClickHouse: {e}")
-
-            # Write full raw payloads to local filesystem store.
-            # Awaited before the checkpoint save: if a write fails and the process
-            # crashes before the checkpoint is committed, the block is replayed on
-            # restart and the write-once guard in _write_sync skips already-written files.
-            if settings.RAW_STORE_ENABLED:
-                try:
-                    await asyncio.gather(*[
-                        raw_store.write_confirmed(self.network, tx.tx_hash, tx.raw_data, now)
-                        for tx in normalized_txs
-                        if tx.raw_data
-                    ])
-                except Exception as e:
-                    logger.error(f"Error writing raw store for block {block_slot}: {e}")
-
-            # Batch upsert lifecycle CONFIRMED (single DB round-trip for whole block)
-            try:
-                await postgres.batch_upsert_lifecycle_confirmed(confirmed_records)
-            except Exception as e:
-                logger.error(f"Error updating lifecycle for block {block_slot}: {e}")
-
-            # Detect displacement: a confirmed tx may spend inputs that a
-            # still-pending tx also wanted.  This is the primary Cardano
-            # front-running signal (two competing txs are never in the same
-            # node's mempool simultaneously).
-            confirmed_hashes = {tx.tx_hash for tx in normalized_txs}
-            for tx in normalized_txs:
-                conf_refs = {
-                    (inp.tx_hash, inp.index) for inp in tx.inputs
-                    if not inp.is_collateral and not inp.is_reference
-                }
-                if not conf_refs:
-                    continue
-                for pending_id, (pending_refs, pending_seen, pending_fee, pending_addr, pending_ttl) in self._pending_input_sets.items():
-                    if pending_id in confirmed_hashes:
-                        continue  # this pending tx is also in this block
-                    shared = conf_refs & pending_refs
-                    if shared:
-                        delta_ms = (now_utc - pending_seen).total_seconds() * 1000
-                        conf_addr = ""
-                        conf_inp = next(
-                            (i for i in tx.inputs if not i.is_collateral and not i.is_reference and i.address),
-                            None,
-                        )
-                        if conf_inp:
-                            conf_addr = conf_inp.address
-                        try:
-                            await postgres.insert_mempool_collision(
-                                tx_a=pending_id, tx_b=tx.tx_hash,
-                                network=self.network,
-                                shared_inputs=[list(s) for s in shared],
-                                shared_count=len(shared),
-                                tx_a_seen_at=pending_seen, tx_b_seen_at=now_utc,
-                                delta_ms=delta_ms,
-                                tx_a_fee=pending_fee, tx_b_fee=tx.fee or 0,
-                                tx_a_first_input_addr=pending_addr,
-                                tx_b_first_input_addr=conf_addr,
-                                tx_a_ttl=pending_ttl, tx_b_ttl=0,
-                            )
-                            # Immediately mark outcome: the confirmed tx (tx_b) won
-                            await postgres.update_collision_outcome(
-                                tx.tx_hash, self.network
-                            )
-                            logger.info(
-                                f"Displacement detected: pending {pending_id[:16]}.. "
-                                f"displaced by confirmed {tx.tx_hash[:16]}.. "
-                                f"({len(shared)} shared inputs)"
-                            )
-                        except Exception as e:
-                            logger.debug(f"Displacement record error: {e}")
-
-            # Update collision outcomes for pre-existing collisions and clean up
-            for tx in normalized_txs:
-                self._pending_input_sets.pop(tx.tx_hash, None)
-                try:
-                    await postgres.update_collision_outcome(
-                        tx.tx_hash, self.network
+                last_err = e
+                logger.warning(
+                    "ClickHouse insert for block %s failed "
+                    "(attempt %d/%d): %s",
+                    block_slot, attempt, max_attempts, e,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(delay)
+                    delay = min(
+                        delay * 2,
+                        settings.CLICKHOUSE_INSERT_RETRY_MAX_DELAY_SECONDS,
                     )
-                except Exception:
-                    pass
-
-            # Emit lifecycle events after DB writes so API queries are consistent
-            for tx in normalized_txs:
-                await self._emit({
-                    "eventType": "TX_CONFIRMED",
-                    "txId": tx.tx_hash,
-                    "network": self.network,
-                    "observedAt": now.isoformat(),
-                    "block": {"hash": block_id, "slot": block_slot, "height": block_height},
-                })
-
-            # Remove confirmed txs from mempool dedup set
-            for tx in normalized_txs:
-                self._seen_mempool_txs.discard(tx.tx_hash)
-
-        await postgres.save_sync_point(self.network, block_slot, block_id)
-
-        logger.info(
-            f"Block {block_height} (slot {block_slot}): "
-            f"{len(normalized_txs)} transactions confirmed"
-        )
+        raise BlockPersistError(
+            f"Block at slot {block_slot}: ClickHouse insert failed after "
+            f"{max_attempts} attempts; checkpoint NOT advanced, block will replay."
+        ) from last_err
 
     async def _handle_roll_backward(self, result: dict):
         """Process a chain rollback (rollBackward)."""
@@ -598,12 +477,55 @@ class OgmiosClient:
         except Exception as e:
             logger.error(f"Error marking rollback in PostgreSQL: {e}")
 
+        # Purge orphaned-fork rows from the analytics warehouse so they
+        # cannot feed scorers, baselines, or API reads. Deliberately NOT
+        # wrapped in try/except: a failure here propagates, the connection
+        # resets, and the node re-sends the rollback (the cleanup is
+        # idempotent). Skipped on rollback-to-origin: that is a node-resync
+        # artifact (checkpoint past the volatile chain), and wiping the
+        # whole network's history on it would destroy the warehouse over a
+        # transient condition.
+        if settings.ROLLBACK_CLEANUP_ENABLED and not rolled_back_to_origin:
+            purged_hashes = await clickhouse.delete_rolled_back_txs_async(
+                self.network, rollback_slot,
+            )
+            if purged_hashes:
+                logger.warning(
+                    "Rollback cleanup: purged %d orphaned tx(s) past slot %s "
+                    "from ClickHouse", len(purged_hashes), rollback_slot,
+                )
+                # Second tx_class_scores pass after a delay: an engine batch
+                # in flight during the purge can insert a stale score row
+                # right after it, which would block re-scoring forever via
+                # the unanalyzed anti-join. Deleting a FRESH score of a
+                # re-confirmed tx is recall-safe (it just re-scores).
+                #
+                # Persist the hashes BEFORE scheduling the in-memory task:
+                # the task is volatile (restart, shutdown inside the delay
+                # window, task failure) and the persisted row is what
+                # guarantees the repurge is replayed on the next chain-sync
+                # (re)connect. Deliberately NOT wrapped in try/except, like
+                # the purge above: a write failure propagates, the
+                # connection resets, and the node re-sends the rollback.
+                await postgres.add_pending_score_repurges(
+                    self.network, purged_hashes,
+                )
+                task = asyncio.create_task(
+                    self._delayed_score_repurge(purged_hashes)
+                )
+                # Strong reference until completion: the event loop only
+                # holds tasks weakly, and a GC'd task silently drops the
+                # delayed pass (the persisted row would still recover it on
+                # the next reconnect, but only after an unbounded delay).
+                self._repurge_tasks.add(task)
+                task.add_done_callback(self._repurge_tasks.discard)
+
         if rollback_id:
             await postgres.save_sync_point(self.network, rollback_slot, rollback_id)
 
-        # Clear mempool dedup set so rolled-back txs can re-enter tracking
-        # if they re-appear in the mempool (valid in Cardano)
-        self._seen_mempool_txs.clear()
+        # Rolled-back txs may re-enter the mempool (valid in Cardano); clear
+        # the monitor's dedup set so they re-enter tracking.
+        self.mempool.clear_on_rollback()
 
         await self._emit({
             "eventType": "TX_ROLLED_BACK",
@@ -612,169 +534,72 @@ class OgmiosClient:
             "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
         })
 
-    # --- Mempool Monitoring ---
+    async def _delayed_score_repurge(self, hashes: List[str]) -> None:
+        """Re-delete tx_class_scores rows for rolled-back txs after a delay.
 
-    async def run_mempool_monitor(self):
-        """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
-        while self._running:
-            if not self._circuit_breaker_mempool.can_attempt():
-                await asyncio.sleep(10)
-                continue
+        Durable, not best-effort: the hashes were persisted to
+        pending_score_repurges BEFORE this task was scheduled, and the row
+        is cleared only AFTER the ClickHouse delete succeeds. If this task
+        never completes (failure, shutdown inside the delay window), the
+        persisted row replays the repurge on the next chain-sync
+        (re)connect via _replay_pending_score_repurges, so a stale score
+        row cannot permanently block re-scoring of a re-confirmed tx
+        (missed-attack risk). Failures log instead of crashing chain sync
+        precisely because the persisted row guarantees the retry.
+        """
+        await asyncio.sleep(settings.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS)
+        if not self._running:
+            # Shutting down inside the delay window: nothing is lost. The
+            # persisted pending_score_repurges row replays this repurge on
+            # the next startup's chain-sync connect.
+            return
+        try:
+            await clickhouse.delete_score_rows_async(self.network, hashes)
+            await postgres.clear_pending_score_repurges(self.network, hashes)
+            logger.info(
+                "Rollback score repurge: re-cleared %d tx(s)", len(hashes),
+            )
+        except Exception:
+            logger.exception(
+                "Rollback score repurge failed; the persisted pending row "
+                "will replay it on the next chain-sync (re)connect"
+            )
 
-            try:
-                self._mempool_ws = await self._connect_ws("mempool")
-                self._connected_mempool = True
-                self._circuit_breaker_mempool.record_success()
-                self._backoff_mempool.reset()
+    async def _replay_pending_score_repurges(self) -> None:
+        """Execute score repurges persisted before a restart or disconnect.
 
-                await self._mempool_loop(self._mempool_ws)
-
-            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-                logger.warning(f"Ogmios [mempool]: connection lost: {e}")
-                self._connected_mempool = False
-                self._circuit_breaker_mempool.record_failure()
-                await self._backoff_mempool.wait()
-            except Exception as e:
-                logger.error(f"Ogmios [mempool]: unexpected error: {e}")
-                self._connected_mempool = False
-                self._circuit_breaker_mempool.record_failure()
-                await self._backoff_mempool.wait()
-            finally:
-                if self._mempool_ws:
-                    await self._mempool_ws.close()
-                    self._mempool_ws = None
-
-    async def _mempool_loop(self, ws):
-        """LocalTxMonitor: acquireMempool → nextTransaction loop."""
-        # Clear dedup set on (re)connect so the fresh snapshot is fully processed.
-        # The DB's ON CONFLICT DO NOTHING handles any genuine duplicates safely.
-        self._seen_mempool_txs.clear()
-
-        while self._running:
-            resp = await self._send_recv(ws, "acquireMempool")
-            snapshot_slot = resp.get("result", {}).get("slot")
-            logger.debug(f"Ogmios [mempool]: acquired snapshot at slot {snapshot_slot}")
-
-            while self._running:
-                resp = await self._send_recv(ws, "nextTransaction", {"fields": "all"})
-                tx_data = resp.get("result", {}).get("transaction")
-
-                if tx_data is None:
-                    # Snapshot exhausted, re-acquire
-                    break
-
-                tx_id = tx_data.get("id", "")
-                if not tx_id or tx_id in self._seen_mempool_txs:
-                    continue
-
-                self._seen_mempool_txs.add(tx_id)
-                now = datetime.now(timezone.utc)
-
-                # Collision detection: extract input refs and check against pending txs
-                try:
-                    input_refs = set()
-                    fee_obj = tx_data.get("fee", {})
-                    if isinstance(fee_obj, dict):
-                        ada = fee_obj.get("ada")
-                        tx_fee = ada.get("lovelace", 0) if isinstance(ada, dict) else fee_obj.get("lovelace", 0)
-                    else:
-                        tx_fee = int(fee_obj or 0)
-                    tx_ttl = tx_data.get("timeToLive", 0) or 0
-                    # Extract first input address for address clustering.
-                    # Ogmios mempool inputs are unresolved references (tx_hash + index),
-                    # not full UTxOs with addresses. Extract the address field if present
-                    # (resolved inputs), otherwise leave empty.
-                    first_input_addr = ""
-                    first_inp = (tx_data.get("inputs") or [None])[0]
-                    if first_inp:
-                        first_input_addr = first_inp.get("address", "")
-                    for inp in tx_data.get("inputs", []):
-                        inp_tx = inp.get("transaction", {})
-                        inp_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
-                        input_refs.add((inp_hash, inp.get("index", 0)))
-
-                    if input_refs:
-                        # Check for collisions with existing pending txs
-                        for other_id, (other_refs, other_seen, other_fee, other_addr, other_ttl) in self._pending_input_sets.items():
-                            shared = input_refs & other_refs
-                            if shared:
-                                delta_ms = (now - other_seen).total_seconds() * 1000
-                                try:
-                                    await postgres.insert_mempool_collision(
-                                        tx_a=other_id, tx_b=tx_id,
-                                        network=self.network,
-                                        shared_inputs=[list(s) for s in shared],
-                                        shared_count=len(shared),
-                                        tx_a_seen_at=other_seen, tx_b_seen_at=now,
-                                        delta_ms=delta_ms,
-                                        tx_a_fee=other_fee, tx_b_fee=tx_fee,
-                                        tx_a_first_input_addr=other_addr,
-                                        tx_b_first_input_addr=first_input_addr,
-                                        tx_a_ttl=other_ttl, tx_b_ttl=tx_ttl,
-                                    )
-                                    logger.info(
-                                        f"Mempool collision: {other_id[:16]}.. vs {tx_id[:16]}.. "
-                                        f"({len(shared)} shared inputs, delta={delta_ms:.0f}ms)"
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Failed to record collision: {e}")
-
-                        self._pending_input_sets[tx_id] = (input_refs, now, tx_fee, first_input_addr, tx_ttl)
-
-                    # Prune stale entries (throttled: every 100 txs)
-                    if len(self._seen_mempool_txs) % 100 == 0:
-                        cutoff = now - timedelta(hours=2)
-                        stale = [k for k, v in self._pending_input_sets.items() if v[1] < cutoff]
-                        for k in stale:
-                            del self._pending_input_sets[k]
-                            self._pending_input_cache.pop(k, None)
-                        # Cap dedup set to prevent unbounded growth
-                        if len(self._seen_mempool_txs) > 50_000:
-                            self._seen_mempool_txs.clear()
-                except Exception as e:
-                    logger.debug(f"Collision detection error for {tx_id}: {e}")
-
-                # Resolve UTxO inputs while the tx is still PENDING (inputs
-                # are guaranteed unspent at this point). Results are cached
-                # for use when ChainSync confirms the tx.
-                try:
-                    await self._resolve_mempool_inputs(tx_id, tx_data)
-                except Exception as e:
-                    logger.debug(f"Input resolution failed for {tx_id}: {e}")
-
-                # Write raw mempool payload to local filesystem store (non-blocking)
-                if settings.RAW_STORE_ENABLED:
-                    asyncio.create_task(
-                        raw_store.write_mempool(self.network, tx_id, tx_data, now)
-                    )
-
-                try:
-                    await postgres.upsert_lifecycle_pending(
-                        tx_id=tx_id,
-                        network=self.network,
-                        first_seen_at=now,
-                    )
-                except Exception as e:
-                    logger.error(f"Error persisting pending tx {tx_id}: {e}")
-
-                await self._emit({
-                    "eventType": "TX_PENDING",
-                    "txId": tx_id,
-                    "network": self.network,
-                    "observedAt": now.isoformat(),
-                    "firstSeenAt": now.isoformat(),
-                })
-
-                logger.debug(f"TX_PENDING: {tx_id}")
+        Runs on every chain-sync (re)connect, before block processing
+        resumes: it covers the window where _delayed_score_repurge was
+        scheduled but never completed (process restart, shutdown during
+        the delay, ClickHouse outage). Rows are cleared only after the
+        delete succeeds; on failure they stay queued for the next
+        (re)connect rather than crashing the sync loop, since the chain
+        reconnect path is the retry mechanism.
+        """
+        try:
+            pending = await postgres.get_pending_score_repurges(self.network)
+            if not pending:
+                return
+            await clickhouse.delete_score_rows_async(self.network, pending)
+            await postgres.clear_pending_score_repurges(self.network, pending)
+            logger.info(
+                "Replayed %d pending score repurge(s) from before restart",
+                len(pending),
+            )
+        except Exception:
+            logger.exception(
+                "Pending score repurge replay failed; rows stay queued for "
+                "the next chain-sync (re)connect"
+            )
 
     # --- Control ---
 
     async def disconnect(self):
         """Gracefully disconnect all WebSocket connections."""
         self._running = False
+        await self.mempool.stop()
         for ws, label in [
             (self._chain_ws, "chain"),
-            (self._mempool_ws, "mempool"),
             (self._query_ws, "query"),
         ]:
             if ws:
@@ -784,12 +609,11 @@ class OgmiosClient:
                 except Exception:
                     pass
         self._chain_ws = None
-        self._mempool_ws = None
         self._query_ws = None
 
     @property
     def is_connected(self) -> bool:
-        return self._connected_chain or self._connected_mempool
+        return self._connected_chain or self.mempool.connected
 
     @property
     def pipeline_state(self) -> str:
@@ -817,7 +641,6 @@ class OgmiosClient:
 
     @property
     def status(self) -> dict:
-        now = datetime.now(timezone.utc)
         sync_lag = (
             max(0, self._tip_slot - self._last_processed_slot)
             if self._tip_slot is not None and self._last_processed_slot is not None
@@ -826,9 +649,9 @@ class OgmiosClient:
         return {
             "pipeline_state": self.pipeline_state,
             "chain_sync": "connected" if self._connected_chain else "disconnected",
-            "mempool_monitor": "connected" if self._connected_mempool else "disconnected",
+            "mempool_monitor": "connected" if self.mempool.connected else "disconnected",
             "circuit_breaker_chain": self._circuit_breaker_chain.state.value,
-            "circuit_breaker_mempool": self._circuit_breaker_mempool.state.value,
+            "circuit_breaker_mempool": self.mempool.circuit_state,
             "last_processed_slot": self._last_processed_slot,
             "last_ogmios_msg_at": self._last_msg_at.isoformat() if self._last_msg_at else None,
             "sync_lag_slots": sync_lag,

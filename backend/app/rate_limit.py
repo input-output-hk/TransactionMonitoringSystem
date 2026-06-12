@@ -15,12 +15,18 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app import net
+from app.auth import is_valid_api_key
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Paths that are never rate-limited
-_EXEMPT_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/ws"}
+# Paths that are never rate-limited. /ws is deliberately absent: this is a
+# BaseHTTPMiddleware, which never dispatches websocket scopes, so listing it
+# here was dead code — the WS handshake limit lives in routers/websocket.py.
+# The docs paths are acceptable here because they 404 unless dev mode or
+# TMS_API_DOCS_ENABLED explicitly exposes them (see main.py).
+_EXEMPT_PATHS = {"/", "/health", "/health/ready", "/docs", "/redoc", "/openapi.json"}
 
 # Every RateLimiter registers itself here at construction. The app lifespan
 # then calls start_all_cleanups()/stop_all_cleanups() so each limiter's
@@ -128,12 +134,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in _EXEMPT_PATHS:
             return await call_next(request)
 
-        # Use API key as the rate-limit identity; fall back to client IP
-        key = (
-            request.headers.get(settings.API_KEY_HEADER)
-            or (request.client.host if request.client else None)
-            or "unknown"
-        )
+        # The rate-limit identity is the API key ONLY when it is a VALID
+        # key. Bucketing on the raw header value gave every key-guessing
+        # attempt its own fresh window, so brute-forcing the key was never
+        # throttled; invalid/absent keys now share the client IP's bucket.
+        # IP derivation (incl. trusted-proxy forwarded-header rules) lives
+        # in app.net.client_ip; spoofable left-most XFF entries never win.
+        supplied = request.headers.get(settings.API_KEY_HEADER)
+        if supplied and is_valid_api_key(supplied):
+            key = supplied
+        else:
+            key = f"ip:{net.client_ip(request) or 'unknown'}"
 
         allowed, retry_after = await self.limiter.check(key)
 

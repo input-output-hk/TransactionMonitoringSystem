@@ -24,6 +24,7 @@ from app.analysis.normalise import normalise, normalise_inverted
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
+    fraction_of_limit as _fraction_of_limit,
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -38,7 +39,63 @@ _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MIN_DATUM_BYTES = int(_CFG["gate"]["min_datum_bytes"])
+# A datum only counts as bloat when its byte entropy is at or below this floor.
+# Padding attacks are low-entropy (repetitive filler); legitimate large datums
+# carry high-entropy structured state. Size alone cannot separate them, so this
+# content check is what suppresses benign large datums without losing a real
+# (size-overlapping) bloat attack. See features.datum_shannon_entropy_bits.
+_BLOAT_ENTROPY_MAX = float(_CFG["gate"]["bloat_entropy_max"])
+# A datum is bloat when one CBOR leaf holds at least this fraction of its bytes
+# (single-leaf padding). Structural, so it catches high-entropy random padding
+# that the entropy gate misses; legitimate nested datums sit far below it.
+_LEAF_CONCENTRATION_MAX = float(_CFG["gate"]["leaf_concentration_max"])
+# Absolute-size backstop: a datum at or above this many bytes is flagged
+# regardless of entropy, because it approaches the point where a consuming tx
+# can no longer fit under maxTxSize. Robust against a high-entropy (random)
+# padding attack that evades the entropy gate. Derived from the tx-size limit.
+_SIZE_BACKSTOP = _fraction_of_limit(
+    _CFG["gate"]["size_backstop_fraction"], "max_tx_size_bytes"
+)
 _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
+# Observability flag for datumHash-only outputs at script addresses. The
+# referenced datum cannot be sized without an indexer, so a bloat-by-hash
+# attack is invisible to the byte gates; when enabled, the scorer engages
+# and records datum_hash_only_count (score stays -1: never alerts).
+_FLAG_DATUM_HASH_ONLY = bool(_CFG["gate"]["flag_datum_hash_only"])
+
+
+def _datum_hash_only_addresses(outputs) -> list:
+    """Script-output addresses whose datum is a hash reference (flag 1):
+    present but unsizable without an indexer."""
+    return [
+        out.get("address", "")
+        for out in outputs
+        if isinstance(out, dict)
+        and feat_mod.is_script_address(out.get("address", ""))
+        and feat_mod._extract_datum_info(out)[0] == 1
+    ]
+
+
+def _is_bloat_datum(output: Dict[str, Any], datum_bytes: int) -> bool:
+    """True when an output's datum is a bloat-DoS candidate.
+
+    Triggers (any one):
+      - absolute backstop: ``datum_bytes >= _SIZE_BACKSTOP`` flags regardless of
+        content, catching extreme bloat that nears the tx-size limit;
+      - content gate: a smaller-but-large datum (``>= _MIN_DATUM_BYTES``) is a
+        candidate when it is either low-entropy padding
+        (``<= _BLOAT_ENTROPY_MAX``) OR structurally concentrated in one CBOR
+        leaf (``>= _LEAF_CONCENTRATION_MAX``). The concentration branch catches
+        single-leaf padding even when the padding bytes are high-entropy.
+    """
+    if datum_bytes >= _SIZE_BACKSTOP:
+        return True
+    if datum_bytes < _MIN_DATUM_BYTES:
+        return False
+    return (
+        feat_mod.datum_shannon_entropy_bits(output) <= _BLOAT_ENTROPY_MAX
+        or feat_mod.datum_leaf_concentration(output) >= _LEAF_CONCENTRATION_MAX
+    )
 
 
 def _per_script_datum_bytes(outputs):
@@ -95,10 +152,19 @@ class LargeDatumScorer(BaseScorer):
             if not feat_mod.is_script_address(addr):
                 continue
             _, datum_bytes = feat_mod._extract_datum_info(out)
-            if datum_bytes >= _MIN_DATUM_BYTES:
+            if _is_bloat_datum(out, datum_bytes):
                 return True
         per_script = _per_script_datum_bytes(outputs)
-        return any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values())
+        if any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values()):
+            return True
+        # Observability path: a datum-hash-only output reports 0 bytes
+        # (_extract_datum_info cannot size the referenced datum without an
+        # indexer), so a bloat-by-hash attack is invisible to the byte gates
+        # above. Engage so score() records datum_hash_only_count; the result
+        # stays a no-finding (-1) and never alerts.
+        if _FLAG_DATUM_HASH_ONLY and _datum_hash_only_addresses(outputs):
+            return True
+        return False
 
     def score(self, features: Dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
@@ -124,7 +190,7 @@ class LargeDatumScorer(BaseScorer):
             if not feat_mod.is_script_address(addr):
                 continue
             datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
-            if datum_flag == 0 or datum_bytes < _MIN_DATUM_BYTES:
+            if datum_flag == 0 or not _is_bloat_datum(out, datum_bytes):
                 continue
 
             result = self._score_utxo(
@@ -146,19 +212,26 @@ class LargeDatumScorer(BaseScorer):
                 evidence=best_evidence,
             )
 
-        # Aggregate-only engagement path: gate fired because the
-        # per-script aggregate crossed `aggregate_engagement_min`, but no
-        # single output passed the per-output threshold. Surface the
-        # observability metric while returning score=-1 so the engine
-        # does NOT select `large_datum` as `max_class` (-1 is filtered
-        # out by `applicable = {k: v ... if v >= 0}`); writing -1 to the
-        # column matches the existing "scorer didn't produce a finding"
-        # convention.
-        return ScorerResult(
-            score=-1.0,
-            sub_scores={"max_script_datum_bytes": float(max_script_datum_bytes)},
-            reasons=[],
-            baseline_source="missing",
+        # Aggregate-only / hash-only engagement path: gate fired because the
+        # per-script aggregate crossed `aggregate_engagement_min` or a
+        # datum-hash-only script output was present, but no single output
+        # passed the per-output threshold. Surface the observability metrics
+        # while returning score=-1 so the engine does NOT select
+        # `large_datum` as `max_class` (-1 is filtered out by
+        # `applicable = {k: v ... if v >= 0}`); writing -1 to the column
+        # matches the existing "scorer didn't produce a finding" convention.
+        hash_only_addrs = (
+            _datum_hash_only_addresses(outputs) if _FLAG_DATUM_HASH_ONLY else []
+        )
+        return ScorerResult.no_finding(
+            sub_scores={
+                "max_script_datum_bytes": float(max_script_datum_bytes),
+                "datum_hash_only_count": float(len(hash_only_addrs)),
+            },
+            evidence=(
+                {"datum_hash_only_addresses": hash_only_addrs}
+                if hash_only_addrs else {}
+            ),
         )
 
     def _score_utxo(
@@ -198,7 +271,11 @@ class LargeDatumScorer(BaseScorer):
         s_datum = normalise(datum_bytes, p50=p50_db, p99=p99_db)
         s_ratio = normalise(datum_ratio, p50=p50_r, p99=p99_r)
         s_value_inv = normalise_inverted(value_cbor, p50=p50_cb, p99=p99_cb)
-        s_recurrence = 0.0  # requires entity clustering (deferred to mainnet)
+        # Blind spot: recurrence/steady-state suppression (a contract that
+        # emits the same datum size every block is benign protocol traffic, a
+        # spiky novel datum is the attack) needs entity clustering, deferred to
+        # mainnet. Its weight contributes 0 until then.
+        s_recurrence = 0.0
 
         raw = (
             float(_W["datum_bytes"]) * s_datum

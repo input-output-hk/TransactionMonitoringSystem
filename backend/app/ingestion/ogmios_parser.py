@@ -1,9 +1,10 @@
 """Parser for Ogmios v6 transaction format into NormalizedTransaction"""
 
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 import logging
 
+from app.analysis.features import extract_fee, extract_lovelace, flatten_assets
 from app.models.transaction import (
     NormalizedTransaction,
     TransactionInput,
@@ -35,23 +36,30 @@ def parse_ogmios_transaction(
     """
     tx_hash = tx_data.get("id", "")
 
-    # Fee
-    # Ogmios v6 wraps fee as {"ada": {"lovelace": N}} in Conway/Babbage era
-    fee_obj = tx_data.get("fee", {})
-    if isinstance(fee_obj, dict):
-        ada = fee_obj.get("ada")
-        if isinstance(ada, dict):
-            fee = ada.get("lovelace", 0)   # {"ada": {"lovelace": N}}
-        else:
-            fee = fee_obj.get("lovelace", 0)  # legacy {"lovelace": N}
-    else:
-        fee = int(fee_obj) if fee_obj else 0
+    # Phase-2 validation marker (Ogmios v6): "spends" is "inputs" when the
+    # transaction validated and "collaterals" when a Plutus script failed
+    # phase-2 validation. For a failed tx the ledger consumes the COLLATERAL
+    # inputs and creates only the collateralReturn output; the regular
+    # inputs stay live and the regular outputs never exist on-chain.
+    # Absent (mempool txs, v5 payloads) means "validated".
+    script_valid = tx_data.get("spends", "inputs") != "collaterals"
+
+    # Fee: v5/v6 shape handling lives in features.extract_fee.
+    fee = extract_fee(tx_data)
 
     # Parse inputs.
     # Ogmios does not include resolved UTxO values in the transaction body, so
     # input amounts cannot be determined here.  total_input_value is left as
     # None (unknown) rather than 0 (known zero) to avoid misleading analytics.
+    # Regular inputs are ALWAYS emitted first (indices 0..k aligned with
+    # raw_data["inputs"], which the enrichment patcher keys on). For a failed
+    # tx they carry is_unspent_attempt=1: the ledger did NOT consume them
+    # (the collaterals below carry the consumption), but what a failed
+    # attack TRIED to spend is high-value signal — dropping them made failed
+    # attempts invisible to contention queries (review finding). Flow and
+    # displacement readers exclude the flag.
     inputs = []
+    spending_input_count = 0
     for inp in tx_data.get("inputs", []):
         inp_tx = inp.get("transaction", {})
         inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
@@ -63,7 +71,10 @@ def parse_ogmios_transaction(
             index=inp_index,
             address="",  # not resolved in Ogmios tx body
             amount=0,
+            is_unspent_attempt=not script_valid,
         ))
+        if script_valid:
+            spending_input_count += 1
 
     # Parse reference inputs
     for inp in tx_data.get("references", []):
@@ -77,7 +88,10 @@ def parse_ogmios_transaction(
             is_reference=True,
         ))
 
-    # Parse collateral inputs
+    # Parse collateral inputs. For a validated tx these were NOT consumed
+    # (recorded with the is_collateral flag so analytics can exclude them);
+    # for a failed tx they are exactly what the ledger consumed.
+    collateral_count = 0
     for inp in tx_data.get("collaterals", []):
         inp_tx = inp.get("transaction", {})
         inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
@@ -88,63 +102,54 @@ def parse_ogmios_transaction(
             amount=0,
             is_collateral=True,
         ))
+        collateral_count += 1
 
-    # Parse outputs
+    # Parse outputs. A failed tx's regular outputs never exist on-chain, so
+    # they are skipped (raw_data retains them); only the collateralReturn is
+    # created. Conversely a validated tx never creates the collateralReturn.
     outputs = []
     total_output_value = 0
     addresses = set()
 
-    for out in tx_data.get("outputs", []):
-        address = out.get("address", "")
-        addresses.add(address)
+    if script_valid:
+        for out in tx_data.get("outputs", []):
+            address = out.get("address", "")
+            addresses.add(address)
 
-        value = out.get("value", {})
-        if isinstance(value, dict):
-            # Ogmios v6: {"ada": {"lovelace": N}, ...}
-            # Ogmios v5: {"lovelace": N, ...}
-            ada = value.get("ada")
-            if isinstance(ada, dict):
-                lovelace = ada.get("lovelace", 0)
-            else:
-                lovelace = value.get("lovelace", 0)
-            # Multi-asset: everything except "lovelace" and "ada" keys
-            assets = {}
-            for key, val in value.items():
-                if key in ("lovelace", "ada"):
-                    continue
-                if isinstance(val, dict):
-                    # Format: {"policyId": {"assetName": quantity}}
-                    for asset_name, qty in val.items():
-                        assets[f"{key}.{asset_name}"] = int(qty)
-                else:
-                    assets[key] = int(val)
+            value = out.get("value", {})
+            # v5/v6 lovelace + flattened "policy.name" asset shape handling
+            # lives in features.extract_lovelace / flatten_assets.
+            lovelace = extract_lovelace(value)
+            assets = flatten_assets(value)
             asset_dict = assets if assets else None
-        else:
-            lovelace = int(value) if value else 0
-            asset_dict = None
 
-        outputs.append(TransactionOutput(
-            address=address,
-            amount=int(lovelace),
-            assets=asset_dict,
-        ))
-        total_output_value += int(lovelace)
-
-    # Collateral return output
-    collateral_return = tx_data.get("collateralReturn")
-    if collateral_return:
-        addr = collateral_return.get("address", "")
-        val = collateral_return.get("value", {})
-        if isinstance(val, dict):
-            ada = val.get("ada")
-            lv = ada.get("lovelace", 0) if isinstance(ada, dict) else val.get("lovelace", 0)
-        else:
-            lv = 0
-        outputs.append(TransactionOutput(
-            address=addr,
-            amount=int(lv),
-            is_collateral=True,
-        ))
+            outputs.append(TransactionOutput(
+                address=address,
+                amount=int(lovelace),
+                assets=asset_dict,
+            ))
+            total_output_value += int(lovelace)
+    else:
+        collateral_return = tx_data.get("collateralReturn")
+        if collateral_return:
+            addr = collateral_return.get("address", "")
+            # v5/v6 shape handling lives in features.extract_lovelace (this
+            # was the last hand-rolled copy of the dual-shape branch — the
+            # duplication class that caused the v6 mempool fee bug).
+            lv = extract_lovelace(collateral_return.get("value", {}))
+            addresses.add(addr)
+            outputs.append(TransactionOutput(
+                address=addr,
+                amount=int(lv),
+                is_collateral=True,
+                # Babbage rule: the collateral return's on-chain index is
+                # the count of regular outputs (which never materialise for
+                # a failed tx but still occupy the index space). Storing it
+                # at enumerate-position 0 made any later spend of this UTxO
+                # unresolvable (review finding).
+                output_index=len(tx_data.get("outputs", [])),
+            ))
+            total_output_value += int(lv)
 
     # Add input addresses (mostly empty for Ogmios)
     for inp in inputs:
@@ -164,12 +169,18 @@ def parse_ogmios_transaction(
                 else:
                     metadata[label] = content
 
-    # Deposit
+    # Deposit (v6 nests as {"ada": {"lovelace": N}}; v5 as {"lovelace": N}).
+    # None stays None ("no deposit field"), distinct from a known 0.
     deposit = tx_data.get("deposit")
     if deposit is not None:
-        if isinstance(deposit, dict):
-            deposit = deposit.get("lovelace", 0)
-        deposit = int(deposit)
+        deposit = extract_lovelace(deposit)
+
+    # input_count / output_count are CONSUMED / CREATED counts: regular
+    # inputs and outputs for a validated tx, collaterals and the
+    # collateralReturn for a failed one. Reference inputs and (for valid
+    # txs) collateral inputs are recorded in `inputs` with their flags but
+    # never counted; previously they inflated input_count on every Plutus tx.
+    input_count = spending_input_count if script_valid else collateral_count
 
     return NormalizedTransaction(
         tx_hash=tx_hash,
@@ -182,11 +193,12 @@ def parse_ogmios_transaction(
         deposit=deposit,
         inputs=inputs,
         outputs=outputs,
-        input_count=len(inputs),
+        input_count=input_count,
         output_count=len(outputs),
         total_input_value=None,
         total_output_value=total_output_value,
         addresses=list(addresses),
         metadata=metadata,
+        script_valid=script_valid,
         raw_data=tx_data,
     )

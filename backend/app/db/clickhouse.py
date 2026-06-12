@@ -4,23 +4,22 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from functools import partial
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
 
 from app.config import settings
+from app.db import clickhouse_schema
+from app.db.clickhouse_schema import (  # noqa: F401  (re-exported API)
+    DEDUP_TABLE_KEYS,
+    SCHEMA_DDL,
+)
 from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
-
-# Maximum byte-length of the raw_data JSON stored per transaction.
-# Full Ogmios payloads for Plutus transactions can reach hundreds
-# of kilobytes; at Mainnet scale this balloons ClickHouse storage and slows
-# ingestion. 64 KiB is sufficient for debugging while keeping inserts fast.
-_RAW_DATA_MAX_BYTES = 65_536
 
 # Thread-local ClickHouse clients + 3-worker executor.
 #
@@ -37,6 +36,17 @@ _RAW_DATA_MAX_BYTES = 65_536
 # no executor tasks are in flight at those points.
 _thread_local = threading.local()
 _ch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="clickhouse")
+
+
+async def _in_executor(fn, *args):
+    """Run a blocking ClickHouse call on the dedicated executor.
+
+    The single home for the ``run_in_executor(_ch_executor, ...)`` idiom
+    every ``*_async`` wrapper repeats; keyword-rich callables pass a
+    ``functools.partial``.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_ch_executor, fn, *args)
 
 
 def _get_client() -> Client:
@@ -115,374 +125,43 @@ def shutdown_executor():
     _ch_executor.shutdown(wait=True)
 
 
+# ---------------------------------------------------------------------------
+# Schema. DDL templates, table creation, the legacy-layout guard, and
+# retention TTLs live in app.db.clickhouse_schema (pure functions of a
+# connected Client). SCHEMA_DDL / DEDUP_TABLE_KEYS are re-exported here so
+# existing imports (e.g. scripts/migrate_dedup_schema.py reads
+# clickhouse.SCHEMA_DDL) keep working.
+
+
 def execute_schema():
     """Create ClickHouse tables if they don't exist"""
     client = _get_client()
-
     try:
-        # Main transactions table.
-        # Partitioned by day so that "last N hours / last day" queries prune to
-        # 1–2 partitions instead of scanning the entire current month.
-        # NOTE: changing PARTITION BY on an existing table requires recreating it;
-        # this DDL only takes effect on a fresh deployment.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                tx_hash String,
-                network String,
-                slot Nullable(UInt64),
-                block_height Nullable(UInt32),
-                block_hash Nullable(String),
-                block_index Nullable(UInt32),
-                timestamp DateTime,
-                fee UInt64,
-                deposit Nullable(Int64),
-                input_count UInt8,
-                output_count UInt8,
-                total_input_value Nullable(UInt64),
-                total_output_value UInt64,
-                addresses Array(String),
-                metadata String,
-                raw_data String,
-                ingestion_timestamp DateTime DEFAULT now(),
-                INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_slot slot TYPE minmax GRANULARITY 1,
-                INDEX idx_block_height block_height TYPE minmax GRANULARITY 1,
-                INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, timestamp, tx_hash)
-            PARTITION BY toYYYYMMDD(timestamp)
-        """)
-
-        # Add network column if it doesn't exist (migration for existing tables)
-        try:
-            client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
-        except Exception as e:
-            logger.debug(f"Network column may already exist or migration not needed: {e}")
-
-        # Add block_index column if it doesn't exist (migration for existing tables)
-        try:
-            client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS block_index Nullable(UInt32)")
-        except Exception as e:
-            logger.debug(f"block_index column may already exist or migration not needed: {e}")
-
-        # Migrate total_input_value from UInt64 (old default 0 = ambiguous) to
-        # Nullable(UInt64) so that NULL = "unresolved" and 0 = "known zero".
-        try:
-            client.execute(
-                "ALTER TABLE transactions MODIFY COLUMN total_input_value Nullable(UInt64)"
-            )
-        except Exception as e:
-            logger.debug(f"total_input_value already Nullable or migration not needed: {e}")
-
-        # Transaction inputs table
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS transaction_inputs (
-                tx_hash String,
-                network String,
-                input_index UInt8,
-                input_tx_hash String,
-                input_index_in_tx UInt8,
-                address String,
-                amount UInt64,
-                assets String,
-                is_reference UInt8,
-                is_collateral UInt8,
-                ingestion_timestamp DateTime DEFAULT now(),
-                INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_address address TYPE bloom_filter GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash, input_index)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
-
-        # Add network column if it doesn't exist (migration for existing tables)
-        try:
-            client.execute("ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
-        except Exception as e:
-            logger.debug(f"Network column may already exist or migration not needed: {e}")
-
-        # Transaction outputs table
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS transaction_outputs (
-                tx_hash String,
-                network String,
-                output_index UInt8,
-                address String,
-                amount UInt64,
-                assets String,
-                is_collateral UInt8,
-                ingestion_timestamp DateTime DEFAULT now(),
-                INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_address address TYPE bloom_filter GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash, output_index)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
-
-        # Add network column if it doesn't exist (migration for existing tables)
-        try:
-            client.execute("ALTER TABLE transaction_outputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
-        except Exception as e:
-            logger.debug(f"Network column may already exist or migration not needed: {e}")
-
-        # Analysis results table — written by the Analysis Engine.
-        # ORDER BY (network, tx_hash) is the ReplacingMergeTree dedup key and must
-        # not include analyzed_at. risk_level gets a bloom_filter skip index so
-        # WHERE risk_level = 'HIGH' queries don't scan every granule for the network.
-        # Partitioned by day (same rationale as transactions).
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS tx_analysis_results (
-                tx_hash String,
-                network String,
-                risk_score Float32,
-                risk_level String,
-                cluster_id UInt32,
-                is_anomaly UInt8,
-                anomaly_reasons Array(String),
-                analysis_version String,
-                analyzed_at DateTime,
-                INDEX idx_risk_level risk_level TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_analyzed_at analyzed_at TYPE minmax GRANULARITY 1
-            ) ENGINE = ReplacingMergeTree(analyzed_at)
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMMDD(analyzed_at)
-        """)
-
-        # Add risk_level index to existing tables (no-op if already present).
-        try:
-            client.execute(
-                "ALTER TABLE tx_analysis_results ADD INDEX idx_risk_level risk_level "
-                "TYPE bloom_filter GRANULARITY 1"
-            )
-            client.execute("ALTER TABLE tx_analysis_results MATERIALIZE INDEX idx_risk_level")
-        except Exception as e:
-            logger.debug(f"risk_level index may already exist: {e}")
-
-        try:
-            client.execute(
-                "ALTER TABLE tx_analysis_results ADD INDEX idx_analyzed_at analyzed_at "
-                "TYPE minmax GRANULARITY 1"
-            )
-            client.execute("ALTER TABLE tx_analysis_results MATERIALIZE INDEX idx_analyzed_at")
-        except Exception as e:
-            logger.debug(f"analyzed_at index may already exist: {e}")
-
-        # Address lookup table.
-        #
-        # `addresses Array(String)` in `transactions` carries all input + output
-        # addresses for a transaction.  A bloom_filter skip index on that column
-        # helps at the granule level, but `has(addresses, ?)` still scans every
-        # row in passing granules — at scale this degrades to a full-partition scan.
-        #
-        # This table normalises the array into one row per (address, tx_hash) pair,
-        # ordered by (network, address, slot) so every address lookup is a B-tree
-        # point seek that prunes to a tiny number of granules.
-        #
-        # The companion materialized view populates it automatically on every INSERT
-        # into `transactions`.  A backfill query below seeds it from existing rows.
-        #
-        # NOTE: `transactions.slot` is Nullable; `ifNull(slot, 0)` is used so the
-        # lookup table column stays non-nullable and the ORDER BY is efficient.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS address_transactions (
-                network     String,
-                address     String,
-                slot        UInt64,
-                tx_hash     String,
-                timestamp   DateTime,
-                ingestion_timestamp DateTime DEFAULT now()
-            ) ENGINE = ReplacingMergeTree()
-            ORDER BY (network, address, slot, tx_hash)
-            PARTITION BY toYYYYMMDD(timestamp)
-        """)
-
-        # Materialized view: unnests `addresses` into address_transactions.
-        # ARRAY JOIN in the SELECT is supported in ClickHouse MV definitions and
-        # fires on every INSERT into `transactions`.
-        client.execute("""
-            CREATE MATERIALIZED VIEW IF NOT EXISTS address_transactions_mv
-            TO address_transactions
-            AS SELECT
-                network,
-                addr                  AS address,
-                ifNull(slot, 0)       AS slot,
-                tx_hash,
-                timestamp,
-                ingestion_timestamp
-            FROM transactions
-            ARRAY JOIN addresses AS addr
-            WHERE notEmpty(addr)
-        """)
-
-        # Backfill existing rows (no-op on a fresh deployment where the table is
-        # already empty; on existing deployments this seeds the lookup table once).
-        try:
-            client.execute("""
-                INSERT INTO address_transactions (network, address, slot, tx_hash, timestamp, ingestion_timestamp)
-                SELECT
-                    network,
-                    addr                AS address,
-                    ifNull(slot, 0)     AS slot,
-                    tx_hash,
-                    timestamp,
-                    ingestion_timestamp
-                FROM transactions
-                ARRAY JOIN addresses AS addr
-                WHERE notEmpty(addr)
-                  AND (network, addr, ifNull(slot, 0), tx_hash)
-                      NOT IN (SELECT network, address, slot, tx_hash FROM address_transactions)
-            """)
-        except Exception as e:
-            logger.debug(f"address_transactions backfill skipped: {e}")
-
-        # Multi-class detection tables
-
-        # Extended UTxO-level features, populated inline during ingestion.
-        # One row per output per transaction.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS utxo_features (
-                tx_hash              String,
-                network              String,
-                output_index         UInt16,
-                address              String,
-                is_script_address    UInt8,
-                ada_amount           UInt64,
-                value_cbor_bytes     UInt32,
-                unique_policy_count  UInt16,
-                unique_token_count   UInt16,
-                datum_present        UInt8,
-                datum_bytes          UInt32,
-                datum_ratio          Float32,
-                utxo_total_bytes     UInt32,
-                ingestion_timestamp  DateTime DEFAULT now(),
-                INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network    network TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_address    address TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_is_script  is_script_address TYPE minmax GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash, output_index)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
-
-        # Transaction-level script execution features, populated inline
-        # during ingestion.  One row per transaction.
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS tx_script_features (
-                tx_hash              String,
-                network              String,
-                redeemers_count      UInt16,
-                spending_inputs      UInt16,
-                exunits_mem_total    UInt64,
-                exunits_cpu_total    UInt64,
-                mint_policy_count    UInt16,
-                mint_entries         String,
-                ingestion_timestamp  DateTime DEFAULT now(),
-                INDEX idx_tx_hash    tx_hash TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network    network TYPE bloom_filter GRANULARITY 1
-            ) ENGINE = MergeTree()
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMM(ingestion_timestamp)
-        """)
-
-        # Multi-class scoring output.  One row per scored transaction.
-        # Each attack class gets an independent 0-100 score; -1 means the
-        # gate condition failed (class not applicable).
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS tx_class_scores (
-                tx_hash          String,
-                network          String,
-                token_dust       Float32 DEFAULT -1,
-                large_value      Float32 DEFAULT -1,
-                large_datum      Float32 DEFAULT -1,
-                multiple_sat     Float32 DEFAULT -1,
-                front_running    Float32 DEFAULT -1,
-                sandwich         Float32 DEFAULT -1,
-                circular         Float32 DEFAULT -1,
-                fake_token       Float32 DEFAULT -1,
-                phishing         Float32 DEFAULT -1,
-                max_score        Float32,
-                max_class        String,
-                risk_band        String,
-                sub_scores       String,
-                evidence         String DEFAULT '{}',
-                analysis_version String,
-                analyzed_at      DateTime,
-                INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1
-            ) ENGINE = ReplacingMergeTree(analyzed_at)
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMMDD(analyzed_at)
-        """)
-
-        client.execute(
-            "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS evidence String DEFAULT '{}'"
-        )
-
-        # Admin-curated archive of flagged transactions known to be false
-        # positives. Additive to tx_class_scores: a row here suppresses the
-        # corresponding score from "currently dangerous" lists at query time.
-        # An entry can exist without a matching tx_class_scores row (cross-
-        # instance CSV import: another admin's archive for a tx this instance
-        # never observed).
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS archived_alerts (
-                tx_hash      String,
-                network      String,
-                note         String,
-                archived_by  String,
-                archived_at  DateTime DEFAULT now(),
-                source       String DEFAULT 'local',
-                INDEX idx_tx_hash    tx_hash     TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_network    network     TYPE bloom_filter GRANULARITY 1,
-                INDEX idx_archived   archived_at TYPE minmax       GRANULARITY 1
-            ) ENGINE = ReplacingMergeTree(archived_at)
-            ORDER BY (network, tx_hash)
-            PARTITION BY toYYYYMM(archived_at)
-        """)
-
-        # Per-script / per-policy / global baseline statistics used by the
-        # percentile normalisation framework.  Updated daily (or on bootstrap).
-        #
-        # The ``network`` column is part of the ORDER BY key so ReplacingMergeTree
-        # deduplicates within a network and preprod / preview / mainnet baselines
-        # cannot overwrite each other. If the legacy (network-less) table exists,
-        # drop it so the new schema applies — baselines are always recomputable
-        # from utxo_features / tx_script_features.
-        try:
-            cols = client.execute(
-                "SELECT name FROM system.columns "
-                "WHERE database = currentDatabase() AND table = 'baselines'"
-            )
-            if cols and not any(row[0] == "network" for row in cols):
-                client.execute("DROP TABLE IF EXISTS baselines")
-                logger.info("Dropped legacy baselines table (pre-network schema)")
-        except ClickHouseError as e:
-            # Concurrent startup of another app instance may have already dropped
-            # the table; log and continue rather than mask the error silently.
-            logger.warning("Legacy baselines check/drop skipped: %s", e)
-        client.execute("""
-            CREATE TABLE IF NOT EXISTS baselines (
-                network      String,
-                scope_type   String,
-                scope_id     String,
-                feature      String,
-                p50          Float64,
-                p99          Float64,
-                sample_count UInt64,
-                computed_at  DateTime,
-                window_days  UInt16
-            ) ENGINE = ReplacingMergeTree(computed_at)
-            ORDER BY (network, scope_type, scope_id, feature)
-        """)
-
+        clickhouse_schema.create_all(client)
         logger.info("ClickHouse schema initialized")
     except ClickHouseError as e:
         logger.error(f"Failed to create ClickHouse schema: {e}")
         raise
+
+
+def _serialize_raw_data(raw_data: Optional[Dict[str, Any]]) -> Tuple[str, int]:
+    """Serialize a tx's raw Ogmios payload for the transactions INSERT.
+
+    Returns ``(json_string, truncated_flag)``. When RAW_DATA_MAX_BYTES > 0
+    and the serialized payload exceeds it, an EMPTY string is stored with the
+    flag set — never a sliced prefix, which is invalid JSON and used to make
+    the analysis engine silently score the tx with every gate closed. The
+    full payload stays available in the raw store (ADR-009); the engine falls
+    back to it when the flag is set.
+    """
+    if not raw_data:
+        return "", 0
+    raw_json = json.dumps(raw_data)
+    max_bytes = settings.RAW_DATA_MAX_BYTES
+    # json.dumps defaults to ensure_ascii=True, so len() == byte length.
+    if max_bytes > 0 and len(raw_json) > max_bytes:
+        return "", 1
+    return raw_json, 0
 
 
 def insert_transactions_batch(transactions: List[NormalizedTransaction]):
@@ -498,15 +177,10 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
     now = datetime.now(timezone.utc)
 
     try:
-        client.execute(
-            """
-            INSERT INTO transactions (
-                tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
-                input_count, output_count, total_input_value, total_output_value,
-                addresses, metadata, raw_data, ingestion_timestamp
-            ) VALUES
-            """,
-            [(
+        tx_rows = []
+        for tx in transactions:
+            raw_json, raw_truncated = _serialize_raw_data(tx.raw_data)
+            tx_rows.append((
                 tx.tx_hash,
                 tx.network or settings.CARDANO_NETWORK,
                 tx.slot,
@@ -522,9 +196,20 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 tx.total_output_value,
                 tx.addresses,
                 json.dumps(tx.metadata) if tx.metadata else "",
-                (json.dumps(tx.raw_data) if tx.raw_data else "")[:_RAW_DATA_MAX_BYTES],
+                raw_json,
+                raw_truncated,
+                1 if tx.script_valid else 0,
                 tx.ingestion_timestamp or now,
-            ) for tx in transactions]
+            ))
+        client.execute(
+            """
+            INSERT INTO transactions (
+                tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
+                input_count, output_count, total_input_value, total_output_value,
+                addresses, metadata, raw_data, raw_data_truncated, script_valid, ingestion_timestamp
+            ) VALUES
+            """,
+            tx_rows,
         )
 
         all_inputs = [
@@ -539,6 +224,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 json.dumps(inp.assets) if inp.assets else "",
                 1 if inp.is_reference else 0,
                 1 if inp.is_collateral else 0,
+                1 if inp.is_unspent_attempt else 0,
                 tx.ingestion_timestamp or now,
             )
             for tx in transactions
@@ -549,7 +235,8 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 """
                 INSERT INTO transaction_inputs (
                     tx_hash, network, input_index, input_tx_hash, input_index_in_tx,
-                    address, amount, assets, is_reference, is_collateral, ingestion_timestamp
+                    address, amount, assets, is_reference, is_collateral,
+                    is_unspent_attempt, ingestion_timestamp
                 ) VALUES
                 """,
                 all_inputs,
@@ -559,7 +246,9 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
             (
                 tx.tx_hash,
                 tx.network or settings.CARDANO_NETWORK,
-                idx,
+                # Explicit on-chain index wins (collateral returns sit at
+                # the regular-output count, not their list position).
+                out.output_index if out.output_index is not None else idx,
                 out.address,
                 out.amount,
                 json.dumps(out.assets) if out.assets else "",
@@ -613,38 +302,165 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
 async def insert_transactions_batch_async(transactions: List[NormalizedTransaction]):
     """Non-blocking wrapper: runs insert_transactions_batch on the dedicated
     ClickHouse executor so it never blocks the event loop or the default pool."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_ch_executor, insert_transactions_batch, transactions)
+    await _in_executor(insert_transactions_batch, transactions)
 
 
 # ---------------------------------------------------------------------------
 # Analysis Engine helpers
 # ---------------------------------------------------------------------------
 
+# Tables holding per-transaction chain facts that must be purged when the
+# chain rolls back past their slot. archived_alerts is deliberately absent:
+# it is admin curation, not chain state.
+#
+# Order is load-bearing for idempotency: transactions is the table the orphan
+# hashes are SELECTed from, so it must be deleted LAST. If it were deleted
+# earlier and a later table's DELETE failed, the retry would re-select from
+# transactions, find nothing, and leave the remaining tables holding orphans
+# forever (a surviving stale tx_class_scores row then permanently blocks
+# re-scoring via the unanalyzed anti-join). tx_class_scores stays as late as
+# possible (second-to-last) to minimize the window where an in-flight engine
+# batch re-inserts a score row after its purge.
+_ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
+    "transaction_inputs",
+    "transaction_outputs",
+    "utxo_features",
+    "tx_script_features",
+    "address_transactions",
+    "tx_class_scores",
+    "transactions",
+)
+
+# ClickHouse >= 24.7 refuses lightweight DELETE on a table with projections
+# unless told how to handle them ('throw' is the default), which would turn
+# every rollback purge on the projected transactions table into a permanent
+# chain-sync crash loop. 'rebuild' keeps the list-endpoint projection correct
+# on surviving rows; 'drop' would silently degrade reads on mutated parts.
+# On 26.x the gate reads the TABLE-level merge-tree setting (declared in
+# clickhouse_schema's transactions DDL/migration; verified live on 26.1.3);
+# this per-query copy covers 24.7-25.x servers where the gate reads the
+# query setting. Harmless on the cleanup tables that have no projections.
+_LIGHTWEIGHT_DELETE_SETTINGS = {"lightweight_mutation_projection_mode": "rebuild"}
+
+
+def delete_rolled_back_txs(network: str, rollback_slot: int) -> List[str]:
+    """Delete all rows for transactions confirmed after ``rollback_slot``.
+
+    Called on a ChainSync rollBackward: blocks past the rollback point are
+    off-chain, so their rows would otherwise feed scorers, baselines, and
+    API reads forever. Uses lightweight DELETEs (ClickHouse 22.8+). If the
+    transaction later re-confirms on the new fork, ChainSync re-delivers it
+    and the ReplacingMergeTree insert is a clean upsert with the new block
+    coordinates. Returns the orphaned tx hashes (callers use len() for the
+    count; the rollback handler feeds them to the delayed score repurge).
+
+    Idempotent under partial failure: the orphan hashes are selected from
+    transactions, and transactions is deleted LAST (see
+    _ROLLBACK_CLEANUP_TABLES). If any earlier table's DELETE fails, the
+    hash source is still intact, so a retry re-selects the same hashes and
+    deletes whatever remains. tx_class_scores is second-to-last, which
+    minimizes (but cannot close) the window where an engine batch in
+    flight re-inserts a score row after the purge; delete_score_rows runs
+    again after a delay for that race.
+    """
+    client = _get_client()
+    rows = client.execute(
+        """
+        SELECT DISTINCT tx_hash FROM transactions FINAL
+        WHERE network = %(network)s AND slot > %(slot)s
+        """,
+        {"network": network, "slot": rollback_slot},
+    )
+    hashes = [r[0] for r in rows]
+    if not hashes:
+        return []
+    for table in _ROLLBACK_CLEANUP_TABLES:
+        client.execute(
+            f"DELETE FROM {table} WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+            {"network": network, "hashes": hashes},
+            settings=_LIGHTWEIGHT_DELETE_SETTINGS,
+        )
+    return hashes
+
+
+async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> List[str]:
+    """Async wrapper for delete_rolled_back_txs (runs on the CH executor)."""
+    return await _in_executor(delete_rolled_back_txs, network, rollback_slot)
+
+
+def delete_score_rows(network: str, hashes: List[str]) -> None:
+    """Targeted tx_class_scores purge: the delayed second rollback pass.
+
+    Closes the purge/score-writer race: an engine batch holding rolled-back
+    rows when the purge ran inserts its scores AFTER the first DELETE, and
+    the stale row then blocks re-scoring forever via the anti-join.
+    """
+    if not hashes:
+        return
+    _get_client().execute(
+        "DELETE FROM tx_class_scores "
+        "WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+        {"network": network, "hashes": hashes},
+        settings=_LIGHTWEIGHT_DELETE_SETTINGS,
+    )
+
+
+async def delete_score_rows_async(network: str, hashes: List[str]) -> None:
+    """Async wrapper for delete_score_rows (runs on the CH executor)."""
+    await _in_executor(delete_score_rows, network, hashes)
+
+
 def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[str, Any]]:
     """Resolve input values and unique source addresses for a batch of transactions.
 
     Joins transaction_inputs against transaction_outputs on (input_tx_hash, input_index_in_tx).
-    Only non-collateral, non-reference inputs are considered.
+    Only consumed inputs are considered (non-collateral, non-reference,
+    non-attempted: a failed tx's regular inputs were never spent).
     Returns a dict keyed by tx_hash. Missing keys = no resolvable inputs (outputs pre-date sync).
     """
     if not tx_hashes:
         return {}
+    # FINAL-in-subquery on BOTH join sides: this is a sum over a join, so a
+    # not-yet-merged ReplacingMergeTree duplicate on either side would double
+    # the resolved input value feeding the scorers. (FINAL directly on a
+    # joined table is rejected by ClickHouse; subqueries are the supported
+    # form.) The inner ref-bound on to2 keeps the FINAL scan proportional to
+    # the batch, not the table.
+    # Output side has NO is_collateral filter: only failed txs persist
+    # collateral-return output rows, and those ARE real spendable UTxOs;
+    # excluding them made any tx spending one unresolvable (review finding).
     rows = _get_client().execute(
         """
         SELECT
             ti.tx_hash,
             sum(coalesce(to2.amount, 0))  AS resolved_input_value,
             uniqExact(to2.address)        AS unique_input_addresses
-        FROM transaction_inputs ti
-        LEFT JOIN transaction_outputs to2
+        FROM (
+            SELECT tx_hash, network, input_tx_hash, input_index_in_tx
+            FROM transaction_inputs FINAL
+            WHERE tx_hash      IN %(tx_hashes)s
+              AND network       = %(network)s
+              AND is_collateral = 0
+              AND is_reference  = 0
+              AND is_unspent_attempt = 0
+        ) ti
+        LEFT JOIN (
+            SELECT tx_hash, network, output_index, address, amount
+            FROM transaction_outputs FINAL
+            WHERE network = %(network)s
+              AND tx_hash IN (
+                  SELECT input_tx_hash
+                  FROM transaction_inputs FINAL
+                  WHERE tx_hash      IN %(tx_hashes)s
+                    AND network       = %(network)s
+                    AND is_collateral = 0
+                    AND is_reference  = 0
+                    AND is_unspent_attempt = 0
+              )
+        ) to2
             ON  ti.input_tx_hash     = to2.tx_hash
             AND ti.input_index_in_tx = to2.output_index
             AND ti.network           = to2.network
-        WHERE ti.tx_hash      IN %(tx_hashes)s
-          AND ti.network       = %(network)s
-          AND ti.is_collateral = 0
-          AND ti.is_reference  = 0
         GROUP BY ti.tx_hash
         """,
         {"tx_hashes": tx_hashes, "network": network},
@@ -669,16 +485,21 @@ def get_outputs_for_refs(
     # Deduplicate and build a set for filtering
     ref_set = set(refs)
     unique_tx_hashes = list({r[0] for r in ref_set})
+    # FINAL: resolved amounts feed total_input_value at ingestion; a
+    # pre-merge duplicate row is harmless for the dict shape (same key,
+    # same value) but FINAL keeps the contract exact.
     rows = _get_client().execute(
         """
         SELECT tx_hash, output_index, address, amount
-        FROM transaction_outputs
+        FROM transaction_outputs FINAL
         WHERE tx_hash IN %(tx_hashes)s
           AND network = %(network)s
-          AND is_collateral = 0
         """,
         {"tx_hashes": unique_tx_hashes, "network": network},
     )
+    # No is_collateral filter: only failed txs persist collateral-return
+    # output rows and those are real spendable UTxOs (Babbage); excluding
+    # them left total_input_value NULL on any tx spending one.
     # Only return rows matching requested (tx_hash, output_index) pairs
     return {
         (r[0], r[1]): (r[2], int(r[3]))
@@ -691,8 +512,7 @@ async def get_outputs_for_refs_async(
     network: str,
 ) -> Dict[tuple, tuple]:
     """Async wrapper for get_outputs_for_refs."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ch_executor, get_outputs_for_refs, refs, network)
+    return await _in_executor(get_outputs_for_refs, refs, network)
 
 
 def get_address_activity(addresses: List[str], network: str) -> Dict[str, int]:
@@ -703,9 +523,13 @@ def get_address_activity(addresses: List[str], network: str) -> Dict[str, int]:
     """
     if not addresses:
         return {}
+    # uniqExact(tx_hash) rather than count(): the MV fires on every INSERT
+    # into transactions, so a replayed block produces duplicate rows until
+    # the ReplacingMergeTree merge runs; counting distinct tx hashes is
+    # correct in both states and cheaper than FINAL here.
     rows = _get_client().execute(
         """
-        SELECT address, count() AS tx_count
+        SELECT address, uniqExact(tx_hash) AS tx_count
         FROM address_transactions
         WHERE network  = %(network)s
           AND address IN %(addresses)s
@@ -723,10 +547,7 @@ def _execute_query(query: str, params: Optional[Dict] = None) -> list:
 
 async def execute_query_async(query: str, params: Optional[Dict] = None) -> list:
     """Non-blocking wrapper: runs a parameterized SELECT on the ClickHouse executor."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _ch_executor, _execute_query, query, params,
-    )
+    return await _in_executor(_execute_query, query, params)
 
 
 
@@ -764,80 +585,41 @@ def insert_tx_script_features(rows: List[tuple]):
     )
 
 
-def insert_class_scores(results: List[Dict[str, Any]]):
-    """Batch-insert multi-class scoring results into tx_class_scores."""
-    if not results:
-        return
-    _get_client().execute(
-        """
-        INSERT INTO tx_class_scores (
-            tx_hash, network,
-            token_dust, large_value, large_datum, multiple_sat,
-            front_running, sandwich, circular, fake_token, phishing,
-            max_score, max_class, risk_band, sub_scores, evidence,
-            analysis_version, analyzed_at
-        ) VALUES
-        """,
-        [
-            (
-                r["tx_hash"], r["network"],
-                r.get("token_dust", -1), r.get("large_value", -1),
-                r.get("large_datum", -1), r.get("multiple_sat", -1),
-                r.get("front_running", -1), r.get("sandwich", -1),
-                r.get("circular", -1), r.get("fake_token", -1),
-                r.get("phishing", -1),
-                r["max_score"], r["max_class"], r["risk_band"],
-                json.dumps(r.get("sub_scores", {})),
-                json.dumps(r.get("evidence", {}), default=str),
-                r["analysis_version"], r["analyzed_at"],
-            )
-            for r in results
-        ],
-    )
-
-
-def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
-    """Return the latest multi-class score vector for a single transaction."""
-    rows = _get_client().execute(
-        """
-        SELECT tx_hash, network,
-               token_dust, large_value, large_datum, multiple_sat,
-               front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores, evidence,
-               analysis_version, analyzed_at
-        FROM tx_class_scores FINAL
-        WHERE tx_hash = %(tx_hash)s
-        LIMIT 1
-        """,
-        {"tx_hash": tx_hash},
-    )
-    if not rows:
-        return None
-    keys = (
-        "tx_hash", "network",
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
-        "analysis_version", "analyzed_at",
-    )
-    result = dict(zip(keys, rows[0]))
-    for json_key in ("sub_scores", "evidence"):
-        if isinstance(result.get(json_key), str):
-            try:
-                result[json_key] = json.loads(result[json_key])
-            except (json.JSONDecodeError, TypeError):
-                result[json_key] = {}
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Baseline read/write
 # ---------------------------------------------------------------------------
+
+# In-process TTL cache for baseline lookups. Baselines change once per
+# recompute (daily cadence) but were fetched with a point SELECT ... FINAL
+# per feature per scored transaction: the dominant N+1 in the engine's
+# per-tx query budget. Negative results are cached too (most scripts have
+# no per-script baseline, so misses dominate). insert_baselines() clears
+# the cache, so the daily recompute invalidates atomically; the TTL is the
+# backstop for out-of-band writes. Guarded by a lock: callers run on the
+# ClickHouse executor threads.
+_baseline_cache: Dict[tuple, tuple] = {}
+_baseline_cache_lock = threading.Lock()
+
+
+def _baseline_cache_clear() -> None:
+    with _baseline_cache_lock:
+        _baseline_cache.clear()
+
 
 def get_baseline(
     network: str, scope_type: str, scope_id: str, feature: str,
 ) -> Optional[Dict[str, Any]]:
     """Return the latest baseline for a given (network, scope_type, scope_id, feature)."""
+    ttl = settings.BASELINE_CACHE_TTL_SECONDS
+    cache_key = (network, scope_type, scope_id, feature)
+    if ttl > 0:
+        with _baseline_cache_lock:
+            hit = _baseline_cache.get(cache_key)
+            if hit is not None:
+                value, fetched_at = hit
+                if time.monotonic() - fetched_at < ttl:
+                    return dict(value) if value is not None else None
+                _baseline_cache.pop(cache_key, None)
     rows = _get_client().execute(
         """
         SELECT p50, p99, sample_count, computed_at, window_days
@@ -855,10 +637,20 @@ def get_baseline(
             "feature": feature,
         },
     )
-    if not rows:
-        return None
     keys = ("p50", "p99", "sample_count", "computed_at", "window_days")
-    return dict(zip(keys, rows[0]))
+    result = dict(zip(keys, rows[0])) if rows else None
+    if ttl > 0:
+        with _baseline_cache_lock:
+            if len(_baseline_cache) >= settings.BASELINE_CACHE_MAX_ENTRIES:
+                # Blunt overflow policy: drop everything and let the hot
+                # keys refill. Simpler than LRU bookkeeping and overflow is
+                # effectively unreachable at the configured size.
+                _baseline_cache.clear()
+            _baseline_cache[cache_key] = (
+                dict(result) if result is not None else None,
+                time.monotonic(),
+            )
+    return result
 
 
 def insert_baselines(rows: List[tuple]):
@@ -878,447 +670,52 @@ def insert_baselines(rows: List[tuple]):
         """,
         rows,
     )
+    # New baselines invalidate every cached lookup (recompute writes all
+    # scopes in a handful of batches; a full clear is the simple, correct
+    # granularity).
+    _baseline_cache_clear()
 
 
-def get_class_scores_list(
+def insert_baseline_drift_event(
     network: str,
-    risk_band: Optional[List[str]] = None,
-    attack_class: Optional[str] = None,
-    min_score: float = 0.0,
-    sort: str = "score",
-    analyzed_from: Optional[Any] = None,
-    analyzed_to: Optional[Any] = None,
-    limit: int = 100,
-    offset: int = 0,
-    include_archived: bool = False,
-) -> List[Dict[str, Any]]:
-    """Return multi-class score rows with optional filters.
+    scope_type: str,
+    scope_id: str,
+    feature: str,
+    old_p99: float,
+    new_p99: float,
+    drift_ratio: float,
+    detected_at: datetime,
+    axis: str = "p99",
+    applied: bool = False,
+):
+    """Record a baseline drift event (held or applied).
 
-    sort: "score" (default) or "date" (most recent first).
-    include_archived: when False (default), rows whose (network, tx_hash) is
-        present in ``archived_alerts`` are excluded so admin-curated false
-        positives stop showing up in "currently dangerous" lists.
-    risk_band: list of risk band values (case-insensitive). When non-empty,
-        results are restricted via an ``IN`` clause; ``None`` or empty list
-        means no filter.
-    analyzed_from / analyzed_to: inclusive lower / exclusive upper bound on
-    ``analyzed_at`` (datetime).
+    ``axis`` names the drifting percentile; the legacy ``old_p99``/
+    ``new_p99`` column names are kept but hold that axis's old/new values.
+    ``applied`` is True for recall-safe drifts that were inserted anyway.
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
-    _ALLOWED_SORTS = {
-        "score": "max_score DESC, analyzed_at DESC",
-        "date": "analyzed_at DESC, max_score DESC",
-    }
-    order_clause = _ALLOWED_SORTS.get(sort, _ALLOWED_SORTS["score"])
-    if attack_class and attack_class not in _CLASS_COLS:
-        raise ValueError(f"Invalid attack_class '{attack_class}'")
-
-    conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {
-        "network": network, "limit": limit, "offset": offset,
-    }
-    if risk_band:
-        # Generate one named placeholder per value so the query is fully
-        # parameterized (no string interpolation of user input). clickhouse-
-        # driver doesn't expand a Python list into a SQL list automatically.
-        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
-        conditions.append(
-            f"lower(risk_band) IN ({', '.join(placeholders)})"
-        )
-        for i, rb in enumerate(risk_band):
-            params[f"risk_band_{i}"] = rb.lower()
-    if attack_class and attack_class in _CLASS_COLS:
-        # Filter by the DOMINANT class (max_class), not just "this class has
-        # a non-zero sub-score". The list view shows one row per tx with its
-        # dominant attack type, so a stricter filter keeps the UI labelling
-        # honest — otherwise a Phishing tx with a small `circular` score
-        # would appear under the "Circular" filter labelled "Phishing".
-        conditions.append("max_class = %(attack_class)s")
-        params["attack_class"] = attack_class
-    if min_score > 0:
-        conditions.append("max_score >= %(min_score)s")
-        params["min_score"] = min_score
-    if not include_archived:
-        # Anti-join via subquery: NOT IN against the (network, tx_hash) pairs
-        # currently archived. ClickHouse 26+ disallows FINAL on a table inside
-        # a JOIN clause, so we use a scalar subquery instead.
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
-    if analyzed_from is not None:
-        conditions.append("analyzed_at >= %(analyzed_from)s")
-        params["analyzed_from"] = analyzed_from
-    if analyzed_to is not None:
-        conditions.append("analyzed_at < %(analyzed_to)s")
-        params["analyzed_to"] = analyzed_to
-
-    where = " AND ".join(conditions)
-    # Query scores first, then batch-fetch tx details separately.
-    # ClickHouse 26+ does not allow FINAL on tables inside JOINs.
-    rows = _get_client().execute(
-        f"""
-        SELECT tx_hash, network,
-               token_dust, large_value, large_datum, multiple_sat,
-               front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores, evidence,
-               analysis_version, analyzed_at
-        FROM tx_class_scores FINAL
-        WHERE {where}
-        ORDER BY {order_clause}
-        LIMIT %(limit)s OFFSET %(offset)s
-        """,
-        params,
-    )
-    score_keys = (
-        "tx_hash", "network",
-        *_CLASS_COLS,
-        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
-        "analysis_version", "analyzed_at",
-    )
-    # Batch-fetch fee/output_count for matched tx_hashes
-    tx_hashes = [r[0] for r in rows]
-    tx_details: Dict[str, Dict[str, Any]] = {}
-    if tx_hashes:
-        detail_rows = _get_client().execute(
-            """
-            SELECT tx_hash, fee, output_count
-            FROM transactions
-            WHERE tx_hash IN %(hashes)s AND network = %(network)s
-            """,
-            {"hashes": tx_hashes, "network": network},
-        )
-        for dr in detail_rows:
-            tx_details[dr[0]] = {"fee": dr[1], "output_count": dr[2]}
-    keys = (*score_keys, "fee", "output_count")
-    results = []
-    for row in rows:
-        d = dict(zip(score_keys, row))
-        detail = tx_details.get(d["tx_hash"], {})
-        d["fee"] = detail.get("fee")
-        d["output_count"] = detail.get("output_count")
-        for json_key in ("sub_scores", "evidence"):
-            if isinstance(d.get(json_key), str):
-                try:
-                    d[json_key] = json.loads(d[json_key])
-                except (json.JSONDecodeError, TypeError):
-                    d[json_key] = {}
-        results.append(d)
-    return results
-
-
-async def get_class_scores_list_async(
-    network: str,
-    risk_band: Optional[List[str]],
-    attack_class: Optional[str],
-    min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
-    include_archived: bool = False,
-    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
-) -> List[Dict[str, Any]]:
-    # Bind by keyword so a future reorder of the sync signature can't silently
-    # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _ch_executor,
-        partial(
-            get_class_scores_list,
-            network=network,
-            risk_band=risk_band,
-            attack_class=attack_class,
-            min_score=min_score,
-            sort=sort,
-            analyzed_from=analyzed_from,
-            analyzed_to=analyzed_to,
-            limit=limit,
-            offset=offset,
-            include_archived=include_archived,
-        ),
-    )
-
-
-def count_class_scores(
-    network: str,
-    risk_band: Optional[List[str]] = None,
-    attack_class: Optional[str] = None,
-    min_score: float = 0.0,
-    analyzed_from: Optional[Any] = None,
-    analyzed_to: Optional[Any] = None,
-    include_archived: bool = False,
-) -> int:
-    """Total number of class-score rows matching the given filters.
-
-    Mirrors the WHERE clause of ``get_class_scores_list`` so the count is
-    consistent with what would be returned (ignoring LIMIT/OFFSET).
-    risk_band: list of bands; ``None`` or empty list means no filter. See
-        ``get_class_scores_list`` for the same semantics.
-    include_archived: when False (default), exclude rows whose
-        ``(network, tx_hash)`` is present in ``archived_alerts`` — keeps the
-        count aligned with the rows actually surfaced by the list query.
-    """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
-    if attack_class and attack_class not in _CLASS_COLS:
-        raise ValueError(f"Invalid attack_class '{attack_class}'")
-
-    conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {"network": network}
-    if risk_band:
-        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
-        conditions.append(
-            f"lower(risk_band) IN ({', '.join(placeholders)})"
-        )
-        for i, rb in enumerate(risk_band):
-            params[f"risk_band_{i}"] = rb.lower()
-    if attack_class and attack_class in _CLASS_COLS:
-        # Mirror the list query's filter: filter by max_class so the count
-        # reflects what would actually be returned (see get_class_scores_list).
-        conditions.append("max_class = %(attack_class)s")
-        params["attack_class"] = attack_class
-    if min_score > 0:
-        conditions.append("max_score >= %(min_score)s")
-        params["min_score"] = min_score
-    if analyzed_from is not None:
-        conditions.append("analyzed_at >= %(analyzed_from)s")
-        params["analyzed_from"] = analyzed_from
-    if analyzed_to is not None:
-        conditions.append("analyzed_at < %(analyzed_to)s")
-        params["analyzed_to"] = analyzed_to
-    if not include_archived:
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
-
-    where = " AND ".join(conditions)
-    rows = _get_client().execute(
-        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}",
-        params,
-    )
-    return int(rows[0][0]) if rows else 0
-
-
-async def count_class_scores_async(
-    network: str,
-    risk_band: Optional[List[str]],
-    attack_class: Optional[str],
-    min_score: float,
-    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
-    include_archived: bool = False,
-) -> int:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _ch_executor,
-        partial(
-            count_class_scores,
-            network=network,
-            risk_band=risk_band,
-            attack_class=attack_class,
-            min_score=min_score,
-            analyzed_from=analyzed_from,
-            analyzed_to=analyzed_to,
-            include_archived=include_archived,
-        ),
-    )
-
-
-async def get_class_scores_async(tx_hash: str) -> Optional[Dict[str, Any]]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_ch_executor, get_class_scores, tx_hash)
-
-
-def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict[str, Any]:
-    """Per-class distribution stats for a network.
-
-    include_archived: when False (default), exclude rows whose (network, tx_hash)
-        has been admin-archived so band counts reflect only currently-flagged txs.
-    """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
-    # Build per-class aggregation: count of scored (>= 0), avg, max
-    agg_parts = []
-    for col in _CLASS_COLS:
-        agg_parts.append(
-            f"countIf({col} >= 0) AS {col}_count, "
-            f"avgIf({col}, {col} >= 0) AS {col}_avg, "
-            f"maxIf({col}, {col} >= 0) AS {col}_max"
-        )
-    agg_sql = ", ".join(agg_parts)
-    archive_clause = (
-        " AND (network, tx_hash) NOT IN ("
-        "SELECT network, tx_hash FROM archived_alerts FINAL)"
-        if not include_archived else ""
-    )
-    rows = _get_client().execute(
-        f"""
-        SELECT count() AS total,
-               countIf(lower(risk_band) = 'critical') AS critical_count,
-               countIf(lower(risk_band) = 'high') AS high_count,
-               countIf(lower(risk_band) = 'moderate') AS moderate_count,
-               countIf(lower(risk_band) = 'low') AS low_count,
-               avg(max_score) AS avg_max_score,
-               max(analyzed_at) AS last_analyzed_at,
-               {agg_sql}
-        FROM tx_class_scores FINAL
-        WHERE network = %(network)s{archive_clause}
-        """,
-        {"network": network},
-    )
-    if not rows:
-        return {}
-
-    import math
-
-    def _safe(v):
-        """Convert NaN/inf floats (ClickHouse empty-agg artefacts) to None."""
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return None
-        return v
-
-    row = rows[0]
-    idx = 0
-    result: Dict[str, Any] = {
-        "total": row[idx], "critical_count": row[idx+1],
-        "high_count": row[idx+2], "moderate_count": row[idx+3],
-        "low_count": row[idx+4], "avg_max_score": _safe(row[idx+5]),
-        "last_analyzed_at": row[idx+6],
-    }
-    idx = 7
-    per_class = {}
-    for col in _CLASS_COLS:
-        per_class[col] = {
-            "scored_count": row[idx], "avg_score": _safe(row[idx+1]), "max_score": _safe(row[idx+2]),
-        }
-        idx += 3
-    result["per_class"] = per_class
-    result["pending_count"] = get_pending_count(network)
-    return result
-
-
-def get_pending_count(network: str) -> int:
-    """Count transactions ingested but not yet scored, on a like-for-like
-    basis.
-
-    The dashboard previously derived "pending" as
-    ``count(transactions) - count(tx_class_scores)``, but those two counts
-    aren't comparable: ``transactions`` is a plain MergeTree counted without
-    FINAL (so re-ingested/reorg duplicates inflate it) while the scores count
-    is FINAL-deduped AND archive-filtered (so every archived alert showed as
-    permanently "pending").
-
-    This computes the real backlog as the difference of two deduped counts:
-    distinct ingested tx_hashes minus distinct scored tx_hashes. Every scored
-    tx_hash is necessarily one we ingested (``scored ⊆ ingested``), so the
-    difference is exactly the unscored set — without the cost of a per-row
-    ``NOT IN`` against the full scored-hash set on every 15s poll.
-
-    Notes:
-      - No archive filter on the scores count: archived txs *were* scored, so
-        they must not count as pending. (Distinct from the band-count stats,
-        which exclude archived.)
-      - ``greatest(0, ...)`` guards the rare case of a score row without a
-        matching transactions row (e.g. cross-instance score import), which
-        would otherwise drive the figure negative.
-      - Input-deferred txs (awaiting transaction_inputs) have no score row yet
-        and are correctly counted as pending.
-    """
-    rows = _get_client().execute(
+    _get_client().execute(
         """
-        SELECT greatest(0,
-            (SELECT countDistinct(tx_hash) FROM transactions
-             WHERE network = %(network)s)
-            - (SELECT count() FROM tx_class_scores FINAL
-               WHERE network = %(network)s)
-        )
+        INSERT INTO baseline_drift_events (
+            network, scope_type, scope_id, feature,
+            old_p99, new_p99, drift_ratio, detected_at, axis, applied
+        ) VALUES
         """,
-        {"network": network},
-    )
-    return int(rows[0][0]) if rows else 0
-
-
-async def get_class_scores_stats_async(
-    network: str, include_archived: bool = False,
-) -> Dict[str, Any]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _ch_executor, get_class_scores_stats, network, include_archived,
+        [(
+            network, scope_type, scope_id, feature,
+            float(old_p99), float(new_p99), float(drift_ratio), detected_at,
+            axis, 1 if applied else 0,
+        )],
     )
 
 
-def get_alert_timeseries(
-    network: str, days: int = 14, include_archived: bool = False,
-) -> List[Dict[str, Any]]:
-    """Daily count of High+Critical alerts over the last ``days`` days.
-
-    Bucketed on the transaction's on-chain block ``timestamp`` (not
-    ``analyzed_at``) so the trend reflects when attacks actually occurred,
-    not our scoring/backfill cadence. Powers the dashboard sparkline.
-
-    Excludes admin-archived rows by default so the trend matches the
-    Critical KPI card (which also excludes them).
-
-    FINAL is applied inside subqueries rather than on the joined tables
-    directly: ClickHouse 26+ rejects FINAL on a table inside a JOIN.
-    Gaps (days with zero alerts) are filled with 0 via ``WITH FILL`` so
-    the sparkline renders a continuous line instead of collapsing missing
-    days.
-
-    Counts ``DISTINCT s.tx_hash`` rather than join-rows: the ``transactions``
-    table is a plain MergeTree (no dedup), so a tx ingested more than once
-    (chain reorg / re-sync) has duplicate rows that would otherwise fan out
-    the JOIN and inflate the daily count. A tx_hash maps to exactly one
-    block, so distinct-by-hash is the correct unit.
-    """
-    archive_clause = (
-        " AND (network, tx_hash) NOT IN ("
-        "SELECT network, tx_hash FROM archived_alerts FINAL)"
-        if not include_archived else ""
-    )
-    rows = _get_client().execute(
-        f"""
-        SELECT toDate(t.timestamp) AS day, count(DISTINCT s.tx_hash) AS cnt
-        FROM (
-            SELECT tx_hash, network
-            FROM tx_class_scores FINAL
-            WHERE network = %(network)s
-              AND lower(risk_band) IN ('high', 'critical')
-              {archive_clause}
-        ) AS s
-        INNER JOIN (
-            SELECT tx_hash, network, timestamp
-            FROM transactions
-            WHERE network = %(network)s
-              AND timestamp >= toStartOfDay(now() - INTERVAL %(days)s DAY)
-        ) AS t
-          ON s.tx_hash = t.tx_hash AND s.network = t.network
-        GROUP BY day
-        ORDER BY day WITH FILL
-            FROM toDate(now() - INTERVAL %(days)s DAY)
-            TO toDate(now()) + 1
-            STEP 1
-        """,
-        {"network": network, "days": days},
-    )
-    return [{"date": r[0].isoformat(), "count": int(r[1])} for r in rows]
-
-
-async def get_alert_timeseries_async(
-    network: str, days: int = 14, include_archived: bool = False,
-) -> List[Dict[str, Any]]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _ch_executor, get_alert_timeseries, network, days, include_archived,
-    )
-
-
+# Baseline feature name -> the multiple_sat evidence JSON key that carries its
+# per-tx value. Only the VALUE-extraction axis is per-script-calibrated (see
+# baselines._MULTIPLE_SAT_PER_SCRIPT_FEATURES for why exunits/n_inputs are
+# excluded). These are computed only at scoring time (they need resolved
+# inputs), so they are not in any ingestion feature table; their values are read
+# back out of the persisted ``tx_class_scores.evidence``. Keys are a fixed
+# allowlist (no user input) so they are safe to interpolate.
 def get_baselines_for_scope(
     network: str, scope_type: str, scope_id: str,
 ) -> List[Dict[str, Any]]:
@@ -1341,52 +738,32 @@ def get_baselines_for_scope(
 async def get_baselines_for_scope_async(
     network: str, scope_type: str, scope_id: str,
 ) -> List[Dict[str, Any]]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _ch_executor, get_baselines_for_scope, network, scope_type, scope_id,
-    )
+    return await _in_executor(get_baselines_for_scope, network, scope_type, scope_id)
 
-
-def get_unanalyzed_transactions(network: str, batch_size: int) -> List[Dict[str, Any]]:
-    """Return transactions that have no multi-class score yet.
-
-    Fetches raw_data alongside the standard fields so that the feature
-    extraction pipeline can derive UTxO-level and script-level features
-    without a second round-trip.
-
-    Defers a tx until ``transaction_inputs`` rows for it are visible. The
-    ingester writes ``transactions`` and ``transaction_inputs`` as separate
-    ``INSERT`` statements (ClickHouse has no multi-statement transactions;
-    see :func:`insert_transactions_batch` for the writer side), so a poll
-    that lands between the two writes would see the tx with no resolved
-    input addresses, the scorer enrichment would no-op, and gate conditions
-    like ``≥2 inputs from same script`` would silently fail. Per-statement
-    atomicity guarantees that if any ``transaction_inputs`` row exists for
-    the tx, all of them do; "any row exists" is therefore a sufficient
-    witness that the inputs side is ready. Txs with ``input_count = 0``
-    (treasury / collateral-only edge cases) are admitted directly since
-    they need no input enrichment.
-    """
-    rows = _get_client().execute(
-        """
-        SELECT t.tx_hash, t.network, t.fee, t.input_count, t.output_count,
-               t.total_output_value, t.metadata, t.addresses, t.raw_data,
-               t.slot, t.block_height, t.timestamp
-        FROM transactions t
-        LEFT ANTI JOIN tx_class_scores s
-          ON t.tx_hash = s.tx_hash AND t.network = s.network
-        WHERE t.network = %(network)s
-          AND (t.input_count = 0
-               OR t.tx_hash IN (
-                   SELECT tx_hash FROM transaction_inputs
-                   WHERE network = %(network)s
-               ))
-        ORDER BY t.ingestion_timestamp ASC
-        LIMIT %(batch_size)s
-        """,
-        {"network": network, "batch_size": batch_size},
-    )
-    keys = ("tx_hash", "network", "fee", "input_count", "output_count",
-            "total_output_value", "metadata", "addresses", "raw_data",
-            "slot", "block_height", "timestamp")
-    return [dict(zip(keys, row)) for row in rows]
+# ---------------------------------------------------------------------------
+# tx_class_scores layer: lives in app.db.clickhouse_scores; re-exported here
+# so every existing caller and test import path (clickhouse.insert_class_scores,
+# clickhouse.get_unanalyzed_transactions, the _score_filter_conditions /
+# _MULTIPLE_SAT_EVIDENCE_KEYS internals used by tests and baselines.py)
+# keeps working unchanged. clickhouse_scores resolves the client/executor
+# through this module at call time, so monkeypatching _get_client /
+# _ch_executor here still reaches the moved code.
+from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
+    _CLASS_COLS,
+    _MULTIPLE_SAT_EVIDENCE_KEYS,
+    _score_filter_conditions,
+    count_class_scores,
+    count_class_scores_async,
+    get_alert_timeseries,
+    get_alert_timeseries_async,
+    get_class_scores,
+    get_class_scores_async,
+    get_class_scores_list,
+    get_class_scores_list_async,
+    get_class_scores_stats,
+    get_class_scores_stats_async,
+    get_pending_count,
+    get_unanalyzed_transactions,
+    insert_class_scores,
+    query_multiple_sat_extraction_percentiles,
+)

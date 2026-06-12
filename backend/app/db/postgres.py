@@ -241,6 +241,23 @@ async def execute_schema():
                 ON mempool_collisions(created_at);
         """)
 
+        # Durable queue for the delayed tx_class_scores rollback repurge.
+        # The in-memory asyncio task that performs the delayed second purge
+        # pass is volatile (lost on restart/shutdown inside the delay
+        # window); a lost repurge leaves a stale score row that permanently
+        # blocks re-scoring of a re-confirmed tx (missed-attack risk). Rows
+        # are written BEFORE the task is scheduled and deleted only after
+        # the ClickHouse delete succeeds; chain-sync (re)connect replays
+        # whatever is left.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_score_repurges (
+                network     TEXT NOT NULL,
+                tx_hash     TEXT NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, tx_hash)
+            )
+        """)
+
         logger.info("PostgreSQL schema initialized")
 
 
@@ -423,6 +440,51 @@ async def get_sync_point(network: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# --- Pending score repurges (durable rollback second pass) ---
+
+async def add_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+    """Persist tx hashes awaiting the delayed tx_class_scores repurge.
+
+    Written BEFORE the in-memory repurge task is scheduled so a restart or
+    shutdown inside the delay window cannot lose the repurge. ON CONFLICT
+    DO NOTHING: a rollback re-delivered by the node (the cleanup path is
+    idempotent) may enqueue the same hashes twice.
+    """
+    if not tx_hashes:
+        return
+    async with get_connection() as conn:
+        await conn.executemany("""
+            INSERT INTO pending_score_repurges (network, tx_hash)
+            VALUES ($1, $2)
+            ON CONFLICT (network, tx_hash) DO NOTHING
+        """, [(network, h) for h in tx_hashes])
+
+
+async def get_pending_score_repurges(network: str) -> List[str]:
+    """All tx hashes whose delayed score repurge has not completed yet."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            "SELECT tx_hash FROM pending_score_repurges WHERE network = $1",
+            network,
+        )
+        return [r["tx_hash"] for r in rows]
+
+
+async def clear_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+    """Remove hashes whose tx_class_scores repurge succeeded in ClickHouse.
+
+    Called only AFTER delete_score_rows_async returns: clearing first would
+    reopen the lost-repurge window this table exists to close.
+    """
+    if not tx_hashes:
+        return
+    async with get_connection() as conn:
+        await conn.execute("""
+            DELETE FROM pending_score_repurges
+            WHERE network = $1 AND tx_hash = ANY($2)
+        """, network, tx_hashes)
+
+
 # --- Entity State ---
 
 async def get_entity_state(entity_type: str, entity_id: str, network: str) -> Optional[Dict[str, Any]]:
@@ -471,6 +533,89 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
               AND first_seen_at < NOW() - ($2 * INTERVAL '1 second')
         """, network, older_than_seconds)
         # asyncpg returns "UPDATE N" — extract the row count
+        return int(result.split()[1])
+
+
+async def insert_audit_log(
+    event_type: str,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    details: str,
+    ip_address: Optional[str],
+) -> int:
+    """Append one audit row and return its id. ``details`` is a JSON string;
+    ``user_id`` stays NULL until server-side accounts exist (the actor is
+    carried in details).
+    """
+    # Defence-in-depth: app.net.client_ip already validates, but the ::inet
+    # cast aborts the whole insert on any malformed value reaching this
+    # layer, and for fail-closed audit callers that would block the action.
+    from app.net import parse_ip
+
+    ip_address = parse_ip(ip_address)
+    async with get_connection() as conn:
+        return await conn.fetchval("""
+            INSERT INTO audit_logs (
+                event_type, entity_type, entity_id, action, details, ip_address
+            ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::inet)
+            RETURNING id
+        """, event_type, entity_type, entity_id, action, details, ip_address)
+
+
+async def update_audit_log_details(audit_id: int, outcome: str) -> None:
+    """Merge ``outcome`` (a JSON object string) into an audit row's details."""
+    async with get_connection() as conn:
+        await conn.execute("""
+            UPDATE audit_logs SET details = details || $2::jsonb WHERE id = $1
+        """, audit_id, outcome)
+
+
+async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
+    """Delete TERMINAL lifecycle rows (DROPPED / ROLLED_BACK) older than the
+    retention window. CONFIRMED and PENDING rows are never pruned: CONFIRMED
+    is the canonical lifecycle record and PENDING is live state. Retention
+    is opt-in (LIFECYCLE_RETENTION_DAYS=0 keeps everything).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM tx_lifecycle
+            WHERE network    = $1
+              AND status IN ('DROPPED', 'ROLLED_BACK')
+              AND updated_at < NOW() - ($2 * INTERVAL '1 day')
+        """, network, older_than_days)
+        return int(result.split()[1])
+
+
+async def prune_audit_logs(older_than_days: int) -> int:
+    """Delete audit rows older than the retention window.
+
+    No network column on audit_logs (actions are instance-scoped); uses
+    idx_audit_logs_created_at. Opt-in: AUDIT_LOG_RETENTION_DAYS=0 keeps
+    everything (audit rows are the suppression accountability record).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM audit_logs
+            WHERE created_at < NOW() - ($1 * INTERVAL '1 day')
+        """, older_than_days)
+        return int(result.split()[1])
+
+
+async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
+    """Delete collision records older than the retention window.
+
+    Note the precision trade-off before enabling: the front_running
+    attacker-recurrence signal counts wins over collision HISTORY, so
+    pruning shrinks the window that signal can see. Opt-in
+    (MEMPOOL_COLLISION_RETENTION_DAYS=0 keeps everything).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM mempool_collisions
+            WHERE network    = $1
+              AND created_at < NOW() - ($2 * INTERVAL '1 day')
+        """, network, older_than_days)
         return int(result.split()[1])
 
 

@@ -16,7 +16,7 @@ import re
 import time
 import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import settings
 
@@ -354,10 +354,12 @@ def _fetch_token_from_registry(subject: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _refresh_legitimate_tokens() -> Dict[str, List[str]]:
+def _refresh_legitimate_tokens() -> Tuple[Dict[str, List[str]], int]:
     """Fetch well-known tokens from the Cardano Token Registry.
 
-    Merges remote results with the seed list. On failure, falls back to seeds.
+    Merges remote results with the seed list; returns ``(registry, fetched)``
+    so the caller can tell a real refresh from a total outage (seeds-only)
+    and avoid shrinking a previously complete cache.
     """
     registry: Dict[str, List[str]] = {}
 
@@ -394,7 +396,7 @@ def _refresh_legitimate_tokens() -> Dict[str, List[str]]:
     else:
         logger.warning("Token registry: remote fetch returned 0 entries, using seed list only")
 
-    return registry
+    return registry, fetched
 
 
 def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
@@ -417,17 +419,63 @@ def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
     """
     if network != "mainnet" and not settings.FAKE_TOKEN_TESTNET_MODE:
         return {}
-    cached = _get_cached("legitimate_tokens")
-    if cached is not None:
-        return cached
-    registry = _refresh_legitimate_tokens()
-    _set_cached("legitimate_tokens", registry)
-    return registry
+    # NEVER fetch inline: this is called from gate()/score() on the scoring
+    # hot path, and the remote registry refresh is ~30 sequential blocking
+    # HTTP requests (worst case minutes), which previously stalled an entire
+    # analysis batch on every 24 h cache expiry. The background task
+    # (tasks/analysis.py) refreshes on a cadence via refresh_token_registry;
+    # here we serve whatever is cached, stale included, falling back to the
+    # curated seed list before the first refresh completes.
+    entry = _cache.get("legitimate_tokens")
+    if entry is not None:
+        if time.time() - entry["ts"] >= _CACHE_TTL_SECONDS:
+            logger.debug(
+                "Token registry cache stale; serving it pending background refresh"
+            )
+        return entry["data"]
+    logger.warning(
+        "Token registry not yet fetched; serving seed list only (degraded "
+        "coverage until the background refresh completes)"
+    )
+    return dict(_SEED_TOKENS)
 
 
 def refresh_token_registry() -> int:
-    """Force-refresh the token registry cache. Returns the number of names registered."""
-    registry = _refresh_legitimate_tokens()
+    """Force-refresh the token registry cache. Returns the number of names registered.
+
+    A refresh that produces a SMALLER registry than the cached one must not
+    replace it, regardless of how many subjects were fetched. A total outage
+    (0 fetched) and a partial outage (the registry serving only a few of the
+    ~31 well-known subjects) both shrink the result toward the seed list,
+    and replacing a complete cache with that shrunken merge would silently
+    cut fake_token impersonation coverage for a full refresh interval.
+    Recall-first reasoning: a legitimate registry shrink (token delisting)
+    is rare, and keeping a stale superset only risks impersonation FALSE
+    POSITIVES on lookalikes of delisted tokens, while accepting the shrink
+    risks MISSED impersonations of every dropped name; the stale superset
+    is the safe direction. A grown-or-equal registry always replaces; a
+    cold start with no prior cache stores whatever was merged (seeds only,
+    in the worst case).
+    """
+    registry, fetched = _refresh_legitimate_tokens()
+    # Read the raw cache (stale included): a refresh usually runs BECAUSE
+    # the TTL expired, so the TTL-checked accessor would return None for
+    # exactly the cache this guard protects.
+    prior_entry = _cache.get("legitimate_tokens")
+    previous = prior_entry["data"] if prior_entry else None
+    if previous and len(previous) > len(registry):
+        logger.warning(
+            "Token registry %s outage (%d/%d subjects fetched): keeping "
+            "previous cache of %d names instead of shrinking to %d",
+            "total" if fetched == 0 else "partial",
+            fetched, len(_WELL_KNOWN_SUBJECTS),
+            len(previous), len(registry),
+        )
+        return len(previous)
+    logger.info(
+        "Token registry refresh applied: %d names cached (%d/%d subjects "
+        "fetched)", len(registry), fetched, len(_WELL_KNOWN_SUBJECTS),
+    )
     _set_cached("legitimate_tokens", registry)
     return len(registry)
 
