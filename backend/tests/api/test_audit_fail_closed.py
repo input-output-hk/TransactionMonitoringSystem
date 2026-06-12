@@ -81,9 +81,9 @@ def client(monkeypatch, audit_log):
 
 @pytest.fixture
 def auth_open(monkeypatch):
-    from app import auth
-    monkeypatch.setattr(auth, "_valid_keys", [])
-    monkeypatch.setattr(auth, "_dev_mode", True)
+    from app.auth import api_key
+    monkeypatch.setattr(api_key, "_valid_keys", [])
+    monkeypatch.setattr(api_key, "_dev_mode", True)
 
 
 def _archive_payload():

@@ -33,18 +33,18 @@ class TestHealthDetail:
         self, client, monkeypatch,
     ):
         """With API_KEYS set, /health/detail must reject unauthenticated calls."""
-        from app import auth
-        monkeypatch.setattr(auth, "_valid_keys", ["sentinel-key"])
-        monkeypatch.setattr(auth, "_dev_mode", False)
+        from app.auth import api_key
+        monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
+        monkeypatch.setattr(api_key, "_dev_mode", False)
         r = client.get("/health/detail")
         assert r.status_code == 403
 
     def test_health_detail_open_in_dev_mode(self, client, monkeypatch):
         """With no API keys (dev mode), /health/detail is open — same policy
         as the rest of the API under the existing _dev_mode behaviour."""
-        from app import auth
-        monkeypatch.setattr(auth, "_valid_keys", [])
-        monkeypatch.setattr(auth, "_dev_mode", True)
+        from app.auth import api_key
+        monkeypatch.setattr(api_key, "_valid_keys", [])
+        monkeypatch.setattr(api_key, "_dev_mode", True)
         r = client.get("/health/detail")
         assert r.status_code == 200
         body = r.json()
