@@ -41,10 +41,24 @@ class RiskBand(str, Enum):
 
     Scores are continuous 0-100; bands guide analyst workflow and alerting.
     """
-    LOW = "Low"             # 0-30: no action, baseline calibration
-    MODERATE = "Moderate"   # 31-59: flagged for periodic review
-    HIGH = "High"           # 60-79: queued for analyst review
-    CRITICAL = "Critical"   # 80-100: immediate alert
+    INFORMATIONAL = "Informational"  # 0-30: no action, scored-but-not-alerting baseline
+    MODERATE = "Moderate"            # 31-59: flagged for periodic review
+    HIGH = "High"                    # 60-79: queued for analyst review
+    CRITICAL = "Critical"            # 80-100: immediate alert
+
+    @classmethod
+    def _missing_(cls, value: object) -> "RiskBand | None":
+        """Map the pre-2026-06 label "Low" onto INFORMATIONAL.
+
+        The 0-30 band was renamed "Low" -> "Informational"; rows scored before
+        the migration (and any in-flight during it) still carry "Low". Parsing
+        them here keeps ``RiskBand(stored_value)`` from raising on un-migrated
+        rows, so the rename is safe regardless of deploy/migration ordering.
+        Remove once all stored ``risk_band`` values are migrated.
+        """
+        if isinstance(value, str) and value.lower() == "low":
+            return cls.INFORMATIONAL
+        return None
 
 
 class AttackClass(str, Enum):
@@ -123,7 +137,7 @@ class ClassScoreResult(BaseModel):
     )
     max_score: float = Field(0.0, description="Highest score across all classes")
     max_class: str = Field("", description="Attack class with the highest score")
-    risk_band: RiskBand = RiskBand.LOW
+    risk_band: RiskBand = RiskBand.INFORMATIONAL
     sub_scores: Dict[str, Dict[str, Any]] = Field(
         default_factory=dict,
         description="Per-class sub-score breakdown for drill-down",
@@ -134,6 +148,18 @@ class ClassScoreResult(BaseModel):
     )
     analysis_version: str = ""
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    corroboration_count: int = Field(
+        0,
+        description=(
+            "Number of distinct attack classes that independently scored at or "
+            "above the corroboration threshold. A flag for analyst triage only; "
+            "does not affect risk_band."
+        ),
+    )
+    corroborating_classes: str = Field(
+        "",
+        description="Comma-separated names of the corroborating classes.",
+    )
     fee: Optional[int] = Field(None, description="Transaction fee in lovelace")
     output_count: Optional[int] = Field(None, description="Number of transaction outputs")
     archived: Optional[Dict[str, Any]] = Field(

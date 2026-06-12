@@ -8,7 +8,7 @@ to global baselines.
 """
 
 import logging
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 from app.config import settings
 from app.db import clickhouse
@@ -78,6 +78,7 @@ def resolve_baseline(
     scope_id: str,
     network: str,
     min_samples: int = 0,
+    scope_types_allowed: Optional[List[str]] = None,
 ) -> Tuple[float, float, str]:
     """Resolve the (p50, p99) baseline for a feature on a given network, with fallback.
 
@@ -89,18 +90,30 @@ def resolve_baseline(
     ``network`` is required: the baselines table is partitioned by network so
     preprod / preview / mainnet cannot pollute each other.
 
+    ``scope_types_allowed`` optionally restricts which tiers may be consulted.
+    When ``None`` (default) the behaviour is unchanged: try ``scope_type`` then
+    fall back to ``global``. When a list is given, a tier is only tried if it is
+    in the list, so e.g. ``["per_script"]`` resolves per-script then drops
+    straight to "missing" (the caller's bootstrap), never consulting global.
+    This is required for the multiple_sat extraction axis: the global
+    distribution is dominated by legitimate high-volume asset-movers, so a global
+    fallback would de-sensitise detection on rare/novel scripts (where one-shot
+    double-sat exploits live) instead of leaving them on the conservative
+    bootstrap anchor.
+
     Returns (p50, p99, source) where source is "per_script", "per_policy",
     "global", or "missing".
     """
     if min_samples == 0:
         min_samples = settings.BASELINE_MIN_SAMPLES
 
-    row = clickhouse.get_baseline(network, scope_type, scope_id, feature)
-    if row and row["sample_count"] >= min_samples and _baseline_is_usable(row):
-        return row["p50"], row["p99"], scope_type
+    if scope_types_allowed is None or scope_type in scope_types_allowed:
+        row = clickhouse.get_baseline(network, scope_type, scope_id, feature)
+        if row and row["sample_count"] >= min_samples and _baseline_is_usable(row):
+            return row["p50"], row["p99"], scope_type
 
     # Fallback to global within the same network
-    if scope_type != "global":
+    if scope_type != "global" and (scope_types_allowed is None or "global" in scope_types_allowed):
         row = clickhouse.get_baseline(network, "global", "__global__", feature)
         if row and row["sample_count"] >= min_samples and _baseline_is_usable(row):
             return row["p50"], row["p99"], "global"
@@ -118,20 +131,30 @@ BAND_CRITICAL_THRESHOLD = 80.0
 BAND_HIGH_THRESHOLD = 60.0
 BAND_MODERATE_THRESHOLD = 31.0
 
-# Convenience constant: the highest score that still lands at Moderate.
-# Used by scorers that cap a score at "top of Moderate" so their band
-# does not climb to High (e.g. multiple_sat's uniform_sweep_guard,
-# token_dust's dos_asset_min cap). Encapsulates the off-by-one that
-# would otherwise show up at every cap site.
+# Convenience constants: the highest score that still lands in a given band.
+# Used by scorers that cap a score at "top of band X" so their band does not
+# climb (e.g. multiple_sat's uniform_sweep_guard and token_dust's dos_asset_min
+# cap use BAND_MODERATE_MAX; large_value's digits-floor cap uses BAND_LOW_MAX).
+# Encapsulates the off-by-one that would otherwise show up at every cap site.
+# BAND_LOW_MAX is the top of the bottom (Informational) band; the name is kept
+# for the numeric "top of bottom band" role (the client-facing label is set in
+# score_to_band).
 BAND_MODERATE_MAX = BAND_HIGH_THRESHOLD - 1.0
+BAND_LOW_MAX = BAND_MODERATE_THRESHOLD - 1.0
 
 
 def score_to_band(score: float) -> str:
-    """Map a 0-100 score to the interpretive risk band."""
+    """Map a 0-100 score to the interpretive risk band.
+
+    The bottom band (0-30) is "Informational": no action, the scored-but-not-
+    alerting baseline. It was historically labelled "Low", which clients read as
+    a low-grade threat; "Informational" reads as "nothing to act on". Renamed
+    2026-06; legacy "Low" values are still parsed by RiskBand._missing_.
+    """
     if score >= BAND_CRITICAL_THRESHOLD:
         return "Critical"
     if score >= BAND_HIGH_THRESHOLD:
         return "High"
     if score >= BAND_MODERATE_THRESHOLD:
         return "Moderate"
-    return "Low"
+    return "Informational"

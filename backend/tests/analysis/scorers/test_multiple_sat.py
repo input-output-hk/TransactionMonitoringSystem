@@ -487,7 +487,10 @@ class TestUniformSweepGuard:
     normally lifts lazy-validator hits into High is suppressed.
     """
 
-    def test_uniform_sweep_suppresses_lazy_validator_floor(self, scorer):
+    def test_uniform_sweep_suppressed(self, scorer):
+        # A uniform sweep (owner consolidating their own script UTxOs) is not
+        # double satisfaction; it is now suppressed entirely (no finding, -1),
+        # not merely band-capped.
         n = 12  # > min_inputs=10
         inputs = [
             {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
@@ -496,10 +499,9 @@ class TestUniformSweepGuard:
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.sub_scores["uniform_sweep"] is True
         assert result.sub_scores["s_exunits_inv"] > 0.8
-        assert "uniform_script_sweep_guard" in result.reasons
-        assert "lazy_validator_band_floor" not in result.reasons
-        assert result.score < 60.0
+        assert result.score == -1.0
 
     def test_below_min_inputs_does_not_engage_guard(self, scorer):
         # n=4 is the canonical lazy-validator scenario from the existing
@@ -564,10 +566,11 @@ class TestLazyValidatorExtractionGate:
     script" semantics that double-satisfaction requires.
     """
 
-    def test_state_machine_with_zero_extraction_is_not_floored(self, scorer):
-        # 2 inputs from the script, 1 output back to the same script
-        # carrying the consolidated value. Nothing escapes the script,
-        # so s_extraction must be 0 and the floor must NOT engage.
+    def test_state_machine_with_value_returned_suppressed(self, scorer):
+        # 2 inputs from the script, 1 output back to the same script carrying
+        # the consolidated value: value returns to the script (state
+        # continuation, s_extraction = 0), not extraction. Now suppressed
+        # entirely (no finding, -1) rather than scored-and-not-floored.
         inputs = [
             {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
             {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
@@ -580,9 +583,8 @@ class TestLazyValidatorExtractionGate:
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["s_extraction"] == 0.0
-        assert result.sub_scores["s_exunits_inv"] > 0.8
-        assert "lazy_validator_band_floor" not in result.reasons
-        assert result.score < 60.0
+        assert result.sub_scores["value_returned_lovelace"] > 0
+        assert result.score == -1.0
 
     def test_floor_still_fires_on_small_extraction(self, scorer):
         # The canonical low-value-drain case the floor exists for: the
@@ -620,7 +622,7 @@ class TestUniformSweepGuardAndAllowlistInteraction:
     Moderate regardless of allowlist path.
     """
 
-    def test_allowlisted_sweep_caps_at_moderate(self, scorer, monkeypatch):
+    def test_allowlisted_sweep_suppressed(self, scorer, monkeypatch):
         # Inject the sweep script into the preprod allowlist for the
         # duration of this test so the reweight path activates.
         from app.analysis.scorers import multiple_sat as ms_mod
@@ -636,11 +638,179 @@ class TestUniformSweepGuardAndAllowlistInteraction:
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
-        # Both suppression paths fire: the script is allowlisted AND the
-        # tx is a uniform sweep.
-        assert "allowlisted_batch_script" in result.reasons
-        assert "uniform_script_sweep_guard" in result.reasons
-        # The Moderate cap is what keeps the band correct here. Without
-        # the cap, the reweighted s_inputs (saturated for a 12-input
-        # sweep against p99=10) would climb above the High threshold.
-        assert result.score < 60.0
+        # A uniform sweep is suppressed regardless of allowlist status (it can
+        # no longer climb back to High via the allowlist reweight, because it
+        # never reaches scoring).
+        assert result.sub_scores["uniform_sweep"] is True
+        assert result.score == -1.0
+
+
+# A script address that groups consistently by payment credential. Distinct from
+# SCRIPT so per-script baselines planted in these tests are unambiguous.
+_EXTRACT_SCRIPT = "addr_test1wq3pw00c65cg"
+
+
+def _two_asset_extraction_features():
+    """A CTF-01-shaped double-sat: 2 script inputs each carrying a distinct
+    native asset, both assets (and the lovelace) leave to a wallet. Heavy CPU
+    per input so the lazy-validator floor does NOT engage (the validator did
+    real work) and the score is driven purely by the extraction axis. Not a
+    uniform sweep (2 inputs) and nothing returns to the script, so it reaches
+    scoring rather than the sweep/return suppression.
+    """
+    inputs = [
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": 5_000_000, "pol1": {"nft1": 1}}},
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": 5_000_000, "pol2": {"nft2": 1}}},
+    ]
+    outputs = [{"address": WALLET, "value": {
+        "lovelace": 9_500_000, "pol1": {"nft1": 1}, "pol2": {"nft2": 1}}}]
+    redeemers = [
+        {"validator": {"index": i, "purpose": "spend"},
+         "executionUnits": {"memory": 5_000_000, "cpu": 10_000_000}}
+        for i in range(2)
+    ]
+    return _features(inputs, outputs, redeemers)
+
+
+def _plant_baselines(monkeypatch, rows, calls=None):
+    """Patch the baseline lookup with a fixed ``(scope_type, feature) -> row`` map.
+
+    ``rows`` values are baseline dicts; absent keys resolve to None (missing).
+    Patches the module object that ``normalise.resolve_baseline`` calls, so the
+    whole multiple_sat -> scorer_config -> normalise resolve chain sees it.
+    """
+    from app.analysis import normalise as norm
+
+    def _fn(network, scope_type, scope_id, feature):
+        if calls is not None:
+            calls.append((scope_type, feature))
+        row = rows.get((scope_type, feature))
+        return dict(row) if row else None
+
+    monkeypatch.setattr(norm.clickhouse, "get_baseline", _fn)
+
+
+class TestPerScriptExtractionBaseline:
+    """The extraction axis resolves per_script -> bootstrap, never global.
+
+    Established high-volume contracts are de-saturated against their own norm;
+    rare/novel scripts (where one-shot double-sat exploits live, e.g. CTF-01)
+    stay on the conservative bootstrap. The global tier is never consulted,
+    because the global value/asset-extraction distribution is dominated by
+    legitimate batchers and would silence detection on rare scripts.
+    """
+
+    def test_ctf01_rare_script_stays_on_bootstrap(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # No baselines at all -> bootstrap (n_assets p99=2): a 2-asset
+        # extraction saturates -> Moderate. This is the CTF-01 recall anchor.
+        _plant_baselines(monkeypatch, {})
+        result = scorer.score(_two_asset_extraction_features())
+        assert result.sub_scores["n_assets_out_of_script"] == 2.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+        assert result.baseline_source == "bootstrap"
+
+    def test_global_baseline_ignored_for_extraction(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # A usable GLOBAL n_assets baseline (p99=5) exists that WOULD
+        # de-saturate a 2-asset extraction to Low if consulted. The per_script
+        # restriction must skip it, so the score stays Moderate on bootstrap.
+        rows = {("global", "n_assets_out_of_script"):
+                {"p50": 1.0, "p99": 5.0, "sample_count": 5000}}
+        calls = []
+        _plant_baselines(monkeypatch, rows, calls)
+        result = scorer.score(_two_asset_extraction_features())
+        assert result.score >= BAND_MODERATE_THRESHOLD
+        assert result.baseline_source != "global"
+        # The regression lock: global was never even queried for the axis.
+        assert ("global", "n_assets_out_of_script") not in calls
+
+    def test_per_script_baseline_desaturates_high_volume(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # A high-volume contract's own baseline: 2 assets / 10 ADA is its norm,
+        # so its routine spend de-saturates below Moderate. A genuine spike
+        # above its own p99 would still fire.
+        rows = {
+            ("per_script", "n_assets_out_of_script"):
+                {"p50": 2.0, "p99": 4.0, "sample_count": 300},
+            ("per_script", "net_value_out_of_script"):
+                {"p50": 10_000_000.0, "p99": 100_000_000.0, "sample_count": 300},
+        }
+        _plant_baselines(monkeypatch, rows)
+        result = scorer.score(_two_asset_extraction_features())
+        assert result.sub_scores["s_extraction"] == 0.0
+        assert result.score < BAND_MODERATE_THRESHOLD
+        assert result.baseline_source == "per_script"
+
+
+def _extraction_features(n_assets, lovelace_in_per_input=2_400_000, cpu=10_000_000):
+    """2 script inputs carrying ``n_assets`` distinct native assets that all
+    leave to a wallet, so ``n_assets_out == n_assets`` while inputs stay low
+    (not a uniform sweep). Lovelace nets ~p50 of the planted net_value baseline,
+    so the asset axis drives the score. ``cpu`` per input controls whether the
+    lazy-validator floor engages (low cpu -> lazy).
+    """
+    assets = {f"pol{i}": {f"nft{i}": 1} for i in range(n_assets)}
+    inputs = [
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": lovelace_in_per_input, **assets}},
+        {"address": _EXTRACT_SCRIPT, "value": {"lovelace": lovelace_in_per_input}},
+    ]
+    out_value = {"lovelace": int(lovelace_in_per_input * 2 * 0.95), **assets}
+    outputs = [{"address": WALLET, "value": out_value}]
+    redeemers = [
+        {"validator": {"index": i, "purpose": "spend"},
+         "executionUnits": {"memory": 5_000_000, "cpu": cpu}}
+        for i in range(2)
+    ]
+    return _features(inputs, outputs, redeemers)
+
+
+# Established-contract baseline: normal extraction is 2-3 assets / ~4.8-9.6 ADA.
+_EST_BASELINES = {
+    ("per_script", "n_assets_out_of_script"): {"p50": 2.0, "p99": 3.0, "sample_count": 1893},
+    ("per_script", "net_value_out_of_script"): {"p50": 4_800_000.0, "p99": 9_600_000.0, "sample_count": 1893},
+}
+
+
+class TestPerScriptExtractionHeadroom:
+    """Per-script extraction anchors get headroom so an established contract's
+    normal upper-range extraction (its common p99 value) does not saturate;
+    rare/novel scripts on the bootstrap anchor stay conservative (CTF-01 recall).
+    """
+
+    def test_per_script_normal_upper_desaturates(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        _plant_baselines(monkeypatch, _EST_BASELINES)
+        # 3 assets == the contract's p99 (its common upper-normal value). With
+        # headroom (anchor 2 + (3-2)*3 = 5) this no longer saturates.
+        result = scorer.score(_extraction_features(3))
+        assert result.sub_scores["s_extraction_assets"] < 1.0
+        assert result.score < BAND_MODERATE_THRESHOLD   # Informational, not an alert
+        assert result.baseline_source == "per_script"
+
+    def test_per_script_anomaly_still_fires(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        _plant_baselines(monkeypatch, _EST_BASELINES)
+        # 8 assets is well above the contract's norm (p99=3) -> saturates -> fires.
+        result = scorer.score(_extraction_features(8))
+        assert result.sub_scores["s_extraction_assets"] == 1.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+
+    def test_bootstrap_unaffected_by_headroom(self, scorer, monkeypatch):
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+        # No per-script baseline -> bootstrap (n_assets p99=2). The 2-asset
+        # CTF-01 shape must still saturate; headroom must NOT touch bootstrap.
+        _plant_baselines(monkeypatch, {})
+        result = scorer.score(_extraction_features(2))
+        assert result.sub_scores["s_extraction"] == 1.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+        assert result.baseline_source == "bootstrap"
+
+    def test_lazy_validator_floor_independent_of_headroom(self, scorer, monkeypatch):
+        # Per-script baseline + near-zero CPU (lazy validator) + extraction: the
+        # floor must still fire to High, because its gate uses the un-widened
+        # extraction (headroom must not weaken the high-confidence path).
+        _plant_baselines(monkeypatch, _EST_BASELINES)
+        result = scorer.score(_extraction_features(3, cpu=1))
+        assert "lazy_validator_band_floor" in result.reasons
+        assert result.score >= 60.0

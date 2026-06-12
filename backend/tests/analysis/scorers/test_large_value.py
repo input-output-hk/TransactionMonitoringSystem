@@ -60,6 +60,20 @@ class TestScore:
         result = scorer.score(_features([out]))
         assert result.score < 30
 
+    def test_normal_supply_capped_to_low(self, scorer, monkeypatch):
+        """A normal-supply UTxO (digits sub-score ~0) must not reach Moderate
+        on the secondary axes alone. Force the value-CBOR axis to saturate via
+        its bootstrap anchor so that, without the digits-floor cap, the score
+        would land in Moderate; the cap must hold it to the top of Low."""
+        import app.analysis.scorers.large_value as lv
+        monkeypatch.setitem(lv._BOOT, "value_cbor_bytes", {"p50": 0, "p99": 1})
+        # Small quantity -> digits sub-score 0; min ADA -> inverted-ADA ~1.0.
+        out = _out(SCRIPT, lovelace=1_200_000, policies={"p": {"t": 1000}})
+        result = scorer.score(_features([out]))
+        assert result.sub_scores["quantity_digits"] == 0.0
+        assert result.sub_scores["value_cbor_bytes"] >= 0.9   # saturated axis
+        assert result.score <= 30.0                            # capped to Low band
+
     def test_sub_scores_present(self, scorer):
         out = _out(SCRIPT, policies={"p": {"t": 10**20}})
         result = scorer.score(_features([out]))

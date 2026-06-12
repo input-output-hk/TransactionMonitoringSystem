@@ -47,9 +47,10 @@ class TestNormaliseInverted:
 
 
 class TestScoreToBand:
-    def test_low(self):
-        assert score_to_band(0) == "Low"
-        assert score_to_band(30) == "Low"
+    def test_informational(self):
+        # 0-30 is the "Informational" band (renamed from "Low" 2026-06).
+        assert score_to_band(0) == "Informational"
+        assert score_to_band(30) == "Informational"
 
     def test_moderate(self):
         assert score_to_band(31) == "Moderate"
@@ -94,3 +95,76 @@ class TestBaselineSpreadGuard:
         # (the spread is "infinite" by convention) and reject p99 == 0.
         assert _baseline_is_usable({"p50": 0.0, "p99": 5.0}) is True
         assert _baseline_is_usable({"p50": 0.0, "p99": 0.0}) is False
+
+
+class TestResolveScopeTypesAllowed:
+    """``scope_types_allowed`` restricts which baseline tiers are consulted.
+
+    Used by the multiple_sat extraction axis to resolve per_script -> bootstrap
+    and NEVER global: the global distribution of value/assets leaving a script
+    is dominated by legitimate high-volume asset-movers, so a global fallback
+    would de-sensitise detection on rare/novel scripts.
+    """
+
+    @staticmethod
+    def _fake_get_baseline(monkeypatch, rows, calls):
+        from app.analysis import normalise as norm
+
+        def _fn(network, scope_type, scope_id, feature):
+            calls.append((scope_type, feature))
+            row = rows.get((scope_type, feature))
+            return dict(row) if row else None
+
+        monkeypatch.setattr(norm.clickhouse, "get_baseline", _fn)
+
+    def test_per_script_only_skips_global(self, monkeypatch):
+        from app.analysis.normalise import resolve_baseline
+        # A usable global baseline exists but per_script does not.
+        rows = {("global", "n_assets_out_of_script"):
+                {"p50": 1.0, "p99": 5.0, "sample_count": 1000}}
+        calls = []
+        self._fake_get_baseline(monkeypatch, rows, calls)
+        p50, p99, source = resolve_baseline(
+            "n_assets_out_of_script", "per_script", "addrX", "preprod",
+            scope_types_allowed=["per_script"],
+        )
+        # global is present but must be ignored -> "missing" (caller bootstraps).
+        assert source == "missing"
+        assert ("global", "n_assets_out_of_script") not in calls
+
+    def test_default_still_falls_back_to_global(self, monkeypatch):
+        from app.analysis.normalise import resolve_baseline
+        rows = {("global", "n_assets_out_of_script"):
+                {"p50": 1.0, "p99": 5.0, "sample_count": 1000}}
+        calls = []
+        self._fake_get_baseline(monkeypatch, rows, calls)
+        # No scope_types_allowed -> unchanged behaviour: per_script miss falls to global.
+        p50, p99, source = resolve_baseline(
+            "n_assets_out_of_script", "per_script", "addrX", "preprod",
+        )
+        assert source == "global"
+        assert (p50, p99) == (1.0, 5.0)
+
+
+class TestRiskBandLegacyAlias:
+    """The 0-30 band was renamed "Low" -> "Informational" (2026-06).
+
+    RiskBand must still parse the legacy "Low" so reads of un-migrated rows
+    don't raise, regardless of deploy/migration ordering.
+    """
+
+    def test_current_label_parses(self):
+        from app.models.transaction import RiskBand
+        assert RiskBand("Informational") is RiskBand.INFORMATIONAL
+
+    def test_legacy_low_maps_to_informational(self):
+        from app.models.transaction import RiskBand
+        assert RiskBand("Low") is RiskBand.INFORMATIONAL
+        # value is the new canonical label, so API responses serialise consistently
+        assert RiskBand("Low").value == "Informational"
+
+    def test_unknown_still_raises(self):
+        import pytest
+        from app.models.transaction import RiskBand
+        with pytest.raises(ValueError):
+            RiskBand("Nonexistent")

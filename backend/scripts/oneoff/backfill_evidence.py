@@ -71,7 +71,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--min-band",
-        choices=["Low", "Moderate", "High", "Critical"],
+        choices=["Informational", "Moderate", "High", "Critical"],
         default=None,
         help=(
             "Restrict to rows at or above this risk band. Useful when you "
@@ -114,7 +114,7 @@ def main() -> None:
 
     limit_clause = f"LIMIT {int(args.limit)}" if args.limit > 0 else ""
     days_clause = (
-        f"AND s.analyzed_at >= now() - INTERVAL {int(args.days)} DAY"
+        f"AND analyzed_at >= now() - INTERVAL {int(args.days)} DAY"
         if args.days > 0
         else ""
     )
@@ -125,16 +125,16 @@ def main() -> None:
     alert_clause = (
         ""
         if args.all_rows
-        else "AND s.max_class != '' AND s.max_score >= 1"
+        else "AND max_class != '' AND max_score >= 1"
     )
     # Risk-band filter via the in-table column. Bands are an ordered enum
-    # (Low < Moderate < High < Critical); we encode the order in a fixed
-    # dict so a future band rename is a one-line change.
-    _BAND_ORDER = {"Low": 0, "Moderate": 1, "High": 2, "Critical": 3}
+    # (Informational < Moderate < High < Critical); we encode the order in a
+    # fixed dict so a future band rename is a one-line change.
+    _BAND_ORDER = {"Informational": 0, "Moderate": 1, "High": 2, "Critical": 3}
     if args.min_band:
         keep = [b for b, n in _BAND_ORDER.items() if n >= _BAND_ORDER[args.min_band]]
         keep_sql = ", ".join(f"'{b}'" for b in keep)
-        band_clause = f"AND s.risk_band IN ({keep_sql})"
+        band_clause = f"AND risk_band IN ({keep_sql})"
     else:
         band_clause = ""
     # Empty-evidence filter: by default only touch rows that haven't been
@@ -146,15 +146,15 @@ def main() -> None:
     evidence_clause = (
         ""
         if args.force
-        else "AND (s.evidence = '' OR s.evidence = '{}' OR s.evidence IS NULL)"
+        else "AND (evidence = '' OR evidence = '{}' OR evidence IS NULL)"
     )
     # Count-only path: cheap COUNT() against tx_class_scores alone,
     # without the JOIN to transactions or the big raw_data payload.
     if args.count_only:
         count_rows = client.execute(
             f"""
-            SELECT count() FROM (SELECT * FROM tx_class_scores FINAL) AS s
-            WHERE s.network = %(network)s
+            SELECT count() FROM tx_class_scores FINAL
+            WHERE network = %(network)s
               {evidence_clause}
               {alert_clause}
               {band_clause}
@@ -171,13 +171,15 @@ def main() -> None:
         SELECT s.tx_hash, s.network, s.max_score, s.max_class, s.analyzed_at,
                t.fee, t.input_count, t.output_count, t.total_output_value,
                t.addresses, t.metadata, t.raw_data, t.slot, t.block_height, t.timestamp
-        FROM (SELECT * FROM tx_class_scores FINAL) AS s
+        FROM (
+            SELECT * FROM tx_class_scores FINAL
+            WHERE network = %(network)s
+              {evidence_clause}
+              {alert_clause}
+              {band_clause}
+              {days_clause}
+        ) AS s
         JOIN transactions t ON t.tx_hash = s.tx_hash AND t.network = s.network
-        WHERE s.network = %(network)s
-          {evidence_clause}
-          {alert_clause}
-          {band_clause}
-          {days_clause}
         ORDER BY s.analyzed_at DESC, s.tx_hash ASC
         {limit_clause}
         """,
@@ -255,10 +257,13 @@ def main() -> None:
     # keeping the round-trip count low.
     _CHUNK = 500
 
-    corrected = []
+    total = len(feature_rows)
+    processed = 0
     score_drifted = 0
+    inserted = 0
+    partitions: set = set()
 
-    for chunk_start in range(0, len(feature_rows), _CHUNK):
+    for chunk_start in range(0, total, _CHUNK):
         chunk = feature_rows[chunk_start : chunk_start + _CHUNK]
 
         # Resolve input addresses before scoring: raw_data.inputs only carries
@@ -272,6 +277,7 @@ def main() -> None:
         _enrich_cycle_features(chunk, args.network)
         _enrich_sandwich_features(chunk, args.network)
 
+        chunk_results = []
         for feature_row in chunk:
             tx_hash = feature_row["tx_hash"]
             prev_max, prev_class, prev_at = metadata_by_tx[tx_hash]
@@ -281,7 +287,8 @@ def main() -> None:
             # ReplacingMergeTree dedupe kicks in; bump by 1s so the new row
             # wins max(analyzed_at).
             result["analyzed_at"] = prev_at + timedelta(seconds=1)
-            corrected.append(result)
+            chunk_results.append(result)
+            processed += 1
 
             if (
                 round(float(result["max_score"]), 2) != round(float(prev_max), 2)
@@ -294,29 +301,43 @@ def main() -> None:
                     f"{result['max_class'] or '(none)'} ({result['max_score']:.2f})"
                 )
 
-        # Periodic progress line so a 14k-row run doesn't look hung.
-        processed = min(chunk_start + _CHUNK, len(feature_rows))
-        print(f"  ...processed {processed}/{len(feature_rows)} rows", flush=True)
+        # Insert each chunk as it completes rather than buffering the whole
+        # run. Keeps memory flat (one chunk in flight, not N) and makes the
+        # backfill restartable: a crash leaves a consistent partial state since
+        # each re-scored row independently supersedes its old version via the
+        # ReplacingMergeTree, and re-running with --force resumes safely.
+        # Without --apply this stays a dry run and nothing is written.
+        if args.apply:
+            clickhouse.insert_class_scores(chunk_results)
+            inserted += len(chunk_results)
+            partitions.update(
+                r["analyzed_at"].strftime("%Y%m%d") for r in chunk_results
+            )
+
+        print(f"  ...processed {processed}/{total} rows", flush=True)
 
     print(
-        f"\nProcessed {len(corrected)} rows; "
+        f"\nProcessed {processed} rows; "
         f"{score_drifted} had score/class drift, "
-        f"{len(corrected) - score_drifted} unchanged (evidence-only update)."
+        f"{processed - score_drifted} unchanged (evidence-only update)."
     )
 
     if not args.apply:
         print("Dry run. Pass --apply to insert.")
         return
 
-    clickhouse.insert_class_scores(corrected)
     # Force a merge per affected partition so the dedupe takes effect now
-    # instead of waiting for background merges.
-    partitions = sorted({r["analyzed_at"].strftime("%Y%m%d") for r in corrected})
-    for part in partitions:
+    # instead of waiting for background merges. Done once at the end so each
+    # partition is optimised a single time regardless of how many chunks
+    # touched it.
+    for part in sorted(partitions):
         client.execute(
             f"OPTIMIZE TABLE tx_class_scores PARTITION {part} FINAL"
         )
-    print(f"Inserted {len(corrected)} rows; merged partitions: {', '.join(partitions)}")
+    print(
+        f"Inserted {inserted} rows; "
+        f"merged partitions: {', '.join(sorted(partitions))}"
+    )
 
 
 if __name__ == "__main__":

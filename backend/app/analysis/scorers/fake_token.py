@@ -42,6 +42,15 @@ _UNI_SCORES = _CFG["unicode_scores"]
 _REASON_T = _CFG["reason_thresholds"]
 T_SIM_MIN = float(_CFG["similarity_threshold"])
 
+# Curated high-value tokens (stablecoins above all) whose impersonation is
+# escalated: see ``fake_token.critical_assets`` in detection.yaml for the
+# threat-model rationale. The multiplier is >= 1.0 and the amplified identity
+# score is capped at 1.0, so this is strictly monotonic and never lowers a
+# score (recall-safe).
+_CRIT_CFG = _CFG["critical_assets"]
+_CRITICAL_NAMES = frozenset(_CRIT_CFG["names"])
+_CRITICALITY_MULTIPLIER = float(_CRIT_CFG["multiplier"])
+
 EPSILON = 1e-6
 
 
@@ -329,6 +338,15 @@ class FakeTokenScorer(BaseScorer):
             + float(_W_IDENT["cip25"]) * s_cip25
         )
 
+        # Amplify identity when the impersonated asset is on the critical list.
+        # The lift is proportional to the existing identity signal, so an
+        # exact-name clone gets the largest boost and a fuzzy match a smaller
+        # one; the cap at 1.0 keeps it from exceeding a clean full-identity
+        # score. Monotonic by construction: never lowers a score.
+        is_critical = best_legit_name in _CRITICAL_NAMES
+        if is_critical:
+            identity_score = min(1.0, identity_score * _CRITICALITY_MULTIPLIER)
+
         # ----- Distribution Pattern sub-pipeline -----
 
         policy_id = best_candidate["policy_id"]
@@ -484,6 +502,7 @@ class FakeTokenScorer(BaseScorer):
                 "fake_asset_name_ascii": best_candidate.get("token_name", ""),
                 "fake_quantity": int(best_candidate.get("quantity", 0)),
                 "legit_policy_ids": list(legit_tokens.get(best_legit_name, [])),
+                "matched_token_criticality": "critical" if is_critical else "standard",
                 "recipient_count": int(recipient_count),
                 "cip25_similarity_raw": round(cip25_sim, 4),
                 "unicode_confusables": confusables,
