@@ -21,6 +21,8 @@ import logging
 import sys
 import uuid
 
+from pydantic import EmailStr, TypeAdapter, ValidationError
+
 from app.auth.email import send_magic_link
 from app.auth.schema import execute_auth_schema
 from app.auth.tokens import issue_token
@@ -28,6 +30,11 @@ from app.config import settings
 from app.db.postgres import close_pool, get_connection, init_pool
 
 logger = logging.getLogger(__name__)
+
+# Same validation the API applies on POST /api/users (UserCreate.email).
+# The CLI must not be a side door: a user row whose address fails EmailStr
+# (e.g. special-use domains like .local/.test) used to be insertable here.
+_EMAIL_VALIDATOR = TypeAdapter(EmailStr)
 
 
 async def create_admin(
@@ -39,6 +46,20 @@ async def create_admin(
     into the system. After that, additional users should be added via
     the admin UI (``POST /api/users``).
     """
+    # Validate BEFORE touching the DB: the API and UI reject addresses
+    # that fail EmailStr, so an invalid row created here could neither
+    # be listed by GET /api/users nor redeem its magic link.
+    try:
+        email = str(_EMAIL_VALIDATOR.validate_python(email))
+    except ValidationError as exc:
+        reason = exc.errors()[0].get("msg", "invalid email address")
+        raise SystemExit(
+            f"Invalid email {email!r}: {reason}\n"
+            "Note: special-use domains (.local, .test, localhost) are not "
+            "accepted anywhere in TMS. For local development with mailpit, "
+            "any routable-looking domain works, e.g. admin@example.com."
+        )
+
     await init_pool()
     try:
         # Make sure the schema exists — handy when this is the first command

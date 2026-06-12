@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     # plus ad-hoc clicks (filters, archive ops, detail navigation). 240/min
     # = 4 req/sec sustained leaves comfortable headroom; abuse protection
     # is still meaningful at that ceiling.
+    # Scope note: this flag gates the HTTP middleware and the WS handshake
+    # check only. The per-email magic-link throttle (app.api.auth) is
+    # always on, and limiter eviction loops run for every constructed
+    # limiter regardless of this flag.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 240  # max requests per window per key/IP
     RATE_LIMIT_WINDOW_SECONDS: int = 60  # sliding window duration in seconds
