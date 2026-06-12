@@ -306,7 +306,10 @@ async def get_recent_blocks(
             FROM transactions
             WHERE network = %(network)s AND block_height IS NOT NULL
             GROUP BY block_height, block_hash
-            ORDER BY timestamp DESC
+            -- block_height tie-breaker: timestamp is ingestion wall-clock
+            -- time with 1s granularity, so catch-up replay lands many
+            -- blocks on the same value and ties returned in random order.
+            ORDER BY timestamp DESC, block_height DESC
             LIMIT %(limit)s
             """,
             {"network": query_network, "limit": limit},
