@@ -342,7 +342,7 @@ def test_archive_accepts_valid_api_key(client, monkeypatch):
 
 def test_list_filters_by_date_range(client, auth_open, store):
     """The from/to query params must constrain archived_at on the list."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
     older = datetime(2026, 1, 1)
     newer = datetime(2026, 4, 1)
     store.rows[("preprod", VALID_HASH)] = {
@@ -478,17 +478,64 @@ def test_class_scores_list_sql_includes_archived_when_requested():
     assert "archived_alerts" not in captured["queries"][0]
 
 
+def test_count_class_scores_sql_excludes_archived_by_default():
+    """count_class_scores shares the list query's WHERE builder, so it must
+    apply the same archive anti-join — otherwise pagination totals would count
+    archived rows the list itself drops."""
+    from unittest.mock import patch
+    from app.db import clickhouse
+
+    captured = {"queries": []}
+
+    class FakeClient:
+        def execute(self, query, params=None):
+            captured["queries"].append(query)
+            return [(0,)]
+
+    with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
+        clickhouse.count_class_scores(
+            network="preprod", risk_band=None, attack_class=None, min_score=0.0,
+        )
+
+    count_sql = captured["queries"][0]
+    assert "archived_alerts" in count_sql
+    assert "NOT IN" in count_sql
+
+
+def test_count_class_scores_sql_includes_archived_when_requested():
+    from unittest.mock import patch
+    from app.db import clickhouse
+
+    captured = {"queries": []}
+
+    class FakeClient:
+        def execute(self, query, params=None):
+            captured["queries"].append(query)
+            return [(0,)]
+
+    with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
+        clickhouse.count_class_scores(
+            network="preprod", risk_band=None, attack_class=None, min_score=0.0,
+            include_archived=True,
+        )
+
+    assert "archived_alerts" not in captured["queries"][0]
+
+
 def test_class_scores_stats_sql_excludes_archived_by_default():
     """Same contract for /api/analysis/stats: band counts must not include
     archived transactions."""
     from unittest.mock import patch
     from app.db import clickhouse
 
-    captured = {}
+    captured = {"queries": []}
 
     class FakeClient:
         def execute(self, query, params=None):
-            captured["query"] = query
+            # Capture every query: get_class_scores_stats issues the stats query
+            # first, then get_pending_count issues its own. Asserting on the
+            # stats query (the first) avoids checking the unrelated pending one.
+            captured["queries"].append(query)
             # Return a single row matching the schema the parser expects.
             zero_per_class = [0, 0.0, 0.0] * 9
             return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
@@ -496,23 +543,26 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod")
 
-    assert "archived_alerts" in captured["query"]
-    assert "NOT IN" in captured["query"]
+    stats_query = captured["queries"][0]
+    assert "archived_alerts" in stats_query
+    assert "NOT IN" in stats_query
 
 
 def test_class_scores_stats_sql_skips_filter_when_include_archived():
     from unittest.mock import patch
     from app.db import clickhouse
 
-    captured = {}
+    captured = {"queries": []}
 
     class FakeClient:
         def execute(self, query, params=None):
-            captured["query"] = query
+            captured["queries"].append(query)
             zero_per_class = [0, 0.0, 0.0] * 9
             return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
 
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod", include_archived=True)
 
-    assert "archived_alerts" not in captured["query"]
+    # The stats query (first) must omit the archive clause; the later
+    # get_pending_count query is unrelated.
+    assert "archived_alerts" not in captured["queries"][0]

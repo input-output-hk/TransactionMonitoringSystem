@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
 
@@ -408,6 +408,8 @@ def execute_schema():
                 risk_band        String,
                 sub_scores       String,
                 evidence         String DEFAULT '{}',
+                corroboration_count   UInt8 DEFAULT 0,
+                corroborating_classes String DEFAULT '',
                 analysis_version String,
                 analyzed_at      DateTime,
                 INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
@@ -420,6 +422,16 @@ def execute_schema():
 
         client.execute(
             "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS evidence String DEFAULT '{}'"
+        )
+        # Cross-class corroboration flag (additive; see engine.py). Existing
+        # rows default to 0 / '' until re-scored.
+        client.execute(
+            "ALTER TABLE tx_class_scores "
+            "ADD COLUMN IF NOT EXISTS corroboration_count UInt8 DEFAULT 0"
+        )
+        client.execute(
+            "ALTER TABLE tx_class_scores "
+            "ADD COLUMN IF NOT EXISTS corroborating_classes String DEFAULT ''"
         )
 
         # Admin-curated archive of flagged transactions known to be false
@@ -775,6 +787,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
             token_dust, large_value, large_datum, multiple_sat,
             front_running, sandwich, circular, fake_token, phishing,
             max_score, max_class, risk_band, sub_scores, evidence,
+            corroboration_count, corroborating_classes,
             analysis_version, analyzed_at
         ) VALUES
         """,
@@ -789,6 +802,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
                 r["max_score"], r["max_class"], r["risk_band"],
                 json.dumps(r.get("sub_scores", {})),
                 json.dumps(r.get("evidence", {}), default=str),
+                r.get("corroboration_count", 0), r.get("corroborating_classes", ""),
                 r["analysis_version"], r["analyzed_at"],
             )
             for r in results
@@ -804,6 +818,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
                max_score, max_class, risk_band, sub_scores, evidence,
+               corroboration_count, corroborating_classes,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE tx_hash = %(tx_hash)s
@@ -818,6 +833,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
         "token_dust", "large_value", "large_datum", "multiple_sat",
         "front_running", "sandwich", "circular", "fake_token", "phishing",
         "max_score", "max_class", "risk_band", "sub_scores", "evidence",
+        "corroboration_count", "corroborating_classes",
         "analysis_version", "analyzed_at",
     )
     result = dict(zip(keys, rows[0]))
@@ -880,6 +896,154 @@ def insert_baselines(rows: List[tuple]):
     )
 
 
+# Baseline feature name -> the multiple_sat evidence JSON key that carries its
+# per-tx value. Only the VALUE-extraction axis is per-script-calibrated (see
+# baselines._MULTIPLE_SAT_PER_SCRIPT_FEATURES for why exunits/n_inputs are
+# excluded). These are computed only at scoring time (they need resolved
+# inputs), so they are not in any ingestion feature table; their values are read
+# back out of the persisted ``tx_class_scores.evidence``. Keys are a fixed
+# allowlist (no user input) so they are safe to interpolate.
+_MULTIPLE_SAT_EVIDENCE_KEYS = (
+    ("net_value_out_of_script", "value_extracted_lovelace"),
+    ("n_assets_out_of_script", "n_assets_extracted"),
+)
+
+
+def query_multiple_sat_extraction_percentiles(
+    network: str, window_days: int, min_samples: int,
+) -> List[Dict[str, Any]]:
+    """Per-script p50/p99 of the multiple_sat extraction features.
+
+    Aggregates the already-persisted ``tx_class_scores.evidence`` over scored
+    (``multiple_sat >= 0``) rows, grouped by the evidence's
+    ``target_script_address``, within the trailing ``window_days``. Only scripts
+    with at least ``min_samples`` scored spends are returned.
+
+    Returns one dict per qualifying script::
+
+        {"script": str, "sample_count": int,
+         "<feature>": (p50, p99), ...}   # one entry per _MULTIPLE_SAT_EVIDENCE_KEYS
+
+    ``quantileExact`` is used for determinism (idempotent recomputes). It holds
+    each per-script group's values in memory; the 90-day window + daily-batch
+    cadence keep that bounded. If a single hot mainnet script ever makes this a
+    memory concern, switch to a deterministic approximate quantile (preserving
+    idempotency) rather than a tighter window.
+    """
+    # Build the per-feature percentile projections from the fixed key allowlist.
+    select_parts = []
+    for feature, key in _MULTIPLE_SAT_EVIDENCE_KEYS:
+        col = f"JSONExtractInt(evidence, 'multiple_sat', '{key}')"
+        select_parts.append(f"quantileExact(0.50)(toFloat64({col})) AS {feature}_p50")
+        select_parts.append(f"quantileExact(0.99)(toFloat64({col})) AS {feature}_p99")
+    projections = ",\n                ".join(select_parts)
+
+    rows = _get_client().execute(
+        f"""
+        SELECT
+            JSONExtractString(evidence, 'multiple_sat', 'target_script_address') AS script,
+            count() AS cnt,
+            {projections}
+        FROM tx_class_scores FINAL
+        WHERE network = %(network)s
+          AND multiple_sat >= 0
+          AND analyzed_at >= now() - INTERVAL %(days)s DAY
+          AND JSONExtractString(evidence, 'multiple_sat', 'target_script_address') != ''
+        GROUP BY script
+        HAVING cnt >= %(min_samples)s
+        """,
+        {"network": network, "days": window_days, "min_samples": min_samples},
+    )
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        script, cnt = row[0], int(row[1])
+        rec: Dict[str, Any] = {"script": script, "sample_count": cnt}
+        # Remaining columns are (p50, p99) pairs in _MULTIPLE_SAT_EVIDENCE_KEYS order.
+        for i, (feature, _key) in enumerate(_MULTIPLE_SAT_EVIDENCE_KEYS):
+            p50 = float(row[2 + i * 2])
+            p99 = float(row[2 + i * 2 + 1])
+            rec[feature] = (p50, p99)
+        results.append(rec)
+    return results
+
+
+# The nine attack-class score columns on tx_class_scores, in canonical order.
+# Shared by the score-query builders below (filter validation, score_keys, and
+# the per-class stats aggregation) so the list stays defined in one place.
+_CLASS_COLS = (
+    "token_dust", "large_value", "large_datum", "multiple_sat",
+    "front_running", "sandwich", "circular", "fake_token", "phishing",
+)
+
+
+def _score_filter_conditions(
+    network: str,
+    risk_band: Optional[List[str]],
+    attack_class: Optional[str],
+    min_score: float,
+    analyzed_from: Optional[Any],
+    analyzed_to: Optional[Any],
+    include_archived: bool,
+    min_corroboration: int = 0,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Build the shared WHERE conditions + params for the class-scores list and
+    count queries.
+
+    Both ``get_class_scores_list`` and ``count_class_scores`` must apply the
+    exact same filter, or pagination totals drift from the rows actually shown.
+    Keeping the clause in one place guarantees they stay in sync. ``attack_class``
+    is validated against ``_CLASS_COLS`` here (ValueError on an unknown value),
+    so callers cannot inject an unvalidated class. Returns ``(conditions,
+    params)``; the caller joins with " AND " and adds any query-specific params
+    (e.g. limit/offset).
+    """
+    if attack_class and attack_class not in _CLASS_COLS:
+        raise ValueError(f"Invalid attack_class '{attack_class}'")
+    conditions = ["network = %(network)s"]
+    params: Dict[str, Any] = {"network": network}
+    if risk_band:
+        # One named placeholder per value so the query is fully parameterized
+        # (no string interpolation of user input); clickhouse-driver does not
+        # expand a Python list into a SQL list automatically.
+        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
+        conditions.append(f"lower(risk_band) IN ({', '.join(placeholders)})")
+        for i, rb in enumerate(risk_band):
+            params[f"risk_band_{i}"] = rb.lower()
+    if attack_class:
+        # Filter by the DOMINANT class (max_class), not "this class has a
+        # non-zero sub-score", so the list view's one-row-per-tx labelling stays
+        # honest (a Phishing tx with a small circular score must not appear under
+        # the Circular filter labelled Phishing).
+        conditions.append("max_class = %(attack_class)s")
+        params["attack_class"] = attack_class
+    if min_score > 0:
+        conditions.append("max_score >= %(min_score)s")
+        params["min_score"] = min_score
+    if min_corroboration > 0:
+        # Multi-signal filter: only transactions where at least this many
+        # distinct classes independently corroborated. Flag-only; orthogonal
+        # to risk_band / max_score.
+        conditions.append("corroboration_count >= %(min_corroboration)s")
+        params["min_corroboration"] = min_corroboration
+    if analyzed_from is not None:
+        conditions.append("analyzed_at >= %(analyzed_from)s")
+        params["analyzed_from"] = analyzed_from
+    if analyzed_to is not None:
+        conditions.append("analyzed_at < %(analyzed_to)s")
+        params["analyzed_to"] = analyzed_to
+    if not include_archived:
+        # Anti-join via scalar subquery against currently-archived
+        # (network, tx_hash) pairs. ClickHouse 26+ disallows FINAL on a table
+        # inside a JOIN, so a subquery is used instead of a join.
+        conditions.append(
+            "(network, tx_hash) NOT IN ("
+            "SELECT network, tx_hash FROM archived_alerts FINAL"
+            ")"
+        )
+    return conditions, params
+
+
 def get_class_scores_list(
     network: str,
     risk_band: Optional[List[str]] = None,
@@ -891,6 +1055,7 @@ def get_class_scores_list(
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
+    min_corroboration: int = 0,
 ) -> List[Dict[str, Any]]:
     """Return multi-class score rows with optional filters.
 
@@ -904,58 +1069,18 @@ def get_class_scores_list(
     analyzed_from / analyzed_to: inclusive lower / exclusive upper bound on
     ``analyzed_at`` (datetime).
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
     _ALLOWED_SORTS = {
         "score": "max_score DESC, analyzed_at DESC",
         "date": "analyzed_at DESC, max_score DESC",
     }
     order_clause = _ALLOWED_SORTS.get(sort, _ALLOWED_SORTS["score"])
-    if attack_class and attack_class not in _CLASS_COLS:
-        raise ValueError(f"Invalid attack_class '{attack_class}'")
 
-    conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {
-        "network": network, "limit": limit, "offset": offset,
-    }
-    if risk_band:
-        # Generate one named placeholder per value so the query is fully
-        # parameterized (no string interpolation of user input). clickhouse-
-        # driver doesn't expand a Python list into a SQL list automatically.
-        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
-        conditions.append(
-            f"lower(risk_band) IN ({', '.join(placeholders)})"
-        )
-        for i, rb in enumerate(risk_band):
-            params[f"risk_band_{i}"] = rb.lower()
-    if attack_class and attack_class in _CLASS_COLS:
-        # Filter by the DOMINANT class (max_class), not just "this class has
-        # a non-zero sub-score". The list view shows one row per tx with its
-        # dominant attack type, so a stricter filter keeps the UI labelling
-        # honest — otherwise a Phishing tx with a small `circular` score
-        # would appear under the "Circular" filter labelled "Phishing".
-        conditions.append("max_class = %(attack_class)s")
-        params["attack_class"] = attack_class
-    if min_score > 0:
-        conditions.append("max_score >= %(min_score)s")
-        params["min_score"] = min_score
-    if not include_archived:
-        # Anti-join via subquery: NOT IN against the (network, tx_hash) pairs
-        # currently archived. ClickHouse 26+ disallows FINAL on a table inside
-        # a JOIN clause, so we use a scalar subquery instead.
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
-    if analyzed_from is not None:
-        conditions.append("analyzed_at >= %(analyzed_from)s")
-        params["analyzed_from"] = analyzed_from
-    if analyzed_to is not None:
-        conditions.append("analyzed_at < %(analyzed_to)s")
-        params["analyzed_to"] = analyzed_to
+    conditions, params = _score_filter_conditions(
+        network, risk_band, attack_class, min_score,
+        analyzed_from, analyzed_to, include_archived, min_corroboration,
+    )
+    params["limit"] = limit
+    params["offset"] = offset
 
     where = " AND ".join(conditions)
     # Query scores first, then batch-fetch tx details separately.
@@ -966,6 +1091,7 @@ def get_class_scores_list(
                token_dust, large_value, large_datum, multiple_sat,
                front_running, sandwich, circular, fake_token, phishing,
                max_score, max_class, risk_band, sub_scores, evidence,
+               corroboration_count, corroborating_classes,
                analysis_version, analyzed_at
         FROM tx_class_scores FINAL
         WHERE {where}
@@ -978,6 +1104,7 @@ def get_class_scores_list(
         "tx_hash", "network",
         *_CLASS_COLS,
         "max_score", "max_class", "risk_band", "sub_scores", "evidence",
+        "corroboration_count", "corroborating_classes",
         "analysis_version", "analyzed_at",
     )
     # Batch-fetch fee/output_count for matched tx_hashes
@@ -994,7 +1121,6 @@ def get_class_scores_list(
         )
         for dr in detail_rows:
             tx_details[dr[0]] = {"fee": dr[1], "output_count": dr[2]}
-    keys = (*score_keys, "fee", "output_count")
     results = []
     for row in rows:
         d = dict(zip(score_keys, row))
@@ -1018,6 +1144,7 @@ async def get_class_scores_list_async(
     min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
     include_archived: bool = False,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
+    min_corroboration: int = 0,
 ) -> List[Dict[str, Any]]:
     # Bind by keyword so a future reorder of the sync signature can't silently
     # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
@@ -1036,6 +1163,7 @@ async def get_class_scores_list_async(
             limit=limit,
             offset=offset,
             include_archived=include_archived,
+            min_corroboration=min_corroboration,
         ),
     )
 
@@ -1048,6 +1176,7 @@ def count_class_scores(
     analyzed_from: Optional[Any] = None,
     analyzed_to: Optional[Any] = None,
     include_archived: bool = False,
+    min_corroboration: int = 0,
 ) -> int:
     """Total number of class-score rows matching the given filters.
 
@@ -1059,42 +1188,10 @@ def count_class_scores(
         ``(network, tx_hash)`` is present in ``archived_alerts`` — keeps the
         count aligned with the rows actually surfaced by the list query.
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
+    conditions, params = _score_filter_conditions(
+        network, risk_band, attack_class, min_score,
+        analyzed_from, analyzed_to, include_archived, min_corroboration,
     )
-    if attack_class and attack_class not in _CLASS_COLS:
-        raise ValueError(f"Invalid attack_class '{attack_class}'")
-
-    conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {"network": network}
-    if risk_band:
-        placeholders = [f"%(risk_band_{i})s" for i in range(len(risk_band))]
-        conditions.append(
-            f"lower(risk_band) IN ({', '.join(placeholders)})"
-        )
-        for i, rb in enumerate(risk_band):
-            params[f"risk_band_{i}"] = rb.lower()
-    if attack_class and attack_class in _CLASS_COLS:
-        # Mirror the list query's filter: filter by max_class so the count
-        # reflects what would actually be returned (see get_class_scores_list).
-        conditions.append("max_class = %(attack_class)s")
-        params["attack_class"] = attack_class
-    if min_score > 0:
-        conditions.append("max_score >= %(min_score)s")
-        params["min_score"] = min_score
-    if analyzed_from is not None:
-        conditions.append("analyzed_at >= %(analyzed_from)s")
-        params["analyzed_from"] = analyzed_from
-    if analyzed_to is not None:
-        conditions.append("analyzed_at < %(analyzed_to)s")
-        params["analyzed_to"] = analyzed_to
-    if not include_archived:
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
 
     where = " AND ".join(conditions)
     rows = _get_client().execute(
@@ -1111,6 +1208,7 @@ async def count_class_scores_async(
     min_score: float,
     analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
     include_archived: bool = False,
+    min_corroboration: int = 0,
 ) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -1124,6 +1222,7 @@ async def count_class_scores_async(
             analyzed_from=analyzed_from,
             analyzed_to=analyzed_to,
             include_archived=include_archived,
+            min_corroboration=min_corroboration,
         ),
     )
 
@@ -1139,10 +1238,6 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
     include_archived: when False (default), exclude rows whose (network, tx_hash)
         has been admin-archived so band counts reflect only currently-flagged txs.
     """
-    _CLASS_COLS = (
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-    )
     # Build per-class aggregation: count of scored (>= 0), avg, max
     agg_parts = []
     for col in _CLASS_COLS:
@@ -1163,7 +1258,9 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
                countIf(lower(risk_band) = 'critical') AS critical_count,
                countIf(lower(risk_band) = 'high') AS high_count,
                countIf(lower(risk_band) = 'moderate') AS moderate_count,
-               countIf(lower(risk_band) = 'low') AS low_count,
+               -- 'low' is the pre-2026-06 label for the Informational band;
+               -- counted here too so the stat stays correct mid-migration.
+               countIf(lower(risk_band) IN ('informational', 'low')) AS informational_count,
                avg(max_score) AS avg_max_score,
                max(analyzed_at) AS last_analyzed_at,
                {agg_sql}
@@ -1183,22 +1280,35 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
             return None
         return v
 
-    row = rows[0]
-    idx = 0
+    # Read the single result row by column name rather than positional offsets.
+    # The name list mirrors the SELECT order above: the fixed head columns, then
+    # three aggregate columns (count, avg, max) per class. Zipping into a dict
+    # removes the fragile row[idx+N] / idx+=3 arithmetic that silently breaks if
+    # a SELECT column is added or reordered.
+    _HEAD_COLS = (
+        "total", "critical_count", "high_count", "moderate_count",
+        "informational_count", "avg_max_score", "last_analyzed_at",
+    )
+    agg_cols = [f"{col}_{stat}" for col in _CLASS_COLS for stat in ("count", "avg", "max")]
+    d = dict(zip([*_HEAD_COLS, *agg_cols], rows[0]))
+
     result: Dict[str, Any] = {
-        "total": row[idx], "critical_count": row[idx+1],
-        "high_count": row[idx+2], "moderate_count": row[idx+3],
-        "low_count": row[idx+4], "avg_max_score": _safe(row[idx+5]),
-        "last_analyzed_at": row[idx+6],
+        "total": d["total"],
+        "critical_count": d["critical_count"],
+        "high_count": d["high_count"],
+        "moderate_count": d["moderate_count"],
+        "informational_count": d["informational_count"],
+        "avg_max_score": _safe(d["avg_max_score"]),
+        "last_analyzed_at": d["last_analyzed_at"],
     }
-    idx = 7
-    per_class = {}
-    for col in _CLASS_COLS:
-        per_class[col] = {
-            "scored_count": row[idx], "avg_score": _safe(row[idx+1]), "max_score": _safe(row[idx+2]),
+    result["per_class"] = {
+        col: {
+            "scored_count": d[f"{col}_count"],
+            "avg_score": _safe(d[f"{col}_avg"]),
+            "max_score": _safe(d[f"{col}_max"]),
         }
-        idx += 3
-    result["per_class"] = per_class
+        for col in _CLASS_COLS
+    }
     result["pending_count"] = get_pending_count(network)
     return result
 

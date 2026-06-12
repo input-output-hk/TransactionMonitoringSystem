@@ -15,7 +15,7 @@ back to the next broader tier (per_script -> global -> missing).
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from app.config import settings
 from app.db import clickhouse
@@ -36,6 +36,30 @@ _TX_FEATURES = [
     "redeemers_count",
     "exunits_mem_total",
     "exunits_cpu_total",
+]
+
+# multiple_sat VALUE-extraction features (lovelace / native assets leaving the
+# script). Computed only at scoring time (they need resolved inputs), so they
+# are not in any ingestion feature table; their per-script baselines are
+# aggregated from the persisted tx_class_scores.evidence instead (see
+# clickhouse.query_multiple_sat_extraction_percentiles). Emitted at per_script
+# scope ONLY: the global distribution is dominated by legitimate high-volume
+# asset-movers, so a global baseline would de-sensitise detection on rare/novel
+# scripts. multiple_sat resolves these per_script -> bootstrap, never global.
+#
+# ONLY the value axis is per-script-calibrated. exunits_per_script_input feeds an
+# INVERTED signal (the lazy-validator floor), which is an absolute concept
+# ("near-zero CPU"); a per-script baseline would make a script that consistently
+# does heavy work look "lazy" relative to its own median and spuriously floor it
+# to High. n_inputs is left on the absolute bootstrap for the same reason. Both
+# stay on the original per_script->global->bootstrap resolution.
+#
+# Derived from clickhouse._MULTIPLE_SAT_EVIDENCE_KEYS, the single source of truth
+# for which value features are per-script-calibrated (and which evidence JSON key
+# carries each). Deriving rather than re-listing means the percentile query and
+# this emitter cannot drift out of sync.
+_MULTIPLE_SAT_PER_SCRIPT_FEATURES = [
+    feature for feature, _evidence_key in clickhouse._MULTIPLE_SAT_EVIDENCE_KEYS
 ]
 
 # Allowed table names and column names for SQL identifier interpolation
@@ -110,6 +134,48 @@ def compute_script_baselines(
     return rows
 
 
+def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
+    """Compute per-script baselines for the multiple_sat extraction features.
+
+    Sourced from tx_class_scores.evidence (90-day window) rather than an
+    ingestion feature table, because the extraction values are only computed at
+    scoring time. Emits per_script rows ONLY (no global): see
+    ``_MULTIPLE_SAT_PER_SCRIPT_FEATURES`` for why. Scripts below
+    BASELINE_MIN_SAMPLES are skipped by the query, so rare/novel scripts (where
+    one-shot double-sat exploits live) keep falling back to the conservative
+    bootstrap anchor.
+
+    Cold-start note: the source (evidence) is produced BY scoring, which consumes
+    these baselines, so on a fresh DB the correct order is reclassify (populate
+    evidence on bootstrap) -> recompute baselines (this) -> reclassify (apply the
+    per-script de-saturation). It is stable across cycles: an asset-extracting
+    spend keeps scoring >= 0 and so keeps emitting evidence even after it
+    de-saturates, so the per-script population does not collapse.
+    """
+    now = datetime.now(timezone.utc)
+    per_script = clickhouse.query_multiple_sat_extraction_percentiles(
+        network, 90, settings.BASELINE_MIN_SAMPLES,
+    )
+    rows = []
+    for rec in per_script:
+        script = rec["script"]
+        count = rec["sample_count"]
+        for feature in _MULTIPLE_SAT_PER_SCRIPT_FEATURES:
+            p50, p99 = rec[feature]
+            rows.append((
+                network, "per_script", script, feature,
+                p50, p99, count, now, 90,
+            ))
+
+    if rows:
+        clickhouse.insert_baselines(rows)
+        logger.info(
+            f"Baselines [per_script/multiple_sat/{network}]: "
+            f"{len(rows)} feature-rows across {len(per_script)} scripts"
+        )
+    return rows
+
+
 def bootstrap_baselines(network: str) -> int:
     """Bootstrap baselines if the baselines table is empty.
 
@@ -175,6 +241,14 @@ def recompute_all_baselines(network: str, max_scripts: int = 500) -> int:
             total += len(rows)
         except Exception:
             logger.exception(f"Failed to recompute baselines for {addr[:16]}...")
+
+    # Per-script extraction baselines for multiple_sat (sourced from evidence,
+    # per_script-only). One grouped query rather than per-script, so it is not
+    # bounded by max_scripts.
+    try:
+        total += len(compute_multiple_sat_per_script_baselines(network))
+    except Exception:
+        logger.exception("Failed to recompute multiple_sat per-script baselines")
 
     logger.info(f"Baseline recomputation complete: {total} rows for {len(scripts)} scripts")
     return total

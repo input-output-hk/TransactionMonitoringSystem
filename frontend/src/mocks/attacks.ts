@@ -12,7 +12,7 @@ export const ATTACK_TYPES = [
 
 export type AttackType = (typeof ATTACK_TYPES)[number];
 
-export type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+export type Severity = "INFORMATIONAL" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export type SubScore = { label: string; percent: number };
 
@@ -364,7 +364,7 @@ const ROWS: {
 	feeAda: number;
 	outputs: number;
 }[] = [
-	{ type: "Sandwich", sev: "LOW", riskScore: 38, feeAda: 0.23, outputs: 2 },
+	{ type: "Sandwich", sev: "MEDIUM", riskScore: 38, feeAda: 0.23, outputs: 2 },
 	{ type: "Phishing", sev: "HIGH", riskScore: 74, feeAda: 0.23, outputs: 47 },
 	{
 		type: "Circular",
@@ -387,10 +387,10 @@ const ROWS: {
 		feeAda: 0.21,
 		outputs: 1,
 	},
-	{ type: "Token Dust", sev: "LOW", riskScore: 32, feeAda: 0.21, outputs: 1 },
+	{ type: "Token Dust", sev: "MEDIUM", riskScore: 32, feeAda: 0.21, outputs: 1 },
 	{
 		type: "Front Running",
-		sev: "LOW",
+		sev: "MEDIUM",
 		riskScore: 41,
 		feeAda: 0.34,
 		outputs: 2,
@@ -409,7 +409,7 @@ const ROWS: {
 		feeAda: 0.21,
 		outputs: 1,
 	},
-	{ type: "Circular", sev: "LOW", riskScore: 36, feeAda: 0.18, outputs: 2 },
+	{ type: "Circular", sev: "MEDIUM", riskScore: 36, feeAda: 0.18, outputs: 2 },
 ];
 
 export const riskAlerts: RiskAlert[] = ROWS.map((r, i) => ({

@@ -53,10 +53,12 @@ guard is config-gated under ``uniform_sweep_guard`` so each leg
 (uniform-redeemer, no-return, min-inputs) can be loosened independently.
 
 Extraction sanity gate: the floor additionally requires
-``s_extraction > lazy_validator_extraction_min``. Double-satisfaction by
-definition needs value to leave the script; state-machine contracts that
-consume their own UTxOs and write state back have ``s_extraction = 0``
-and are not exploits even when execution is cheap.
+``s_extraction_floor > lazy_validator_extraction_min`` (the UN-widened
+extraction, so the per-script headroom in ``_extraction_anchor`` cannot weaken
+this high-confidence path). Double-satisfaction by definition needs value to
+leave the script; state-machine contracts that consume their own UTxOs and
+write state back have ``s_extraction_floor = 0`` and are not exploits even when
+execution is cheap.
 
 All tunable constants live in ``config/detection.yaml`` under the
 ``scorers.multiple_sat`` section.
@@ -64,7 +66,7 @@ All tunable constants live in ``config/detection.yaml`` under the
 
 import logging
 from functools import lru_cache
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
@@ -88,6 +90,75 @@ EPSILON = 1e-6
 _CFG = _get_cfg("multiple_sat")
 _W = _CFG["weights"]
 _BOOT = _CFG["bootstrap_anchors"]
+# Per-script headroom for the value-extraction axis. See _extraction_anchor and
+# config/detection.yaml multiple_sat.per_script_extraction_headroom.
+_HEADROOM = float(_CFG["per_script_extraction_headroom"])
+
+# The VALUE-extraction axis (net_value / n_assets out of the script) resolves
+# per-script then drops straight to the bootstrap anchor, NEVER the global tier.
+# The global distribution of value/assets leaving a script is dominated by
+# legitimate high-volume asset-movers (DEX/marketplace batchers), so a global
+# baseline would learn "extracting 2+ assets is normal" and de-sensitise
+# detection on the rare/novel scripts where one-shot double-satisfaction
+# exploits live (the CTF-01 anchor extracts 2 assets on a 3-tx script).
+# per_script -> bootstrap keeps established contracts judged against their own
+# norm while rare scripts stay on the conservative default.
+#
+# This is applied ONLY to the value axis. exunits_per_script_input feeds the
+# INVERTED lazy-validator signal: "lazy" means near-zero CPU in absolute terms,
+# so it must stay on the absolute bootstrap. A per-script exunits baseline would
+# make a script that consistently does heavy work (its median CPU) look
+# maximally lazy against itself and spuriously floor it to High. n_inputs is
+# likewise left on the default resolution.
+_PER_SCRIPT_ONLY = ("per_script",)
+
+# The baselines _score_script draws on, as (feature, scope_types_allowed). The
+# value-extraction axis is per_script-only (see _PER_SCRIPT_ONLY above); the
+# structural / lazy-validator axes use the default per_script->global->bootstrap
+# (scope_types_allowed=None). Keeping the policy here, declaratively, is the one
+# place that says "which signals are calibrated per-script and which are absolute".
+_BASELINE_SPECS: Tuple[Tuple[str, Optional[Tuple[str, ...]]], ...] = (
+    ("net_value_out_of_script", _PER_SCRIPT_ONLY),
+    ("n_assets_out_of_script", _PER_SCRIPT_ONLY),
+    ("exunits_per_script_input", None),
+    ("n_inputs_same_script", None),
+    ("sender_recurrence", None),
+)
+
+
+def _resolve_baselines(
+    representative_addr: str, network: str,
+) -> Dict[str, Tuple[float, float, str]]:
+    """Resolve every baseline in ``_BASELINE_SPECS`` for one script group.
+
+    Returns ``feature -> (p50, p99, source)``. Each feature's per-script vs
+    absolute resolution policy comes from its ``scope_types_allowed`` entry.
+    """
+    return {
+        feature: _resolve(
+            feature, "per_script", representative_addr, network,
+            _BOOT, feature, scope_types_allowed=allowed,
+        )
+        for feature, allowed in _BASELINE_SPECS
+    }
+
+
+def _extraction_anchor(p50: float, p99: float, source: str) -> float:
+    """Upper normalise() anchor for a value-extraction feature, with per-script
+    headroom.
+
+    The extraction features are discrete and low-cardinality, so a per-script
+    p99 often sits ~1 above p50 (e.g. n_assets p50=2, p99=3) and normalise()
+    saturates on the contract's common upper-normal value. When a per-script
+    baseline is in use, widen the saturation point to
+    ``p50 + (p99 - p50) * _HEADROOM`` so only extraction well above the
+    contract's own normal range scores. Bootstrap/global anchors are returned
+    unchanged, keeping rare/novel scripts on the conservative floor (CTF-01
+    recall). Degenerate p99 <= p50 is left as-is for normalise() to handle.
+    """
+    if source == "per_script" and p99 > p50:
+        return p50 + (p99 - p50) * _HEADROOM
+    return p99
 
 
 _ALLOWLIST: Dict[str, Tuple[str, ...]] = _load_network_map(
@@ -435,7 +506,11 @@ class MultipleSatScorer(BaseScorer):
         # depends on raw_data.
         spend_payloads = _spend_redeemer_payloads(raw_data)
 
-        best: ScorerResult = ScorerResult()
+        # Start at the "no finding" sentinel (-1) so a suppressed group
+        # (no_finding, score -1) propagates as not-applicable instead of being
+        # masked by a 0.0 default, and a tx with no qualifying script group also
+        # yields -1 rather than a spurious applicable 0.0.
+        best: ScorerResult = ScorerResult(score=-1.0)
 
         for script_key, inps in groups.items():
             n_inputs = len(inps)
@@ -452,7 +527,10 @@ class MultipleSatScorer(BaseScorer):
                 raw_data, outputs, sender_recurrence, network,
                 spend_payloads,
             )
-            if result.score > best.score:
+            # >= (not >) so a suppressed group's no_finding result (score -1)
+            # replaces the -1 init and carries its observability sub_scores
+            # through; a real finding (score >= 0) still wins over any -1.
+            if result.score >= best.score:
                 best = result
 
         return best
@@ -478,35 +556,37 @@ class MultipleSatScorer(BaseScorer):
         exunits_per_input = total_cpu / (n_inputs + EPSILON)
 
         # Per-script baselines still keyed by full address; use the
-        # representative address picked from the group.
-        p50_nv, p99_nv, bl_nv = _resolve(
-            "net_value_out_of_script", "per_script", representative_addr, network,
-            _BOOT, "net_value_out_of_script",
-        )
-        p50_na, p99_na, bl_na = _resolve(
-            "n_assets_out_of_script", "per_script", representative_addr, network,
-            _BOOT, "n_assets_out_of_script",
-        )
-        p50_ex, p99_ex, bl_ex = _resolve(
-            "exunits_per_script_input", "per_script", representative_addr, network,
-            _BOOT, "exunits_per_script_input",
-        )
-        p50_ni, p99_ni, bl_ni = _resolve(
-            "n_inputs_same_script", "per_script", representative_addr, network,
-            _BOOT, "n_inputs_same_script",
-        )
-        p50_rc, p99_rc, bl_rc = _resolve(
-            "sender_recurrence", "per_script", representative_addr, network,
-            _BOOT, "sender_recurrence",
-        )
+        # representative address picked from the group. Per-feature resolution
+        # policy (per_script-only vs absolute) lives in _BASELINE_SPECS.
+        bl = _resolve_baselines(representative_addr, network)
+        p50_nv, p99_nv, bl_nv = bl["net_value_out_of_script"]
+        p50_na, p99_na, bl_na = bl["n_assets_out_of_script"]
+        p50_ex, p99_ex, bl_ex = bl["exunits_per_script_input"]
+        p50_ni, p99_ni, bl_ni = bl["n_inputs_same_script"]
+        p50_rc, p99_rc, bl_rc = bl["sender_recurrence"]
 
         # Extraction is value-agnostic: take the stronger of the lovelace and
         # the native-asset axis. NFT-marketplace double-sat exploits drain
         # native assets while the script's lovelace position barely moves;
         # taking max lets either axis carry the signal without dilution.
-        s_extraction_lov = normalise(net_value, p50=p50_nv, p99=p99_nv)
-        s_extraction_assets = normalise(float(n_assets_out), p50=p50_na, p99=p99_na)
+        # Per-script anchors get headroom (see _extraction_anchor) so an
+        # established contract's normal upper-range extraction does not saturate;
+        # bootstrap anchors are used as-is.
+        s_extraction_lov = normalise(
+            net_value, p50=p50_nv, p99=_extraction_anchor(p50_nv, p99_nv, bl_nv),
+        )
+        s_extraction_assets = normalise(
+            float(n_assets_out), p50=p50_na, p99=_extraction_anchor(p50_na, p99_na, bl_na),
+        )
         s_extraction = max(s_extraction_lov, s_extraction_assets)
+        # Un-widened extraction for the lazy-validator floor gate only, so the
+        # High-confidence floor's recall is independent of the per-script
+        # headroom (a cheap-validator low-value exploit must still floor even on
+        # an established contract).
+        s_extraction_floor = max(
+            normalise(net_value, p50=p50_nv, p99=p99_nv),
+            normalise(float(n_assets_out), p50=p50_na, p99=p99_na),
+        )
         s_exunits_inv = normalise_inverted(exunits_per_input, p50=p50_ex, p99=p99_ex)
         s_inputs = normalise(float(n_inputs), p50=p50_ni, p99=p99_ni)
         s_recurrence = normalise(sender_recurrence, p50=p50_rc, p99=p99_rc)
@@ -522,6 +602,9 @@ class MultipleSatScorer(BaseScorer):
             s_extraction = 0.0
             s_extraction_lov = 0.0
             s_extraction_assets = 0.0
+            # s_extraction_floor is intentionally NOT zeroed: it feeds only the
+            # lazy-validator floor, whose gate begins with `not allowlisted`, so
+            # it is never consulted for an allowlisted script anyway.
         else:
             w_ex = float(_W["extraction"])
             w_eu = float(_W["exunits_inv"])
@@ -570,7 +653,9 @@ class MultipleSatScorer(BaseScorer):
             not allowlisted
             and not uniform_sweep
             and s_exunits_inv > _LAZY_VALIDATOR_THRESHOLD
-            and s_extraction > _LAZY_VALIDATOR_EXTRACTION_MIN
+            # Un-widened extraction: the floor is the high-confidence lazy-
+            # validator path; the per-script headroom must not weaken it.
+            and s_extraction_floor > _LAZY_VALIDATOR_EXTRACTION_MIN
         )
         if floor_applies:
             final = max(final, _LAZY_VALIDATOR_FLOOR)
@@ -588,6 +673,28 @@ class MultipleSatScorer(BaseScorer):
         # The baseline source reported is the "most specific tier actually used"
         # across the four features. Prefer per_script > per_policy > global > bootstrap.
         bl_source = _dominant_source([bl_nv, bl_na, bl_ex, bl_ni, bl_rc])
+
+        # Suppress benign multi-input script spends that are not double
+        # satisfaction: an owner consolidating their own UTxOs (uniform sweep),
+        # or a tx that returns value TO the script (state continuation, not
+        # extraction). Gated on ``not floor_applies`` so a high-confidence
+        # lazy-validator exploit (already floored to High) is never suppressed,
+        # and the CTF-01 marketplace double-sat (uniform=False, value_returned=0,
+        # Moderate) is unaffected. These two signals are exactly what the
+        # extraction-assets axis cannot distinguish on its own.
+        if not floor_applies and (uniform_sweep or lovelace_out_at_script > 0):
+            return ScorerResult.no_finding(
+                sub_scores={
+                    "s_extraction": round(s_extraction, 4),
+                    "s_exunits_inv": round(s_exunits_inv, 4),
+                    "s_inputs": round(s_inputs, 4),
+                    "s_recurrence": round(s_recurrence, 4),
+                    "n_inputs_same_script": float(n_inputs),
+                    "uniform_sweep": bool(uniform_sweep),
+                    "value_returned_lovelace": int(lovelace_out_at_script),
+                },
+                baseline_source=bl_source,
+            )
 
         reasons = []
         if s_extraction_lov > _REASON_T:

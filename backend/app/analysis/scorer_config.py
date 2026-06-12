@@ -11,7 +11,7 @@ file and the key path, not a deep ``KeyError`` from inside a scorer module.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import logging
 import os
 
@@ -29,6 +29,7 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold",
                       "lazy_validator_threshold", "lazy_validator_floor",
                       "lazy_validator_extraction_min",
+                      "per_script_extraction_headroom",
                       "uniform_sweep_guard.enabled",
                       "uniform_sweep_guard.require_uniform_redeemer",
                       "uniform_sweep_guard.require_no_script_return",
@@ -38,17 +39,19 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     "token_dust":    ("gate.min_token_count", "weights", "bootstrap_anchors",
                       "allowlist_prefixes", "allowlist_policies",
                       "dos_asset_min", "reason_threshold"),
-    "large_value":   ("weights", "bootstrap_anchors", "reason_threshold"),
+    "large_value":   ("weights", "bootstrap_anchors", "reason_threshold",
+                      "min_digits_subscore"),
     "front_running": ("weights", "fixed_anchors", "bootstrap_anchors", "outcome_scores",
                       "reason_thresholds", "min_recurrence_wins", "high_band_cap",
                       "delta_ms_default"),
     "sandwich":      ("weights", "fixed_anchors", "bootstrap_anchors", "link_scores",
-                      "window_slots", "min_profit_lovelace", "high_band_cap",
+                      "window_slots", "min_profit_lovelace",
                       "reason_thresholds"),
     "circular":      ("weights", "fixed_anchors", "bootstrap_anchors", "cycle",
                       "reason_threshold", "moderate_cap"),
     "fake_token":    ("weights", "fixed_anchors", "bootstrap_anchors",
-                      "similarity_threshold", "unicode_scores", "reason_thresholds"),
+                      "similarity_threshold", "unicode_scores", "reason_thresholds",
+                      "critical_assets.multiplier", "critical_assets.names"),
     "phishing":      ("weights", "fixed_anchors", "bootstrap_anchors",
                       "similarity_suspicious_range", "social_engineering",
                       "reason_thresholds", "critical_threshold", "metadata_labels"),
@@ -80,10 +83,51 @@ def _config_dir() -> Path:
     )
 
 
+# Required top-level protocol parameters. These encode the Cardano ledger
+# resource limits that several scorers' thresholds are derived from; a missing
+# block must fail loudly at import rather than surfacing as a KeyError deep
+# inside a scorer.
+_REQUIRED_PROTOCOL_LIMITS: Tuple[str, ...] = (
+    "max_value_size_bytes",
+    "max_tx_size_bytes",
+)
+
+# Required keys for the top-level composite_corroboration block (cross-class
+# agreement signal; see detection.yaml). Top-level, not a scorer section.
+_REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
+    "corroboration_threshold",
+)
+
+
 def _validate(path: Path, data: Dict[str, Any]) -> None:
     if "scorers" not in data or not isinstance(data["scorers"], dict):
         raise RuntimeError(
             f"Detection config {path} must contain a top-level 'scorers' mapping."
+        )
+    limits = data.get("protocol_limits")
+    if not isinstance(limits, dict):
+        raise RuntimeError(
+            f"Detection config {path} must contain a top-level 'protocol_limits' mapping."
+        )
+    missing_limits = [k for k in _REQUIRED_PROTOCOL_LIMITS if k not in limits]
+    if missing_limits:
+        raise RuntimeError(
+            f"Detection config {path} missing protocol_limits keys: "
+            f"{', '.join(missing_limits)}"
+        )
+    corroboration = data.get("composite_corroboration")
+    if not isinstance(corroboration, dict):
+        raise RuntimeError(
+            f"Detection config {path} must contain a top-level "
+            f"'composite_corroboration' mapping."
+        )
+    missing_corr = [
+        k for k in _REQUIRED_COMPOSITE_CORROBORATION if k not in corroboration
+    ]
+    if missing_corr:
+        raise RuntimeError(
+            f"Detection config {path} missing composite_corroboration keys: "
+            f"{', '.join(missing_corr)}"
         )
     scorers = data["scorers"]
     missing: Iterable[str] = []
@@ -138,6 +182,42 @@ def get(section: str) -> Dict[str, Any]:
             f"Add a 'scorers.{section}' block to detection.yaml."
         )
     return cfg
+
+
+def composite_corroboration_config() -> Dict[str, Any]:
+    """Return the top-level composite_corroboration block.
+
+    Cross-class agreement signal (not a scorer section). Presence and required
+    keys are enforced at load time by :func:`_validate`.
+    """
+    return _CFG["composite_corroboration"]
+
+
+def protocol_limit(name: str) -> int:
+    """Return a Cardano ledger protocol limit (e.g. ``'max_tx_size_bytes'``).
+
+    These are top-level (not per-scorer) so multiple scorers derive byte
+    thresholds from the same named value instead of repeating raw constants.
+    Presence is enforced at load time by :func:`_validate`.
+    """
+    limits = _CFG["protocol_limits"]
+    if name not in limits:
+        raise KeyError(
+            f"No protocol limit '{name}'. Add it to the 'protocol_limits' "
+            f"block in detection.yaml."
+        )
+    return int(limits[name])
+
+
+def fraction_of_limit(fraction: Any, limit_name: str) -> int:
+    """Byte threshold expressed as a fraction of a named protocol limit.
+
+    Several scorers derive a byte threshold as ``fraction * protocol_limit(...)``
+    (token_dust's value-CBOR floor, large_datum's size backstop). This names the
+    ``int(fraction * limit)`` idiom so the derivation is not duplicated across
+    scorers and reads as intent rather than arithmetic.
+    """
+    return int(float(fraction) * protocol_limit(limit_name))
 
 
 def anchor(container: Dict[str, Any], key: str) -> Tuple[float, float]:
@@ -198,6 +278,7 @@ def resolved_or_bootstrap(
     network: str,
     bootstrap: Dict[str, Any],
     bootstrap_key: str,
+    scope_types_allowed: Optional[List[str]] = None,
 ) -> Tuple[float, float, str]:
     """Resolve a baseline, falling back to the scorer's configured bootstrap anchor.
 
@@ -207,13 +288,20 @@ def resolved_or_bootstrap(
     the source as ``"bootstrap"``.
 
     Parameters mirror ``resolve_baseline`` plus:
-        bootstrap:      the scorer's ``bootstrap_anchors`` config sub-dict.
-        bootstrap_key:  the key inside ``bootstrap`` to read when falling back.
+        bootstrap:            the scorer's ``bootstrap_anchors`` config sub-dict.
+        bootstrap_key:        the key inside ``bootstrap`` to read when falling back.
+        scope_types_allowed:  forwarded to ``resolve_baseline`` to restrict which
+                              baseline tiers may be consulted. With
+                              ``["per_script"]`` the global tier is skipped, so a
+                              per-script miss drops straight to ``bootstrap``.
 
     Returns ``(p50, p99, source)`` where ``source`` is one of
     ``"per_script" | "per_policy" | "global" | "bootstrap"``.
     """
-    p50, p99, source = resolve_baseline(feature, scope_type, scope_id, network)
+    p50, p99, source = resolve_baseline(
+        feature, scope_type, scope_id, network,
+        scope_types_allowed=scope_types_allowed,
+    )
     if source == "missing":
         p50, p99 = anchor(bootstrap, bootstrap_key)
         source = "bootstrap"

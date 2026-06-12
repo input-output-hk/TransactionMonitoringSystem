@@ -105,6 +105,36 @@ class TestScore:
         result = scorer.score(_features(mint=mint))
         assert result.score == 0.0
 
+    def test_critical_asset_clone_scores_higher_than_standard(self, scorer):
+        """An exact-name clone of a critical stablecoin (iUSD) must score
+        strictly higher than an identical clone of a non-critical token
+        (HOSKY): same fake policy, same quantity, same recipients, so the only
+        difference is the criticality amplification on the identity axis. This
+        pins the recall-positive escalation. iUSD/HOSKY are both in the mainnet
+        registry; HOSKY is intentionally absent from fake_token.critical_assets.
+        """
+        outputs = [{"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(5)]
+        r_critical = scorer.score(_features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=outputs))
+        r_standard = scorer.score(_features(mint={FAKE_POLICY: {"HOSKY": 10_000}}, outputs=outputs))
+
+        assert r_critical.evidence["matched_token_criticality"] == "critical"
+        assert r_standard.evidence["matched_token_criticality"] == "standard"
+        # Identity is amplified for the critical asset, lifting the final score.
+        assert r_critical.sub_scores["identity_composite"] > r_standard.sub_scores["identity_composite"]
+        assert r_critical.score > r_standard.score
+
+    def test_criticality_never_lowers_score(self, scorer):
+        """The amplification is monotonic (multiplier >= 1.0, capped at 1.0):
+        a critical-asset clone is never scored below the same clone without the
+        bonus. Compared against the multiplier=1.0 (no-op) baseline."""
+        from unittest.mock import patch
+        outputs = [{"address": "addr1", "value": {"lovelace": 1_500_000}}]
+        feats = _features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=outputs)
+        with_bonus = scorer.score(feats).score
+        with patch("app.analysis.scorers.fake_token._CRITICALITY_MULTIPLIER", 1.0):
+            no_bonus = scorer.score(feats).score
+        assert with_bonus >= no_bonus
+
 
 class TestConfusablesFold:
     """Confusables fold for cross-script visual homoglyphs.

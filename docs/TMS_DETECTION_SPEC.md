@@ -8,7 +8,7 @@ All scoring uses the continuous 0-100 risk score framework from PolimiDocs (weig
 
 | Score | Risk | Action |
 |-------|------|--------|
-| 0-30 | Low | No action, retained for baseline calibration |
+| 0-30 | Informational | No action, scored-but-not-alerting baseline (renamed from "Low" 2026-06; legacy values still parsed) |
 | 31-59 | Moderate | Flagged for periodic review |
 | 60-79 | High | Queued for analyst review |
 | 80-100 | Critical | Immediate alert |
@@ -72,8 +72,11 @@ A UTxO value size spam attack. The attacker creates a single UTxO carrying hundr
 ### Gate Condition
 - `address_type == SCRIPT` (attack is only meaningful at script addresses)
 - `unique_assetclass_count >= min_token_count` (default 2; tunable via `token_dust.gate.min_token_count`)
+- **DoS engagement discriminator**: a bundle enters scoring only when it is a plausible value-bloat DoS: either `>= dos_asset_min` distinct `(policy, name)` pairs (default 15) OR its serialized Value CBOR reaches `dos_value_cbor_fraction` (0.20) of `max_value_size_bytes` (5000, so 1000 bytes). The byte branch makes the gate robust to the long-asset-name evasion (few pairs, long names yield high CBOR). Normal protocol multi-asset UTxOs (2-6 pairs, <=0.5 KB Value CBOR) sit under both thresholds and produce no finding at all.
 
 The minimum-bundle gate is part of the attack definition: a CBOR-bloat attack requires multiple distinct `(policy, name)` entries to inflate the Value field. A single-asset UTxO is bounded in size regardless of quantity and is not in scope for this scorer.
+
+**Moderate cap below `dos_asset_min`**: an output whose bundle has fewer than `dos_asset_min` distinct pairs is capped at the top of Moderate (`BAND_HIGH_THRESHOLD - 1`) even when its three primary sub-scores saturate. A small bundle cannot meaningfully bloat the 16 KB tx-CBOR limit, so the band reflects that structural fact while the saturated sub-scores still record severity. The composite `script_value_bloat_dos` reason and a High+ band require at least `dos_asset_min` pairs.
 
 ### Detection Features
 
@@ -165,31 +168,40 @@ The attacker attaches an oversized inline datum to a UTxO output. The Value fiel
 ### Gate Conditions
 - `address_type == SCRIPT`
 - `datum_present == INLINE` (or resolvable hash) and `datum_bytes != null`
+- **Bloat discriminator** (`_is_bloat_datum`): a script output's datum is a candidate only when it is either
+  - at or above the absolute size backstop (`size_backstop_fraction` * `max_tx_size_bytes` = 0.75 * 16384 = 12288 bytes), flagged regardless of content because it nears the point a consuming tx cannot fit under `maxTxSize`; or
+  - large (`>= min_datum_bytes`, default 6000) AND low-information, where low-information means byte-entropy `<= bloat_entropy_max` (default 4.0 bits/byte: padding attacks observe ~0.3-1.5, legitimate structured state ~7) OR a single CBOR leaf holds `>= leaf_concentration_max` (default 0.5) of the datum bytes (catches high-entropy single-leaf padding the entropy gate misses).
+
+  Absolute size alone cannot separate the two populations: an observed CTF bloat attack carries a 7.3 KB datum, overlapping a benign contract's ~6.9 KB datum. Content entropy and leaf concentration are the discriminators that removed the false positives, which is why the scoring axes below keep their original size-based shape.
+- **Aggregate engagement** (observability only): when no single output passes the per-output predicate but the SUM of datum bytes across outputs at the same payment credential reaches `aggregate_engagement_min` (12000), the scorer engages and records `max_script_datum_bytes` in `sub_scores` but returns `score=-1` (no alert, not selected as `max_class`). This surfaces the multi-output split-payload shape for analyst queries without firing.
 
 ### Detection Features
 
 | Feature | Role | Weight |
 |---------|------|--------|
-| `datum_bytes` | Primary: absolute byte size of the datum. Per-script baseline. | 0.40 |
-| `datum_ratio` | Derived primary: `datum_bytes / utxo_total_bytes`. **Fixed anchors: p50=0.20, p99=0.60.** Values > 0.60 = datum dominance. | 0.35 |
-| `value_cbor_bytes` | Separation signal (inverted): expected to be normal, distinguishes from Token Dust | 0.15 |
-| `sender_recurrence` | Contextual | 0.10 |
+| `datum_bytes` | Primary: absolute byte size of the datum. Per-script baseline. | 0.50 |
+| `datum_ratio` | Derived primary: `datum_bytes / utxo_total_bytes`. **Fixed anchors: p50=0.70, p99=0.97.** A confirmed bloat datum occupies almost the whole UTxO. | 0.35 |
+| `value_cbor_bytes` | Separation signal (inverted): expected to be normal, distinguishes from Token Dust | 0.05 |
+| `sender_recurrence` | Contextual (stubbed to 0 pending entity clustering) | 0.10 |
 
 ### Scoring
+
+The gate (the bloat discriminator above) is what removes false positives, so the score axes keep their original size-based shape: a confirmed bloat datum is both large (`datum_bytes`) and occupies most of the UTxO (`datum_ratio`), both saturating toward Critical.
 
 ```
 score_large_datum(utxo):
     if utxo.address_type != SCRIPT: return 0
     if utxo.datum_present == NONE or utxo.datum_bytes == null: return 0
+    if not is_bloat_datum(utxo): return -1  # gate (entropy / leaf-conc / size backstop)
 
     datum_ratio = utxo.datum_bytes / (utxo.utxo_total_bytes + EPSILON)
 
     s_datum      = normalise(utxo.datum_bytes, per_script_baselines)
-    s_ratio      = normalise(datum_ratio, p50=0.20, p99=0.60)  # fixed anchors
+    s_ratio      = normalise(datum_ratio, p50=0.70, p99=0.97)  # fixed anchors
     s_value_inv  = 1 - normalise(utxo.value_cbor_bytes, per_script_baselines)
-    s_recurrence = normalise(utxo.sender_recurrence, per_script_baselines)
+    s_recurrence = 0.0  # stubbed: entity clustering deferred
 
-    score = 0.40 * s_datum + 0.35 * s_ratio + 0.15 * s_value_inv + 0.10 * s_recurrence
+    score = 0.50 * s_datum + 0.35 * s_ratio + 0.05 * s_value_inv + 0.10 * s_recurrence
     return clip(score, 0, 1) * 100
 ```
 
@@ -239,7 +251,7 @@ group representative is the first input's address in the group.
 
 ### Value-Agnostic Extraction
 
-Real-world double-satisfaction targets two distinct asset classes: lovelace (DeFi vaults, escrow contracts) and native assets (NFT marketplaces, token-locking contracts). The canonical NFT-marketplace case drains native assets while the script's lovelace position is flat — min-UTxO ADA enters and the same min-UTxO ADA leaves. A lovelace-only extraction signal is invariant in that case and produces no detection.
+Real-world double-satisfaction targets two distinct asset classes: lovelace (DeFi vaults, escrow contracts) and native assets (NFT marketplaces, token-locking contracts). The canonical NFT-marketplace case drains native assets while the script's lovelace position is flat: min-UTxO ADA enters and the same min-UTxO ADA leaves. A lovelace-only extraction signal is invariant in that case and produces no detection.
 
 The scorer therefore computes both axes independently against per-script baselines and combines them via `max()`. Either dimension is a sufficient signal of value extraction; combining via `max()` rather than a weighted sum prevents one neutral axis from diluting the other. The extraction sub-score reaches its ceiling whenever either axis does.
 
@@ -254,31 +266,64 @@ score_multiple_satisfaction(tx):
     n_assets_out       = compute_n_assets_out_of_script(tx)
     exunits_per_input  = tx.exunits_total.cpu / (tx.n_inputs_same_script + EPSILON)
 
-    s_extraction_lov    = normalise(net_value_out, per_script_baselines)
-    s_extraction_assets = normalise(n_assets_out,  per_script_baselines)
+    # Value axis (net_value, n_assets): per-script baseline, then bootstrap
+    # anchor on miss -- NEVER the global tier (see "Per-Script-Only Value
+    # Baselines"). Per-script anchors are widened by `per_script_extraction_headroom`.
+    s_extraction_lov    = normalise(net_value_out, per_script_value_baseline, headroom)
+    s_extraction_assets = normalise(n_assets_out,  per_script_value_baseline, headroom)
     s_extraction        = max(s_extraction_lov, s_extraction_assets)
-    s_exunits_inv       = 1 - normalise(exunits_per_input, per_script_baselines)
-    s_inputs            = normalise(tx.n_inputs_same_script, per_script_baselines)
-    s_recurrence        = normalise(tx.sender_recurrence,  per_script_baselines)
+    # exunits / n_inputs / recurrence: per_script -> global -> bootstrap (absolute)
+    s_exunits_inv       = 1 - normalise(exunits_per_input, baselines)
+    s_inputs            = normalise(tx.n_inputs_same_script, baselines)
+    s_recurrence        = normalise(tx.sender_recurrence,  baselines)
 
     score = 0.42 * s_extraction + 0.28 * s_exunits_inv + 0.16 * s_inputs + 0.14 * s_recurrence
     score = clip(score, 0, 1) * 100
 
-    # Lazy-validator band floor (see below)
-    if not allowlisted and s_exunits_inv > lazy_validator_threshold:
+    # Un-widened extraction for the floor gate only (headroom must not weaken
+    # the high-confidence path): s_extraction_floor = max over both axes at raw p99.
+    uniform_sweep = is_uniform_sweep(tx)   # many inputs, identical spend redeemers, no script return
+
+    # Lazy-validator band floor (see below). Requires real extraction
+    # (s_extraction_floor > lazy_validator_extraction_min) and not a sweep.
+    floor_applies = (not allowlisted and not uniform_sweep
+                     and s_exunits_inv > lazy_validator_threshold
+                     and s_extraction_floor > lazy_validator_extraction_min)
+    if floor_applies:
         score = max(score, lazy_validator_floor)
+    if uniform_sweep:
+        score = min(score, BAND_MODERATE_MAX)   # sweep classification stands even under allowlist reweight
+
+    # Suppression: a benign multi-input spend that is NOT double-satisfaction
+    # (owner sweep, or value returned to the script = state continuation) is
+    # dropped to no-finding (-1). Gated on `not floor_applies` so a floored
+    # lazy-validator exploit and the CTF-01 marketplace case (uniform=False,
+    # value_returned=0) are never suppressed.
+    if not floor_applies and (uniform_sweep or value_returned_to_script > 0):
+        return no_finding
 
     return score
 ```
 
 ### Lazy-Validator Band Floor
 
-When the gate has fired AND `s_exunits_inv` saturates above `lazy_validator_threshold` (default 0.8 — the validator did near-zero CPU per input), the final score is floored to `lazy_validator_floor` (default 60.0, the High band threshold). The weighted average is biased toward value extraction, so a low-value but structurally unambiguous exploit (multiple inputs, gate satisfied, validator clearly skipping per-input work) can produce a Moderate score; the floor surfaces these to operators on signal strength rather than dollar impact. The mechanism is the inverse of `front_running.high_band_cap`, which caps the score when structural confirmation is weak.
+When the gate has fired AND `s_exunits_inv` saturates above `lazy_validator_threshold` (default 0.8, the validator did near-zero CPU per input), the final score is floored to `lazy_validator_floor` (default 60.0, the High band threshold). The weighted average is biased toward value extraction, so a low-value but structurally unambiguous exploit (multiple inputs, gate satisfied, validator clearly skipping per-input work) can produce a Moderate score; the floor surfaces these to operators on signal strength rather than dollar impact. The mechanism is the inverse of `front_running.high_band_cap`, which caps the score when structural confirmation is weak.
 
 Allowlisted scripts are exempt: legitimate batch-processing contracts often run minimal per-input CPU by design (the validator runs once and amortises across all batched orders), so the lazy-validator fingerprint is part of their normal operation.
 
+The floor additionally requires `s_extraction_floor > lazy_validator_extraction_min` (the un-widened extraction, so the per-script headroom cannot weaken this high-confidence path) and `not uniform_sweep`. Double-satisfaction by definition needs value to leave the script: a state-machine contract that consumes its own UTxOs and writes state back has `s_extraction_floor = 0` and is not floored even when execution is cheap.
+
+### Per-Script-Only Value Baselines
+
+The value-extraction axis (`net_value_out_of_script`, `n_assets_out_of_script`) resolves per-script then drops straight to the bootstrap anchor, **never the global tier**. The global distribution of value/assets leaving a script is dominated by legitimate high-volume asset-movers (DEX/marketplace batchers), so a global baseline would learn "extracting 2+ assets is normal" and de-sensitise detection on the rare/novel scripts where one-shot double-satisfaction exploits live (the CTF-01 anchor extracts 2 assets on a 3-tx script). `per_script -> bootstrap` keeps established contracts judged against their own norm while rare scripts stay on the conservative default. This applies only to the value axis: `exunits_per_script_input` feeds the inverted lazy-validator signal where "lazy" means near-zero CPU in absolute terms, so it stays on the absolute bootstrap (a per-script exunits baseline would make a heavy-work contract look maximally lazy against its own median and spuriously floor it).
+
+**Per-script extraction headroom**: the extraction features are discrete and low-cardinality, so a per-script p99 often sits ~1 above p50 (e.g. `n_assets` p50=2, p99=3) and normalise() would saturate on the contract's common upper-normal value. When a per-script baseline is in use, the upper anchor is widened to `p50 + (p99 - p50) * per_script_extraction_headroom` (default 3.0) so only extraction well above the contract's own normal range scores. Bootstrap/global anchors are used unchanged, keeping rare/novel scripts on the conservative floor (CTF-01 recall preserved).
+
 ### False Positive: Legitimate UTxO Batching
 - DEX batch settlement, staking reward consolidation, multi-position liquidation, and prediction-market resolution all have elevated `n_inputs_same_script` and large `net_value_out_of_script` as normal behaviour.
+- **Per-script value baselines (no global tier)** judge extraction against the contract's own history, not a batcher-dominated global distribution. See above.
+- **Uniform-sweep guard**: a tx whose fingerprint is "owner sweeping their own script UTxOs" (>= `min_inputs` script inputs, identical spend redeemers, no value returned to the same script) is a UTxO consolidation, not double-satisfaction. The lazy-validator floor is suppressed and the score is capped at the top of Moderate. Each leg (uniform-redeemer, no-return, min-inputs) is independently config-gated under `uniform_sweep_guard`. Real double-satisfaction has asymmetric satisfaction arguments and writes the satisfying value to a distinct address shape that the no-return predicate rejects.
+- **State-continuation suppression**: when the floor does not apply and either the sweep guard fires or any lovelace is returned to the script (state continuation, not extraction), the finding is dropped to no-finding (`score=-1`). Gated on `not floor_applies` so the CTF-01 marketplace double-sat (uniform=False, value_returned=0, Moderate) is unaffected.
 - Per-script allowlist of known batch-processing / resolution contracts **reduces** the `s_extraction` weight (redistributed proportionally to `s_inputs` and `s_recurrence`) rather than bypassing the scorer. This preserves the structural signals while suppressing the economic-magnitude signal for contracts where large extraction is legitimate.
 - The spend-redeemer gate condition excludes native-script multisig wallets, which evaluate as declarative ledger predicates per-input and are immune to multiple-satisfaction by construction.
 - **Net value linearity check**: spec-defined corroboration on the coefficient of variation of per-input extracted values, on the roadmap.
@@ -330,7 +375,11 @@ A three-TX exploit targeting DEX swaps. The attacker places tx_A (buy) before th
 - All 3 TXs fall within `W_SLOTS` window (recommended: 5 slots = ~25 seconds; expand to 20 for batching DEXes)
 
 ### Current Implementation: Structural Detection
-The current implementation uses simplified structural pattern detection without DEX redeemer parsing. It detects 3+ transactions at the same **script address** within a 5-slot window where two share a first-input address cluster (same attacker). `swap_rate_delta` and `price_impact` are set to 0. Script addresses are filtered by Bech32 prefix (`addr1w`, `addr_test1w`, etc.).
+The current implementation uses structural pattern detection without DEX redeemer parsing. It detects an attacker's two legs bracketing a victim's tx at the same **script address** within a `window_slots` (5) window. `swap_rate_delta` and `price_impact` are set to 0. Script addresses are filtered by Bech32 prefix (`addr1w`, `addr_test1w`, etc.). Three structural requirements were added to remove the arbitrage/batcher false-positive class that dominated this scorer:
+
+1. **Temporal bracketing**: the attacker's legs must actually straddle the victim in `(slot, block_index)` order: closest leg before the victim is `tx_a`, closest after is `tx_b`. `block_index` (the tx's position within its block, already ingested) totally-orders transactions including within a single block, so genuine same-block sandwiches are confirmable, while co-occurrence (both legs before, or both after, the victim) is rejected. Bracketing is a necessary condition for a sandwich, so this gate is recall-safe by construction and adds same-block detection the slot-only logic lacked. The victim's position is resolved from the neighbour set, falling back to a direct point-query (`_tx_position`) when it sits outside the capped neighbour window.
+2. **Non-script (wallet) attacker**: the 2-leg cluster's first-input address must be a payment-key (wallet) address, not a script. This excludes pool/batcher self-interaction, the dominant structural false positive.
+3. **Net-ADA profit floor** (`min_profit_lovelace`, 200000): the attacker's net ADA across the front and back legs must exceed the floor or the candidate is suppressed entirely (`score=-1`, no finding). A sandwich that extracts no value is not an attack. Blind spot: profit taken in a non-ADA token nets ~0 ADA and is missed; that needs the deferred DEX datum / rate-impact confirmation.
 
 ### Detection Features
 
@@ -373,8 +422,10 @@ Since TMS Forge cannot interact with live DEX pools, it simulates the **temporal
 Value (ADA or native assets) travels through a sequence of addresses and returns to its origin within a bounded time window. Net economic displacement is near-zero (only fees lost). Used for: wash trading (fake volume), AML layering (obscure fund provenance), self-churn to confuse UTxO-graph clustering.
 
 ### Gate Conditions
-- Cycle length k in [2..6]
-- `net_loss_ratio` consistent with fee-only loss: `(amount_in - amount_out) / amount_in <= expected_fee_ratio * 2.0`
+- Cycle length k in [3..6] (`cycle.min_length` = 3). A 2-hop `A → script → A` is a
+  deposit/withdraw round-trip, not circular layering, and was the dominant
+  false positive; the floor is 3 hops.
+- `net_loss_ratio` consistent with fee-only loss: `(amount_in - amount_out) / amount_in <= expected_fee_ratio * fee_tolerance_multiplier` (default 4.0)
 
 ### Detection Features
 
@@ -392,8 +443,10 @@ Value (ADA or native assets) travels through a sequence of addresses and returns
 - `cluster_self_return`: terminal address belongs to same cluster as origin
 
 ### Two Detection Levels
-1. **Graph-level pipeline**: detect explicit cycles of length k in [2..6] in the transfer graph (rolling window). Score each cycle as a unit.
-2. **Address-level pipeline** (lightweight fallback): detect 2-hop ping-pong (A → B → A) without full graph traversal.
+1. **Graph-level pipeline**: detect explicit cycles of length k in [3..6] in the transfer graph (rolling window). Score each cycle as a unit.
+2. **Address-level pipeline** (lightweight fallback): detect 2-hop ping-pong (A → B → A) without full graph traversal. The detector still finds 2-hop round-trips, but they sit below the `min_length` = 3 gate and are not alerted: a 2-hop `A → script → A` is a deposit/withdraw round-trip, not circular layering, and was the dominant false positive.
+
+A structural-only match (just `amount_similarity` + `cycle_recurrence`, with the corroborating axes near zero) is suppressed entirely to no-finding (`score = -1`): when the corroborating signals (entropy + auxiliary + speed) sum below `structural_corroboration_floor`, the cycle is structurally indistinguishable from benign DeFi composition (a pool swap or state machine) and carries no layering evidence, so a plain round-trip never reaches an alerting band on the two structural axes alone. Separately, a corroborated cycle that still loses more than the strict fee-only ratio (`fee_tolerance_strict`) is capped at the top of Moderate (`moderate_cap`).
 
 ### What TMS Forge Produces
 - `hop_count` (3-8) separate TXs chaining ADA through HD-derived addresses: `addr_0 → addr_1 → addr_2 → ... → addr_0`
@@ -441,6 +494,10 @@ The attacker mints tokens with a TokenName identical or visually similar (Unicod
 ```
 final_score = 0.60 * identity_deception_score + 0.40 * distribution_score
 ```
+
+#### Critical-Asset Escalation
+
+Impersonating a high-value asset is more dangerous than cloning a meme coin: a fake stablecoin redirects DeFi collateral that users trust as worth $1. The identity sub-pipeline weighs every impersonation equally on the name axis, so a plain exact-name clone of a stablecoin scores no higher than any other clone and its severity ends up driven by distribution alone. To correct this, when the matched legitimate token is on the curated `fake_token.critical_assets.names` list (stablecoins iUSD/DJED/SHEN by default), the identity score is multiplied by `fake_token.critical_assets.multiplier` (default 1.8) and clipped to 1.0. The multiplier is >= 1.0 and the clip keeps it from exceeding a clean full-identity score, so the adjustment is strictly monotonic: it only ever raises an impersonation's score, never lowers a detection. The matched asset's tier is recorded in evidence as `matched_token_criticality` (`critical` or `standard`).
 
 ### `tokenname_similarity` Implementation
 Two-stage comparison:
@@ -547,7 +604,7 @@ All values are recommended starting points. Validate against production data.
 
 | Attack Class | Feature | p50 Anchor | p99 Anchor | Notes |
 |-------------|---------|------------|------------|-------|
-| Large Datum | `datum_ratio` | 0.20 | 0.60 | Fraction of UTxO bytes from datum |
+| Large Datum | `datum_ratio` | 0.70 | 0.97 | Fraction of UTxO bytes from datum |
 | Front-Running | `1 / mempool_delta_ms` | 1/2000 | 1/200 | 200ms = automation threshold |
 | Front-Running | `fee_delta` | 500 | 5000 | Lovelace |
 | Front-Running | `ttl_delta` | 10 | 100 | Slots |
@@ -577,6 +634,7 @@ All values are recommended starting points. Validate against production data.
 
 - Minimum 200 transactions per script/policy before per-entity baseline is valid
 - Below threshold → fall back to global baselines (by script type)
+- **Exception**: the Multiple Satisfaction value-extraction axis (`net_value_out_of_script`, `n_assets_out_of_script`) skips the global tier and falls back per-script → bootstrap, because a global value-extraction distribution is dominated by legitimate batchers and would de-sensitise the scorer (see Attack 4: Per-Script-Only Value Baselines).
 - **Drift check**: if new p99 differs > 50% from current, flag for analyst review before applying
 
 
@@ -596,13 +654,28 @@ RiskScore(tx, class) = clip(sum(w_i * norm(f_i)) / sum(w_i), 0, 1) * 100
 
 Each attack class produces an independent score. A single TX can score on multiple classes simultaneously. Output one score vector per TX, with top contributing features and normalised values for each non-zero score.
 
+## Cross-Class Corroboration
+
+The risk band is derived solely from the single highest class score (`max_score`), so a transaction that independently trips two different detectors is banded identically to one that trips only the strongest: the agreement between detectors is otherwise lost. To surface that agreement without changing alerting, each scored transaction also records two fields on `tx_class_scores`:
+
+- `corroboration_count`: the number of distinct attack classes scoring at or above `composite_corroboration.corroboration_threshold` (default 40.0, in `config/detection.yaml`).
+- `corroborating_classes`: the comma-separated names of those classes (e.g. `sandwich,token_dust`).
+
+This is a flag only: it deliberately does not feed `max_score` or `risk_band`, so alerting volume is unchanged. The list endpoint exposes a `min_corroboration` filter for analyst triage:
+
+```
+GET /api/analysis/results?min_corroboration=2
+```
+
+returns only transactions where at least that many distinct classes corroborated (`corroboration_count >= 2`); `0` (the default) disables the filter. The intent is to pull multi-signal transactions where several independent detectors agree, regardless of the band the single highest score placed them in. The filter is API-only; there is no UI control.
+
 ## Implementation Notes
 
 ### Ogmios v6 Value Format
 All scorers and feature extractors handle both Ogmios v5 (`{"lovelace": N, "policyId": {...}}`) and v6 (`{"ada": {"lovelace": N}, "policyId": {...}}`) value formats. The `"ada"` key is skipped when iterating native assets.
 
 ### Baseline Resolution Order
-Scorers call `scorer_config.resolved_or_bootstrap()`, which wraps `normalise.resolve_baseline()`: a per-network dynamic baseline is tried first (per-script → global fallback within the same network). When no dynamic baseline is available, the scorer's bootstrap anchors from `config/detection.yaml` are substituted and the source is reported as `"bootstrap"`. Fixed anchors (declared in the same config file under `fixed_anchors`) are consulted directly by the scorer, not through this helper — they apply to dimensionless features like `datum_ratio` that never baseline against data. The effect: learned per-script baselines supersede bootstraps as each script accumulates ≥ `BASELINE_MIN_SAMPLES` transactions.
+Scorers call `scorer_config.resolved_or_bootstrap()`, which wraps `normalise.resolve_baseline()`: a per-network dynamic baseline is tried first (per-script → global fallback within the same network). When no dynamic baseline is available, the scorer's bootstrap anchors from `config/detection.yaml` are substituted and the source is reported as `"bootstrap"`. Fixed anchors (declared in the same config file under `fixed_anchors`) are consulted directly by the scorer, not through this helper; they apply to dimensionless features like `datum_ratio` that never baseline against data. The effect: learned per-script baselines supersede bootstraps as each script accumulates ≥ `BASELINE_MIN_SAMPLES` transactions.
 
 ### Collision and Displacement Detection
 Front-running on Cardano differs from Ethereum: a single node's mempool rejects a second transaction spending the same UTxO, so two competing transactions cannot coexist in the same mempool. The primary detection mechanism is therefore **displacement detection**: when a confirmed block contains a transaction that spends inputs claimed by a still-pending transaction, the system records a collision with the confirmed transaction as the winner.

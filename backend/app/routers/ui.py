@@ -155,7 +155,7 @@ async def root():
             .risk-band.Critical {{ background: #ff1744; color: #fff; }}
             .risk-band.High {{ background: #ff6d00; color: #fff; }}
             .risk-band.Moderate {{ background: #ffab00; color: #000; }}
-            .risk-band.Low {{ background: #00c853; color: #000; }}
+            .risk-band.Informational {{ background: #00c853; color: #000; }}
             .attack-class {{ color: #ce93d8; font-size: 12px; font-weight: 600; }}
             .filter-label {{ color: #888; font-size: 11px; margin-right: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
             .band-swatch {{
@@ -190,7 +190,7 @@ async def root():
             .risk-row.Critical {{ border-left-color: #ff1744; }}
             .risk-row.High {{ border-left-color: #ff6d00; }}
             .risk-row.Moderate {{ border-left-color: #ffab00; }}
-            .risk-row.Low {{ border-left-color: #00c853; }}
+            .risk-row.Informational {{ border-left-color: #00c853; }}
 
             /* Filters */
             .filters {{
@@ -219,7 +219,7 @@ async def root():
             .score-bar-fill.Critical {{ background: #ff1744; }}
             .score-bar-fill.High {{ background: #ff6d00; }}
             .score-bar-fill.Moderate {{ background: #ffab00; }}
-            .score-bar-fill.Low {{ background: #00c853; }}
+            .score-bar-fill.Informational {{ background: #00c853; }}
 
             /* Scrollbar */
             ::-webkit-scrollbar {{ width: 6px; }}
@@ -255,7 +255,7 @@ async def root():
                         <span class="band-swatch" style="background:#ffab00"></span>Moderate and above
                     </button>
                     <button class="filter-btn band-btn" data-band="1">
-                        <span class="band-swatch" style="background:#00c853"></span>All (inc. Low)
+                        <span class="band-swatch" style="background:#00c853"></span>All (inc. Informational)
                     </button>
                     <span style="border-left:1px solid #3a3f5a;height:20px;margin:0 4px"></span>
                     <button class="filter-btn active" data-attack="">All classes</button>
@@ -448,7 +448,7 @@ async def root():
                     if (s >= 80) return 'Critical';
                     if (s >= 60) return 'High';
                     if (s >= 31) return 'Moderate';
-                    return 'Low';
+                    return 'Informational';
                 }};
                 riskPanel.innerHTML = alerts.map(a => {{
                     const topClasses = Object.entries(a.scores)
