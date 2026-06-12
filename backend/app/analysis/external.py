@@ -443,25 +443,39 @@ def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
 def refresh_token_registry() -> int:
     """Force-refresh the token registry cache. Returns the number of names registered.
 
-    A refresh that fetched 0 remote entries (total registry outage) must not
-    REPLACE a previously complete cache with the seeds-only merge: that would
-    shrink fake_token impersonation coverage for a full refresh interval
-    (recall-first). The stale-but-complete cache is kept instead; a cold
-    start with no prior cache still stores the seed merge.
+    A refresh that produces a SMALLER registry than the cached one must not
+    replace it, regardless of how many subjects were fetched. A total outage
+    (0 fetched) and a partial outage (the registry serving only a few of the
+    ~31 well-known subjects) both shrink the result toward the seed list,
+    and replacing a complete cache with that shrunken merge would silently
+    cut fake_token impersonation coverage for a full refresh interval.
+    Recall-first reasoning: a legitimate registry shrink (token delisting)
+    is rare, and keeping a stale superset only risks impersonation FALSE
+    POSITIVES on lookalikes of delisted tokens, while accepting the shrink
+    risks MISSED impersonations of every dropped name; the stale superset
+    is the safe direction. A grown-or-equal registry always replaces; a
+    cold start with no prior cache stores whatever was merged (seeds only,
+    in the worst case).
     """
     registry, fetched = _refresh_legitimate_tokens()
-    if fetched == 0:
-        # Read the raw cache (stale included): a refresh usually runs
-        # BECAUSE the TTL expired, so the TTL-checked accessor would
-        # return None for exactly the cache this guard protects.
-        prior_entry = _cache.get("legitimate_tokens")
-        previous = prior_entry["data"] if prior_entry else None
-        if previous and len(previous) > len(registry):
-            logger.warning(
-                "Token registry outage: keeping previous cache of %d names "
-                "instead of shrinking to %d seeds", len(previous), len(registry),
-            )
-            return len(previous)
+    # Read the raw cache (stale included): a refresh usually runs BECAUSE
+    # the TTL expired, so the TTL-checked accessor would return None for
+    # exactly the cache this guard protects.
+    prior_entry = _cache.get("legitimate_tokens")
+    previous = prior_entry["data"] if prior_entry else None
+    if previous and len(previous) > len(registry):
+        logger.warning(
+            "Token registry %s outage (%d/%d subjects fetched): keeping "
+            "previous cache of %d names instead of shrinking to %d",
+            "total" if fetched == 0 else "partial",
+            fetched, len(_WELL_KNOWN_SUBJECTS),
+            len(previous), len(registry),
+        )
+        return len(previous)
+    logger.info(
+        "Token registry refresh applied: %d names cached (%d/%d subjects "
+        "fetched)", len(registry), fetched, len(_WELL_KNOWN_SUBJECTS),
+    )
     _set_cached("legitimate_tokens", registry)
     return len(registry)
 

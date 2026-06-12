@@ -1,6 +1,10 @@
 """Unit tests for the Multiple Satisfaction scorer (Class 4)."""
 
 import pytest
+from app.analysis.normalise import (
+    BAND_MODERATE_MAX,
+    BAND_MODERATE_THRESHOLD,
+)
 from app.analysis.scorers.multiple_sat import (
     MultipleSatScorer,
     _W as _WEIGHTS,
@@ -738,7 +742,13 @@ class TestPerScriptExtractionBaseline:
         }
         _plant_baselines(monkeypatch, rows)
         result = scorer.score(_two_asset_extraction_features())
-        assert result.sub_scores["s_extraction"] == 0.0
+        # Not exactly 0: the anchor-relative p50 bound clamps the learned
+        # median toward the bootstrap anchor (recall-positive tightening),
+        # so a routine 2-asset spend keeps a small residual signal. It must
+        # stay far below the reason threshold and below the Moderate band.
+        import app.analysis.scorer_config as sc_mod
+        reason_t = float(sc_mod.get("multiple_sat")["reason_threshold"])
+        assert result.sub_scores["s_extraction"] < reason_t / 2
         assert result.score < BAND_MODERATE_THRESHOLD
         assert result.baseline_source == "per_script"
 
@@ -858,8 +868,8 @@ class TestSuppressionEscape:
         # Not lazy (real CPU), so the floor does not apply; the escape must.
         assert result.sub_scores["s_exunits_inv"] < 0.8
         assert result.score != -1.0
-        assert result.score >= 31.0  # Moderate band, surfaced for review
-        assert result.score <= 59.0  # capped, never High on this shape
+        # Moderate band, surfaced for review; capped, never High on this shape.
+        assert BAND_MODERATE_THRESHOLD <= result.score <= BAND_MODERATE_MAX
         assert "extraction_escape_moderate_cap" in result.reasons
 
     def test_uniform_full_drain_double_sat_not_silenced(self, scorer):
@@ -882,7 +892,7 @@ class TestSuppressionEscape:
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.score != -1.0
-        assert result.score == 59.0  # BAND_MODERATE_MAX
+        assert result.score == BAND_MODERATE_MAX
         assert "uniform_script_sweep_guard" in result.reasons
         assert "extraction_escape_moderate_cap" in result.reasons
 
@@ -904,7 +914,7 @@ class TestSuppressionEscape:
         # ATTACK-MUST-FIRE boundary case: one NFT drained, 1 lovelace
         # returned to the script, real (non-lazy) validator. The asset
         # floor signal is normalise(1, p50=0, p99=2) = 1/(2+EPSILON)
-        # ~= 0.49999975 — a hair BELOW the old 0.5 threshold, so the
+        # ~= 0.49999975, a hair BELOW the old 0.5 threshold, so the
         # strict > comparison silenced exactly this single-NFT drain.
         inputs = [
             {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
@@ -927,7 +937,8 @@ class TestSuppressionEscape:
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["s_exunits_inv"] < 0.8  # not lazy
         assert result.score != -1.0
-        assert 31.0 <= result.score <= 59.0  # exactly Moderate
+        # Exactly the Moderate band: floored at its bottom, capped at its top.
+        assert BAND_MODERATE_THRESHOLD <= result.score <= BAND_MODERATE_MAX
         assert "extraction_escape_moderate_cap" in result.reasons
 
     def test_small_nft_drain_under_capped_poisoned_baseline_not_silenced(
@@ -964,7 +975,67 @@ class TestSuppressionEscape:
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.score != -1.0
-        assert 31.0 <= result.score <= 59.0
+        assert BAND_MODERATE_THRESHOLD <= result.score <= BAND_MODERATE_MAX
+        assert "extraction_escape_moderate_cap" in result.reasons
+
+    def test_in_bound_median_poisoned_drain_not_silenced(self, scorer, monkeypatch):
+        # ATTACK-MUST-FIRE (p50-bound review fix): a per-script n_assets
+        # baseline median-poisoned to exactly the OLD cap-relative p50
+        # bound, cap / (1 + min_spread_ratio) (~9.09 with shipped knobs),
+        # used to resolve unchanged, so a drain of any asset count below it
+        # normalised to 0 on the asset axis and the suppression escape
+        # never fired: an in-bound poisoned drain was silenced. The
+        # anchor-relative bound (per_script_p50_cap_spread_fraction) clamps
+        # the resolved median to anchor_p50 + K * anchor spread, so the
+        # same drain must now escape to Moderate. Every value derives from
+        # the config knobs, not bare literals.
+        import math
+        import app.analysis.scorer_config as sc_mod
+        from app.analysis.normalise import normalise
+
+        boot = sc_mod.get("multiple_sat")["bootstrap_anchors"]
+        anchor_p50, anchor_p99 = sc_mod.anchor(boot, "n_assets_out_of_script")
+        cap = sc_mod._P99_CAP_MULTIPLIER * anchor_p99
+        old_bound = cap / (1.0 + sc_mod._MIN_SPREAD_RATIO)
+        # The drain sits between the NEW p50 bound and the old one (and
+        # under the p99 cap): the silenced-yesterday, must-fire-today case.
+        n_drain = math.floor(old_bound)
+        new_bound = anchor_p50 + sc_mod._P50_CAP_SPREAD_FRACTION * (
+            anchor_p99 - anchor_p50
+        )
+        assert new_bound < n_drain < cap
+        # Regression statement: under the old resolved pair this exact
+        # drain normalised to 0 on the asset axis (silenced).
+        assert normalise(n_drain, p50=old_bound, p99=cap) == 0.0
+
+        _plant_baselines(monkeypatch, {
+            ("per_script", "n_assets_out_of_script"): {
+                "p50": old_bound, "p99": cap * 1e5, "sample_count": 500,
+                "computed_at": None, "window_days": 90,
+            },
+        })
+        inputs = [
+            {"address": SCRIPT,
+             "value": {"lovelace": 2_700_000, **self._nft(i)}}
+            for i in range(n_drain)
+        ]
+        outputs = [
+            {"address": WALLET, "value": {
+                "lovelace": 2_700_000 * n_drain - 300_000,
+                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n_drain)},
+            }},
+            {"address": SCRIPT, "value": {"lovelace": 1}},
+        ]
+        redeemers = [
+            {"validator": {"index": i, "purpose": "spend"},
+             "redeemer": f"payload{i}",
+             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            for i in range(n_drain)
+        ]
+        result = scorer.score(_features(inputs, outputs, redeemers))
+        assert result.sub_scores["s_exunits_inv"] < 0.8  # not lazy
+        assert result.score != -1.0
+        assert BAND_MODERATE_THRESHOLD <= result.score <= BAND_MODERATE_MAX
         assert "extraction_escape_moderate_cap" in result.reasons
 
     def test_escape_fires_at_exact_threshold(self):
@@ -987,7 +1058,7 @@ class TestSuppressionEscape:
 
     def test_escaped_finding_always_bands_moderate(self, scorer, monkeypatch):
         # Structural (not fixture-empirical): WHATEVER the weighted score,
-        # an escaped finding must band exactly Moderate — the floor closes
+        # an escaped finding must band exactly Moderate: the floor closes
         # the hole where a small weighted sum landed in Informational
         # (no action) despite the escape deliberately un-silencing it.
         import app.analysis.scorers.multiple_sat as ms_mod
@@ -1012,7 +1083,7 @@ class TestSuppressionEscape:
             for i in range(2)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
-        assert 31.0 <= result.score <= 59.0
+        assert BAND_MODERATE_THRESHOLD <= result.score <= BAND_MODERATE_MAX
         assert score_to_band(result.score) == "Moderate"
 
 
@@ -1064,7 +1135,7 @@ class TestBaselinePoisoningResistance:
     def test_median_poisoned_baseline_cannot_silence_drain(self, scorer, monkeypatch):
         # ATTACK-MUST-FIRE for the p50 vector: normalise() subtracts p50
         # first, so a poisoned MEDIAN (p50=500 assets, p99=1000) made every
-        # real drain normalise to 0 — the p99 cap alone never touched it.
+        # real drain normalise to 0; the p99 cap alone never touched it.
         # With the p50 bound (derived from the capped p99), the axis stays
         # alive and the lazy-validator floor fires.
         poisoned = {

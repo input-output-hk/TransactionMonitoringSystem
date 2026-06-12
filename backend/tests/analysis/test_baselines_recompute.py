@@ -3,29 +3,37 @@
 from unittest.mock import patch, MagicMock
 
 from app.analysis.baselines import (
+    _DRIFT_P50_THRESHOLD,
+    _DRIFT_P99_THRESHOLD,
+    INVERTED_CONSUMER_FEATURES,
     check_drift,
     compute_global_baselines,
     get_active_script_addresses,
 )
 
+# Thresholds come from the validated config (baselines.drift), not bare
+# literals: check_drift deliberately has no default, so the tunable cannot
+# bypass the loader.
+_THR = _DRIFT_P99_THRESHOLD
+
 
 class TestCheckDrift:
     def test_no_drift(self):
-        assert check_drift(100.0, 110.0, threshold=0.50) is False
+        assert check_drift(100.0, 100.0 * (1 + _THR / 2), threshold=_THR) is False
 
     def test_drift_detected(self):
-        assert check_drift(100.0, 200.0, threshold=0.50) is True
+        assert check_drift(100.0, 100.0 * (1 + 2 * _THR), threshold=_THR) is True
 
     def test_zero_old_p99(self):
-        assert check_drift(0.0, 5.0) is True
+        assert check_drift(0.0, 5.0, threshold=_THR) is True
 
     def test_zero_both(self):
-        assert check_drift(0.0, 0.0) is False
+        assert check_drift(0.0, 0.0, threshold=_THR) is False
 
     def test_exact_threshold(self):
-        # 50% drift exactly at 0.50 threshold: abs(150 - 100) / 100 = 0.50
-        # > 0.50 is False because it's not strictly greater
-        assert check_drift(100.0, 150.0, threshold=0.50) is False
+        # A relative change of exactly the threshold is NOT drift: the
+        # comparison is strictly greater-than.
+        assert check_drift(100.0, 100.0 * (1 + _THR), threshold=_THR) is False
 
 
 class TestComputeGlobalBaselines:
@@ -88,7 +96,7 @@ class TestMultipleSatPerScriptBaselines:
         assert all(r[1] == "per_script" for r in rows)   # scope_type
         assert all(r[2] == "addrA" for r in rows)        # scope_id
         assert all(r[6] == 300 for r in rows)            # sample_count
-        # Never global — the whole point.
+        # Never global: the whole point.
         assert not any(r[1] == "global" for r in rows)
         mock_ch.insert_baselines.assert_called_once()
 
@@ -177,14 +185,18 @@ class TestDriftGuard:
     @patch("app.analysis.baselines.clickhouse")
     def test_narrowing_p99_recompute_applies_and_records(self, mock_ch):
         # The poisoned-first-baseline recovery path: a wide stored p99
-        # narrowing back down is strictly MORE sensitive (recall-safe), so
-        # it must apply — holding it made the poisoned row self-protecting.
+        # narrowing back down is strictly MORE sensitive for a
+        # plain-normalise feature (recall-safe), so it must apply; holding
+        # it made the poisoned row self-protecting. Uses datum_bytes, a
+        # pure-normalise feature: inverted-consumer features hold both
+        # directions (see TestDriftGuardInvertedConsumers).
         from app.analysis.baselines import _filter_drifted
+        assert "datum_bytes" not in INVERTED_CONSUMER_FEATURES
         mock_ch.get_baseline.return_value = {
             "p50": 5.0, "p99": 100.0, "sample_count": 300,
             "computed_at": None, "window_days": 90,
         }
-        rows = [self._row(p99=10.0)]  # 90% change, narrowing
+        rows = [self._row(p99=10.0, feature="datum_bytes")]  # 90% narrowing
         assert _filter_drifted(rows) == rows
         kwargs = mock_ch.insert_baseline_drift_event.call_args.kwargs
         assert kwargs["axis"] == "p99"
@@ -219,12 +231,14 @@ class TestDriftGuard:
 
     @patch("app.analysis.baselines.clickhouse")
     def test_falling_p50_recompute_applies(self, mock_ch):
+        # Pure-normalise feature: a falling median is strictly more
+        # sensitive, so the recompute applies.
         from app.analysis.baselines import _filter_drifted
         mock_ch.get_baseline.return_value = {
             "p50": 5.0, "p99": 10.0, "sample_count": 300,
             "computed_at": None, "window_days": 90,
         }
-        rows = [self._row(p99=10.0, p50=1.0)]
+        rows = [self._row(p99=10.0, p50=1.0, feature="datum_bytes")]
         assert _filter_drifted(rows) == rows
 
     @patch("app.analysis.baselines.clickhouse")
@@ -238,6 +252,169 @@ class TestDriftGuard:
         }
         kept = _filter_drifted([self._row(p99=10.0, p50=2.0)])
         assert kept == []
+
+
+class TestDriftGuardInvertedConsumers:
+    """ada_amount and value_cbor_bytes feed normalise_inverted() axes
+    (token_dust / large_value s_ada, large_datum s_value_inv), where a
+    DOWNWARD-poisoned baseline zeroes the dust signal. The drift guard must
+    hold BOTH directions for these features: the direction-aware guard
+    alone treated falling values as recall-safe, so one low-ADA dump
+    recompute de-sensitised the inverted axes (review finding)."""
+
+    def _row(self, feature, p50, p99):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_downward_p99_drift_on_inverted_feature_held(self, mock_ch):
+        from app.analysis.baselines import _filter_drifted
+        assert "value_cbor_bytes" in INVERTED_CONSUMER_FEATURES
+        mock_ch.get_baseline.return_value = {
+            "p50": 100.0, "p99": 1500.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        # p99 collapses 1500 -> 400 (ratio 0.73 > threshold), p50 stable.
+        kept = _filter_drifted([self._row("value_cbor_bytes", p50=100.0, p99=400.0)])
+        assert kept == []
+        kwargs = mock_ch.insert_baseline_drift_event.call_args.kwargs
+        assert kwargs["axis"] == "p99"
+        assert kwargs["applied"] is False
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_downward_p50_drift_on_inverted_feature_held(self, mock_ch):
+        from app.analysis.baselines import _filter_drifted
+        assert "ada_amount" in INVERTED_CONSUMER_FEATURES
+        mock_ch.get_baseline.return_value = {
+            "p50": 1_200_000.0, "p99": 2_000_000.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        # p50 falls 1.2M -> 0.5M (ratio 0.58 > threshold), p99 stable.
+        kept = _filter_drifted(
+            [self._row("ada_amount", p50=500_000.0, p99=1_900_000.0)]
+        )
+        assert kept == []
+        kwargs = mock_ch.insert_baseline_drift_event.call_args.kwargs
+        assert kwargs["axis"] == "p50"
+        assert kwargs["applied"] is False
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_downward_drift_on_pure_normalise_feature_applies(self, mock_ch):
+        # The recall-safe direction still applies for plain-normalise
+        # features; only inverted-consumer features get the symmetric hold.
+        from app.analysis.baselines import _filter_drifted
+        assert "datum_bytes" not in INVERTED_CONSUMER_FEATURES
+        mock_ch.get_baseline.return_value = {
+            "p50": 1_200_000.0, "p99": 2_000_000.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        rows = [self._row("datum_bytes", p50=500_000.0, p99=600_000.0)]
+        assert _filter_drifted(rows) == rows
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_dust_signal_survives_downward_poisoning_recompute(self, mock_ch, monkeypatch):
+        """ATTACK-MUST-FIRE: an attacker dumps low-ADA outputs at a victim
+        script to drag the ada_amount percentiles down, then sends the real
+        dust bundle. The poisoned recompute must be HELD, and with the
+        surviving (honest) baseline the token_dust inverted-ADA axis must
+        still saturate on the dust bundle."""
+        import app.analysis.scorer_config as sc
+        from app.analysis import normalise as norm
+        from app.analysis.baselines import _filter_drifted
+        from app.analysis.normalise import BAND_MODERATE_THRESHOLD, normalise_inverted
+        from app.analysis.scorers.token_dust import TokenDustScorer
+
+        # Honest per-script baseline at the token_dust bootstrap values
+        # (min-UTxO dust economics), straight from the validated config.
+        anchors = sc.get("token_dust")["bootstrap_anchors"]
+        honest_p50, honest_p99 = sc.anchor(anchors, "ada_amount")
+        honest = {
+            "p50": honest_p50, "p99": honest_p99, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        # Attacker's downward recompute: percentiles dragged far below the
+        # honest window by a low-ADA output flood.
+        poisoned_p50, poisoned_p99 = honest_p50 / 100.0, honest_p99 / 40.0
+
+        # 1. The poisoned recompute is HELD (prior row stays active).
+        mock_ch.get_baseline.return_value = dict(honest)
+        kept = _filter_drifted(
+            [self._row("ada_amount", p50=poisoned_p50, p99=poisoned_p99)]
+        )
+        assert kept == []
+
+        # 2. With the surviving baseline, the dust bundle still fires.
+        def _resolver(network, scope_type, scope_id, feature):
+            if (scope_type, feature) == ("per_script", "ada_amount"):
+                return dict(honest)
+            return None  # other axes fall back to bootstrap
+
+        monkeypatch.setattr(norm.clickhouse, "get_baseline", _resolver)
+        dust_value = {"lovelace": int(honest_p50)}  # min-UTxO dust ADA
+        for i in range(20):
+            dust_value[f"policy{i:03d}" + "0" * 50] = {"tok": 1}
+        features = {
+            "tx_hash": "dust_poison", "network": "preprod",
+            "raw_data": {"outputs": [
+                {"address": "addr_test1wz5fxvalex", "value": dust_value},
+            ]},
+        }
+        result = TokenDustScorer().score(features)
+        assert result.sub_scores["lovelace_inverted"] == 1.0
+        assert result.score >= BAND_MODERATE_THRESHOLD
+
+        # 3. Counterfactual: had the poisoned window applied, the inverted
+        # axis would have been zeroed; this is the recall the hold preserves.
+        assert normalise_inverted(
+            honest_p50, p50=poisoned_p50, p99=poisoned_p99,
+        ) == 0.0
+
+
+class TestHeldDriftWarning:
+    """The held-drift warning must name the axis/values that actually CAUSED
+    the hold, not simply the first axis that drifted (review finding: a
+    p50-caused hold logged the p99 axis when p99 had also drifted in an
+    applied-safe direction)."""
+
+    def _row(self, feature, p50, p99):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_warning_names_causal_axis_only(self, mock_ch, caplog):
+        import logging
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 100.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        # p99 narrows 100 -> 10 (drifted, applied-safe for a pure-normalise
+        # feature); p50 rises 5 -> 20 (the hold cause).
+        with caplog.at_level(logging.WARNING, logger="app.analysis.baselines"):
+            kept = _filter_drifted([self._row("datum_bytes", p50=20.0, p99=10.0)])
+        assert kept == []
+        held_msgs = [r.getMessage() for r in caplog.records if "HELD" in r.getMessage()]
+        assert len(held_msgs) == 1
+        assert "p50 5 -> 20" in held_msgs[0]
+        assert "p99" not in held_msgs[0]
+
+    @patch("app.analysis.baselines.clickhouse")
+    def test_warning_names_both_axes_when_both_cause_hold(self, mock_ch, caplog):
+        import logging
+        from app.analysis.baselines import _filter_drifted
+        mock_ch.get_baseline.return_value = {
+            "p50": 5.0, "p99": 10.0, "sample_count": 300,
+            "computed_at": None, "window_days": 90,
+        }
+        with caplog.at_level(logging.WARNING, logger="app.analysis.baselines"):
+            kept = _filter_drifted([self._row("datum_bytes", p50=20.0, p99=100.0)])
+        assert kept == []
+        held_msgs = [r.getMessage() for r in caplog.records if "HELD" in r.getMessage()]
+        assert len(held_msgs) == 1
+        assert "p99 10 -> 100" in held_msgs[0]
+        assert "p50 5 -> 20" in held_msgs[0]
 
 
 class TestChainTimeWindows:

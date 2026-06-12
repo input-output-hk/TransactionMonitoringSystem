@@ -62,6 +62,129 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
                       "asset_name_carrier.enabled", "min_decoded_string_len"),
 }
 
+# Weight and anchor names each scorer's code reads (the ``weights[...]`` and
+# ``anchor(_BOOT/_FIXED, ...)`` call sites in
+# backend/app/analysis/scorers/<name>.py). WHY this lives here as data
+# instead of being derived from the scorer modules: scorers import this
+# module at import time, so importing them back for introspection would be
+# circular. The failure mode being closed is a typo'd anchor or weight name
+# surfacing as a KeyError at SCORING time, where engine.py catches per-tx
+# scorer exceptions and moves on, i.e. silent per-transaction recall loss.
+# Validating the YAML names against these sets turns that typo into an
+# import-time failure. Keep in sync with the scorer call sites when adding
+# an axis; tests/analysis/test_scorer_config.py cross-checks the
+# multiple_sat entries against the scorer's declared baseline specs.
+_SCORER_WEIGHT_NAMES: Dict[str, Tuple[str, ...]] = {
+    "multiple_sat":  ("extraction", "exunits_inv", "inputs", "recurrence"),
+    "large_datum":   ("datum_bytes", "datum_ratio", "value_cbor_inv",
+                      "recurrence"),
+    "token_dust":    ("bytes", "assets", "ada_inv", "recurrence"),
+    "large_value":   ("digits", "bytes", "ada_inv", "recurrence"),
+    "front_running": ("outcome", "delta", "recurrence", "structure"),
+    "sandwich":      ("link", "rate", "impact", "profit", "recurrence"),
+    "circular":      ("amount", "recurrence", "entropy", "auxiliary", "speed"),
+    "fake_token":    ("identity.name", "identity.unicode", "identity.cip25",
+                      "distribution.recipients", "distribution.ratio",
+                      "distribution.policy_age", "distribution.recurrence",
+                      "overall.identity", "overall.distribution"),
+    "phishing":      ("content.blacklist", "content.domain", "content.social",
+                      "delivery.recipients", "delivery.url_recur",
+                      "delivery.targeting", "delivery.recurrence",
+                      "overall.content", "overall.delivery"),
+}
+
+_SCORER_BOOTSTRAP_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
+    "multiple_sat":  ("net_value_out_of_script", "n_assets_out_of_script",
+                      "exunits_per_script_input", "n_inputs_same_script",
+                      "sender_recurrence"),
+    "large_datum":   ("datum_bytes", "value_cbor_bytes"),
+    "token_dust":    ("value_cbor_bytes", "unique_token_count", "ada_amount"),
+    "large_value":   ("quantity_digits", "value_cbor_bytes", "ada_amount"),
+    "front_running": ("attacker_recurrence",),
+    "sandwich":      ("price_impact", "swap_profit", "attacker_recurrence"),
+    "circular":      ("attacker_recurrence",),
+    "fake_token":    ("recipient_count", "mint_to_recipient_ratio"),
+    "phishing":      ("recipient_count",),
+}
+
+_SCORER_FIXED_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
+    "multiple_sat":  (),
+    "large_datum":   ("datum_ratio",),
+    "token_dust":    (),
+    "large_value":   (),
+    "front_running": ("mempool_delta_inv", "fee_delta", "ttl_delta"),
+    "sandwich":      ("rate_delta",),
+    "circular":      ("amount_sim", "entropy", "hop_delta_inv", "temporal"),
+    "fake_token":    ("name_sim", "unicode", "cip25", "policy_age_inv"),
+    "phishing":      ("brand_sim", "social_score"),
+}
+
+# Anchor names allowed in the YAML but not (yet) consumed by code: declared
+# for a documented-but-deferred axis, kept so the client-facing config does
+# not have to churn when the axis lands. Allowed but never required.
+_SCORER_OPTIONAL_FIXED_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
+    # The phishing domain-age axis is documented in the detection spec and
+    # its anchors are declared in the shipped config, but the signal needs
+    # WHOIS enrichment, which is deferred.
+    "phishing": ("domain_age_inv",),
+}
+
+# Dotted leaves the code reads (via .get(...) or hard [...] lookups in the
+# scorers and their helper modules) that are not in _REQUIRED_KEYS. Together
+# with _REQUIRED_KEYS and the weight/anchor name sets above, these form the
+# allowlist for unknown-key rejection: any YAML key outside the allowlist
+# fails at import, so a misspelled tunable cannot sit silently unread while
+# the code keeps using a default or an old value.
+_KNOWN_OPTIONAL_KEYS: Dict[str, Tuple[str, ...]] = {
+    "multiple_sat":  (),
+    "large_datum":   ("gate.min_datum_bytes", "gate.bloat_entropy_max",
+                      "gate.leaf_concentration_max",
+                      "gate.size_backstop_fraction"),
+    "token_dust":    ("dos_value_cbor_fraction",),
+    "large_value":   (),
+    "front_running": ("reason_thresholds.outcome", "reason_thresholds.delta",
+                      "reason_thresholds.recurrence"),
+    "sandwich":      ("link_scores.linked", "link_scores.unlinked",
+                      "reason_thresholds.link", "reason_thresholds.rate",
+                      "reason_thresholds.impact"),
+    "circular":      ("structural_corroboration_floor",
+                      "recurrence_window_days",
+                      "cycle.min_length", "cycle.max_length",
+                      "cycle.fee_tolerance_multiplier",
+                      "cycle.fee_tolerance_strict",
+                      "cycle.per_hop_fee_estimate", "cycle.max_age_slots",
+                      "cycle.max_output_fanout"),
+    "fake_token":    ("unicode_scores.zero_width",
+                      "unicode_scores.mixed_scripts",
+                      "unicode_scores.homoglyphs",
+                      "reason_thresholds.name", "reason_thresholds.unicode",
+                      "reason_thresholds.recipients"),
+    "phishing":      ("similarity_suspicious_range.lo",
+                      "similarity_suspicious_range.hi",
+                      "social_engineering.urgency_increment",
+                      "social_engineering.urgency_cap",
+                      "social_engineering.brand_increment",
+                      "social_engineering.brand_cap",
+                      "social_engineering.url_combo_bonus",
+                      "social_engineering.phishing_tld_bonus",
+                      "reason_thresholds.blacklist",
+                      "reason_thresholds.domain",
+                      "reason_thresholds.social",
+                      "reason_thresholds.recipients"),
+}
+
+# Subtrees whose leaf names are operational data, not schema, so the
+# unknown-key walk does not descend into them: network-keyed allowlists
+# (shape-validated by load_network_map at scorer import) and the
+# front_running outcome map (keys are collision-outcome labels produced by
+# mempool ingestion, an open set this module must not have to mirror).
+_FREEFORM_SUBTREES: frozenset = frozenset({
+    "scorers.multiple_sat.allowlist_prefixes",
+    "scorers.token_dust.allowlist_prefixes",
+    "scorers.token_dust.allowlist_policies",
+    "scorers.front_running.outcome_scores",
+})
+
 
 def _config_dir() -> Path:
     """Resolve the config directory, honouring TMS_CONFIG_DIR if set.
@@ -108,6 +231,7 @@ _REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
 _REQUIRED_BASELINES: Tuple[str, ...] = (
     "min_spread_ratio",
     "per_script_p99_cap_multiplier",
+    "per_script_p50_cap_spread_fraction",
     "drift.enabled",
     "drift.p99_threshold",
     "drift.p50_threshold",
@@ -134,6 +258,105 @@ def _missing_dotted(
                 missing.append(f"{prefix}.{key}")
                 break
             cur = cur[part]
+    return missing
+
+
+def _add_dotted(allowed: set, prefix: str, dotted: str) -> None:
+    """Add ``prefix.dotted`` to ``allowed``, including every intermediate
+    prefix, so the unknown-key walk can descend through nested blocks."""
+    path = prefix
+    for part in dotted.split("."):
+        path = f"{path}.{part}" if path else part
+        allowed.add(path)
+
+
+def _allowed_paths() -> set:
+    """Dotted paths of every key the code knows how to read.
+
+    Derived from _REQUIRED_KEYS, _KNOWN_OPTIONAL_KEYS, and the per-scorer
+    weight/anchor name sets, so the allowlist cannot drift from the
+    validation that uses it. Anchor names additionally allow their
+    ``p50`` / ``p99`` children (the shape ``anchor()`` reads).
+    """
+    allowed: set = {
+        "protocol_limits", "composite_corroboration", "baselines", "scorers",
+    }
+    for key in _REQUIRED_PROTOCOL_LIMITS:
+        _add_dotted(allowed, "protocol_limits", key)
+    for key in _REQUIRED_COMPOSITE_CORROBORATION:
+        _add_dotted(allowed, "composite_corroboration", key)
+    for key in _REQUIRED_BASELINES:
+        _add_dotted(allowed, "baselines", key)
+    for scorer, keys in _REQUIRED_KEYS.items():
+        prefix = f"scorers.{scorer}"
+        allowed.add(prefix)
+        for key in keys:
+            _add_dotted(allowed, prefix, key)
+        for key in _KNOWN_OPTIONAL_KEYS.get(scorer, ()):
+            _add_dotted(allowed, prefix, key)
+        for name in _SCORER_WEIGHT_NAMES.get(scorer, ()):
+            _add_dotted(allowed, f"{prefix}.weights", name)
+        anchor_groups = (
+            ("bootstrap_anchors", _SCORER_BOOTSTRAP_ANCHOR_NAMES.get(scorer, ())),
+            ("fixed_anchors", _SCORER_FIXED_ANCHOR_NAMES.get(scorer, ())),
+            ("fixed_anchors", _SCORER_OPTIONAL_FIXED_ANCHOR_NAMES.get(scorer, ())),
+        )
+        for block, names in anchor_groups:
+            for name in names:
+                _add_dotted(allowed, f"{prefix}.{block}", f"{name}.p50")
+                _add_dotted(allowed, f"{prefix}.{block}", f"{name}.p99")
+    return allowed
+
+
+def _unknown_paths(data: Dict[str, Any]) -> List[str]:
+    """Dotted paths of YAML keys outside the allowlist (typos, dead keys)."""
+    allowed = _allowed_paths()
+    unknown: List[str] = []
+
+    def _walk(node: Dict[str, Any], prefix: str) -> None:
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if path not in allowed:
+                unknown.append(path)
+                continue
+            if isinstance(value, dict) and path not in _FREEFORM_SUBTREES:
+                _walk(value, path)
+
+    _walk(data, "")
+    return unknown
+
+
+def _missing_scorer_names(scorer: str, section: Dict[str, Any]) -> List[str]:
+    """Required weight/anchor names absent from a scorer's YAML section.
+
+    A missing name would otherwise surface as a KeyError at scoring time,
+    where the engine swallows per-tx scorer exceptions (silent recall loss);
+    here it fails at import with the full dotted path.
+    """
+    missing: List[str] = []
+    blocks = (
+        ("weights", _SCORER_WEIGHT_NAMES.get(scorer, ())),
+        ("bootstrap_anchors", tuple(
+            f"{name}.{leaf}"
+            for name in _SCORER_BOOTSTRAP_ANCHOR_NAMES.get(scorer, ())
+            for leaf in ("p50", "p99")
+        )),
+        ("fixed_anchors", tuple(
+            f"{name}.{leaf}"
+            for name in _SCORER_FIXED_ANCHOR_NAMES.get(scorer, ())
+            for leaf in ("p50", "p99")
+        )),
+    )
+    for block, names in blocks:
+        if not names:
+            continue
+        container = section.get(block)
+        if not isinstance(container, dict):
+            # Block presence itself is reported by the _REQUIRED_KEYS pass.
+            continue
+        missing.extend(
+            _missing_dotted(container, names, f"scorers.{scorer}.{block}")
+        )
     return missing
 
 
@@ -190,10 +413,19 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
                 f"Detection config {path}: scorers.{name} must be a mapping."
             )
         missing.extend(_missing_dotted(section, keys, f"scorers.{name}"))
+        missing.extend(_missing_scorer_names(name, section))
     if missing:
         joined = ", ".join(sorted(missing))
         raise RuntimeError(
             f"Detection config {path} missing required keys: {joined}"
+        )
+    unknown = _unknown_paths(data)
+    if unknown:
+        joined = ", ".join(sorted(unknown))
+        raise RuntimeError(
+            f"Detection config {path} contains unknown keys (typo or removed "
+            f"tunable; every key must be read by the code or listed as a "
+            f"known optional): {joined}"
         )
 
 
@@ -238,8 +470,19 @@ _P99_CAP_MULTIPLIER: float = float(
 )
 
 # Minimum (p99 - p50) / p50 spread for a usable baseline; reused here to
-# derive the p50 bound that keeps a capped baseline non-degenerate.
+# keep the p50 bound strictly below the p99 cap so a capped baseline can
+# never collapse to a degenerate (p50 >= p99) pair.
 _MIN_SPREAD_RATIO: float = float(_CFG["baselines"]["min_spread_ratio"])
+
+# Anchor-relative bound on a LEARNED baseline's p50
+# (baselines.per_script_p50_cap_spread_fraction): resolved p50 is clamped to
+# anchor_p50 + K * (anchor_p99 - anchor_p50). Bounding p50 relative to the
+# CAP instead (the previous behaviour, ~4.55x the anchor p99) left enough
+# room for an in-bound median-poisoned pair to zero a real drain below the
+# suppression-escape floor; see the derivation in config/detection.yaml.
+_P50_CAP_SPREAD_FRACTION: float = float(
+    _CFG["baselines"]["per_script_p50_cap_spread_fraction"]
+)
 
 
 def composite_corroboration_config() -> Dict[str, Any]:
@@ -367,9 +610,14 @@ def resolved_or_bootstrap(
     first, so drifting the MEDIAN upward de-sensitises an axis exactly like
     widening the tail (values below the learned median score 0), and the
     p99 cap alone could even create a degenerate p50 >= p99 pair from a
-    median-poisoned baseline. The bound derives from the capped p99 and
-    min_spread_ratio (never from the anchor p50, which is legitimately 0
-    for count-like features), guaranteeing the capped pair keeps a usable
+    median-poisoned baseline. The bound is ANCHOR-relative,
+    ``anchor_p50 + K * (anchor_p99 - anchor_p50)`` with
+    ``K = baselines.per_script_p50_cap_spread_fraction``: a cap-relative
+    bound left an in-bound median-poisoned pair enough room to zero a real
+    drain below the suppression-escape floor (see the config derivation).
+    An anchor p50 of 0 (count-like features) degrades naturally to
+    ``K * anchor_p99``, and the bound is additionally kept below the p99
+    cap via min_spread_ratio so the capped pair always keeps a usable
     spread.
 
     Returns ``(p50, p99, source)`` where ``source`` is one of
@@ -383,9 +631,19 @@ def resolved_or_bootstrap(
         p50, p99 = anchor(bootstrap, bootstrap_key)
         source = "bootstrap"
     elif _P99_CAP_MULTIPLIER > 0:
-        _, anchor_p99 = anchor(bootstrap, bootstrap_key)
+        anchor_p50, anchor_p99 = anchor(bootstrap, bootstrap_key)
         if anchor_p99 > 0:
             cap = _P99_CAP_MULTIPLIER * anchor_p99
             p99 = min(p99, cap)
-            p50 = min(p50, cap / (1.0 + _MIN_SPREAD_RATIO))
+            # min() of both bounds: the anchor-relative term carries the
+            # escape-floor guarantee; the cap-relative term (the previous
+            # sole bound) guards a misconfigured K from ever producing a
+            # degenerate p50 >= capped-p99 pair. Taking the min also means
+            # this change can only ever LOWER a resolved p50 versus the
+            # previous behaviour (recall-positive tightening).
+            p50_bound = min(
+                anchor_p50 + _P50_CAP_SPREAD_FRACTION * (anchor_p99 - anchor_p50),
+                cap / (1.0 + _MIN_SPREAD_RATIO),
+            )
+            p50 = min(p50, p50_bound)
     return p50, p99, source

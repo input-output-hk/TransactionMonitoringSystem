@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Drift guard (baselines.drift in config/detection.yaml): a recompute that
 # drifts beyond the threshold in a RECALL-HARMFUL direction (p99 widening,
-# p50 rising) is HELD (prior row stays active); recall-safe drifts apply.
+# p50 rising; BOTH directions for INVERTED_CONSUMER_FEATURES) is HELD
+# (prior row stays active); recall-safe drifts apply.
 # All drift events are logged to baseline_drift_events. This is the
 # anti-poisoning control for per-script baselines; see the config comment.
 _DRIFT_CFG = baselines_config()["drift"]
@@ -83,6 +84,36 @@ _MULTIPLE_SAT_PER_SCRIPT_FEATURES = [
 _ALLOWED_TABLES = {"utxo_features", "tx_script_features"}
 _ALLOWED_FEATURES = set(_UTXO_FEATURES + _TX_FEATURES)
 _ALLOWED_SCOPE_COLUMNS = {"address", "policy_id"}
+
+# Features consumed through normalise_inverted() by at least one scorer
+# ("low value is suspicious" axes): ada_amount feeds token_dust's s_ada and
+# large_value's s_ada; value_cbor_bytes feeds large_datum's s_value_inv
+# (value_cbor_bytes also has plain-normalise consumers in token_dust and
+# large_value, which is why membership means ANY inverted consumer: the
+# drift hold must protect the weakest axis). For these features a FALLING
+# p50/p99 is recall-harmful too: an attacker dumping low-ADA / small-CBOR
+# outputs at a victim script drags the learned percentiles DOWN, and a
+# lower (p50, p99) window de-sensitises the inverted axes (a dust output no
+# longer sits "below normal", so s_ada / s_value_inv collapse to 0). The
+# drift guard therefore holds BOTH directions for these features, while
+# pure-normalise features keep the direction-aware hold (falling values
+# there are strictly more sensitive). Trade-off accepted recall-first: a
+# poisoned FIRST baseline on these features now needs analyst recovery
+# (every drift event is logged to baseline_drift_events), because an honest
+# shrinking recompute is held too. Other inverted consumers
+# (multiple_sat's exunits_per_script_input, fake_token's
+# mint_to_recipient_ratio) never receive learned baselines from this module
+# (they resolve to bootstrap anchors), so they are not listed; add them
+# here if baseline computation for them is ever introduced.
+INVERTED_CONSUMER_FEATURES = frozenset({"ada_amount", "value_cbor_bytes"})
+
+# Denominator guard for the relative drift ratio. The old == 0 case is
+# short-circuited in check_drift, but _drift_ratio is also called when
+# logging drift events where old can be 0; the epsilon avoids a
+# ZeroDivisionError there. It sits many orders of magnitude below every
+# baselined feature's scale (bytes, counts, lovelace), so it cannot perturb
+# a comparison against the ~0.50 drift thresholds.
+_DRIFT_RATIO_EPSILON = 1e-9
 
 
 def compute_global_baselines(network: str) -> List[tuple]:
@@ -290,39 +321,49 @@ def recompute_all_baselines(network: str, max_scripts: int = 500) -> int:
 def check_drift(
     old_p99: float,
     new_p99: float,
-    threshold: float = 0.50,
+    threshold: float,
 ) -> bool:
     """Return True if the new value drifted beyond threshold from the old.
 
     Symmetric magnitude check (works for any percentile); the HOLD decision
-    is direction-aware and lives in ``_filter_drifted``.
+    is direction-aware and lives in ``_filter_drifted``. ``threshold`` is
+    deliberately required (no default): the tunable lives in
+    ``baselines.drift`` in config/detection.yaml and must flow through the
+    validated loader, not a hardcoded fallback.
     """
     if old_p99 == 0:
         return new_p99 > 0
-    return abs(new_p99 - old_p99) / (abs(old_p99) + 1e-9) > threshold
+    return abs(new_p99 - old_p99) / (abs(old_p99) + _DRIFT_RATIO_EPSILON) > threshold
 
 
 def _drift_ratio(old: float, new: float) -> float:
-    return abs(new - old) / (abs(old) + 1e-9)
+    return abs(new - old) / (abs(old) + _DRIFT_RATIO_EPSILON)
 
 
 def _filter_drifted(rows: List[tuple]) -> List[tuple]:
     """Hold baseline recomputes that drift in a RECALL-HARMFUL direction.
 
-    Direction-aware: only de-sensitising moves are held — a WIDENING p99
-    (new > old) or a RISING p50 (the median-poisoning vector: normalise()
-    subtracts p50 first). A narrowing p99 or falling p50 makes detection
-    strictly more sensitive and always applies; holding those made a
-    poisoned first baseline self-protecting, because every honest recompute
-    that shrank it back was itself a >threshold change. A prior with
-    p99 == 0 never holds: _baseline_is_usable already rejects it at
-    resolution time, so it protects nothing.
+    Direction-aware for pure-normalise features: only de-sensitising moves
+    are held, i.e. a WIDENING p99 (new > old) or a RISING p50 (the
+    median-poisoning vector: normalise() subtracts p50 first). A narrowing
+    p99 or falling p50 makes plain-normalise detection strictly more
+    sensitive and applies; holding those made a poisoned first baseline
+    self-protecting, because every honest recompute that shrank it back was
+    itself a >threshold change. A prior with p99 == 0 never holds:
+    _baseline_is_usable already rejects it at resolution time, so it
+    protects nothing.
+
+    Features in ``INVERTED_CONSUMER_FEATURES`` hold BOTH directions:
+    "falling is recall-safe" is false for normalise_inverted() consumers,
+    where a downward-poisoned window zeroes the inverted axis (see the
+    constant's comment for the threat model).
 
     Held rows are NOT inserted (the ReplacingMergeTree keeps the prior row
-    as the active baseline). Every drift event — held or applied — is
+    as the active baseline). Every drift event, held or applied, is
     recorded in ``baseline_drift_events`` (axis + applied flag) so an
-    analyst can review; held ones also log a warning. First-ever baselines
-    (no prior row) always pass: drift is only definable against history.
+    analyst can review; held ones also log a warning naming the axis or
+    axes that caused the hold.  First-ever baselines (no prior row) always
+    pass: drift is only definable against history.
 
     Row tuple shape: ``(network, scope_type, scope_id, feature, p50, p99,
     sample_count, computed_at, window_days)``.
@@ -340,17 +381,28 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
             continue
         old_p50, old_p99 = float(prior["p50"]), float(prior["p99"])
 
+        # Symmetric hold for features with an inverted consumer: BOTH
+        # directions of drift are recall-harmful there.
+        symmetric_hold = feature in INVERTED_CONSUMER_FEATURES
         p99_drifted = check_drift(old_p99, new_p99, _DRIFT_P99_THRESHOLD)
         p50_drifted = check_drift(old_p50, new_p50, _DRIFT_P50_THRESHOLD)
-        p99_hold = p99_drifted and new_p99 > old_p99 and old_p99 > 0
-        p50_hold = p50_drifted and new_p50 > old_p50
+        p99_hold = (
+            p99_drifted and old_p99 > 0
+            and (new_p99 > old_p99 or symmetric_hold)
+        )
+        p50_hold = p50_drifted and (new_p50 > old_p50 or symmetric_hold)
         held = p99_hold or p50_hold
 
         drifted_axes = []
+        held_axes = []
         if p99_drifted:
             drifted_axes.append(("p99", old_p99, new_p99))
+            if p99_hold:
+                held_axes.append(("p99", old_p99, new_p99))
         if p50_drifted:
             drifted_axes.append(("p50", old_p50, new_p50))
+            if p50_hold:
+                held_axes.append(("p50", old_p50, new_p50))
         for axis, old_v, new_v in drifted_axes:
             try:
                 clickhouse.insert_baseline_drift_event(
@@ -362,12 +414,18 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
                 logger.exception("Failed to record baseline drift event")
 
         if held:
-            axis, old_v, new_v = drifted_axes[0]
+            # Name the axis/values that actually CAUSED the hold (there can
+            # be two); an axis that merely drifted in an applied-safe
+            # direction must not be reported as the cause.
+            detail = "; ".join(
+                f"{axis} {old_v:.4g} -> {new_v:.4g} "
+                f"(ratio {_drift_ratio(old_v, new_v):.2f})"
+                for axis, old_v, new_v in held_axes
+            )
             logger.warning(
-                "Baseline drift HELD: %s/%s %s/%s %s %.4g -> %.4g "
-                "(ratio %.2f); prior baseline stays active",
-                scope_type, scope_id[:16], network, feature,
-                axis, old_v, new_v, _drift_ratio(old_v, new_v),
+                "Baseline drift HELD on %s: %s/%s %s/%s; "
+                "prior baseline stays active",
+                detail, scope_type, scope_id[:16], network, feature,
             )
             continue
         if drifted_axes:

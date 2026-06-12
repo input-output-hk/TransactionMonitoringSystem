@@ -1,145 +1,134 @@
-"""Tests for the detection config loader."""
+"""Tests for the detection config loader.
+
+The minimal config fixture is built from the loader's own declared
+requirements (_REQUIRED_KEYS, the weight/anchor name sets), so the tests
+reference the validation constants rather than duplicating literals; a new
+required key automatically appears in the fixture.
+"""
 
 import importlib
-import textwrap
+import os
+from pathlib import Path
 
 import pytest
+import yaml
 
 
-def _reload_module(monkeypatch, tmp_path, yaml_body: str):
-    """Write yaml_body to a temp detection.yaml and reload scorer_config."""
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
-    (cfg_dir / "detection.yaml").write_text(yaml_body, encoding="utf-8")
-    monkeypatch.setenv("TMS_CONFIG_DIR", str(cfg_dir))
+def _sc():
     import app.analysis.scorer_config as sc
+    return sc
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_shipped_config():
+    """Reload the shipped config after this module's reload games, so later
+    test modules see real values in scorer_config's module globals."""
+    yield
+    os.environ.pop("TMS_CONFIG_DIR", None)
+    importlib.reload(_sc())
+
+
+def _reload_module(monkeypatch, tmp_path, cfg):
+    """Write cfg (dict or raw YAML string) to a temp detection.yaml and
+    reload scorer_config against it."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(exist_ok=True)
+    body = cfg if isinstance(cfg, str) else yaml.safe_dump(cfg, sort_keys=False)
+    (cfg_dir / "detection.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv("TMS_CONFIG_DIR", str(cfg_dir))
+    return importlib.reload(_sc())
+
+
+def _reload_shipped(monkeypatch):
+    """Reload scorer_config against the SHIPPED config/detection.yaml."""
+    sc = _sc()
+    repo_config = Path(sc.__file__).resolve().parents[3] / "config"
+    monkeypatch.setenv("TMS_CONFIG_DIR", str(repo_config))
     return importlib.reload(sc)
 
 
-def _minimal_valid_yaml() -> str:
-    """YAML that satisfies every scorer's required keys (empty-but-present values)."""
-    return textwrap.dedent("""\
-        protocol_limits:
-          max_value_size_bytes: 5000
-          max_tx_size_bytes: 16384
-        composite_corroboration:
-          corroboration_threshold: 40.0
-        baselines:
-          min_spread_ratio: 0.10
-          per_script_p99_cap_multiplier: 5.0
-          drift:
-            enabled: true
-            p99_threshold: 0.50
-            p50_threshold: 0.50
-          windows:
-            global_days: 180
-            per_script_days: 90
-        scorers:
-          multiple_sat:
-            weights: {}
-            bootstrap_anchors: {}
-            allowlist_prefixes: []
-            reason_threshold: 0.5
-            lazy_validator_threshold: 0.8
-            lazy_validator_floor: 60.0
-            lazy_validator_extraction_min: 0.05
-            per_script_extraction_headroom: 3.0
-            uniform_sweep_guard:
-              enabled: true
-              require_uniform_redeemer: true
-              require_no_script_return: true
-              min_inputs: 10
-            suppression_escape:
-              enabled: true
-              extraction_floor_min: 0.5
-          large_datum:
-            gate:
-              flag_datum_hash_only: true
-            weights: {}
-            fixed_anchors: {}
-            bootstrap_anchors: {}
-            aggregate_engagement_min: 12000
-            reason_threshold: 0.5
-          token_dust:
-            gate:
-              min_token_count: 2
-            weights: {}
-            bootstrap_anchors: {}
-            allowlist_prefixes: {}
-            allowlist_policies: {}
-            dos_asset_min: 15
-            reason_threshold: 0.5
-          large_value:
-            weights: {}
-            bootstrap_anchors: {}
-            reason_threshold: 0.5
-            min_digits_subscore: 0.05
-          front_running:
-            weights: {}
-            fixed_anchors: {}
-            bootstrap_anchors: {}
-            outcome_scores: {}
-            reason_thresholds: {}
-            min_recurrence_wins: 3
-            high_band_cap: 79.0
-            delta_ms_default: 10000
-          sandwich:
-            weights: {}
-            fixed_anchors: {}
-            bootstrap_anchors: {}
-            link_scores: {}
-            window_slots: 5
-            neighbor_limit: 20
-            min_profit_lovelace: 200000
-            reason_thresholds: {}
-          circular:
-            weights: {}
-            fixed_anchors: {}
-            bootstrap_anchors: {}
-            cycle: {}
-            reason_threshold: 0.5
-            moderate_cap: 59.0
-          fake_token:
-            weights: {}
-            fixed_anchors: {}
-            bootstrap_anchors: {}
-            similarity_threshold: 0.8
-            unicode_scores: {}
-            reason_thresholds: {}
-            critical_assets:
-              multiplier: 1.8
-              names: []
-            ascii_homoglyphs_enabled: true
-          phishing:
-            weights: {}
-            fixed_anchors: {}
-            bootstrap_anchors: {}
-            similarity_suspicious_range: {}
-            social_engineering: {}
-            reason_thresholds: {}
-            critical_threshold: 0.6
-            metadata_labels: []
-            asset_name_carrier:
-              enabled: true
-            min_decoded_string_len: 4
-        """)
+def _expand_dotted(keys, leaf_value):
+    """Build a nested dict from dotted keys, each leaf set to leaf_value.
+
+    Handles overlapping keys (e.g. "gate" plus "gate.flag_datum_hash_only")
+    in either order: a path that needs children always becomes a dict.
+    """
+    out = {}
+    for dotted in keys:
+        cur = out
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            if not isinstance(cur.get(part), dict):
+                cur[part] = {}
+            cur = cur[part]
+        if not isinstance(cur.get(parts[-1]), dict):
+            cur[parts[-1]] = leaf_value
+    return out
+
+
+def _minimal_config():
+    """Config dict satisfying every requirement the loader declares."""
+    sc = _sc()
+    cfg = {
+        "protocol_limits": {k: 5000 for k in sc._REQUIRED_PROTOCOL_LIMITS},
+        "composite_corroboration": {
+            k: 40.0 for k in sc._REQUIRED_COMPOSITE_CORROBORATION
+        },
+        # Values mirror the shipped config: tests that do NOT reload read
+        # scorer_config module globals (e.g. _P99_CAP_MULTIPLIER), and a
+        # reload from this fixture must not silently change them.
+        "baselines": {
+            "min_spread_ratio": 0.10,
+            "per_script_p99_cap_multiplier": 5.0,
+            "per_script_p50_cap_spread_fraction": 0.25,
+            "drift": {
+                "enabled": True,
+                "p99_threshold": 0.50,
+                "p50_threshold": 0.50,
+            },
+            "windows": {"global_days": 180, "per_script_days": 90},
+        },
+        "scorers": {},
+    }
+    for scorer, keys in sc._REQUIRED_KEYS.items():
+        section = _expand_dotted(keys, 1)
+        section["weights"] = _expand_dotted(
+            sc._SCORER_WEIGHT_NAMES[scorer], 0.25,
+        )
+        section["bootstrap_anchors"] = {
+            name: {"p50": 0, "p99": 1}
+            for name in sc._SCORER_BOOTSTRAP_ANCHOR_NAMES[scorer]
+        }
+        if sc._SCORER_FIXED_ANCHOR_NAMES.get(scorer):
+            section["fixed_anchors"] = {
+                name: {"p50": 0, "p99": 1}
+                for name in sc._SCORER_FIXED_ANCHOR_NAMES[scorer]
+            }
+        cfg["scorers"][scorer] = section
+    return cfg
 
 
 class TestLoader:
-    def test_loads_detection_yaml(self, tmp_path, monkeypatch):
-        sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
+    def test_loads_minimal_config(self, tmp_path, monkeypatch):
+        sc = _reload_module(monkeypatch, tmp_path, _minimal_config())
         assert "multiple_sat" in sc._CFG["scorers"]
+
+    def test_shipped_config_passes_validation(self, monkeypatch):
+        # The real client-facing config/detection.yaml must satisfy the
+        # full validation: required keys, weight/anchor names, no unknowns.
+        sc = _reload_shipped(monkeypatch)
+        assert "multiple_sat" in sc._CFG["scorers"]
+        assert sc._P50_CAP_SPREAD_FRACTION > 0
 
     def test_missing_file_raises(self, tmp_path, monkeypatch):
         cfg_dir = tmp_path / "config"
         cfg_dir.mkdir()
         monkeypatch.setenv("TMS_CONFIG_DIR", str(cfg_dir))
-        import app.analysis.scorer_config as sc
         with pytest.raises(RuntimeError, match="Detection config not found"):
-            importlib.reload(sc)
+            importlib.reload(_sc())
 
     def test_env_override_honoured(self, tmp_path, monkeypatch):
-        sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
+        sc = _reload_module(monkeypatch, tmp_path, _minimal_config())
         # The resolved config_dir must match our tmp_path.
         assert sc._config_dir() == tmp_path / "config"
 
@@ -150,121 +139,194 @@ class TestValidation:
             _reload_module(monkeypatch, tmp_path, "other_root: {}")
 
     def test_missing_scorer_section_raises_with_path(self, tmp_path, monkeypatch):
-        # Delete the entire multiple_sat block. Built by line-filter rather
-        # than a fragile string replace so additions to the minimal YAML
-        # (extra required keys etc.) do not silently break this test.
-        lines = _minimal_valid_yaml().splitlines(keepends=True)
-        out: list[str] = []
-        in_block = False
-        for line in lines:
-            if line.startswith("  multiple_sat:"):
-                in_block = True
-                continue
-            if in_block:
-                # A new sibling scorer block starts at the same 2-space indent.
-                if line.startswith("  ") and not line.startswith("    ") and line.strip():
-                    in_block = False
-                    out.append(line)
-                continue
-            out.append(line)
-        body = "".join(out)
+        cfg = _minimal_config()
+        del cfg["scorers"]["multiple_sat"]
         with pytest.raises(RuntimeError, match="scorers.multiple_sat"):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_required_key_raises_with_path(self, tmp_path, monkeypatch):
-        body = _minimal_valid_yaml().replace(
-            "multiple_sat:\n    weights: {}\n    bootstrap_anchors: {}\n    allowlist_prefixes: []\n    reason_threshold: 0.5",
-            "multiple_sat:\n    weights: {}\n    bootstrap_anchors: {}\n    reason_threshold: 0.5",
-        )
+        cfg = _minimal_config()
+        del cfg["scorers"]["multiple_sat"]["allowlist_prefixes"]
         with pytest.raises(RuntimeError, match="scorers.multiple_sat.allowlist_prefixes"):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_nested_required_key_raises_with_full_path(self, tmp_path, monkeypatch):
         # The token_dust scorer requires gate.min_token_count. Removing only
         # the leaf field (while leaving the gate block in place) must surface
         # the dotted path, not a downstream KeyError at scorer import time.
-        body = _minimal_valid_yaml().replace(
-            "  token_dust:\n    gate:\n      min_token_count: 2",
-            "  token_dust:\n    gate: {}",
-        )
+        cfg = _minimal_config()
+        del cfg["scorers"]["token_dust"]["gate"]["min_token_count"]
         with pytest.raises(RuntimeError, match="scorers.token_dust.gate.min_token_count"):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_protocol_limits_raises(self, tmp_path, monkeypatch):
-        # Strip the protocol_limits block from the otherwise-valid minimal YAML.
-        body = "\n".join(
-            line for line in _minimal_valid_yaml().splitlines()
-            if not line.startswith("protocol_limits")
-            and "max_value_size_bytes" not in line
-            and "max_tx_size_bytes" not in line
-        )
+        cfg = _minimal_config()
+        del cfg["protocol_limits"]
         with pytest.raises(RuntimeError, match="top-level 'protocol_limits' mapping"):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_non_dict_scorer_section_raises(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        cfg["scorers"]["multiple_sat"] = "not a mapping"
         with pytest.raises(RuntimeError, match="must be a mapping"):
-            _reload_module(
-                monkeypatch, tmp_path,
-                "protocol_limits:\n  max_value_size_bytes: 5000\n"
-                "  max_tx_size_bytes: 16384\n"
-                "composite_corroboration:\n  corroboration_threshold: 40.0\n"
-                "baselines:\n  min_spread_ratio: 0.10\n"
-                "  per_script_p99_cap_multiplier: 5.0\n"
-                "  drift:\n    enabled: true\n    p99_threshold: 0.50\n"
-                "    p50_threshold: 0.50\n"
-                "  windows:\n    global_days: 180\n    per_script_days: 90\n"
-                "scorers:\n  multiple_sat: 'not a mapping'\n",
-            )
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_baselines_drift_leaf_raises_with_path(
         self, tmp_path, monkeypatch
     ):
         # Leaf validation: a missing nested tunable must fail fast with its
         # full dotted path, not a raw KeyError at first use.
-        body = _minimal_valid_yaml().replace(
-            "    p99_threshold: 0.50\n", "",
-        )
+        cfg = _minimal_config()
+        del cfg["baselines"]["drift"]["p99_threshold"]
         with pytest.raises(RuntimeError, match=r"baselines\.drift\.p99_threshold"):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_baselines_windows_raises_with_path(
         self, tmp_path, monkeypatch
     ):
-        body = _minimal_valid_yaml().replace(
-            "    global_days: 180\n", "",
-        )
+        cfg = _minimal_config()
+        del cfg["baselines"]["windows"]["global_days"]
         with pytest.raises(RuntimeError, match=r"baselines\.windows\.global_days"):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_missing_p50_cap_spread_fraction_raises_with_path(
+        self, tmp_path, monkeypatch
+    ):
+        # The p50-bound knob must flow through the validated loader, so its
+        # absence is an import-time failure, never a silent default.
+        cfg = _minimal_config()
+        del cfg["baselines"]["per_script_p50_cap_spread_fraction"]
+        with pytest.raises(
+            RuntimeError,
+            match=r"baselines\.per_script_p50_cap_spread_fraction",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_asset_name_carrier_enabled_raises_with_path(
         self, tmp_path, monkeypatch
     ):
-        body = _minimal_valid_yaml().replace(
-            "    asset_name_carrier:\n      enabled: true\n",
-            "    asset_name_carrier: {}\n",
-        )
+        cfg = _minimal_config()
+        cfg["scorers"]["phishing"]["asset_name_carrier"] = {}
         with pytest.raises(
             RuntimeError,
             match=r"scorers\.phishing\.asset_name_carrier\.enabled",
         ):
-            _reload_module(monkeypatch, tmp_path, body)
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+
+class TestUnknownKeyRejection:
+    """Unknown YAML keys fail at import with their dotted path: a misspelled
+    tunable must not sit silently unread while the code keeps using an old
+    value."""
+
+    def test_unknown_top_level_key_raises(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        cfg["surprise_block"] = {"x": 1}
+        with pytest.raises(RuntimeError, match=r"unknown keys.*surprise_block"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_unknown_nested_scorer_key_raises(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        cfg["scorers"]["multiple_sat"]["lazy_validator_flor"] = 60.0
+        with pytest.raises(
+            RuntimeError,
+            match=r"unknown keys.*scorers\.multiple_sat\.lazy_validator_flor",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_extra_weight_name_raises(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        cfg["scorers"]["token_dust"]["weights"]["bonus_axis"] = 0.1
+        with pytest.raises(
+            RuntimeError,
+            match=r"unknown keys.*scorers\.token_dust\.weights\.bonus_axis",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_allowlist_subtrees_are_freeform(self, tmp_path, monkeypatch):
+        # Network-keyed allowlists carry operational data, not schema; the
+        # unknown-key walk must not reject their entries.
+        cfg = _minimal_config()
+        cfg["scorers"]["multiple_sat"]["allowlist_prefixes"] = {
+            "mainnet": ["addr1qexample"], "preprod": [],
+        }
+        sc = _reload_module(monkeypatch, tmp_path, cfg)
+        assert "multiple_sat" in sc._CFG["scorers"]
+
+
+class TestAnchorWeightNameValidation:
+    """A typo'd anchor or weight name fails at import with the dotted path
+    named. Without this, the KeyError surfaces at SCORING time where the
+    engine swallows per-tx scorer exceptions: silent recall loss."""
+
+    def test_typod_bootstrap_anchor_fails_at_import(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        anchors = cfg["scorers"]["multiple_sat"]["bootstrap_anchors"]
+        anchors["n_assets_out_of_scrpit"] = anchors.pop("n_assets_out_of_script")
+        with pytest.raises(
+            RuntimeError,
+            match=r"scorers\.multiple_sat\.bootstrap_anchors\.n_assets_out_of_script",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_typod_weight_name_fails_at_import(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        weights = cfg["scorers"]["multiple_sat"]["weights"]
+        weights["extractoin"] = weights.pop("extraction")
+        with pytest.raises(
+            RuntimeError,
+            match=r"scorers\.multiple_sat\.weights\.extraction",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_anchor_missing_percentile_leaf_fails(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        cfg["scorers"]["token_dust"]["bootstrap_anchors"]["ada_amount"] = {"p50": 0}
+        with pytest.raises(
+            RuntimeError,
+            match=r"scorers\.token_dust\.bootstrap_anchors\.ada_amount\.p99",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_typod_fixed_anchor_fails_at_import(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        anchors = cfg["scorers"]["circular"]["fixed_anchors"]
+        anchors["entorpy"] = anchors.pop("entropy")
+        with pytest.raises(
+            RuntimeError,
+            match=r"scorers\.circular\.fixed_anchors\.entropy",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_multiple_sat_names_match_scorer_specs(self, monkeypatch):
+        # Cross-check: the loader's declared anchor names cannot drift from
+        # the names the multiple_sat scorer actually resolves. Reload the
+        # SHIPPED config first: importing the scorer reads real config
+        # values at module import, and a sibling test may have left a
+        # minimal fixture loaded.
+        sc = _reload_shipped(monkeypatch)
+        import app.analysis.scorers.multiple_sat as ms
+        spec_features = {feature for feature, _allowed in ms._BASELINE_SPECS}
+        assert spec_features == set(
+            sc._SCORER_BOOTSTRAP_ANCHOR_NAMES["multiple_sat"]
+        )
 
 
 class TestGet:
     def test_unknown_section_raises_clear_error(self, tmp_path, monkeypatch):
-        sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
+        sc = _reload_module(monkeypatch, tmp_path, _minimal_config())
         with pytest.raises(KeyError, match="scorers.does_not_exist"):
             sc.get("does_not_exist")
 
 
 class TestAnchor:
     def test_returns_p50_p99_tuple(self, tmp_path, monkeypatch):
-        sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
+        sc = _reload_module(monkeypatch, tmp_path, _minimal_config())
         container = {"foo": {"p50": 1.0, "p99": 9.0}}
         assert sc.anchor(container, "foo") == (1.0, 9.0)
 
     def test_coerces_ints_to_floats(self, tmp_path, monkeypatch):
-        sc = _reload_module(monkeypatch, tmp_path, _minimal_valid_yaml())
+        sc = _reload_module(monkeypatch, tmp_path, _minimal_config())
         container = {"foo": {"p50": 1, "p99": 9}}
         p50, p99 = sc.anchor(container, "foo")
         assert isinstance(p50, float) and isinstance(p99, float)
@@ -276,7 +338,7 @@ class TestPerScriptP99Cap:
     per-script distribution can de-sensitise any scorer."""
 
     def test_resolved_p99_capped(self, monkeypatch):
-        import app.analysis.scorer_config as sc
+        sc = _sc()
         monkeypatch.setattr(
             sc, "resolve_baseline",
             lambda *a, **k: (0.0, 1_000_000.0, "per_script"),
@@ -293,7 +355,7 @@ class TestPerScriptP99Cap:
         assert normalise(2.0, p50=p50, p99=p99) > 0.0
 
     def test_uncapped_when_below_cap(self, monkeypatch):
-        import app.analysis.scorer_config as sc
+        sc = _sc()
         monkeypatch.setattr(
             sc, "resolve_baseline",
             lambda *a, **k: (0.0, 5.0, "per_script"),
@@ -305,7 +367,7 @@ class TestPerScriptP99Cap:
         assert p99 == 5.0
 
     def test_bootstrap_path_not_capped(self, monkeypatch):
-        import app.analysis.scorer_config as sc
+        sc = _sc()
         monkeypatch.setattr(
             sc, "resolve_baseline",
             lambda *a, **k: (0.0, 1.0, "missing"),
@@ -319,45 +381,51 @@ class TestPerScriptP99Cap:
 
 class TestPerScriptP50Cap:
     """normalise() subtracts p50 first, so a poisoned MEDIAN de-sensitises
-    an axis exactly like a widened tail; the p99 cap alone left that vector
-    open (review finding). The p50 bound derives from the capped p99 and
-    min_spread_ratio, never from the anchor p50 (legitimately 0 for
-    count-like features)."""
+    an axis exactly like a widened tail. The p50 bound is ANCHOR-relative,
+    anchor_p50 + K * (anchor_p99 - anchor_p50): the previous cap-relative
+    bound (~4.55x the anchor p99) left an in-bound poisoned pair enough
+    room to zero a real drain below the suppression-escape floor."""
 
-    def test_poisoned_p50_clamped_to_derived_bound(self, monkeypatch):
-        import app.analysis.scorer_config as sc
+    def test_poisoned_p50_clamped_to_anchor_relative_bound(self, monkeypatch):
+        sc = _sc()
         monkeypatch.setattr(
             sc, "resolve_baseline",
             lambda *a, **k: (1e12, 1e15, "per_script"),
         )
-        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        anchor_p50, anchor_p99 = 0.0, 2.0
+        bootstrap = {"feat": {"p50": anchor_p50, "p99": anchor_p99}}
         p50, p99, _ = sc.resolved_or_bootstrap(
             "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
         )
-        cap = sc._P99_CAP_MULTIPLIER * 2.0
+        cap = sc._P99_CAP_MULTIPLIER * anchor_p99
         assert p99 == cap
-        assert p50 == pytest.approx(cap / (1.0 + sc._MIN_SPREAD_RATIO))
-        # The axis is not dead: an attack above the capped p99 still
-        # normalises positive instead of scoring 0 against the poisoned pair.
+        assert p50 == pytest.approx(
+            anchor_p50 + sc._P50_CAP_SPREAD_FRACTION * (anchor_p99 - anchor_p50)
+        )
+        # The axis is not dead: an attack at the anchor p99 still normalises
+        # positive instead of scoring 0 against the poisoned pair.
         from app.analysis.normalise import normalise
-        assert normalise(12.0, p50=p50, p99=p99) > 0.0
+        assert normalise(anchor_p99, p50=p50, p99=p99) > 0.0
 
     def test_p50_below_bound_unchanged(self, monkeypatch):
-        import app.analysis.scorer_config as sc
+        sc = _sc()
+        anchor_p50, anchor_p99 = 0.0, 2.0
+        bound = anchor_p50 + sc._P50_CAP_SPREAD_FRACTION * (anchor_p99 - anchor_p50)
+        learned_p50 = bound * 0.6  # strictly inside the bound
         monkeypatch.setattr(
             sc, "resolve_baseline",
-            lambda *a, **k: (2.0, 5.0, "per_script"),
+            lambda *a, **k: (learned_p50, 5.0, "per_script"),
         )
-        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        bootstrap = {"feat": {"p50": anchor_p50, "p99": anchor_p99}}
         p50, p99, _ = sc.resolved_or_bootstrap(
             "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
         )
-        assert (p50, p99) == (2.0, 5.0)
+        assert (p50, p99) == (learned_p50, 5.0)
 
     def test_p50_bound_robust_when_anchor_p50_zero(self, monkeypatch):
-        # The bound comes from the capped p99, so an anchor p50 of 0 (the
-        # n_assets case) cannot collapse the clamp to zero.
-        import app.analysis.scorer_config as sc
+        # The bound degrades to K * anchor_p99 when the anchor p50 is 0 (the
+        # n_assets case), so it can never collapse the clamp to zero.
+        sc = _sc()
         monkeypatch.setattr(
             sc, "resolve_baseline",
             lambda *a, **k: (1e6, 1e6, "per_script"),
@@ -368,3 +436,49 @@ class TestPerScriptP50Cap:
         )
         assert p50 > 0.0
         assert p50 < p99
+
+    def test_oversized_fraction_still_keeps_usable_spread(
+        self, tmp_path, monkeypatch
+    ):
+        # Degenerate-pair protection: even a misconfigured K (here 10x the
+        # anchor spread) cannot push the p50 bound to or above the p99 cap;
+        # the min_spread_ratio term keeps the capped pair non-degenerate.
+        cfg = _minimal_config()
+        cfg["baselines"]["per_script_p50_cap_spread_fraction"] = 10.0
+        sc = _reload_module(monkeypatch, tmp_path, cfg)
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (1e6, 1e9, "per_script"),
+        )
+        bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
+        p50, p99, _ = sc.resolved_or_bootstrap(
+            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+        )
+        cap = sc._P99_CAP_MULTIPLIER * 2.0
+        assert p99 == cap
+        assert p50 == pytest.approx(cap / (1.0 + sc._MIN_SPREAD_RATIO))
+        assert p50 < p99
+
+    def test_worst_case_poisoned_pair_clears_escape_floor(self, monkeypatch):
+        # RECALL GUARANTEE pinning K to the shipped thresholds: under the
+        # WORST capped-poisoned per-script baseline, a drain at the
+        # n_assets bootstrap anchor p99 (the canonical 2-NFT double-sat
+        # magnitude) must still normalise at or above the multiple_sat
+        # suppression-escape floor. Every value here comes from the shipped
+        # config, so retuning any knob re-runs this arithmetic.
+        from app.analysis.normalise import normalise
+        sc = _reload_shipped(monkeypatch)
+        boot = sc.get("multiple_sat")["bootstrap_anchors"]
+        anchor_p50, anchor_p99 = sc.anchor(boot, "n_assets_out_of_script")
+        floor_min = float(
+            sc.get("multiple_sat")["suppression_escape"]["extraction_floor_min"]
+        )
+        monkeypatch.setattr(
+            sc, "resolve_baseline",
+            lambda *a, **k: (1e9, 1e12, "per_script"),
+        )
+        p50, p99, _ = sc.resolved_or_bootstrap(
+            "n_assets_out_of_script", "per_script", "addrA", "preprod",
+            boot, "n_assets_out_of_script",
+        )
+        assert normalise(anchor_p99, p50=p50, p99=p99) >= floor_min
