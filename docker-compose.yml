@@ -149,13 +149,20 @@ services:
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
       - RAW_STORE_PATH=/data/raw
       - RAW_STORE_ENABLED=${RAW_STORE_ENABLED:-true}
-      # Client-IP trust for rate limiting + audit logs. Safe to enable here:
-      # app.net takes the right-most forwarded hop and only honours headers
-      # when the direct peer is a configured proxy CIDR; Cloudflare sets
-      # CF-Connecting-IP authoritatively per request.
+      # Client-IP trust for rate limiting + audit logs. The default path is
+      # the append-safe right-most X-Forwarded-For hop, honoured only when
+      # the direct peer is inside TRUSTED_PROXY_CIDRS (set via .env).
+      # TRUSTED_PROXY_CLIENT_IP_HEADER defaults to EMPTY on purpose: set it
+      # to CF-Connecting-IP ONLY when Cloudflare fronts the app. Behind any
+      # other proxy that does not strip the header, a client-supplied
+      # CF-Connecting-IP would be trusted absolutely (rate-limit bucket
+      # rotation, forged audit IPs). Whatever proxy fronts the app MUST
+      # strip or overwrite client-supplied CF-Connecting-IP and
+      # X-Forwarded-For, and TRUSTED_PROXY_CIDRS should be narrowed to the
+      # actual proxy address in production (see .env.example).
       - TRUSTED_PROXY_ENABLED=${TRUSTED_PROXY_ENABLED:-true}
       - TRUSTED_PROXY_HOPS=${TRUSTED_PROXY_HOPS:-1}
-      - TRUSTED_PROXY_CLIENT_IP_HEADER=${TRUSTED_PROXY_CLIENT_IP_HEADER:-CF-Connecting-IP}
+      - TRUSTED_PROXY_CLIENT_IP_HEADER=${TRUSTED_PROXY_CLIENT_IP_HEADER:-}
       # No default: production must set the dashboard origin explicitly
       # (the app refuses to start with '*' when API keys are configured).
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}

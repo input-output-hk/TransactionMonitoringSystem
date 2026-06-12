@@ -39,6 +39,10 @@ router = APIRouter()
 WS_CLOSE_FORBIDDEN = 4403  # invalid/missing api_key (mirrors HTTP 403)
 WS_CLOSE_OVERLOADED = 4429  # connection cap or handshake rate limit (HTTP 429)
 WS_CLOSE_INTERNAL_ERROR = 1011  # RFC 6455 internal-error close
+# Disallowed Origin header on the upgrade. 1008 is the registered
+# policy-violation code (RFC 6455 section 7.4.1), the standard close for
+# origin-based rejection.
+WS_CLOSE_POLICY_VIOLATION = 1008
 
 # Global list of active connections (set from main.py; also used for the
 # /health connection count)
@@ -117,6 +121,42 @@ def _cleanup(websocket: WebSocket) -> None:
         active_connections.remove(websocket)
 
 
+async def _reject(websocket: WebSocket, code: int) -> None:
+    """Accept the handshake, then immediately close with ``code``.
+
+    Accept-first is deliberate: ``close()`` before ``accept()`` surfaces to
+    real clients as a bare HTTP 403 on the upgrade, with no close frame at
+    all, so a reconnecting dashboard cannot distinguish rate-limited (back
+    off) from bad key (stop retrying). Accepting costs one completed
+    upgrade round-trip but makes the application close code observable.
+    The socket is never registered in active_connections, so a rejected
+    handshake receives no broadcast data.
+    """
+    await websocket.accept()
+    await websocket.close(code=code)
+
+
+def _origin_allowed(origin: Optional[str]) -> bool:
+    """Cross-site WebSocket hijacking guard for the live alert feed.
+
+    Browsers always attach an Origin header to WebSocket upgrades, so a
+    present-but-unlisted Origin means some other site's page is opening
+    the feed with the victim's network position. When API keys are
+    configured the key remains the primary gate; this check is what
+    protects dev mode (API_KEYS empty + TMS_ALLOW_DEV_MODE), where the
+    endpoint is otherwise open. Non-browser clients send no Origin, so an
+    absent header stays allowed. Reuses the CORS allowlist (read-only):
+    "*" (or an empty list, i.e. nothing configured) means the deployment
+    is not origin-restricted and every Origin is accepted.
+    """
+    if origin is None:
+        return True
+    allowed = settings.cors_allow_origins_list
+    if not allowed or "*" in allowed:
+        return True
+    return origin in allowed
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -137,16 +177,20 @@ async def websocket_endpoint(
             f"ws:{ip or 'unknown'}"
         )
         if not allowed:
-            await websocket.close(code=WS_CLOSE_OVERLOADED)
+            await _reject(websocket, WS_CLOSE_OVERLOADED)
             return
 
+    if not _origin_allowed(websocket.headers.get("origin")):
+        await _reject(websocket, WS_CLOSE_POLICY_VIOLATION)
+        return
+
     if not _dev_mode and not is_valid_api_key(api_key):
-        await websocket.close(code=WS_CLOSE_FORBIDDEN)
+        await _reject(websocket, WS_CLOSE_FORBIDDEN)
         return
 
     # Cap concurrent connections to prevent resource exhaustion
     if len(active_connections) >= settings.WS_MAX_CONNECTIONS:
-        await websocket.close(code=WS_CLOSE_OVERLOADED)
+        await _reject(websocket, WS_CLOSE_OVERLOADED)
         return
 
     await websocket.accept()

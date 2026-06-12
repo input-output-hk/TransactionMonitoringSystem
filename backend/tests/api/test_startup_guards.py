@@ -6,8 +6,9 @@ that family (review finding: shipping '*' as a production default).
 """
 
 import pytest
+from pydantic import ValidationError
 
-from app.config import settings
+from app.config import Settings, settings
 from app.main import _validate_startup_settings
 
 
@@ -49,6 +50,62 @@ class TestCorsFailFast:
         monkeypatch.setattr(settings, "TMS_ALLOW_DEV_MODE", "1")
         monkeypatch.setattr(settings, "CORS_ALLOW_ORIGINS", "*")
         _validate_startup_settings()
+
+
+class TestTrustedProxyCidrsFailFast:
+    """Malformed TRUSTED_PROXY_CIDRS must refuse to start, not degrade
+    per-request (app.net only soft-fails as a last-resort backstop)."""
+
+    @pytest.fixture(autouse=True)
+    def _cors_ok(self, prod_mode, monkeypatch):
+        # Keep the CORS guard quiet so these tests exercise only the
+        # proxy-CIDR validation.
+        monkeypatch.setattr(
+            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+        )
+
+    def test_malformed_cidr_refuses_start(self, monkeypatch):
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
+        monkeypatch.setattr(
+            settings, "TRUSTED_PROXY_CIDRS", "10.0.0.0/8,not-a-cidr",
+        )
+        with pytest.raises(RuntimeError, match="TRUSTED_PROXY_CIDRS"):
+            _validate_startup_settings()
+
+    def test_error_names_the_bad_cidr(self, monkeypatch):
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
+        monkeypatch.setattr(
+            settings, "TRUSTED_PROXY_CIDRS", "10.0.0.0/8,1.2.3.999/32",
+        )
+        with pytest.raises(RuntimeError, match=r"1\.2\.3\.999/32"):
+            _validate_startup_settings()
+
+    def test_valid_cidrs_pass(self, monkeypatch):
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
+        monkeypatch.setattr(
+            settings, "TRUSTED_PROXY_CIDRS", "127.0.0.1/32,172.18.0.1/32",
+        )
+        _validate_startup_settings()
+
+    def test_disabled_proxy_skips_cidr_validation(self, monkeypatch):
+        # With trust disabled the CIDR list is never consulted at request
+        # time, so a stale bad value must not block startup.
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", False)
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_CIDRS", "not-a-cidr")
+        _validate_startup_settings()
+
+
+class TestTrustedProxyHopsValidation:
+    """Settings-level guard (pydantic ge=1): zero or negative hops would
+    index past the X-Forwarded-For list end on every request."""
+
+    @pytest.mark.parametrize("hops", [0, -1])
+    def test_non_positive_hops_rejected(self, hops):
+        with pytest.raises(ValidationError, match="TRUSTED_PROXY_HOPS"):
+            Settings(TRUSTED_PROXY_HOPS=hops)
+
+    def test_positive_hops_accepted(self):
+        assert Settings(TRUSTED_PROXY_HOPS=2).TRUSTED_PROXY_HOPS == 2
 
 
 class TestDocsGating:

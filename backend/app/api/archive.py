@@ -289,6 +289,15 @@ async def restore_alert(
     # restore mutates the suppression record, so it gets the same
     # accountability as archiving). Benign race: a concurrent delete
     # between check and delete yields an intent row with phase=failed.
+    #
+    # Decision note (recall-first trade-off, accepted): fail-closed here
+    # means an audit outage also blocks RESTORE, the one suppression
+    # mutation that would surface MORE alerts. We accept that because the
+    # alert was already audited when it was suppressed (its evidence trail
+    # exists), restores are operator-initiated and retryable once the audit
+    # store recovers, and an unaudited mutation of the suppression record
+    # would break the tamper-evidence guarantee in both directions. The
+    # detection/scoring pipeline is unaffected: new alerts still fire.
     try:
         exists = await archive_queries.archive_exists_async(query_network, tx_hash)
     except Exception as e:

@@ -43,16 +43,47 @@ def parse_ip(value: Optional[str]) -> Optional[str]:
         # IPv4 with a port: 1.2.3.4:8080 (a bare IPv6 has >= 2 colons)
         candidate = candidate.split(":")[0]
     try:
-        return str(ipaddress.ip_address(candidate))
+        addr = ipaddress.ip_address(candidate)
     except ValueError:
         return None
+    # Dual-stack listeners (e.g. uvicorn on a Docker bridge) report IPv4
+    # peers as IPv4-mapped IPv6 (::ffff:172.18.0.1). An IPv6Address never
+    # matches an IPv4 trusted-proxy CIDR, which would silently disable
+    # proxy trust and collapse every client into the proxy's rate-limit
+    # bucket / audit IP, so unwrap to the underlying IPv4 address.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return str(addr)
+
+
+# Warn only once per process when TRUSTED_PROXY_CIDRS fails to parse at
+# request time: startup validation (main._validate_startup_settings) is the
+# real gate, this flag just keeps a bad value that slipped past it from
+# spamming a warning on every request.
+_warned_malformed_cidrs = False
 
 
 def _peer_is_trusted_proxy(direct: Optional[str]) -> bool:
+    global _warned_malformed_cidrs
     if direct is None:
         return False
+    try:
+        networks = settings.trusted_proxy_networks
+    except ValueError as exc:
+        # Never 500 a request over a config typo: degrade to "untrusted
+        # peer" (direct-IP behaviour), matching this module's never-raises
+        # contract. Startup validation already refuses to boot on this.
+        if not _warned_malformed_cidrs:
+            logger.warning(
+                "TRUSTED_PROXY_CIDRS is malformed (%s); treating all peers "
+                "as untrusted until the configuration is fixed",
+                exc,
+            )
+            _warned_malformed_cidrs = True
+        return False
     addr = ipaddress.ip_address(direct)
-    return any(addr in net for net in settings.trusted_proxy_networks)
+    return any(addr in net for net in networks)
 
 
 def client_ip(conn: Optional[HTTPConnection]) -> Optional[str]:
@@ -75,8 +106,12 @@ def client_ip(conn: Optional[HTTPConnection]) -> Optional[str]:
         for e in value.split(",")
         if e.strip()
     ]
+    # Settings enforce HOPS >= 1 (pydantic ge=1), so idx < len(entries) is
+    # guaranteed there; the full-range check is defence in depth so that NO
+    # hops value (e.g. a monkeypatched 0 or negative) can ever index out of
+    # bounds and break the never-raises contract.
     idx = len(entries) - settings.TRUSTED_PROXY_HOPS
-    if idx < 0:
+    if idx < 0 or idx >= len(entries):
         return direct
     candidate = parse_ip(entries[idx])
     if candidate is None:

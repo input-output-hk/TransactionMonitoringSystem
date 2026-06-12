@@ -305,10 +305,17 @@ async def root():
             const headers = API_KEY ? {{"TMS-API-Key": API_KEY}} : {{}};
 
             // HTML-escape for every server/chain-derived value rendered via
-            // innerHTML. Quotes included so attribute contexts (onclick
-            // arguments) cannot be broken out of; & first so entities are
-            // not double-escaped. Stored XSS via archive source_label was a
-            // review finding — never interpolate a raw field.
+            // innerHTML. Quotes included so plain attribute values (data-*
+            // sinks) cannot be broken out of; & first so entities are not
+            // double-escaped. NOTE: entity encoding only protects HTML text
+            // and attribute-value contexts. It does NOT make a JS-string
+            // sink (an inline onclick handler body) safe: the HTML parser
+            // entity-decodes the attribute before the JS engine parses it,
+            // so &#39;);evil()// decodes back into a string breakout. That
+            // is why this template uses NO inline event handlers: values
+            // ride data-* attributes and behavior is attached with
+            // addEventListener. Stored XSS via archive source_label was a
+            // review finding; never interpolate a raw field.
             const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
                 c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
 
@@ -327,6 +334,26 @@ async def root():
                     setTimeout(() => {{ btn.textContent = "Copy"; btn.classList.remove("copied"); }}, 1500);
                 }});
             }}
+
+            // Row-button behavior via event delegation (one listener for all
+            // three panels, surviving every innerHTML re-render). Values
+            // travel through data-* attributes, an HTML attribute-value sink
+            // where esc() is the correct encoder, and are read back from
+            // dataset. Inline onclick handlers are banned: their body is a
+            // JS-string sink that entity encoding cannot protect (the HTML
+            // parser decodes entities before the JS engine parses the
+            // handler body).
+            document.addEventListener("click", (e) => {{
+                const btn = e.target.closest(".copy-btn, .archive-btn");
+                if (!btn) return;
+                if (btn.classList.contains("copy-btn")) {{
+                    copyTx(btn, btn.dataset.tx);
+                }} else if (btn.classList.contains("restore")) {{
+                    restoreAlert(btn.dataset.tx, btn.dataset.network);
+                }} else {{
+                    archiveAlert(btn.dataset.tx, btn.dataset.network);
+                }}
+            }});
 
             // --- WebSocket ---
             const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -372,7 +399,7 @@ async def root():
                 }}
                 txsPanel.innerHTML = confirmedTxs.map(tx => `
                     <div class="tx-row">
-                        <span class="tx-hash">${{esc(tx.txId.substring(0, 20))}}...${{esc(tx.txId.substring(tx.txId.length - 10))}}</span><button class="copy-btn" onclick="copyTx(this,'${{esc(tx.txId)}}')">Copy</button>
+                        <span class="tx-hash">${{esc(tx.txId.substring(0, 20))}}...${{esc(tx.txId.substring(tx.txId.length - 10))}}</span><button class="copy-btn" data-tx="${{esc(tx.txId)}}">Copy</button>
                         <div class="tx-meta">
                             <span class="tx-status CONFIRMED">CONFIRMED</span>
                             ${{tx.block.height ? `<span class="tx-fee">Block ${{esc(tx.block.height)}}</span>` : ''}}
@@ -478,10 +505,10 @@ async def root():
                         <div class="risk-row ${{esc(a.risk_band)}}">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" onclick="copyTx(this,'${{esc(a.tx_hash)}}')">Copy</button><button class="archive-btn" onclick="archiveAlert('${{esc(a.tx_hash)}}','${{esc(a.network)}}')">Archive</button>
-                                    <span style="color:#888;font-size:11px">Fee: ${{fee}}</span>
-                                    <span style="color:#888;font-size:11px">Outputs: ${{outs}}</span>
-                                    <span style="color:#666;font-size:11px">${{when}}</span>
+                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" data-tx="${{esc(a.tx_hash)}}">Copy</button><button class="archive-btn" data-tx="${{esc(a.tx_hash)}}" data-network="${{esc(a.network)}}">Archive</button>
+                                    <span style="color:#888;font-size:11px">Fee: ${{esc(fee)}}</span>
+                                    <span style="color:#888;font-size:11px">Outputs: ${{esc(outs)}}</span>
+                                    <span style="color:#666;font-size:11px">${{esc(when)}}</span>
                                 </div>
                                 <div class="risk-sub">${{classHtml}}</div>
                                 ${{explain ? `<div class="risk-sub" style="margin-top:2px">${{explain}}</div>` : ''}}
@@ -616,9 +643,9 @@ async def root():
                         <div class="risk-row" style="border-left-color:#4527a0">
                             <div style="flex:1;min-width:0">
                                 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" onclick="copyTx(this,'${{esc(a.tx_hash)}}')">Copy</button><button class="archive-btn restore" onclick="restoreAlert('${{esc(a.tx_hash)}}','${{esc(a.network)}}')">Restore</button>
+                                    <span class="tx-hash">${{esc(a.tx_hash.substring(0, 16))}}...${{esc(a.tx_hash.substring(a.tx_hash.length - 8))}}</span><button class="copy-btn" data-tx="${{esc(a.tx_hash)}}">Copy</button><button class="archive-btn restore" data-tx="${{esc(a.tx_hash)}}" data-network="${{esc(a.network)}}">Restore</button>
                                     <span style="color:#888;font-size:11px">By: ${{esc(a.archived_by || '-')}}</span>
-                                    <span style="color:#666;font-size:11px">${{when}}</span>
+                                    <span style="color:#666;font-size:11px">${{esc(when)}}</span>
                                 </div>
                                 <div class="risk-sub">Was: ${{esc(wasClass)}} (${{esc(wasBand)}}, ${{esc(wasScore)}}) &middot; source: ${{esc(a.source || 'local')}}</div>
                                 ${{noteHtml}}

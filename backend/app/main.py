@@ -140,6 +140,20 @@ def _validate_startup_settings() -> None:
             "Set the explicit dashboard origin(s) for production, or "
             "TMS_ALLOW_DEV_MODE=1 for local dev."
         )
+    # trusted_proxy_networks re-parses TRUSTED_PROXY_CIDRS on every request;
+    # a malformed CIDR would otherwise surface as a per-request failure
+    # (app.net degrades it to untrusted-peer, silently disabling proxy
+    # trust). Parse once here so a typo refuses to start with a clear
+    # message instead.
+    if settings.TRUSTED_PROXY_ENABLED:
+        try:
+            settings.trusted_proxy_networks
+        except ValueError as exc:
+            raise RuntimeError(
+                f"TRUSTED_PROXY_CIDRS is malformed: {exc}. Fix the CIDR "
+                "list (comma-separated networks such as 172.18.0.1/32) or "
+                "set TRUSTED_PROXY_ENABLED=false."
+            ) from exc
 
 
 @asynccontextmanager
