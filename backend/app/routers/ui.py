@@ -11,9 +11,23 @@ router = APIRouter()
 @router.get("/")
 async def root():
     """Serve the real-time transaction monitoring UI"""
-    network = settings.CARDANO_NETWORK
+    return HTMLResponse(content=_build_page(settings.CARDANO_NETWORK))
 
-    html_content = f"""
+
+def _build_page(network: str) -> str:
+    """Assemble the fallback dashboard page from its sections.
+
+    The sections concatenate to output byte-identical to the previous
+    single-f-string template; every section MUST stay an f-string so the
+    {{ }} brace escaping for CSS/JS keeps its meaning.
+    """
+    closing = "    </body>\n    </html>\n    "
+    return _head(network) + _body(network) + _page_script() + closing
+
+
+def _head(network: str) -> str:
+    """Document head: page title and the full stylesheet."""
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -227,7 +241,13 @@ async def root():
             ::-webkit-scrollbar-thumb {{ background: #2a2f4a; border-radius: 3px; }}
         </style>
     </head>
-    <body>
+"""
+
+
+def _body(network: str) -> str:
+    """Static page skeleton: header, status bar, and the three panels
+    (transactions, risk alerts, archive). Rows are rendered client-side."""
+    return f"""    <body>
         <div class="header">
             <h1>Cardano Transaction Monitoring System</h1>
             <div class="header-right">
@@ -300,7 +320,14 @@ async def root():
             </div>
         </div>
 
-        <script>
+"""
+
+
+def _page_script() -> str:
+    """The dashboard's JavaScript: WebSocket feed, render functions (all
+    API-derived values pass through esc(); see test_ui_template.py for the
+    interpolation guard), filters, and archive actions."""
+    return f"""        <script>
             const API_KEY = "";
             const headers = API_KEY ? {{"TMS-API-Key": API_KEY}} : {{}};
 
@@ -687,7 +714,4 @@ async def root():
                 }} catch(e) {{}}
             }})();
         </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+"""
