@@ -67,7 +67,10 @@ services:
       - tms-network
 
   cardano-node:
-    image: ghcr.io/intersectmbo/cardano-node:10.6.2
+    # 11.0.1 is the minimum for the van Rossem PV11 intra-era hard fork
+    # (preprod crossed it at epoch 294, 2026-06-10; mainnet follows). Older
+    # nodes sync to the boundary and stall there.
+    image: ghcr.io/intersectmbo/cardano-node:11.0.1
     container_name: tms-cardano-node
     volumes:
       - ${CARDANO_CONFIG_DIR:-./cardano-config/preprod}:/config:ro
@@ -95,7 +98,10 @@ services:
     # silent :latest major bump could change message shapes under us).
     # Upgrade deliberately alongside the cardano-node pin above, re-running
     # the ADR-004 smoke tests.
-    image: cardanosolutions/ogmios:v6.13.0
+    # v6.14.0 is the newest v6 release as of the node 11.0.1 bump (no Ogmios
+    # release declares node-11 testing yet; v6.14.0 is tested against 10.5.1,
+    # the closest match). Schema stays v6, so the parser contract holds.
+    image: cardanosolutions/ogmios:v6.14.0
     container_name: tms-ogmios
     depends_on:
       - cardano-node
