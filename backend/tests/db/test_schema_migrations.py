@@ -211,3 +211,72 @@ class TestInsertShape:
         out_insert = next(q for q in statements if "INSERT INTO transaction_outputs" in q)
         # Explicit on-chain index wins over the enumerate position.
         assert statements[out_insert][0][2] == 3
+
+
+class TestWideCountColumnGuard:
+    """UInt8 count/index columns overflow on 256+-input transactions — the
+    insert fails and chain sync wedges at that block forever (observed live
+    on preprod). The columns sit in ORDER BY keys and the transactions
+    projection, so they cannot be ALTERed in place: the startup guard must
+    force the rebuild migration instead of letting the app run and wedge."""
+
+    @staticmethod
+    def _client(types_by_table):
+        from app.db.clickhouse_schema import DEDUP_TABLE_KEYS
+
+        client = MagicMock()
+
+        def execute(q, params=None, *a, **k):
+            if "engine_full" in q:
+                # Every dedup table reports a clean v2 engine: the narrow
+                # columns must trip the guard on their own.
+                return [
+                    (t, "ReplacingMergeTree", "ReplacingMergeTree ORDER BY ...")
+                    for t in DEDUP_TABLE_KEYS
+                ]
+            if "system.columns" in q:
+                table = params["t"]
+                return list(types_by_table.get(table, {}).items())
+            return None
+
+        client.execute.side_effect = execute
+        return client
+
+    def test_narrow_input_count_refuses_startup(self):
+        import pytest
+        from app.db.clickhouse_schema import assert_no_legacy_schema
+
+        client = self._client({
+            "transactions": {"input_count": "UInt8", "output_count": "UInt16"},
+        })
+        with pytest.raises(RuntimeError, match="transactions.input_count"):
+            assert_no_legacy_schema(client)
+
+    def test_wide_columns_pass(self):
+        from app.db.clickhouse_schema import (
+            WIDE_COUNT_COLUMNS,
+            assert_no_legacy_schema,
+        )
+
+        client = self._client(dict(WIDE_COUNT_COLUMNS))
+        assert_no_legacy_schema(client)  # must not raise
+
+    def test_missing_table_is_not_stale(self):
+        # Tables that don't exist yet are created fresh from SCHEMA_DDL;
+        # the guard must not demand a migration for them.
+        from app.db.clickhouse_schema import stale_count_columns
+
+        client = self._client({})
+        assert stale_count_columns(client, "transaction_inputs") == []
+
+    def test_ddl_and_enforcement_map_agree(self):
+        # The DDL is the single source of truth; the enforcement map must
+        # never demand a type the CREATE TABLE doesn't produce.
+        from app.db.clickhouse_schema import SCHEMA_DDL, WIDE_COUNT_COLUMNS
+
+        for table, cols in WIDE_COUNT_COLUMNS.items():
+            ddl = SCHEMA_DDL[table]
+            for col, want in cols.items():
+                assert f"{col} {want}" in ddl, (
+                    f"{table}.{col}: DDL does not declare {want}"
+                )
