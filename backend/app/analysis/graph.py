@@ -9,7 +9,7 @@ import logging
 import math
 import statistics
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings

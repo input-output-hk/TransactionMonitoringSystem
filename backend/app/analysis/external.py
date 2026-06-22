@@ -16,7 +16,7 @@ import re
 import time
 import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 
@@ -478,8 +478,3 @@ def refresh_token_registry() -> int:
     )
     _set_cached("legitimate_tokens", registry)
     return len(registry)
-
-
-def get_legitimate_token_names() -> Set[str]:
-    """Return the set of known legitimate token names (uppercased)."""
-    return {name.upper() for name in get_legitimate_tokens().keys()}

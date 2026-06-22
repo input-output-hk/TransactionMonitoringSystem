@@ -7,7 +7,6 @@ from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

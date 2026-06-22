@@ -11,7 +11,7 @@ file and the key path, not a deep ``KeyError`` from inside a scorer module.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import logging
 import os
 

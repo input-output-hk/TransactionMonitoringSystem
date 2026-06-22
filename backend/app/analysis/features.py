@@ -547,21 +547,3 @@ def extract_tx_script_features(
         mint_policy_count,
         mint_entries_json,
     )
-
-
-# ---------------------------------------------------------------------------
-# Convenience: extract all features for a batch
-# ---------------------------------------------------------------------------
-
-def extract_all_features(
-    tx_hash: str,
-    network: str,
-    raw_data: Dict[str, Any],
-) -> Tuple[List[tuple], Optional[tuple]]:
-    """Extract both UTxO-level and tx-level features from raw data.
-
-    Returns (utxo_feature_rows, tx_script_feature_row).
-    """
-    utxo_rows = extract_utxo_features(tx_hash, network, raw_data)
-    script_row = extract_tx_script_features(tx_hash, network, raw_data)
-    return utxo_rows, script_row
