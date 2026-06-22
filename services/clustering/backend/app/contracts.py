@@ -1,8 +1,8 @@
 """Contract identity: classify a target as an address or a minting policy.
 
-Source-neutral and pure — shared by the API, the job worker and the CLI. The
+Source-neutral and pure: shared by the API, the job worker and the CLI. The
 on-chain metadata *fetch* lives with the data-source adapter
-(``app.blockfrost.source``), behind the ``ChainSource`` protocol.
+(``app.sources.host_ch``), behind the ``ChainSource`` protocol.
 """
 
 from __future__ import annotations

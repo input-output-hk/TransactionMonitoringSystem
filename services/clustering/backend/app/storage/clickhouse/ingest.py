@@ -67,8 +67,8 @@ class _IngestMixin(_RepoBase):
             "txs_seen", "done",
         ]
         row = self._rows_to_dicts(keys, rows)[0]
-        # Legacy shim: rows written before 006_cursor.sql carry only the Blockfrost
-        # page number. The migration backfills this same encoding; the shim covers a
+        # Legacy shim: rows written before 006_cursor.sql carry only the page
+        # number. The migration backfills this same encoding; the shim covers a
         # row racing the backfill. Remove when last_page is dropped.
         if not row["cursor"] and int(row.get("last_page") or 0) > 0:
             row["cursor"] = f"page:{row['last_page']}"

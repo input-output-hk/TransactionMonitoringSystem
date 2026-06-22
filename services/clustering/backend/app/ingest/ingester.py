@@ -1,7 +1,7 @@
 """Orchestrates downloading a target's transactions into ClickHouse.
 
-Source-agnostic: it drives a ``ChainSource`` (Blockfrost today, a node later) and
-never sees a provider-specific payload — the source yields tx-hash pages and
+Source-agnostic: it drives a ``ChainSource`` (host_ch today, a node/db-sync adapter
+later) and never sees a provider-specific payload: the source yields tx-hash pages and
 already-normalized transactions. Ingestion is:
   * rate-limited   — by the source's own admission control;
   * resumable      — a per-target cursor records the last completed page;
@@ -57,8 +57,8 @@ class IngestResult:
     status: str  # 'completed' | 'rate_limited' | 'max_reached'
     txs_ingested: int
     # The source-owned resume cursor as persisted at the end of this run (opaque
-    # to the engine; Blockfrost encodes "page:N" — "page:N;from:H" when the walk
-    # is anchored to a recent window — and a node adapter a point).
+    # to the engine; a page-based adapter encodes "page:N", or "page:N;from:H" when
+    # the walk is anchored to a recent window, and a node adapter a point).
     cursor: str
 
 
@@ -153,10 +153,10 @@ def _plan_walk(
 ) -> _WalkPlan:
     """Resolve the stored cursor into a walk plan.
 
-    Provider-neutral logic only — what the cursor MEANS is the source's business.
-    A cursor written by a different CHAIN_SOURCE is treated as absent (a Blockfrost
-    page number is garbage to a node adapter; restarting is safe because inserts
-    are idempotent)."""
+    Provider-neutral logic only: what the cursor MEANS is the source's business.
+    A cursor written by a different CHAIN_SOURCE is treated as absent (a page-based
+    adapter's page number is garbage to a node adapter; restarting is safe because
+    inserts are idempotent)."""
     mode: DiscoveryMode
     cursor_row = repo.get_cursor(target) if resume else None
     chain_source = get_settings().chain_source
@@ -356,9 +356,10 @@ def _discovery_max_items(
     the older history the wider window now spans. Policy discovery always re-walks
     from the start and skips already-done pages, so it caps on the FULL target.
 
-    INVARIANT (paired with BlockfrostSource.tx_hash_pages): on a recent restart the
-    source re-anchors to ``max_items``, so this MUST pass the full ``max_txs`` —
-    passing ``remaining`` would anchor at too-small an N and under-fetch.
+    INVARIANT (paired with a recent-window-anchoring source's tx_hash_pages): on a
+    recent restart the source re-anchors to ``max_items``, so this MUST pass the
+    full ``max_txs``; passing ``remaining`` would anchor at too-small an N and
+    under-fetch.
     """
     if address is None:
         return max_txs

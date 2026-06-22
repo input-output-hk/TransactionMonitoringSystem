@@ -81,8 +81,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "Change the ClickHouse credentials before exposing this beyond localhost."
         )
     # host_ch (the default) reads each watched contract's data from the TMS's
-    # ClickHouse, so its worker uses HostBackedRepo. The optional blockfrost
-    # source (its own ingestion) uses the default ClickHouseRepo.
+    # ClickHouse, so its worker uses HostBackedRepo. A future downloading adapter
+    # (its own ingestion) would use the default ClickHouseRepo.
     host_backed = settings.chain_source == "host_ch"
     if host_backed:
         from app.storage.clickhouse.host_backed import HostBackedRepo

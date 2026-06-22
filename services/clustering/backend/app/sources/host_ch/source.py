@@ -43,7 +43,7 @@ from app.sources.base import (
 _SCRIPT_PAYMENT_TYPES = frozenset({1, 3, 5, 7})
 
 # Discovery page size: tx_hashes per yielded page. Bounds the result set per
-# round-trip the same way the Blockfrost adapter's page size does.
+# round-trip the same way any page-based adapter's page size does.
 _PAGE = 1000
 
 

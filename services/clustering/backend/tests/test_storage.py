@@ -45,7 +45,7 @@ class FakeClient:
 
 def _repo(query_rows: list[tuple[Any, ...]] | None = None) -> tuple[ClickHouseRepo, FakeClient]:
     fake = FakeClient(query_rows)
-    repo = ClickHouseRepo(Settings(BLOCKFROST_PROJECT_ID="t"), client=fake)
+    repo = ClickHouseRepo(Settings(), client=fake)
     return repo, fake
 
 
@@ -110,7 +110,8 @@ def test_upsert_cursor_converts_done_to_int() -> None:
     table, data, cols = fake.inserts[0]
     assert table == "tms.ingest_cursor"
     assert cols == ["target", "target_type", "cursor", "source", "last_tx_hash", "txs_seen", "done"]
-    assert data == [["addr", "address", "page:2", "blockfrost", "bb", 10, 1]]
+    # source is the active CHAIN_SOURCE (host_ch) the repo's settings carry.
+    assert data == [["addr", "address", "page:2", "host_ch", "bb", 10, 1]]
 
 
 def test_save_cluster_labels() -> None:
@@ -197,13 +198,13 @@ def test_save_cluster_run_fills_missing_with_none() -> None:
 # --- Query row-mapping -----------------------------------------------------
 
 def test_get_cursor_maps_row() -> None:
-    repo, _ = _repo([("addr", "address", "page:1", "blockfrost", 1, "bb", 10, 0)])
+    repo, _ = _repo([("addr", "address", "page:1", "host_ch", 1, "bb", 10, 0)])
     cur = repo.get_cursor("addr")
     assert cur == {
         "target": "addr",
         "target_type": "address",
         "cursor": "page:1",
-        "source": "blockfrost",
+        "source": "host_ch",
         "last_page": 1,
         "last_tx_hash": "bb",
         "txs_seen": 10,
@@ -213,8 +214,8 @@ def test_get_cursor_maps_row() -> None:
 
 def test_get_cursor_synthesizes_legacy_page_cursor() -> None:
     # A pre-006 row (empty cursor, last_page set) still resumes correctly: the
-    # read shim synthesizes the Blockfrost encoding the migration backfills.
-    repo, _ = _repo([("addr", "address", "", "blockfrost", 3, "bb", 10, 0)])
+    # read shim synthesizes the page-cursor encoding the migration backfills.
+    repo, _ = _repo([("addr", "address", "", "host_ch", 3, "bb", 10, 0)])
     cur = repo.get_cursor("addr")
     assert cur is not None and cur["cursor"] == "page:3"
 

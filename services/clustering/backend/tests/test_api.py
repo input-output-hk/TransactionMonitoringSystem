@@ -483,7 +483,7 @@ def test_delete_missing_anomaly_run_404() -> None:
 def test_api_key_enforced_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.api.deps.get_settings",
-        lambda: Settings(BLOCKFROST_PROJECT_ID="t", API_KEY="secret"),
+        lambda: Settings(API_KEY="secret"),
     )
     client = _client(FakeApiRepo(contracts=[]))
     assert client.get("/api/contracts").status_code == 401
@@ -523,7 +523,7 @@ def test_non_ascii_api_key_header_is_401_not_500(monkeypatch: pytest.MonkeyPatch
     compare bytes so a crafted header fails closed with 401, not a 500."""
     monkeypatch.setattr(
         "app.api.deps.get_settings",
-        lambda: Settings(BLOCKFROST_PROJECT_ID="t", API_KEY="secret"),
+        lambda: Settings(API_KEY="secret"),
     )
     client = _client(FakeApiRepo(contracts=[]))
     # httpx refuses to encode non-ASCII str headers; send raw latin-1 bytes the

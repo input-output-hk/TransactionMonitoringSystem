@@ -1,20 +1,17 @@
 """Characterization tests for the ingestion orchestration.
 
-Drives ``ingest()`` against an in-memory fake repo and a Blockfrost client
-backed by an httpx MockTransport, so the loop / cursor / batching behaviour is
-pinned without ClickHouse or the network.
+Drives ``ingest()`` against an in-memory fake repo and the in-memory reference
+``ChainSource`` (``tests.sources.inmemory``), so the loop / cursor / batching
+behaviour is pinned without ClickHouse or the network.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import httpx
 import pytest
 
-from app.blockfrost.client import AsyncBlockfrostClient
-from app.blockfrost.source import BlockfrostSource
-from app.config import Settings
+from app.config import get_settings
 from app.ingest.ingester import (
     _discovery_max_items,
     _noop,
@@ -22,6 +19,7 @@ from app.ingest.ingester import (
     ingest,
 )
 from tests.fakes import FakeRepoBase
+from tests.sources.inmemory import InMemoryChainSource
 
 TX_HASHES = ["aa", "bb", "cc"]
 
@@ -30,7 +28,6 @@ class FakeRepo(FakeRepoBase):
     """Records inserts and cursor writes; mimics the methods ingest() uses."""
 
     def __init__(self) -> None:
-        self.settings = Settings(BLOCKFROST_PROJECT_ID="t", BLOCKFROST_PAGE_SIZE=2)
         self.txs: list[Any] = []
         self.utxos: list[Any] = []
         self.assets: list[Any] = []
@@ -81,40 +78,19 @@ def _cursor_row(
         "target": target,
         "target_type": target_type,
         "cursor": cursor,
-        "source": "blockfrost",
+        # Match the active source so the cursor isn't treated as foreign and
+        # re-walked (see ingester._plan_walk's CHAIN_SOURCE check).
+        "source": get_settings().chain_source,
         "last_tx_hash": last_tx_hash,
         "txs_seen": txs_seen,
         "done": done,
     }
 
 
-def _detail(tx_hash: str) -> dict[str, Any]:
-    return {
-        "hash": tx_hash,
-        "block_height": 1,
-        "block_time": 1_700_000_000,
-        "slot": 1,
-        "fees": "200000",
-        "deposit": "0",
-        "size": 300,
-        "valid_contract": True,
-        "redeemer_count": 0,
-    }
-
-
-def _utxos(tx_hash: str) -> dict[str, Any]:
-    return {
-        "hash": tx_hash,
-        "inputs": [{"address": "addrIn", "amount": [{"unit": "lovelace", "quantity": "1000000"}]}],
-        "outputs": [
-            {"address": "addrOut", "amount": [{"unit": "lovelace", "quantity": "900000"}], "output_index": 0}
-        ],
-    }
-
-
-# Each address's full history as (tx_hash, block_height), ascending. The handler
-# serves them honoring page/count/order/from, like the real endpoint; addr1desc402
-# hits the daily limit on any DESC listing (pins the recent-window pre-walk).
+# Each address's full history as (tx_hash, block_height), ascending — the
+# in-memory source pages over this exactly as a real listing endpoint would.
+# addr1desc402 hits the daily limit on any DESC listing (pins the recent-window
+# pre-walk's 402); addr1midlimit's last tx (limit402) hits it on the per-tx fetch.
 ADDRESS_TXS: dict[str, list[tuple[str, int]]] = {
     "addr1demo": [("aa", 10), ("bb", 20), ("cc", 30)],
     "addr1midlimit": [("aa", 10), ("bb", 20), ("limit402", 30)],
@@ -122,69 +98,33 @@ ADDRESS_TXS: dict[str, list[tuple[str, int]]] = {
     "addr1desc402": [("aa", 10), ("bb", 20), ("cc", 30)],
 }
 
-
-def _handler(request: httpx.Request) -> httpx.Response:
-    path = request.url.path
-    if path.endswith("/transactions") and "/addresses/" in path:
-        address = path.split("/")[-2]
-        params = request.url.params
-        if address == "addr1desc402" and params.get("order") == "desc":
-            return httpx.Response(402, json={})
-        txs = ADDRESS_TXS.get(address, [])
-        if params.get("from") is not None:
-            txs = [t for t in txs if t[1] >= int(params["from"])]
-        if params.get("order") == "desc":
-            txs = txs[::-1]
-        page = int(params.get("page", "1"))
-        count = int(params.get("count", "2"))
-        items = txs[(page - 1) * count : page * count]
-        return httpx.Response(
-            200, json=[{"tx_hash": h, "block_height": bh} for h, bh in items]
-        )
-    if "/assets/policy/" in path:
-        pid = path.split("/")[-1]
-        # pol1: two assets; pol402: second asset's tx listing hits the daily limit.
-        assets = {"pol1": ["asset1", "asset2"], "pol402": ["asset1", "asset2limit"]}.get(pid, [])
-        page = int(request.url.params.get("page", "1"))
-        return httpx.Response(200, json=[{"asset": a} for a in (assets if page == 1 else [])])
-    if path.endswith("/transactions") and "/assets/" in path:
-        asset = path.split("/")[-2]
-        if asset == "asset2limit":
-            return httpx.Response(402, json={})
-        page = int(request.url.params.get("page", "1"))
-        # asset1 -> [aa, bb]; asset2 -> [bb, cc] (bb overlaps -> exercises dedup).
-        txmap = {"asset1": ["aa", "bb"], "asset2": ["bb", "cc"]}
-        items = txmap.get(asset, []) if page == 1 else []
-        return httpx.Response(200, json=[{"tx_hash": h} for h in items])
-    if path.endswith("/utxos"):
-        tx_hash = path.split("/")[-2]
-        return httpx.Response(200, json=_utxos(tx_hash))
-    if "/txs/" in path:
-        tx_hash = path.split("/")[-1]
-        if tx_hash == "limit402":
-            return httpx.Response(402, json={})
-        return httpx.Response(200, json=_detail(tx_hash))
-    return httpx.Response(404, json={})
+# Policy discovery walks a policy's assets, then each asset's transactions; bb
+# overlaps the two assets to exercise dedup. pol402's second asset's listing hits
+# the daily limit mid-discovery.
+POLICY_ASSETS: dict[str, list[str]] = {
+    "pol1": ["asset1", "asset2"],
+    "pol402": ["asset1", "asset2limit"],
+}
+ASSET_TXS: dict[str, list[str]] = {"asset1": ["aa", "bb"], "asset2": ["bb", "cc"]}
 
 
-def _client(settings: Settings) -> AsyncBlockfrostClient:
-    inner = httpx.AsyncClient(
-        base_url=settings.blockfrost_base_url,
-        headers={"project_id": settings.blockfrost_project_id},
-        transport=httpx.MockTransport(_handler),
+def _source(*, page_size: int = 2) -> InMemoryChainSource:
+    """The in-memory reference source preloaded with the fixtures above, so the
+    characterization tests drive ingest() exactly as a real adapter would."""
+    return InMemoryChainSource(
+        address_txs=ADDRESS_TXS,
+        policy_assets=POLICY_ASSETS,
+        asset_txs=ASSET_TXS,
+        page_size=page_size,
+        rate_limited_desc=frozenset({"addr1desc402"}),
+        rate_limited_listings=frozenset({"asset2limit"}),
+        rate_limited_txs=frozenset({"limit402"}),
     )
-    return AsyncBlockfrostClient(settings, client=inner)
-
-
-def _source(settings: Settings) -> BlockfrostSource:
-    """Wrap the MockTransport-backed client in the BlockfrostSource adapter, so the
-    characterization tests drive ingest() exactly as production does."""
-    return BlockfrostSource(settings, client=_client(settings))
 
 
 async def test_full_address_ingest() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo")
 
     assert result.status == "completed"
@@ -199,7 +139,7 @@ async def test_full_address_ingest() -> None:
 
 async def test_max_txs_stops_early() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo", max_txs=2)
 
     assert result.status == "max_reached"
@@ -215,7 +155,7 @@ async def test_resume_from_cursor_skips_done_pages() -> None:
     repo._cursor = _cursor_row(
         "addr1demo", "page:1", txs_seen=2, done=0, last_tx_hash="bb"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo")
 
     # Resumes at page 2, ingesting only the remaining transaction.
@@ -231,7 +171,7 @@ async def test_from_tip_continues_past_done_cursor() -> None:
     repo._cursor = _cursor_row(
         "addr1demo", "page:2", txs_seen=3, done=1, last_tx_hash="cc"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1demo", from_tip=True
         )
@@ -249,7 +189,7 @@ async def test_done_cursor_without_from_tip_restarts_from_page_one() -> None:
     repo._cursor = _cursor_row(
         "addr1demo", "page:2", txs_seen=3, done=1, last_tx_hash="cc"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo")
 
     # Default behaviour re-walks the whole history from page 1.
@@ -259,7 +199,7 @@ async def test_done_cursor_without_from_tip_restarts_from_page_one() -> None:
 
 async def test_full_policy_ingest() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, policy_id="pol1")
 
     assert result.status == "completed"
@@ -270,7 +210,7 @@ async def test_full_policy_ingest() -> None:
 
 async def test_policy_max_txs_stops_early() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, policy_id="pol1", max_txs=2)
 
     assert result.status == "max_reached"
@@ -283,7 +223,7 @@ async def test_policy_resume_skips_done_pages() -> None:
     repo._cursor = _cursor_row(
         "pol1", "page:1", txs_seen=2, done=0, target_type="policy", last_tx_hash="bb"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, policy_id="pol1")
 
     # Discovery re-walks but page 1 is skipped (not re-ingested); only cc ingests.
@@ -293,7 +233,7 @@ async def test_policy_resume_skips_done_pages() -> None:
 
 async def test_policy_402_during_discovery_saves_cursor() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, policy_id="pol402")
 
     # Page 1 (asset1's aa, bb) ingests; the daily limit on asset2's listing then
@@ -310,7 +250,7 @@ async def test_mid_page_rate_limit_saves_last_completed_cursor() -> None:
     a resume re-fetches the interrupted page (idempotent under ReplacingMergeTree).
     Pins _drain_pages' mid-page branch, which the conformance suite can't reach."""
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1midlimit")
 
     assert result.status == "rate_limited"
@@ -328,7 +268,7 @@ async def test_recent_capped_ingest_takes_newest_and_anchors_cursor() -> None:
     and persists the from-block anchor inside the cursor, so later walks page
     through the same filtered set instead of the unfiltered history."""
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1recent", max_txs=2, recent=True
         )
@@ -346,7 +286,7 @@ async def test_anchored_cursor_catchup_is_bounded() -> None:
     repo._cursor = _cursor_row(
         "addr1recent", "page:1;from:40", txs_seen=2, done=0, last_tx_hash="n2"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1recent", from_tip=True)
 
     assert result.status == "completed"
@@ -364,7 +304,7 @@ async def test_recent_restart_with_raised_cap_widens_the_window() -> None:
     repo._cursor = _cursor_row(
         "addr1recent", "page:1;from:40", txs_seen=2, done=1, last_tx_hash="n2"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1recent", max_txs=4, recent=True
         )
@@ -379,7 +319,7 @@ async def test_tip_mode_keeps_the_anchor() -> None:
     repo._cursor = _cursor_row(
         "addr1recent", "page:1;from:40", txs_seen=2, done=1, last_tx_hash="n2"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1recent", from_tip=True)
 
     # Tip re-covers the anchored page (idempotent) and persists the anchor again.
@@ -391,7 +331,7 @@ async def test_tip_mode_keeps_the_anchor() -> None:
 
 async def test_recent_with_fewer_txs_than_cap_degrades_to_full_walk() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1demo", max_txs=10, recent=True
         )
@@ -404,7 +344,7 @@ async def test_recent_with_fewer_txs_than_cap_degrades_to_full_walk() -> None:
 async def test_recent_on_policy_ingests_history_with_note() -> None:
     repo = FakeRepo()
     notes: list[str] = []
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, policy_id="pol1", max_txs=2, recent=True,
             progress=notes.append,
@@ -417,7 +357,7 @@ async def test_recent_on_policy_ingests_history_with_note() -> None:
 
 async def test_recent_rejects_explicit_block_range() -> None:
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         with pytest.raises(ValueError, match="mutually exclusive"):
             await ingest(
                 repo=repo, source=source, address="addr1demo",
@@ -430,7 +370,7 @@ async def test_rate_limit_during_recent_prewalk_retries_the_prewalk() -> None:
     retry arrives as mode="resume" with that empty cursor and must RE-RUN the
     pre-walk — never fall back to an unfiltered walk from genesis."""
     repo = FakeRepo()
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1desc402", max_txs=2, recent=True
         )
@@ -441,7 +381,7 @@ async def test_rate_limit_during_recent_prewalk_retries_the_prewalk() -> None:
     repo._cursor = _cursor_row(
         "addr1desc402", "", txs_seen=0, done=0
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         retry = await ingest(
             repo=repo, source=source, address="addr1desc402", max_txs=2, recent=True
         )
@@ -460,7 +400,7 @@ async def test_explicit_from_block_overrides_and_drops_a_stored_anchor() -> None
     repo._cursor = _cursor_row(
         "addr1recent", "page:1;from:40", txs_seen=2, done=0, last_tx_hash="n2"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1recent", from_block="30"
         )
@@ -479,7 +419,7 @@ async def test_legacy_midwalk_cursor_ignores_recent_hint() -> None:
     repo._cursor = _cursor_row(
         "addr1demo", "page:1", txs_seen=2, done=0, last_tx_hash="bb"
     )
-    async with _source(repo.settings) as source:
+    async with _source() as source:
         result = await ingest(
             repo=repo, source=source, address="addr1demo", max_txs=3, recent=True
         )

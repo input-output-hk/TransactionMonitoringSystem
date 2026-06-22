@@ -1,9 +1,8 @@
-"""Command-line interface: ingest, evaluate, cluster, list targets, serve.
+"""Command-line interface: process, evaluate, cluster, list targets, serve.
 
 Examples
 --------
-    python -m app.cli ingest --address addr1... --max-txs 500
-    python -m app.cli ingest --policy-id <policy_id> --max-txs 500
+    python -m app.cli process  --address addr1... --reprocess
     python -m app.cli evaluate --target addr1... --feature-set shape
     python -m app.cli cluster  --target addr1... --feature-set shape --eps 1.5 --min-samples 8
 """
@@ -15,16 +14,14 @@ import asyncio
 import typer
 
 from app.anomaly.detect import DEFAULT_TOP_QUANTILE
-from app.config import Settings, get_settings, setup_logging
+from app.config import get_settings, setup_logging
 from app.features import FEATURE_SETS
-from app.ingest.ingester import ingest as run_ingest
 from app.service import (
     cluster_target,
     detect_anomalies_for_target,
     evaluate_target,
     process_contract,
 )
-from app.sources.factory import get_source
 from app.storage.clickhouse import ClickHouseRepo
 
 app = typer.Typer(add_completion=False, help="Cardano contract transaction clustering tool.")
@@ -43,14 +40,6 @@ def _echo(msg: str) -> None:
 def _check_feature_set(feature_set: str) -> None:
     if feature_set not in FEATURE_SETS:
         raise typer.BadParameter(f"feature_set must be one of {FEATURE_SETS}")
-
-
-def _blockfrost_settings() -> Settings:
-    """Return settings, requiring a configured Blockfrost project id."""
-    settings = get_settings()
-    if not settings.blockfrost_project_id:
-        raise typer.BadParameter("BLOCKFROST_PROJECT_ID is not set (see .env).")
-    return settings
 
 
 def _require_one_target(address: str | None, policy_id: str | None) -> None:
@@ -125,60 +114,18 @@ def targets() -> None:
 
 
 @app.command()
-def ingest(
-    address: str = typer.Option(None, help="Script/payment address (addr1...)."),
-    policy_id: str = typer.Option(None, help="Minting policy id (script hash)."),
-    max_txs: int = typer.Option(None, help="Stop after this many transactions."),
-    from_block: str = typer.Option(None, help="Start block (hash or height) for address mode."),
-    to_block: str = typer.Option(None, help="End block (hash or height) for address mode."),
-    recent: bool = typer.Option(
-        False, help="With --max-txs on an address: ingest the most recent N instead of the first N."
-    ),
-    resume: bool = typer.Option(True, help="Resume from the saved cursor if present."),
-    batch_size: int | None = typer.Option(
-        None, help="Rows buffered before each ClickHouse insert (default: INGEST_BATCH_SIZE)."
-    ),
-) -> None:
-    """Download a target's transactions from Blockfrost into ClickHouse."""
-    settings = _blockfrost_settings()
-    _require_one_target(address, policy_id)
-
-    async def _run() -> None:
-        repo = ClickHouseRepo(settings)
-        async with get_source(settings) as source:
-            result = await run_ingest(
-                repo=repo,
-                source=source,
-                address=address,
-                policy_id=policy_id,
-                max_txs=max_txs,
-                from_block=from_block,
-                to_block=to_block,
-                recent=recent,
-                resume=resume,
-                batch_size=batch_size,
-                progress=_echo,
-            )
-        typer.echo(
-            f"\nDone: status={result.status} target_type={result.target_type} "
-            f"txs_ingested={result.txs_ingested} cursor={result.cursor or '(none)'}"
-        )
-
-    asyncio.run(_run())
-
-
-@app.command()
 def process(
     address: str = typer.Option(None, help="Script/payment address (addr1...)."),
     policy_id: str = typer.Option(None, help="Minting policy id (script hash)."),
     max_txs: int = typer.Option(None, help="Stop after this many transactions."),
     reprocess: bool = typer.Option(
-        False, help="Skip download; re-run the pipeline on already-ingested txs."
+        False, help="Re-run the pipeline on already-ingested txs (the host_ch path)."
     ),
 ) -> None:
-    """Run the full canonical pipeline for a contract (metadata → download →
-    cluster → shape/graph anomaly). Used for onboarding and the in-place backfill."""
-    settings = _blockfrost_settings()
+    """Run the full canonical pipeline for a contract (metadata → cluster →
+    shape/graph anomaly → publish). Used for onboarding and the in-place backfill;
+    under host_ch the data is read from the host TMS, so use ``--reprocess``."""
+    settings = get_settings()
     _require_one_target(address, policy_id)
     target = address or policy_id
     target_type = "address" if address else "policy"

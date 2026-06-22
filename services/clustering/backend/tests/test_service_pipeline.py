@@ -21,6 +21,15 @@ from app.sources.base import SourceNotFound, SourceRateLimited
 from tests.fakes import FakeRepoBase
 
 
+@pytest.fixture(autouse=True)
+def _stub_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On the host_ch path (the default), ``process_contract`` publishes the fit's
+    contract_anomaly rows. Publishing has its own tests; stub it to a no-op here so
+    these stay focused on the cluster/anomaly pipeline and the in-memory repo need
+    not implement the publish read/write surface."""
+    monkeypatch.setattr("app.service.publish.publish_contract_anomaly", lambda *a, **k: None)
+
+
 def test_recommended_params_prefers_grid_recommendation() -> None:
     ev = {"recommended": {"eps": 1.5, "min_samples": 8}, "k_distance": {"knee_eps": 0.3}}
     assert _recommended_params(ev) == (1.5, 8)
