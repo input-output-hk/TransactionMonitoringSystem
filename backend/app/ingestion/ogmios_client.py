@@ -24,7 +24,7 @@ from app.ingestion.input_enrichment import (
 )
 from app.ingestion.mempool_monitor import MempoolMonitor
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
-from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
+from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
@@ -194,34 +194,29 @@ class OgmiosClient:
 
     async def run_chain_sync(self):
         """Connect to Ogmios and run the ChainSync mini-protocol with resilience."""
-        while self._running:
-            if not self._circuit_breaker_chain.can_attempt():
-                logger.warning("Ogmios [chain]: circuit breaker OPEN, waiting for cooldown")
-                await asyncio.sleep(settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS)
-                continue
+        async def _connect():
+            self._chain_ws = await self._connect_ws("chain")
+            return self._chain_ws
 
-            try:
-                self._chain_ws = await self._connect_ws("chain")
-                self._connected_chain = True
-                self._circuit_breaker_chain.record_success()
-                self._backoff_chain.reset()
+        async def _close():
+            if self._chain_ws:
+                await self._chain_ws.close()
+                self._chain_ws = None
 
-                await self._chain_sync_loop(self._chain_ws)
+        def _set_connected(value: bool) -> None:
+            self._connected_chain = value
 
-            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-                logger.warning(f"Ogmios [chain]: connection lost: {e}")
-                self._connected_chain = False
-                self._circuit_breaker_chain.record_failure()
-                await self._backoff_chain.wait()
-            except Exception as e:
-                logger.error(f"Ogmios [chain]: unexpected error: {e}")
-                self._connected_chain = False
-                self._circuit_breaker_chain.record_failure()
-                await self._backoff_chain.wait()
-            finally:
-                if self._chain_ws:
-                    await self._chain_ws.close()
-                    self._chain_ws = None
+        await run_with_reconnect(
+            name="chain",
+            is_running=lambda: self._running,
+            breaker=self._circuit_breaker_chain,
+            backoff=self._backoff_chain,
+            connect=_connect,
+            run_session=self._chain_sync_loop,
+            on_connected=_set_connected,
+            close=_close,
+            poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+        )
 
     async def _chain_sync_loop(self, ws):
         """ChainSync: findIntersection → nextBlock loop."""

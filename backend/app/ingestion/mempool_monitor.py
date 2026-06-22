@@ -23,14 +23,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-import websockets
-
 from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
 from app.db import postgres, raw_store
 from app.ingestion.input_enrichment import parse_resolved_utxo
 from app.ingestion.ogmios_parser import ogmios_input_ref
-from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
+from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
@@ -283,33 +281,29 @@ class MempoolMonitor:
 
     async def run(self):
         """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
-        while self._running:
-            if not self._circuit_breaker.can_attempt():
-                await asyncio.sleep(settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS)
-                continue
+        async def _connect():
+            self._ws = await self._connect_ws("mempool")
+            return self._ws
 
-            try:
-                self._ws = await self._connect_ws("mempool")
-                self.connected = True
-                self._circuit_breaker.record_success()
-                self._backoff.reset()
+        async def _close():
+            if self._ws:
+                await self._ws.close()
+                self._ws = None
 
-                await self._mempool_loop(self._ws)
+        def _set_connected(value: bool) -> None:
+            self.connected = value
 
-            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-                logger.warning(f"Ogmios [mempool]: connection lost: {e}")
-                self.connected = False
-                self._circuit_breaker.record_failure()
-                await self._backoff.wait()
-            except Exception as e:
-                logger.error(f"Ogmios [mempool]: unexpected error: {e}")
-                self.connected = False
-                self._circuit_breaker.record_failure()
-                await self._backoff.wait()
-            finally:
-                if self._ws:
-                    await self._ws.close()
-                    self._ws = None
+        await run_with_reconnect(
+            name="mempool",
+            is_running=lambda: self._running,
+            breaker=self._circuit_breaker,
+            backoff=self._backoff,
+            connect=_connect,
+            run_session=self._mempool_loop,
+            on_connected=_set_connected,
+            close=_close,
+            poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+        )
 
     async def _record_mempool_collisions(
         self, tx_id: str, tx_data: dict, now: datetime,
