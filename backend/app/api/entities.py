@@ -3,15 +3,15 @@
 import json
 import logging
 import re
-from typing import Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Request, Security, Query
+from typing import Dict, Any
+from fastapi import APIRouter, HTTPException, Request, Security
 from pydantic import BaseModel
 
 from app import audit
+from app.api._params import NetworkParam
 from app.db import postgres
 from app.auth import verify_api_key
 from app.config import settings
-from app.models.transaction import NetworkType
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +51,7 @@ class EntityStateResponse(BaseModel):
 async def get_entity_state(
     entity_type: str,
     entity_id: str,
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     api_key: str = Security(verify_api_key),
 ):
     """Get entity state by type and ID"""
@@ -83,10 +80,7 @@ async def set_entity_state(
     entity_type: str,
     entity_id: str,
     state: Dict[str, Any],
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     api_key: str = Security(verify_api_key),
 ):
     """Set or update entity state.

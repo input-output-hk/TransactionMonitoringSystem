@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.db import clickhouse
 from app.config import settings
 from app.auth import verify_api_key
-from app.models.transaction import NetworkType
+from app.api._params import NetworkParam
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +48,34 @@ class TransactionDetailResponse(TransactionResponse):
     metadata: Optional[Dict[str, Any]] = None
 
 
+def _row_to_transaction(row: Any) -> TransactionResponse:
+    """Map a positional transactions-table row onto a TransactionResponse.
+
+    Single-sourced so the list and detail handlers share one field-to-index
+    contract: a reordered SELECT column would otherwise silently misalign one
+    handler with no type error. The detail handler reuses this via ``model_dump()``
+    and adds inputs/outputs/metadata.
+    """
+    return TransactionResponse(
+        tx_hash=row[0],
+        slot=row[1],
+        block_height=row[2],
+        block_hash=row[3],
+        block_index=row[4],
+        timestamp=row[5],
+        fee=row[6],
+        deposit=row[7],
+        input_count=row[8],
+        output_count=row[9],
+        total_input_value=row[10],
+        total_output_value=row[11],
+        addresses=row[12] if row[12] else [],
+    )
+
+
 @router.get("/", response_model=List[TransactionResponse])
 async def get_transactions(
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     limit: int = Query(100, ge=1, le=200, description="Maximum number of transactions to return"),
     before: Optional[datetime] = Query(
         None,
@@ -111,24 +133,7 @@ async def get_transactions(
 
         results = await clickhouse.execute_query_async(query, params)
 
-        transactions = []
-        for row in results:
-            transactions.append(TransactionResponse(
-                tx_hash=row[0],
-                slot=row[1],
-                block_height=row[2],
-                block_hash=row[3],
-                block_index=row[4],
-                timestamp=row[5],
-                fee=row[6],
-                deposit=row[7],
-                input_count=row[8],
-                output_count=row[9],
-                total_input_value=row[10],
-                total_output_value=row[11],
-                addresses=row[12] if row[12] else []
-            ))
-
+        transactions = [_row_to_transaction(row) for row in results]
         return transactions
 
     except Exception as e:
@@ -139,10 +144,7 @@ async def get_transactions(
 @router.get("/{tx_hash}", response_model=TransactionDetailResponse)
 async def get_transaction_by_hash(
     tx_hash: str,
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     api_key: str = Security(verify_api_key),
 ):
     """Get detailed transaction information by hash"""
@@ -230,22 +232,10 @@ async def get_transaction_by_hash(
                 metadata = {"raw": tx_row[13]}
 
         return TransactionDetailResponse(
-            tx_hash=tx_row[0],
-            slot=tx_row[1],
-            block_height=tx_row[2],
-            block_hash=tx_row[3],
-            block_index=tx_row[4],
-            timestamp=tx_row[5],
-            fee=tx_row[6],
-            deposit=tx_row[7],
-            input_count=tx_row[8],
-            output_count=tx_row[9],
-            total_input_value=tx_row[10],
-            total_output_value=tx_row[11],
-            addresses=tx_row[12] if tx_row[12] else [],
+            **_row_to_transaction(tx_row).model_dump(),
             inputs=inputs,
             outputs=outputs,
-            metadata=metadata
+            metadata=metadata,
         )
 
     except HTTPException:
@@ -258,10 +248,7 @@ async def get_transaction_by_hash(
 @router.get("/address/{address}", response_model=List[TransactionResponse])
 async def get_transactions_by_address(
     address: str,
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     limit: int = Query(100, ge=1, le=200),
     before: Optional[datetime] = Query(
         None,
@@ -275,10 +262,7 @@ async def get_transactions_by_address(
 
 @router.get("/blocks/recent")
 async def get_recent_blocks(
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     limit: int = Query(5, ge=1, le=50),
     api_key: str = Security(verify_api_key),
 ):
@@ -331,10 +315,7 @@ async def get_recent_blocks(
 
 @router.get("/stats/summary")
 async def get_transaction_stats(
-    network: Optional[NetworkType] = Query(
-        None,
-        description="Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to the instance's CARDANO_NETWORK setting."
-    ),
+    network: NetworkParam = None,
     start_time: Optional[datetime] = Query(None),
     end_time: Optional[datetime] = Query(None),
     api_key: str = Security(verify_api_key),
@@ -382,13 +363,7 @@ async def get_transaction_stats(
 
 @router.get("/stats/throughput")
 async def get_transaction_throughput(
-    network: Optional[NetworkType] = Query(
-        None,
-        description=(
-            "Network to query: 'mainnet', 'preprod', or 'preview'. Defaults to "
-            "the instance's CARDANO_NETWORK setting."
-        ),
-    ),
+    network: NetworkParam = None,
     window_minutes: int = Query(
         5, ge=1, le=1440,
         description="Sliding window size in minutes (default 5).",
