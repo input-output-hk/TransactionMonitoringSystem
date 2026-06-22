@@ -29,8 +29,8 @@ from sklearn.neighbors import LocalOutlierFactor
 
 from app.anomaly.detect import (
     DEFAULT_TOP_QUANTILE,
-    ISO_ESTIMATORS,
-    LOF_NEIGHBORS,
+    fit_iso,
+    lof_k,
 )
 from app.features.shape import apply_shape_features, fit_shape_features
 
@@ -129,14 +129,11 @@ def build_shape_model(
     lof_bounds = (float("nan"), float("nan"))
 
     if n >= 2 and d > 0:
-        iso_model = IsolationForest(
-            n_estimators=ISO_ESTIMATORS, random_state=random_state, contamination="auto"
-        ).fit(X)
-        iso_train = -iso_model.score_samples(X)
+        iso_model, iso_train = fit_iso(X, random_state)
         iso_threshold = float(np.quantile(iso_train, 1.0 - top_quantile))
         iso_bounds = (float(iso_train.min()), float(iso_train.max()))
 
-        k = max(2, min(LOF_NEIGHBORS, n - 1))
+        k = lof_k(n)
         lof_model = LocalOutlierFactor(n_neighbors=k, novelty=True).fit(X)
         lof_train = -lof_model.score_samples(X)
         lof_threshold = float(np.quantile(lof_train, 1.0 - top_quantile))

@@ -34,6 +34,24 @@ DEFAULT_TOP_QUANTILE = 0.05
 # model in clustering/model.py, so the batch and online detectors stay aligned).
 LOF_NEIGHBORS = 20
 ISO_ESTIMATORS = 300
+
+
+def fit_iso(X: np.ndarray, random_state: int | None) -> tuple[IsolationForest, np.ndarray]:
+    """Fit an IsolationForest on ``X`` and return ``(model, scores)`` where
+    ``scores = -model.score_samples(X)`` (higher = more anomalous). Shared by the
+    batch detector and the frozen online model so their IForest construction
+    (estimators, contamination, random_state) cannot drift apart."""
+    model = IsolationForest(
+        n_estimators=ISO_ESTIMATORS, random_state=random_state, contamination="auto"
+    ).fit(X)
+    return model, -model.score_samples(X)
+
+
+def lof_k(n: int, lof_neighbors: int = LOF_NEIGHBORS) -> int:
+    """LOF ``n_neighbors`` clamped to ``[2, n - 1]`` so it stays valid for a sample
+    of size ``n``. The batch detector forwards its overridable ``lof_neighbors``;
+    the online model takes the ``LOF_NEIGHBORS`` default."""
+    return max(2, min(lof_neighbors, n - 1))
 # Fallback eps when no knee is found, chosen by metric: Jaccard distances live in
 # [0, 1] while Euclidean is unbounded, so they warrant different defaults.
 _FALLBACK_EPS_PRECOMPUTED = 0.5
@@ -95,13 +113,10 @@ def detect_anomalies(
     if precomputed:
         iso = np.full(n, np.nan)
     else:
-        iso_model = IsolationForest(
-            n_estimators=ISO_ESTIMATORS, random_state=random_state, contamination="auto"
-        ).fit(ci.data)
-        iso = -iso_model.score_samples(ci.data)
+        _, iso = fit_iso(ci.data, random_state)
         methods.append("isolation_forest")
 
-    k = max(2, min(lof_neighbors, n - 1))
+    k = lof_k(n, lof_neighbors)
     lof_model = LocalOutlierFactor(
         n_neighbors=k, metric="precomputed" if precomputed else "minkowski"
     )
