@@ -27,6 +27,50 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# The nine per-class scorer columns, in tx_class_scores table order. Shared by
+# the score-query builders (filter validation, the stats aggregation, and the
+# full-vector projection below) so the class list stays defined in one place.
+_CLASS_COLS = (
+    "token_dust", "large_value", "large_datum", "multiple_sat",
+    "front_running", "sandwich", "circular", "fake_token", "phishing",
+)
+
+# The full tx_class_scores column vector in table order. The SELECT projection
+# and the row-mapping key tuples are both derived from this single list, so the
+# writer and every reader stay column-aligned (a reordered or added column can no
+# longer silently mis-map a row). The INSERT VALUES builder stays hand-ordered
+# because it applies per-column defaults / json.dumps, not a uniform projection.
+_SCORE_COLS = (
+    "tx_hash", "network",
+    *_CLASS_COLS,
+    "max_score", "max_class", "risk_band", "sub_scores", "evidence",
+    "corroboration_count", "corroborating_classes",
+    "analysis_version", "analyzed_at",
+)
+_SCORE_SELECT = ", ".join(_SCORE_COLS)
+
+# Suppress admin-archived (network, tx_hash) pairs. ClickHouse 26+ rejects FINAL
+# on a table inside a JOIN, so this is a scalar-subquery anti-join. All score
+# readers (list, count, stats, timeseries) MUST apply the identical predicate or
+# their counts desync.
+_ARCHIVE_ANTI_JOIN = (
+    "(network, tx_hash) NOT IN ("
+    "SELECT network, tx_hash FROM archived_alerts FINAL)"
+)
+
+
+def _decode_score_json(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Decode the sub_scores/evidence JSON columns of a score row in place,
+    swallowing a malformed payload to {} so one bad row can't break a list
+    response. Returns the same dict for convenience."""
+    for json_key in ("sub_scores", "evidence"):
+        if isinstance(d.get(json_key), str):
+            try:
+                d[json_key] = json.loads(d[json_key])
+            except (json.JSONDecodeError, TypeError):
+                d[json_key] = {}
+    return d
+
 
 def _client():
     """The facade's per-thread Client, resolved late (monkeypatch-safe)."""
@@ -45,14 +89,9 @@ def insert_class_scores(results: List[Dict[str, Any]]):
     if not results:
         return
     _client().execute(
-        """
+        f"""
         INSERT INTO tx_class_scores (
-            tx_hash, network,
-            token_dust, large_value, large_datum, multiple_sat,
-            front_running, sandwich, circular, fake_token, phishing,
-            max_score, max_class, risk_band, sub_scores, evidence,
-            corroboration_count, corroborating_classes,
-            analysis_version, analyzed_at
+            {_SCORE_SELECT}
         ) VALUES
         """,
         [
@@ -77,13 +116,8 @@ def insert_class_scores(results: List[Dict[str, Any]]):
 def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
     """Return the latest multi-class score vector for a single transaction."""
     rows = _client().execute(
-        """
-        SELECT tx_hash, network,
-               token_dust, large_value, large_datum, multiple_sat,
-               front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores, evidence,
-               corroboration_count, corroborating_classes,
-               analysis_version, analyzed_at
+        f"""
+        SELECT {_SCORE_SELECT}
         FROM tx_class_scores FINAL
         WHERE tx_hash = %(tx_hash)s
         LIMIT 1
@@ -92,22 +126,7 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
     )
     if not rows:
         return None
-    keys = (
-        "tx_hash", "network",
-        "token_dust", "large_value", "large_datum", "multiple_sat",
-        "front_running", "sandwich", "circular", "fake_token", "phishing",
-        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
-        "corroboration_count", "corroborating_classes",
-        "analysis_version", "analyzed_at",
-    )
-    result = dict(zip(keys, rows[0]))
-    for json_key in ("sub_scores", "evidence"):
-        if isinstance(result.get(json_key), str):
-            try:
-                result[json_key] = json.loads(result[json_key])
-            except (json.JSONDecodeError, TypeError):
-                result[json_key] = {}
-    return result
+    return _decode_score_json(dict(zip(_SCORE_COLS, rows[0])))
 
 
 
@@ -177,14 +196,6 @@ def query_multiple_sat_extraction_percentiles(
 
 
 # The nine attack-class score columns on tx_class_scores, in canonical order.
-# Shared by the score-query builders below (filter validation, score_keys, and
-# the per-class stats aggregation) so the list stays defined in one place.
-_CLASS_COLS = (
-    "token_dust", "large_value", "large_datum", "multiple_sat",
-    "front_running", "sandwich", "circular", "fake_token", "phishing",
-)
-
-
 def _score_filter_conditions(
     network: str,
     risk_band: Optional[List[str]],
@@ -241,14 +252,7 @@ def _score_filter_conditions(
         conditions.append("analyzed_at < %(analyzed_to)s")
         params["analyzed_to"] = analyzed_to
     if not include_archived:
-        # Anti-join via scalar subquery against currently-archived
-        # (network, tx_hash) pairs. ClickHouse 26+ disallows FINAL on a table
-        # inside a JOIN, so a subquery is used instead of a join.
-        conditions.append(
-            "(network, tx_hash) NOT IN ("
-            "SELECT network, tx_hash FROM archived_alerts FINAL"
-            ")"
-        )
+        conditions.append(_ARCHIVE_ANTI_JOIN)
     return conditions, params
 
 
@@ -295,12 +299,7 @@ def get_class_scores_list(
     # ClickHouse 26+ does not allow FINAL on tables inside JOINs.
     rows = _client().execute(
         f"""
-        SELECT tx_hash, network,
-               token_dust, large_value, large_datum, multiple_sat,
-               front_running, sandwich, circular, fake_token, phishing,
-               max_score, max_class, risk_band, sub_scores, evidence,
-               corroboration_count, corroborating_classes,
-               analysis_version, analyzed_at
+        SELECT {_SCORE_SELECT}
         FROM tx_class_scores FINAL
         WHERE {where}
         ORDER BY {order_clause}
@@ -308,13 +307,7 @@ def get_class_scores_list(
         """,
         params,
     )
-    score_keys = (
-        "tx_hash", "network",
-        *_CLASS_COLS,
-        "max_score", "max_class", "risk_band", "sub_scores", "evidence",
-        "corroboration_count", "corroborating_classes",
-        "analysis_version", "analyzed_at",
-    )
+    score_keys = _SCORE_COLS
     # Batch-fetch fee/output_count for matched tx_hashes
     tx_hashes = [r[0] for r in rows]
     tx_details: Dict[str, Dict[str, Any]] = {}
@@ -331,16 +324,10 @@ def get_class_scores_list(
             tx_details[dr[0]] = {"fee": dr[1], "output_count": dr[2]}
     results = []
     for row in rows:
-        d = dict(zip(score_keys, row))
+        d = _decode_score_json(dict(zip(score_keys, row)))
         detail = tx_details.get(d["tx_hash"], {})
         d["fee"] = detail.get("fee")
         d["output_count"] = detail.get("output_count")
-        for json_key in ("sub_scores", "evidence"):
-            if isinstance(d.get(json_key), str):
-                try:
-                    d[json_key] = json.loads(d[json_key])
-                except (json.JSONDecodeError, TypeError):
-                    d[json_key] = {}
         results.append(d)
     return results
 
@@ -468,11 +455,7 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
             f"maxIf({col}, {col} >= 0) AS {col}_max"
         )
     agg_sql = ", ".join(agg_parts)
-    archive_clause = (
-        " AND (network, tx_hash) NOT IN ("
-        "SELECT network, tx_hash FROM archived_alerts FINAL)"
-        if not include_archived else ""
-    )
+    archive_clause = (" AND " + _ARCHIVE_ANTI_JOIN) if not include_archived else ""
     rows = _client().execute(
         f"""
         SELECT count() AS total,
@@ -612,11 +595,7 @@ def get_alert_timeseries(
     the JOIN and inflate the daily count. A tx_hash maps to exactly one
     block, so distinct-by-hash is the correct unit.
     """
-    archive_clause = (
-        " AND (network, tx_hash) NOT IN ("
-        "SELECT network, tx_hash FROM archived_alerts FINAL)"
-        if not include_archived else ""
-    )
+    archive_clause = (" AND " + _ARCHIVE_ANTI_JOIN) if not include_archived else ""
     rows = _client().execute(
         f"""
         SELECT toDate(t.timestamp) AS day, count(DISTINCT s.tx_hash) AS cnt
