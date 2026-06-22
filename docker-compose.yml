@@ -227,6 +227,73 @@ services:
     profiles:
       - app  # Use 'docker-compose --profile app up' to include this service
 
+  # Optional clustering sidecar (the TMS-clustering engine running as
+  # CHAIN_SOURCE=host_ch). Activated only with `--profile clustering`; the host
+  # app reads its verdicts (contract_anomaly) cross-database when CLUSTERING_ENABLED
+  # is set, and ignores them otherwise — so the module is fully opt-in.
+  #
+  # It shares THIS ClickHouse server: engine-owned state lives in tms_clustering,
+  # raw tx/feature reads come from tms_analytics (HostBackedRepo), so no chain
+  # data is duplicated and no Blockfrost is used. `app.cli migrate` creates the
+  # tms_clustering schema idempotently on boot (the `tms` token is rewritten to
+  # tms_clustering). Build context is the sibling TMS-clustering checkout.
+  clustering:
+    build:
+      context: ../TMS-clustering/backend
+      target: ${CLUSTERING_BUILD_TARGET:-runtime}
+    container_name: tms-clustering-sidecar
+    env_file:
+      - .env
+      - .env.${TMS_ENV:-preprod}
+    environment:
+      # Source/topology: read host data, write engine state to the sibling DB.
+      - CHAIN_SOURCE=host_ch
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLUSTERING_DB:-tms_clustering}
+      - HOST_CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
+      # CARDANO_NETWORK comes from .env.${TMS_ENV}; one sidecar per network keeps
+      # the engine single-network (no network column on its tables).
+      # Scale / feed knobs (see engine Settings). Window bounds the fit memory.
+      - CLUSTERING_WINDOW_TXS=${CLUSTERING_WINDOW_TXS:-50000}
+      - CLUSTERING_DEFAULT_FEATURE_SET=${CLUSTERING_DEFAULT_FEATURE_SET:-shape}
+      - MAX_GRAPH_TXS=${MAX_GRAPH_TXS:-5000}
+      - FEED_ENABLED=${FEED_ENABLED:-true}
+      - FEED_POLL_INTERVAL_SECONDS=${FEED_POLL_INTERVAL_SECONDS:-30}
+      - FEED_MAX_CONTRACTS_PER_TICK=${FEED_MAX_CONTRACTS_PER_TICK:-4}
+      - MODEL_SIGNING_KEYS=${MODEL_SIGNING_KEYS:-}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+    # Re-fits hold the windowed feature matrix + IsolationForest(300) + the
+    # O(n^2) silhouette in memory; bound it so a large window degrades instead of
+    # OOM-competing with ClickHouse (4g) + app (2g) + postgres (1g) on one box.
+    mem_limit: ${CLUSTERING_MEM_LIMIT:-3g}
+    # Create/upgrade the tms_clustering schema, then serve + run the feed.
+    command: ["sh", "-c", "python -m app.cli migrate && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"]
+    volumes:
+      # Migration source for `app.cli migrate` (the engine's init SQL).
+      - ../TMS-clustering/clickhouse/init:/init:ro
+    ports:
+      # Loopback only; the host app reaches it in-network for the /api/clustering
+      # proxy. Exposed for debugging/observability.
+      - "127.0.0.1:${CLUSTERING_PORT:-8010}:8000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - tms-network
+    profiles:
+      - clustering  # `docker compose --profile clustering up` to include it
+
 volumes:
   postgres_data:
     driver: local

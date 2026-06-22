@@ -7,9 +7,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
+from app.analysis import contract_anomaly as ca_projection
+from app.analysis.contract_anomaly import corroboration_threshold
+from app.analysis.normalise import score_to_band
 from app.auth import verify_api_key
 from app.config import settings
-from app.db import archive_queries, clickhouse
+from app.db import archive_queries, clickhouse, clustering_queries
 from app.models.transaction import ClassScoreResult, NetworkType, RiskBand
 from app.utils.datetime_utils import format_iso_utc
 
@@ -21,6 +24,52 @@ _CLASS_NAMES = [
     "token_dust", "large_value", "large_datum", "multiple_sat",
     "front_running", "sandwich", "circular", "fake_token", "phishing",
 ]
+
+# The synthetic class merged in at read time from the clustering sidecar. It is
+# NOT in _CLASS_NAMES (which mirrors the nine hardcoded tx_class_scores columns)
+# so the per-tx write path stays untouched; it is injected after hydration.
+_CONTRACT_ANOMALY = "contract_anomaly"
+
+
+def _merge_contract_anomaly(
+    result: ClassScoreResult, rows: List[Dict[str, Any]],
+) -> None:
+    """Fold the clustering sidecar's verdict(s) for a tx into a hydrated result.
+
+    ``rows`` are the raw per-(watched-contract) verdict rows; this resolves them
+    to the highest-severity one (host-scale score computed from the projection
+    config) and merges it additively. Recall-first: it only ever RAISES
+    max_score / risk_band via max(...); it never lowers an existing class score
+    and never mutates the stored, server-filterable corroboration_count (the
+    contract_anomaly corroboration signal rides on its own boolean field).
+    Mutates ``result`` in place; a no-op when ``rows`` is empty.
+    """
+    resolved = ca_projection.resolve(rows)
+    if resolved is None:
+        return
+    score = float(resolved["score"])
+    result.scores[_CONTRACT_ANOMALY] = score
+    result.sub_scores[_CONTRACT_ANOMALY] = {
+        "consensus": float(resolved.get("consensus") or 0.0),
+        "votes": int(resolved.get("votes", 0) or 0),
+        "cluster_id": int(resolved.get("cluster_id", -1)),
+        "verdict": resolved.get("verdict", ""),
+    }
+    evidence = resolved.get("evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    result.evidence[_CONTRACT_ANOMALY] = {
+        **evidence,
+        "target": resolved.get("target", ""),
+        "model_id": resolved.get("model_id", ""),
+        "feature_set": resolved.get("feature_set", ""),
+    }
+    if score > result.max_score:
+        result.max_score = score
+        result.max_class = _CONTRACT_ANOMALY
+        result.risk_band = RiskBand(score_to_band(score))
+    result.contract_anomaly_corroborates = score >= corroboration_threshold()
+    result.contract_anomaly_scored_at = resolved.get("scored_at")
 
 
 def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
@@ -84,6 +133,16 @@ async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
     except Exception as e:
         # Archive enrichment is best-effort; never fail the main fetch.
         logger.warning(f"Archive enrichment failed for {tx_hash}: {e}")
+    if settings.CLUSTERING_ENABLED:
+        try:
+            ca = await clustering_queries.get_contract_anomaly_async(
+                row["network"], row["tx_hash"],
+            )
+            if ca:
+                _merge_contract_anomaly(result, ca)
+        except Exception as e:
+            # Read-time merge is best-effort; never fail the main fetch.
+            logger.warning(f"contract_anomaly merge failed for {tx_hash}: {e}")
     return result
 
 
@@ -156,10 +215,27 @@ async def list_analysis_results(
             analyzed_to=analyzed_to,
             min_corroboration=min_corroboration,
         )
+        data = [_row_to_class_score(r) for r in rows]
+        if settings.CLUSTERING_ENABLED and data:
+            # Batch-merge sidecar verdicts into the page, mirroring the
+            # fee/output_count batch-fetch pattern. Server-side filter/sort on
+            # the synthetic class is intentionally out of scope for now (the
+            # page is still ordered by the stored max_score); the merge only
+            # enriches each row's payload. Best-effort: never fail the list.
+            try:
+                ca_by_hash = await clustering_queries.get_contract_anomaly_batch_async(
+                    query_network, [d.tx_hash for d in data],
+                )
+                for d in data:
+                    ca = ca_by_hash.get(d.tx_hash)
+                    if ca:
+                        _merge_contract_anomaly(d, ca)
+            except Exception as e:
+                logger.warning(f"contract_anomaly batch merge failed: {e}")
         return {
             "count": len(rows),
             "total": total,
-            "data": [_row_to_class_score(r) for r in rows],
+            "data": data,
         }
     except Exception as e:
         logger.error(f"Error listing results: {e}")

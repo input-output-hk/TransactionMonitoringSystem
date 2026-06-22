@@ -516,6 +516,17 @@ def create_all(client: Client) -> None:
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1"
     )
 
+    # Serialized (CBOR) transaction byte size, consumed as a shape feature by the
+    # optional clustering sidecar's HostBackedRepo. Additive and default-0 (a
+    # near-zero permanent cost), so it is unconditional rather than flag-gated:
+    # that avoids the migration-vs-writer ordering hazard a gated column creates.
+    # The ingester only populates it when the Ogmios chain-sync request carries
+    # CBOR (includeCbor); without it the column stays 0 and the sidecar's size
+    # feature is a constant (RobustScaler-collapsed, degraded not broken).
+    client.execute(
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tx_size_bytes UInt32 DEFAULT 0"
+    )
+
     # Swap the legacy SELECT * projection for the narrowed v2 (no-op once
     # done). Must run AFTER the column migrations above: the v2 projection
     # SELECT references the network column, so on a pre-network-column
