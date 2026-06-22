@@ -412,6 +412,47 @@ async def delete_score_rows_async(network: str, hashes: List[str]) -> None:
     await _in_executor(delete_score_rows, network, hashes)
 
 
+def delete_clustering_rows(network: str, hashes: List[str]) -> None:
+    """Purge the clustering sidecar's per-tx state for rolled-back transactions.
+
+    On a rollback the sidecar's sibling-database tables would otherwise keep
+    GHOST verdicts for transactions no longer on-chain: the read-merge would
+    surface a contract_anomaly for a vanished tx, and the feed (which discovers
+    work as host-population MINUS already-classified) would never re-score a
+    re-confirmed tx. Deleting both rows fixes both: the verdict disappears, and
+    a re-confirmed tx becomes "unclassified" again so the feed re-scores it (the
+    cursor rewind for the NOT-IN-classifications discovery). Cross-database on
+    the same ClickHouse server; a no-op unless the clustering module is enabled.
+
+    ``tx_contract_anomaly`` carries ``network`` (one host, many networks);
+    ``tx_classifications`` does not (the sidecar is single-network), so it is
+    purged by tx_hash alone — correct because every row belongs to this network.
+    """
+    if not hashes or not settings.CLUSTERING_ENABLED:
+        return
+    db = settings.CLUSTERING_DB
+    client = _get_client()
+    try:
+        client.execute(
+            f"DELETE FROM {db}.tx_contract_anomaly "
+            "WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+            {"network": network, "hashes": hashes},
+        )
+        client.execute(
+            f"DELETE FROM {db}.tx_classifications WHERE tx_hash IN %(hashes)s",
+            {"hashes": hashes},
+        )
+    except Exception as e:  # noqa: BLE001 - sidecar tables may be absent
+        # The sidecar may never have run (database/table absent); a rollback
+        # must not crash chain sync over an optional module's tables.
+        logger.warning("clustering rollback purge skipped: %s", e)
+
+
+async def delete_clustering_rows_async(network: str, hashes: List[str]) -> None:
+    """Async wrapper for delete_clustering_rows (runs on the CH executor)."""
+    await _in_executor(delete_clustering_rows, network, hashes)
+
+
 def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[str, Any]]:
     """Resolve input values and unique source addresses for a batch of transactions.
 
