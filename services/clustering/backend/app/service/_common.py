@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from app.clustering.evaluate import MIN_POINTS
 from app.config import get_settings
 from app.features import build_features
 from app.ingest.ingester import IngestResult, ProgressFn
@@ -67,11 +68,18 @@ def _safe_error(exc: Exception) -> str:
 
 
 # process_contract tunables.
-_MIN_TXS_FOR_ANALYSIS = 3  # evaluate() needs >= 3 points; below this we skip cluster/anomaly
+_MIN_TXS_FOR_ANALYSIS = MIN_POINTS  # evaluate()'s own floor; below it we skip cluster/anomaly
 _FALLBACK_EPS = 0.5  # used when neither the grid recommendation nor the k-distance knee is available
 _FALLBACK_MIN_SAMPLES = 4  # heuristic floor when the grid has no recommendation
 _MAX_ERROR_DETAIL = 500  # cap the error string persisted to the jobs table
 _CLASSIFY_BATCH = 1000  # online-score chunk size (bounds the IN(...) array + matrix)
+
+
+def target_in_jobs(jobs: list[dict[str, Any]], target: str) -> bool:
+    """Whether ``target`` has a non-terminal job in the already-fetched ``jobs``
+    list. Takes the list (not the repo) so callers fetch nonterminal_jobs() once
+    and the busy check reads the same across the API and the feed scheduler."""
+    return any(j["target"] == target for j in jobs)
 
 
 def _recommended_params(ev: dict[str, Any]) -> tuple[float, int]:

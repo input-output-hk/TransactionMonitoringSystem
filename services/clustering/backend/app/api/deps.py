@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import Depends, Header, HTTPException
 
 from app.config import get_settings
+from app.service._common import target_in_jobs
 from app.storage.clickhouse import ClickHouseRepo
 from app.storage.protocol import Repo
 
@@ -57,7 +58,7 @@ def reject_if_target_busy(repo: Repo, target: str) -> None:
     in-flight cap is reached. Call inside ``job_manager.enqueue_lock`` so the
     check and the subsequent create_job are atomic across request threads."""
     inflight = repo.nonterminal_jobs()
-    if any(j["target"] == target for j in inflight):
+    if target_in_jobs(inflight, target):
         raise HTTPException(status_code=409, detail=f"a job for {target} is already running")
     if len(inflight) >= get_settings().max_inflight_jobs:
         raise HTTPException(status_code=429, detail="too many jobs in progress; try again later")

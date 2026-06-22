@@ -4,7 +4,6 @@ the busy-check and job creation are atomic across request threads."""
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -22,8 +21,10 @@ from app.api.schemas import (
     TargetOut,
 )
 from app.contracts import classify_target, normalize_target
+from app.ids import new_id
 from app.registry import lookup_label, script_hash_for
 from app.service import latest_interactions_with_verdicts
+from app.service._common import target_in_jobs
 from app.storage.protocol import Repo
 
 router = APIRouter(tags=["contracts"])
@@ -70,7 +71,7 @@ def create_contract(
     manager = request.app.state.job_manager
     with manager.enqueue_lock:  # atomic guard-then-create across request threads
         reject_if_target_busy(repo, target)
-        job_id = "job-" + uuid.uuid4().hex[:12]
+        job_id = new_id("job")
         # Keep an existing custom name when re-adding without one — the pending row
         # we write here is what the pipeline reads back as its label preset, so an
         # empty label would otherwise clobber a previously-set name.
@@ -125,7 +126,7 @@ def delete_contract(target: str, request: Request, repo: Repo = RepoDep) -> dict
         raise HTTPException(status_code=404, detail=f"contract {target} not found")
     manager = request.app.state.job_manager
     with manager.enqueue_lock:
-        if any(j["target"] == target for j in repo.nonterminal_jobs()):
+        if target_in_jobs(repo.nonterminal_jobs(), target):
             raise HTTPException(
                 status_code=409,
                 detail=f"a job for {target} is running; stop or wait for it before deleting",
@@ -147,7 +148,7 @@ def classify_new_contract(target: str, request: Request, repo: Repo = RepoDep) -
     manager = request.app.state.job_manager
     with manager.enqueue_lock:  # atomic guard-then-create across request threads
         reject_if_target_busy(repo, target)
-        job_id = "job-" + uuid.uuid4().hex[:12]
+        job_id = new_id("job")
         repo.create_job(job_id, target, contract["target_type"], 0, 0, kind="classify")
         manager.enqueue(job_id)
     return {"job_id": job_id, "target": target, "kind": "classify"}
