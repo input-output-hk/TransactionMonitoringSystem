@@ -293,18 +293,6 @@ def _compute_lovelace_flow(
     return value_in, value_out
 
 
-def _compute_net_value_out(
-    inputs: List[Dict], outputs: List[Dict], script_key: str,
-) -> int:
-    """Net lovelace extraction: ``max(0, in - out)`` over the script.
-
-    Kept as a thin wrapper over :func:`_compute_lovelace_flow` so existing
-    call sites (and tests) don't have to change.
-    """
-    value_in, value_out = _compute_lovelace_flow(inputs, outputs, script_key)
-    return max(0, value_in - value_out)
-
-
 def _compute_n_assets_out(
     inputs: List[Dict], outputs: List[Dict], script_key: str,
 ) -> int:

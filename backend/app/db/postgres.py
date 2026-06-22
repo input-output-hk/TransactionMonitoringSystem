@@ -751,18 +751,3 @@ async def update_collision_outcome(confirmed_tx_hash: str, network: str):
               AND (tx_a = $1 OR tx_b = $1)
               AND outcome = 'BOTH_PENDING'
         """, confirmed_tx_hash, network)
-
-
-async def count_collision_wins(address: str, network: str) -> int:
-    """Count how many collisions an address cluster has won (for recurrence scoring)."""
-    async with get_connection() as conn:
-        row = await conn.fetchrow("""
-            SELECT COUNT(*) AS cnt
-            FROM mempool_collisions
-            WHERE network = $1
-              AND (
-                  (outcome = 'TX_A_CONFIRMED' AND tx_a_first_input_addr = $2)
-                  OR (outcome = 'TX_B_CONFIRMED' AND tx_b_first_input_addr = $2)
-              )
-        """, network, address)
-        return row["cnt"] if row else 0

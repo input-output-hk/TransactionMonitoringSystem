@@ -453,67 +453,6 @@ async def delete_clustering_rows_async(network: str, hashes: List[str]) -> None:
     await _in_executor(delete_clustering_rows, network, hashes)
 
 
-def get_input_resolution(tx_hashes: List[str], network: str) -> Dict[str, Dict[str, Any]]:
-    """Resolve input values and unique source addresses for a batch of transactions.
-
-    Joins transaction_inputs against transaction_outputs on (input_tx_hash, input_index_in_tx).
-    Only consumed inputs are considered (non-collateral, non-reference,
-    non-attempted: a failed tx's regular inputs were never spent).
-    Returns a dict keyed by tx_hash. Missing keys = no resolvable inputs (outputs pre-date sync).
-    """
-    if not tx_hashes:
-        return {}
-    # FINAL-in-subquery on BOTH join sides: this is a sum over a join, so a
-    # not-yet-merged ReplacingMergeTree duplicate on either side would double
-    # the resolved input value feeding the scorers. (FINAL directly on a
-    # joined table is rejected by ClickHouse; subqueries are the supported
-    # form.) The inner ref-bound on to2 keeps the FINAL scan proportional to
-    # the batch, not the table.
-    # Output side has NO is_collateral filter: only failed txs persist
-    # collateral-return output rows, and those ARE real spendable UTxOs;
-    # excluding them made any tx spending one unresolvable (review finding).
-    rows = _get_client().execute(
-        """
-        SELECT
-            ti.tx_hash,
-            sum(coalesce(to2.amount, 0))  AS resolved_input_value,
-            uniqExact(to2.address)        AS unique_input_addresses
-        FROM (
-            SELECT tx_hash, network, input_tx_hash, input_index_in_tx
-            FROM transaction_inputs FINAL
-            WHERE tx_hash      IN %(tx_hashes)s
-              AND network       = %(network)s
-              AND is_collateral = 0
-              AND is_reference  = 0
-              AND is_unspent_attempt = 0
-        ) ti
-        LEFT JOIN (
-            SELECT tx_hash, network, output_index, address, amount
-            FROM transaction_outputs FINAL
-            WHERE network = %(network)s
-              AND tx_hash IN (
-                  SELECT input_tx_hash
-                  FROM transaction_inputs FINAL
-                  WHERE tx_hash      IN %(tx_hashes)s
-                    AND network       = %(network)s
-                    AND is_collateral = 0
-                    AND is_reference  = 0
-                    AND is_unspent_attempt = 0
-              )
-        ) to2
-            ON  ti.input_tx_hash     = to2.tx_hash
-            AND ti.input_index_in_tx = to2.output_index
-            AND ti.network           = to2.network
-        GROUP BY ti.tx_hash
-        """,
-        {"tx_hashes": tx_hashes, "network": network},
-    )
-    return {
-        row[0]: {"resolved_input_value": int(row[1]), "unique_input_addresses": int(row[2])}
-        for row in rows
-    }
-
-
 def get_outputs_for_refs(
     refs: List[tuple],
     network: str,
@@ -556,31 +495,6 @@ async def get_outputs_for_refs_async(
 ) -> Dict[tuple, tuple]:
     """Async wrapper for get_outputs_for_refs."""
     return await _in_executor(get_outputs_for_refs, refs, network)
-
-
-def get_address_activity(addresses: List[str], network: str) -> Dict[str, int]:
-    """Return the total observed transaction count per address.
-
-    Uses address_transactions (auto-populated by the materialized view on INSERT into transactions).
-    Returns a dict {address: tx_count}. Missing keys = address not yet seen.
-    """
-    if not addresses:
-        return {}
-    # uniqExact(tx_hash) rather than count(): the MV fires on every INSERT
-    # into transactions, so a replayed block produces duplicate rows until
-    # the ReplacingMergeTree merge runs; counting distinct tx hashes is
-    # correct in both states and cheaper than FINAL here.
-    rows = _get_client().execute(
-        """
-        SELECT address, uniqExact(tx_hash) AS tx_count
-        FROM address_transactions
-        WHERE network  = %(network)s
-          AND address IN %(addresses)s
-        GROUP BY address
-        """,
-        {"addresses": addresses, "network": network},
-    )
-    return {row[0]: int(row[1]) for row in rows}
 
 
 def _execute_query(query: str, params: Optional[Dict] = None) -> list:

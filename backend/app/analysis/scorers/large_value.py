@@ -55,27 +55,6 @@ def _max_quantity_digits(value: Dict[str, Any]) -> int:
     return max_digits
 
 
-def _primary_policy_id(value: Dict[str, Any]) -> str:
-    """Return the policy ID of the asset with the largest quantity."""
-    best_policy = ""
-    best_qty = 0
-    for key, val in value.items():
-        if key in ("lovelace", "ada"):
-            continue
-        if isinstance(val, dict):
-            for qty in val.values():
-                q = abs(int(qty)) if qty else 0
-                if q > best_qty:
-                    best_qty = q
-                    best_policy = key
-        else:
-            q = abs(int(val)) if val else 0
-            if q > best_qty:
-                best_qty = q
-                best_policy = key
-    return best_policy
-
-
 def _primary_asset(value: Dict[str, Any]) -> Tuple[str, str, int]:
     """Return ``(policy_id, asset_name_hex, quantity)`` for the largest asset.
 
