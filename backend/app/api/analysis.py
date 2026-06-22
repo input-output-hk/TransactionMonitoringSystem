@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Security
 
 from app.analysis import contract_anomaly as ca_projection
 from app.analysis.contract_anomaly import corroboration_threshold
+from app.analysis.engine import _CLASS_NAMES
 from app.analysis.normalise import score_to_band
 from app.auth import verify_api_key
 from app.config import settings
@@ -20,10 +21,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
-_CLASS_NAMES = [
-    "token_dust", "large_value", "large_datum", "multiple_sat",
-    "front_running", "sandwich", "circular", "fake_token", "phishing",
-]
+# _CLASS_NAMES is imported from app.analysis.engine (the canonical scorer-order
+# source) so the API's class validation can't drift from the engine's order.
 
 # The synthetic class merged in at read time from the clustering sidecar. It is
 # NOT in _CLASS_NAMES (which mirrors the nine hardcoded tx_class_scores columns)
@@ -194,27 +193,22 @@ async def list_analysis_results(
         # Normalize the enum list to plain strings, passing None when the
         # caller didn't supply any band so the DB layer skips the WHERE.
         rbs = [b.value for b in risk_band] if risk_band else None
+        # Shared filter predicate: list and count MUST apply identical filters or
+        # the pagination total drifts from the rows shown. sort/limit/offset are
+        # list-only (they do not affect the count) and stay out of this dict.
+        filters = dict(
+            network=query_network,
+            risk_band=rbs,
+            attack_class=attack_class,
+            min_score=min_score,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            min_corroboration=min_corroboration,
+        )
         rows = await clickhouse.get_class_scores_list_async(
-            network=query_network,
-            risk_band=rbs,
-            attack_class=attack_class,
-            min_score=min_score,
-            sort=sort,
-            analyzed_from=analyzed_from,
-            analyzed_to=analyzed_to,
-            limit=limit,
-            offset=offset,
-            min_corroboration=min_corroboration,
+            **filters, sort=sort, limit=limit, offset=offset,
         )
-        total = await clickhouse.count_class_scores_async(
-            network=query_network,
-            risk_band=rbs,
-            attack_class=attack_class,
-            min_score=min_score,
-            analyzed_from=analyzed_from,
-            analyzed_to=analyzed_to,
-            min_corroboration=min_corroboration,
-        )
+        total = await clickhouse.count_class_scores_async(**filters)
         data = [_row_to_class_score(r) for r in rows]
         if settings.CLUSTERING_ENABLED and data:
             # Batch-merge sidecar verdicts into the page, mirroring the
