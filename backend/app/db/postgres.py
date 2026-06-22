@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 _pool: Optional[asyncpg.Pool] = None
 
 
+def _affected_rows(command_tag: str) -> int:
+    """Row count from an asyncpg command tag. asyncpg returns the SQL command tag
+    string ('UPDATE 3', 'DELETE 12') for non-SELECT statements; the affected-row
+    count is its last whitespace-separated token."""
+    return int(command_tag.split()[1])
+
+
 async def init_pool():
     """Initialize PostgreSQL connection pool"""
     global _pool
@@ -532,8 +539,7 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
               AND status        = 'PENDING'
               AND first_seen_at < NOW() - ($2 * INTERVAL '1 second')
         """, network, older_than_seconds)
-        # asyncpg returns "UPDATE N" — extract the row count
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 async def insert_audit_log(
@@ -584,7 +590,7 @@ async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
               AND status IN ('DROPPED', 'ROLLED_BACK')
               AND updated_at < NOW() - ($2 * INTERVAL '1 day')
         """, network, older_than_days)
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 async def prune_audit_logs(older_than_days: int) -> int:
@@ -599,7 +605,7 @@ async def prune_audit_logs(older_than_days: int) -> int:
             DELETE FROM audit_logs
             WHERE created_at < NOW() - ($1 * INTERVAL '1 day')
         """, older_than_days)
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
@@ -616,7 +622,7 @@ async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
             WHERE network    = $1
               AND created_at < NOW() - ($2 * INTERVAL '1 day')
         """, network, older_than_days)
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 # --- Mempool Collision Tracking (Front-Running Detection) ---
