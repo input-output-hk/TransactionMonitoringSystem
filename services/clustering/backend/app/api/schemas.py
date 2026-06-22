@@ -16,15 +16,20 @@ Verdict = Literal["malicious", "benign", "anomaly", "normal"]
 # Verdict a user may explicitly apply to a whole cluster.
 ClusterVerdict = Literal["malicious", "benign"]
 
+# Length caps for user-supplied free text: a cluster/tx note and a contract
+# display label.
+MAX_NOTE_LEN = 240
+MAX_LABEL_LEN = 120
+
 
 class ClusterLabelRequest(BaseModel):
     verdict: ClusterVerdict
-    note: str = Field(default="", max_length=240)
+    note: str = Field(default="", max_length=MAX_NOTE_LEN)
 
 
 class TxLabelRequest(BaseModel):
     verdict: ClusterVerdict
-    note: str = Field(default="", max_length=240)
+    note: str = Field(default="", max_length=MAX_NOTE_LEN)
 
 
 class ClusterRequest(BaseModel):
@@ -54,11 +59,11 @@ class ContractRequest(BaseModel):
     reprocess: bool = False
     # Optional user-supplied display name; takes precedence over the registry
     # label and persists across reprocess. Empty → fall back to the registry.
-    label: str = Field(default="", max_length=120)
+    label: str = Field(default="", max_length=MAX_LABEL_LEN)
 
 
 class RenameRequest(BaseModel):
-    label: str = Field(default="", max_length=120)
+    label: str = Field(default="", max_length=MAX_LABEL_LEN)
 
 
 class TargetOut(BaseModel):

@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import Any
 
 from app.config import Settings
+from app.ids import new_id
 from app.jobs import JobManager, RepoFactory
+from app.service._common import target_in_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +70,9 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
             # Serialize the read-check-create-enqueue against the API's own
             # enqueue path so two writers can't both pass the busy guard.
             with manager.enqueue_lock:
-                if any(j["target"] == target for j in repo.nonterminal_jobs()):
+                if target_in_jobs(repo.nonterminal_jobs(), target):
                     continue
-                job_id = "job-" + uuid.uuid4().hex[:12]
+                job_id = new_id("job")
                 repo.create_job(
                     job_id, target, contract.get("target_type", "address"),
                     0, reprocess, kind=kind,

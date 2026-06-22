@@ -26,6 +26,10 @@ from app.features.shape import apply_shape_features
 # Below this robust-z (IQR units) a feature is not "standing out". RobustScaler
 # scales by the IQR, so |z| >= 2 sits well outside the central 50%.
 _Z_THRESHOLD = 2.0
+# Magnitude (robust z-units) at which a deviation is described as "far" vs "well"
+# above/below typical in the human-readable explanation.
+_BAND_FAR_Z = 4.0
+_BAND_WELL_Z = 2.75
 _TOP_K = 3
 
 # Map the raw model columns to human concepts. The two cyclical pairs collapse to
@@ -57,9 +61,9 @@ class Deviation:
 
 def _band(magnitude: float, *, high: bool) -> str:
     where = "above" if high else "below"
-    if magnitude >= 4.0:
+    if magnitude >= _BAND_FAR_Z:
         return f"far {where} typical"
-    if magnitude >= 2.75:
+    if magnitude >= _BAND_WELL_Z:
         return f"well {where} typical"
     return f"{where} typical"
 

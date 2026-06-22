@@ -13,6 +13,19 @@ from clickhouse_connect.driver.client import Client
 from app.config import Settings, get_settings
 
 
+def connect(settings: Settings) -> Client:
+    """Create a clickhouse_connect Client from settings. Single source for the
+    connection parameters so a TLS flag / timeout change lands in one place; used
+    by the repo's lazy client and the host_ch source."""
+    return clickhouse_connect.get_client(
+        host=settings.clickhouse_host,
+        port=settings.clickhouse_http_port,
+        username=settings.clickhouse_user,
+        password=settings.clickhouse_password,
+        database=settings.clickhouse_db,
+    )
+
+
 def _row_to_dict(
     keys: list[str],
     row: Sequence[Any],
@@ -58,13 +71,7 @@ class _RepoBase:
     @property
     def client(self) -> Client:
         if self._client is None:
-            self._client = clickhouse_connect.get_client(
-                host=self._settings.clickhouse_host,
-                port=self._settings.clickhouse_http_port,
-                username=self._settings.clickhouse_user,
-                password=self._settings.clickhouse_password,
-                database=self._settings.clickhouse_db,
-            )
+            self._client = connect(self._settings)
         return self._client
 
     def ping(self) -> bool:

@@ -9,7 +9,6 @@ docs/online-classification-design.md. Shape feature set only for now.
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any
 
 from app.clustering.model import (
@@ -20,6 +19,7 @@ from app.clustering.model import (
     serialize_model,
 )
 from app.config import get_settings
+from app.ids import new_id
 from app.ingest.ingester import ProgressFn, TargetKwargs, ingest
 from app.service._common import (
     _CLASSIFY_BATCH,
@@ -80,7 +80,7 @@ def ensure_shape_model(repo: Repo, target: str) -> dict[str, Any] | None:
         eps=float(run["eps"]),
         min_samples=int(run["min_samples"]),
     )
-    model_id = "model-" + uuid.uuid4().hex[:12]
+    model_id = new_id("model")
     repo.save_cluster_model(
         {
             "model_id": model_id,

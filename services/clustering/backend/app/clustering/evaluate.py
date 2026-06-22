@@ -24,7 +24,7 @@ from app.clustering.dbscan import run_dbscan
 from app.features import ClusteringInput
 
 # Minimum points before a parameter search is meaningful (DBSCAN needs a few).
-_MIN_POINTS = 3
+MIN_POINTS = 3
 # Plotting cap: the k-distance curve is downsampled to this many points.
 _MAX_CURVE_POINTS = 1500
 # Fallback eps when the k-distance knee is undefined, and the percentile of the
@@ -60,7 +60,7 @@ def _knn_kth_distances(ci: ClusteringInput, k: int) -> np.ndarray:
 
 def k_distance(ci: ClusteringInput, k: int) -> dict[str, Any]:
     """Sorted k-distance curve + auto-detected knee (suggested eps)."""
-    if len(ci.tx_hashes) < _MIN_POINTS:
+    if len(ci.tx_hashes) < MIN_POINTS:
         return {"k": k, "distances": [], "knee_eps": None}
 
     sorted_dist = _knn_kth_distances(ci, k)
@@ -159,7 +159,7 @@ def _recommend(grid: list[dict[str, Any]], knee_eps: float, base_ms: int) -> dic
 def evaluate(ci: ClusteringInput) -> dict[str, Any]:
     n = len(ci.tx_hashes)
     n_features = int(ci.data.shape[1]) if (ci.metric != "precomputed" and ci.data.ndim == 2) else None
-    if n < _MIN_POINTS:
+    if n < MIN_POINTS:
         return {
             "feature_set": ci.feature_set,
             "metric": ci.metric,
@@ -168,7 +168,7 @@ def evaluate(ci: ClusteringInput) -> dict[str, Any]:
             "k_distance": {"k": 0, "distances": [], "knee_eps": None},
             "grid": [],
             "recommended": None,
-            "message": f"Not enough transactions to evaluate (need ≥ {_MIN_POINTS}).",
+            "message": f"Not enough transactions to evaluate (need ≥ {MIN_POINTS}).",
         }
 
     base_ms, ms_grid = _min_samples_grid(ci)

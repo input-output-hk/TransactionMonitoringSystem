@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import uuid
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,6 +10,7 @@ from sklearn.cluster import DBSCAN
 from sklearn.metrics import silhouette_score
 
 from app.features import ClusteringInput
+from app.ids import new_id
 from app.storage.protocol import Repo
 
 
@@ -59,7 +59,7 @@ def run_dbscan(ci: ClusteringInput, eps: float, min_samples: int) -> DBSCANResul
 
 
 def new_run_id(feature_set: str) -> str:
-    return f"{feature_set}-{uuid.uuid4().hex[:12]}"
+    return new_id(feature_set)
 
 
 def persist_run(

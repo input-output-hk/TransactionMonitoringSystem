@@ -23,8 +23,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-import clickhouse_connect
-
 from app.config import Settings
 from app.registry.bech32 import _decode_address_bytes
 from app.sources.base import (
@@ -36,6 +34,7 @@ from app.sources.base import (
     SourceNotFound,
     TargetMeta,
 )
+from app.storage.clickhouse.base import connect
 
 # Shelley address header high-nibble values whose PAYMENT credential is a script
 # (base-script/script, pointer-script, enterprise-script): types 1, 3, 5, 7.
@@ -64,13 +63,7 @@ class HostChainSource:
         self._client: Any = None
 
     async def __aenter__(self) -> ChainSource:
-        self._client = clickhouse_connect.get_client(
-            host=self._settings.clickhouse_host,
-            port=self._settings.clickhouse_http_port,
-            username=self._settings.clickhouse_user,
-            password=self._settings.clickhouse_password,
-            database=self._settings.clickhouse_db,
-        )
+        self._client = connect(self._settings)
         return self
 
     async def __aexit__(self, *exc: object) -> None:
