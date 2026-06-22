@@ -29,6 +29,7 @@ from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
 from app.db import postgres, raw_store
 from app.ingestion.input_enrichment import parse_resolved_utxo
+from app.ingestion.ogmios_parser import ogmios_input_ref
 from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
 from app.models.transaction import NormalizedTransaction
 
@@ -284,7 +285,7 @@ class MempoolMonitor:
         """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
         while self._running:
             if not self._circuit_breaker.can_attempt():
-                await asyncio.sleep(10)
+                await asyncio.sleep(settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS)
                 continue
 
             try:
@@ -332,9 +333,7 @@ class MempoolMonitor:
         if first_inp:
             first_input_addr = first_inp.get("address", "")
         for inp in tx_data.get("inputs", []):
-            inp_tx = inp.get("transaction", {})
-            inp_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
-            input_refs.add((inp_hash, inp.get("index", 0)))
+            input_refs.add(ogmios_input_ref(inp))
 
         if input_refs:
             # Check for collisions with existing pending txs

@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     OGMIOS_HEARTBEAT_TIMEOUT: int = 90  # pong timeout in seconds
     OGMIOS_CIRCUIT_BREAKER_THRESHOLD: int = 5  # failures before cooldown
     OGMIOS_CIRCUIT_BREAKER_COOLDOWN: int = 120  # cooldown in seconds
+    # Poll interval while the breaker is OPEN: how long run_chain_sync /
+    # MempoolMonitor.run sleep before re-checking can_attempt() during cooldown.
+    OGMIOS_CIRCUIT_OPEN_POLL_SECONDS: int = 10
+    # Chain-sync pipeline health bands (ChainSyncClient.pipeline_state): block-age
+    # thresholds for DEGRADED/DOWN, and the startup grace before a not-yet-connected
+    # pipeline counts as DEGRADED rather than OK.
+    PIPELINE_STARTUP_GRACE_SECONDS: int = 60
+    PIPELINE_BLOCK_AGE_DEGRADED_SECONDS: int = 120
+    PIPELINE_BLOCK_AGE_DOWN_SECONDS: int = 300
 
     # API Server Configuration
     API_HOST: str = "0.0.0.0"

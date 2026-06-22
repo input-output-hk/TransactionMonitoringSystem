@@ -14,6 +14,18 @@ from app.models.transaction import (
 logger = logging.getLogger(__name__)
 
 
+def ogmios_input_ref(inp: Dict[str, Any]) -> tuple[str, int]:
+    """Extract ``(tx_hash, output_index)`` from an Ogmios input reference.
+
+    Tolerates both shapes the node emits: v6 nests the source tx as
+    ``{"transaction": {"id": "<hash>"}}`` while v5 / some payloads inline it as
+    ``{"transaction": "<hash>"}``. A missing index defaults to 0.
+    """
+    inp_tx = inp.get("transaction", {})
+    tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
+    return tx_hash, inp.get("index", 0)
+
+
 def parse_ogmios_transaction(
     tx_data: Dict[str, Any],
     block_slot: Optional[int] = None,
@@ -61,9 +73,7 @@ def parse_ogmios_transaction(
     inputs = []
     spending_input_count = 0
     for inp in tx_data.get("inputs", []):
-        inp_tx = inp.get("transaction", {})
-        inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
-        inp_index = inp.get("index", 0)
+        inp_tx_hash, inp_index = ogmios_input_ref(inp)
         # Ogmios inputs don't include resolved address/value in the transaction body;
         # address and amount are only available if resolved via UTxO queries.
         inputs.append(TransactionInput(
@@ -78,11 +88,10 @@ def parse_ogmios_transaction(
 
     # Parse reference inputs
     for inp in tx_data.get("references", []):
-        inp_tx = inp.get("transaction", {})
-        inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
+        inp_tx_hash, inp_index = ogmios_input_ref(inp)
         inputs.append(TransactionInput(
             tx_hash=inp_tx_hash,
-            index=inp.get("index", 0),
+            index=inp_index,
             address="",
             amount=0,
             is_reference=True,
@@ -93,11 +102,10 @@ def parse_ogmios_transaction(
     # for a failed tx they are exactly what the ledger consumed.
     collateral_count = 0
     for inp in tx_data.get("collaterals", []):
-        inp_tx = inp.get("transaction", {})
-        inp_tx_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
+        inp_tx_hash, inp_index = ogmios_input_ref(inp)
         inputs.append(TransactionInput(
             tx_hash=inp_tx_hash,
-            index=inp.get("index", 0),
+            index=inp_index,
             address="",
             amount=0,
             is_collateral=True,
