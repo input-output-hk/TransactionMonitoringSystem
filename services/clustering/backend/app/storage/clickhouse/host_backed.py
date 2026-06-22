@@ -131,6 +131,28 @@ class HostBackedRepo(ClickHouseRepo):
             ) da USING (tx_hash)
         )"""
 
+    def _windowed_tx(self) -> str:
+        """The engine-shaped transactions derived table over the watched target's
+        windowed tx_hashes: the single composition of _tx_shaped(_hashes_expr())
+        that every windowed read (fetch_shape_features + the UI/anomaly joins) uses."""
+        return self._tx_shaped(self._hashes_expr())
+
+    def _addr_cooccurrence_sql(self, hashes_expr: str, *, order_by: str = "") -> str:
+        """DISTINCT (tx_hash, address) over the host inputs+outputs for the txs in
+        ``hashes_expr``. Shared by fetch_tx_addresses (windowed subquery, ORDER BY
+        tx_hash) and fetch_addresses_for_txs (explicit hash array, no order)."""
+        h = self._host_db
+        return f"""
+            SELECT DISTINCT toString(tx_hash) AS tx_hash, address FROM (
+                SELECT tx_hash, address FROM {h}.transaction_outputs
+                WHERE network = {{net:String}} AND tx_hash IN {hashes_expr} AND address != ''
+                UNION DISTINCT
+                SELECT tx_hash, address FROM {h}.transaction_inputs
+                WHERE network = {{net:String}} AND tx_hash IN {hashes_expr} AND address != ''
+            )
+            {order_by}
+        """
+
     _SHAPE_SELECT = """
         tx_hash, fees, size, input_count, output_count,
         total_input_lovelace, total_output_lovelace, net_lovelace,
@@ -143,7 +165,7 @@ class HostBackedRepo(ClickHouseRepo):
 
     def fetch_shape_features(self, target: str) -> pd.DataFrame:
         return self.client.query_df(
-            f"SELECT {self._SHAPE_SELECT} FROM {self._tx_shaped(self._hashes_expr())} "
+            f"SELECT {self._SHAPE_SELECT} FROM {self._windowed_tx()} "
             "ORDER BY tx_hash",
             parameters=self._scope_params(target),
         )
@@ -160,38 +182,16 @@ class HostBackedRepo(ClickHouseRepo):
         )
 
     def fetch_tx_addresses(self, target: str) -> pd.DataFrame:
-        h = self._host_db
-        he = self._hashes_expr()
         return self.client.query_df(
-            f"""
-            SELECT DISTINCT toString(tx_hash) AS tx_hash, address FROM (
-                SELECT tx_hash, address FROM {h}.transaction_outputs
-                WHERE network = {{net:String}} AND tx_hash IN {he} AND address != ''
-                UNION DISTINCT
-                SELECT tx_hash, address FROM {h}.transaction_inputs
-                WHERE network = {{net:String}} AND tx_hash IN {he} AND address != ''
-            )
-            ORDER BY tx_hash
-            """,
+            self._addr_cooccurrence_sql(self._hashes_expr(), order_by="ORDER BY tx_hash"),
             parameters=self._scope_params(target),
         )
 
     def fetch_addresses_for_txs(self, target: str, tx_hashes: Sequence[str]) -> pd.DataFrame:
         if not tx_hashes:
             return pd.DataFrame(columns=["tx_hash", "address"])
-        h = self._host_db
         return self.client.query_df(
-            f"""
-            SELECT DISTINCT toString(tx_hash) AS tx_hash, address FROM (
-                SELECT tx_hash, address FROM {h}.transaction_outputs
-                WHERE network = {{net:String}} AND tx_hash IN {{hs:Array(String)}}
-                  AND address != ''
-                UNION DISTINCT
-                SELECT tx_hash, address FROM {h}.transaction_inputs
-                WHERE network = {{net:String}} AND tx_hash IN {{hs:Array(String)}}
-                  AND address != ''
-            )
-            """,
+            self._addr_cooccurrence_sql("{hs:Array(String)}"),
             parameters={"net": self._network, "hs": list(tx_hashes)},
         )
 
@@ -231,7 +231,7 @@ class HostBackedRepo(ClickHouseRepo):
                 t.input_count AS input_count, t.output_count AS output_count,
                 t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count,
                 c.cluster_id AS online_cluster_id, c.votes AS online_votes
-            FROM {self._tx_shaped(self._hashes_expr())} t
+            FROM {self._windowed_tx()} t
             LEFT JOIN (
                 SELECT tx_hash, cluster_id, votes FROM {self._db}.tx_classifications FINAL
                 WHERE target = {{tgt:String}} AND feature_set = {{f:String}}
@@ -288,7 +288,7 @@ class HostBackedRepo(ClickHouseRepo):
                        votes, score_rank
                 FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}
             ) a
-            INNER JOIN {self._tx_shaped(self._hashes_expr())} t USING (tx_hash)
+            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
             ORDER BY a.score_rank
             LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,
@@ -314,7 +314,7 @@ class HostBackedRepo(ClickHouseRepo):
                 SELECT tx_hash, cluster_id FROM {self._db}.cluster_labels FINAL
                 WHERE run_id = {{r:String}}
             ) l
-            INNER JOIN {self._tx_shaped(self._hashes_expr())} t USING (tx_hash)
+            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
             GROUP BY cluster_id
             ORDER BY (cluster_id = -1), size DESC
             """,
@@ -340,7 +340,7 @@ class HostBackedRepo(ClickHouseRepo):
                 SELECT tx_hash FROM {self._db}.cluster_labels FINAL
                 WHERE run_id = {{r:String}} AND cluster_id = {{c:Int32}}
             ) l
-            INNER JOIN {self._tx_shaped(self._hashes_expr())} t USING (tx_hash)
+            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
             ORDER BY t.block_time DESC
             LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,
