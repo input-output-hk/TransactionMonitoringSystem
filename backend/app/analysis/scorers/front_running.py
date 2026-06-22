@@ -45,8 +45,6 @@ _MIN_RECURRENCE_WINS = int(_CFG["min_recurrence_wins"])
 _HIGH_BAND_CAP = float(_CFG["high_band_cap"])
 _DELTA_MS_DEFAULT = float(_CFG["delta_ms_default"])
 
-EPSILON = 1e-6
-
 
 def _get_collision_data(features: Dict[str, Any]) -> Optional[Dict]:
     """Extract mempool collision data from features if available.

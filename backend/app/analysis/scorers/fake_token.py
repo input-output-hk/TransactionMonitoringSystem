@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from rapidfuzz import fuzz
 
-from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.normalise import EPSILON, normalise, normalise_inverted
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -52,8 +52,6 @@ _ASCII_HOMOGLYPHS_ENABLED = bool(_CFG["ascii_homoglyphs_enabled"])
 _CRIT_CFG = _CFG["critical_assets"]
 _CRITICAL_NAMES = frozenset(_CRIT_CFG["names"])
 _CRITICALITY_MULTIPLIER = float(_CRIT_CFG["multiplier"])
-
-EPSILON = 1e-6
 
 
 # Visual-confusables table. NFKC does not fold cross-script visual

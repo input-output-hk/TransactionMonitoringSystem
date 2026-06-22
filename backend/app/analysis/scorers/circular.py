@@ -24,7 +24,7 @@ task.  Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise
+from app.analysis.normalise import EPSILON, normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -48,8 +48,6 @@ FEE_TOLERANCE_STRICT = float(_CYCLE["fee_tolerance_strict"])
 _PER_HOP_FEE = float(_CYCLE["per_hop_fee_estimate"])
 _MIN_LEN = int(_CYCLE["min_length"])
 _MAX_LEN = int(_CYCLE["max_length"])
-
-EPSILON = 1e-6
 
 
 def _get_cycle_data(features: Dict[str, Any]) -> Optional[Dict]:

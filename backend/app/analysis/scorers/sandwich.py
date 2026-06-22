@@ -23,7 +23,7 @@ built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import normalise
+from app.analysis.normalise import EPSILON, normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -41,8 +41,6 @@ _LINK = _CFG["link_scores"]
 _REASON_T = _CFG["reason_thresholds"]
 W_SLOTS = int(_CFG["window_slots"])
 _MIN_PROFIT_LOVELACE = int(_CFG["min_profit_lovelace"])
-
-EPSILON = 1e-6
 
 
 def _get_sandwich_data(features: Dict[str, Any]) -> Optional[Dict]:
