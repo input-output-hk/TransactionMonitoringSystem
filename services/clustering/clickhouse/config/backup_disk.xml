@@ -1,0 +1,8 @@
+<!-- Allow native BACKUP/RESTORE to the /backups bind mount (see
+     docker-compose.yml and scripts/backup-clickhouse.sh). File() backups are
+     online-consistent: parts are immutable, so no downtime is needed. -->
+<clickhouse>
+    <backups>
+        <allowed_path>/backups/</allowed_path>
+    </backups>
+</clickhouse>

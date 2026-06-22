@@ -1,0 +1,157 @@
+"""Connection management and the shared row-mapping helpers used by every
+repository mixin."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from typing import Any
+
+import clickhouse_connect
+from clickhouse_connect.driver.client import Client
+
+from app.config import Settings, get_settings
+
+
+def _row_to_dict(
+    keys: list[str],
+    row: Sequence[Any],
+    *,
+    int_keys: tuple[str, ...] = (),
+    float_keys: tuple[str, ...] = (),
+    nan_none_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Map a result row onto ``keys`` by position, coercing named columns:
+    ``int_keys`` → int, ``float_keys`` → float, ``nan_none_keys`` → float then
+    NaN → None (e.g. an undefined silhouette)."""
+    d = dict(zip(keys, row, strict=True))
+    for k in int_keys:
+        d[k] = int(d[k])
+    for k in float_keys:
+        d[k] = float(d[k])
+    for k in nan_none_keys:
+        v = float(d[k])
+        d[k] = None if math.isnan(v) else v
+    return d
+
+
+class _RepoBase:
+    """Client lifecycle + batched-insert primitives shared by the mixins.
+
+    Composed into ``ClickHouseRepo`` (see this package's ``__init__``); the mixins
+    call ``self.client`` / ``self._insert`` / ``self._rows_to_dicts`` which resolve
+    here via the MRO.
+    """
+
+    def __init__(self, settings: Settings | None = None, *, client: Client | None = None) -> None:
+        self._settings = settings or get_settings()
+        # Database name used to qualify every table reference. Tracks the same
+        # setting the connection uses (below), so a non-default CLICKHOUSE_DB
+        # doesn't connect to one DB and query another.
+        self._db = self._settings.clickhouse_db
+        self._client = client
+
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
+    @property
+    def client(self) -> Client:
+        if self._client is None:
+            self._client = clickhouse_connect.get_client(
+                host=self._settings.clickhouse_host,
+                port=self._settings.clickhouse_http_port,
+                username=self._settings.clickhouse_user,
+                password=self._settings.clickhouse_password,
+                database=self._settings.clickhouse_db,
+            )
+        return self._client
+
+    def ping(self) -> bool:
+        return self.client.query("SELECT 1").result_rows[0][0] == 1
+
+    # The schema the code expects of a live database. Init SQL creates it on a
+    # fresh volume; `python -m app.cli migrate` brings an existing volume up to
+    # date. Listed explicitly so the startup guard fails fast with a precise
+    # message instead of a runtime "table/column not found".
+    _EXPECTED_TABLES = (
+        "transactions", "tx_utxos", "tx_utxo_assets", "ingest_cursor",
+        "cluster_runs", "cluster_labels", "anomaly_runs", "anomaly_scores",
+        "contracts", "jobs", "tx_labels", "cluster_models", "tx_classifications",
+        "tx_contract_anomaly",
+    )
+    _EXPECTED_COLUMNS = (
+        ("ingest_cursor", "cursor"),   # 006
+        ("ingest_cursor", "source"),   # 006
+        ("jobs", "kind"),              # 005
+        ("cluster_runs", "origin"),    # 007 (retro-edited into 001 without an ALTER)
+        ("anomaly_runs", "origin"),    # 007 (retro-edited into 002 without an ALTER)
+        ("contracts", "drift_score"),  # 008
+    )
+
+    def missing_schema_objects(self) -> list[str]:
+        """Tables/columns the code needs but the live DB lacks (empty = in sync).
+        Drift happens when code is upgraded on an existing volume without running
+        ``python -m app.cli migrate`` (init SQL only runs on fresh volumes)."""
+        have_tables = {
+            r[0]
+            for r in self.client.query(
+                "SELECT name FROM system.tables WHERE database = {db:String}",
+                parameters={"db": self._db},
+            ).result_rows
+        }
+        missing = [f"table {t}" for t in self._EXPECTED_TABLES if t not in have_tables]
+        have_cols = {
+            (r[0], r[1])
+            for r in self.client.query(
+                "SELECT table, name FROM system.columns WHERE database = {db:String}",
+                parameters={"db": self._db},
+            ).result_rows
+        }
+        missing += [
+            f"column {t}.{c}"
+            for t, c in self._EXPECTED_COLUMNS
+            if t in have_tables and (t, c) not in have_cols
+        ]
+        return missing
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    # Rows per INSERT for result-table writes that can carry a whole run at once
+    # (cluster_labels / anomaly_scores on a 100k-tx contract): bounds the request
+    # body well under ClickHouse's HTTP limits without measurable overhead.
+    _INSERT_CHUNK = 10_000
+
+    def _insert(self, table: str, columns: list[str], data: list[list[Any]]) -> None:
+        """Batched insert into ``{self._db}.{table}``, chunked at ``_INSERT_CHUNK``
+        rows; a no-op when ``data`` is empty."""
+        for start in range(0, len(data), self._INSERT_CHUNK):
+            self.client.insert(
+                f"{self._db}.{table}",
+                data[start : start + self._INSERT_CHUNK],
+                column_names=columns,
+            )
+
+    def _insert_records(self, table: str, columns: list[str], records: Sequence[Any]) -> None:
+        """Insert dataclass records, projecting each onto ``columns`` by attribute."""
+        self._insert(table, columns, [[getattr(r, c) for c in columns] for r in records])
+
+    @staticmethod
+    def _rows_to_dicts(
+        keys: list[str],
+        rows: Sequence[Sequence[Any]],
+        *,
+        nan_none_keys: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        """Zip each result row against ``keys`` into a dict. ``nan_none_keys`` are
+        coerced to float then NaN → None (e.g. ``iso_score`` where a detector didn't
+        apply) — the plural counterpart of ``_row_to_dict``'s same option."""
+        out = [dict(zip(keys, r, strict=True)) for r in rows]
+        for d in out:
+            for k in nan_none_keys:
+                v = float(d[k])
+                d[k] = None if math.isnan(v) else v
+        return out

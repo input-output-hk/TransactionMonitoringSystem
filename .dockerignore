@@ -33,6 +33,10 @@ docs/
 **/tests/
 **/test_*.py
 
+# The clustering module has its OWN build context (services/clustering/backend);
+# it must not bloat the `app` image, whose build context is the repo root.
+services/clustering/
+
 # Editor / OS
 .DS_Store
 **/.idea/
