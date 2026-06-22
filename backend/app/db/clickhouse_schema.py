@@ -480,12 +480,10 @@ def migrate_transactions_projection(client: Client) -> None:
     logger.info("transactions projection migrated: p_by_time -> p_by_time_v2")
 
 
-def create_all(client: Client) -> None:
-    """Create every table, the address MV, run one-off column migrations,
-    verify the layout is v2, and apply retention TTLs.
-
-    Raises ClickHouseError on failure (the caller owns logging/handling).
-    """
+def _create_transactions(client: Client) -> None:
+    """Main transactions table + its one-off column migrations. MUST run before
+    migrate_transactions_projection (the v2 projection SELECT references the
+    network column added here)."""
     # Main transactions table (see SCHEMA_DDL for the layout rationale).
     client.execute(SCHEMA_DDL["transactions"].format(table="transactions"))
 
@@ -527,13 +525,9 @@ def create_all(client: Client) -> None:
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tx_size_bytes UInt32 DEFAULT 0"
     )
 
-    # Swap the legacy SELECT * projection for the narrowed v2 (no-op once
-    # done). Must run AFTER the column migrations above: the v2 projection
-    # SELECT references the network column, so on a pre-network-column
-    # deployment running it first crashes startup with an unknown-column
-    # error before the ADD COLUMN migration can fix the table.
-    migrate_transactions_projection(client)
 
+def _create_transaction_io(client: Client) -> None:
+    """Transaction inputs/outputs tables + their column migrations."""
     # Transaction inputs table
     client.execute(SCHEMA_DDL["transaction_inputs"].format(table="transaction_inputs"))
 
@@ -558,22 +552,23 @@ def create_all(client: Client) -> None:
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
-    # Address lookup table.
-    #
-    # `addresses Array(String)` in `transactions` carries all input + output
-    # addresses for a transaction.  A bloom_filter skip index on that column
-    # helps at the granule level, but `has(addresses, ?)` still scans every
-    # row in passing granules — at scale this degrades to a full-partition scan.
-    #
-    # This table normalises the array into one row per (address, tx_hash) pair,
-    # ordered by (network, address, slot) so every address lookup is a B-tree
-    # point seek that prunes to a tiny number of granules.
-    #
-    # The companion materialized view populates it automatically on every INSERT
-    # into `transactions`.  A backfill query below seeds it from existing rows.
-    #
-    # NOTE: `transactions.slot` is Nullable; `ifNull(slot, 0)` is used so the
-    # lookup table column stays non-nullable and the ORDER BY is efficient.
+
+def _create_address_lookup(client: Client) -> None:
+    """Address lookup table, its populating materialized view, and the one-time
+    backfill from existing transactions.
+
+    `addresses Array(String)` in `transactions` carries all input + output
+    addresses for a transaction.  A bloom_filter skip index on that column
+    helps at the granule level, but `has(addresses, ?)` still scans every
+    row in passing granules — at scale this degrades to a full-partition scan.
+
+    This table normalises the array into one row per (address, tx_hash) pair,
+    ordered by (network, address, slot) so every address lookup is a B-tree
+    point seek that prunes to a tiny number of granules.
+
+    NOTE: `transactions.slot` is Nullable; `ifNull(slot, 0)` is used so the
+    lookup table column stays non-nullable and the ORDER BY is efficient.
+    """
     client.execute(SCHEMA_DDL["address_transactions"].format(table="address_transactions"))
 
     # Materialized view: unnests `addresses` into address_transactions.
@@ -615,8 +610,10 @@ def create_all(client: Client) -> None:
     except Exception as e:
         logger.debug(f"address_transactions backfill skipped: {e}")
 
-    # Multi-class detection tables
 
+def _create_detection_tables(client: Client) -> None:
+    """Multi-class detection tables: UTxO/script features, the scoring output
+    (+ its column migrations), and the admin archive."""
     # Extended UTxO-level features, populated inline during ingestion.
     # One row per output per transaction.
     client.execute(SCHEMA_DDL["utxo_features"].format(table="utxo_features"))
@@ -645,6 +642,10 @@ def create_all(client: Client) -> None:
     # Admin-curated archive of flagged transactions (see SCHEMA_DDL).
     client.execute(SCHEMA_DDL["archived_alerts"].format(table="archived_alerts"))
 
+
+def _create_baselines(client: Client) -> None:
+    """Baseline statistics table and the append-only held-drift event log
+    (+ its column migrations)."""
     # Per-script / per-policy / global baseline statistics used by the
     # percentile normalisation framework.  Updated daily (or on bootstrap).
     #
@@ -713,6 +714,29 @@ def create_all(client: Client) -> None:
         "ALTER TABLE baseline_drift_events "
         "ADD COLUMN IF NOT EXISTS applied UInt8 DEFAULT 0"
     )
+
+
+def create_all(client: Client) -> None:
+    """Create every table, the address MV, run one-off column migrations,
+    verify the layout is v2, and apply retention TTLs.
+
+    Decomposed into per-table helpers; the call ORDER below is load-bearing and
+    must be preserved (see the projection note). Raises ClickHouseError on
+    failure (the caller owns logging/handling).
+    """
+    _create_transactions(client)
+
+    # Swap the legacy SELECT * projection for the narrowed v2 (no-op once
+    # done). Must run AFTER _create_transactions: the v2 projection SELECT
+    # references the network column, so on a pre-network-column deployment
+    # running it first crashes startup with an unknown-column error before the
+    # ADD COLUMN migration can fix the table.
+    migrate_transactions_projection(client)
+
+    _create_transaction_io(client)
+    _create_address_lookup(client)
+    _create_detection_tables(client)
+    _create_baselines(client)
 
     # Startup guard: CREATE IF NOT EXISTS above silently keeps a legacy
     # table's engine/partitioning, so verify the live layout is v2 and
