@@ -520,6 +520,14 @@ class OgmiosClient:
                 self._repurge_tasks.add(task)
                 task.add_done_callback(self._repurge_tasks.discard)
 
+                # Purge the optional clustering sidecar's verdicts for the same
+                # orphaned txs (no-op when the module is off): drops ghost
+                # contract_anomaly rows for vanished txs and makes any
+                # re-confirmed tx "unclassified" again so the feed re-scores it.
+                await clickhouse.delete_clustering_rows_async(
+                    self.network, purged_hashes,
+                )
+
         if rollback_id:
             await postgres.save_sync_point(self.network, rollback_slot, rollback_id)
 
