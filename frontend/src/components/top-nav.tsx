@@ -242,6 +242,9 @@ export function TopNav() {
 					<span className="text-border mr-3">|</span>
 					<NavItem to="/dashboard">Attacks</NavItem>
 					<NavItem to="/reports">Reports</NavItem>
+					{health?.clustering_enabled && (
+						<NavItem to="/validators">Validators</NavItem>
+					)}
 					{user?.role === "Admin" && <NavItem to="/users">Users</NavItem>}
 				</nav>
 

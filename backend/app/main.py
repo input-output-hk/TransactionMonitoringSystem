@@ -33,7 +33,7 @@ from app.rate_limit import (
     stop_all_cleanups,
 )
 from app.db import postgres, clickhouse, raw_store
-from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api
+from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api
 from app.tasks import analysis as analysis_task
 from app.routers import ui, websocket
 
@@ -304,6 +304,7 @@ app.include_router(analysis.router)
 app.include_router(archive.router)
 app.include_router(auth_api.router)
 app.include_router(users_api.router)
+app.include_router(clustering_api.router)
 
 
 @app.get("/health")
@@ -347,6 +348,8 @@ async def health_detail(api_key: str = Security(verify_api_key)):
         "network": settings.CARDANO_NETWORK,
         "connections": len(active_connections),
         "pipeline_state": "UNKNOWN",
+        # Lets the SPA show the Validators surfaces only when the module is on.
+        "clustering_enabled": settings.CLUSTERING_ENABLED,
     }
     if ogmios_client:
         ogmios_status = ogmios_client.status

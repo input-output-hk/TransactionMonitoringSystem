@@ -16,12 +16,22 @@ export type OgmiosHealth = {
 	ws_url: string;
 };
 
+export type ClusteringHealth = {
+	state: "ok" | "stale" | "absent" | "error" | string;
+	last_scored_at: string | null;
+	age_seconds?: number;
+};
+
 export type HealthDetail = {
 	status: "healthy" | "degraded" | "down" | string;
 	network: string;
 	connections: number;
 	pipeline_state: HealthState;
 	ogmios: OgmiosHealth;
+	// Present only when the clustering sidecar module is enabled; gates the
+	// Validators UI surfaces.
+	clustering_enabled?: boolean;
+	clustering?: ClusteringHealth;
 };
 
 async function fetchHealthDetail(): Promise<HealthDetail> {

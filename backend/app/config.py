@@ -189,6 +189,10 @@ class Settings(BaseSettings):
     # ClickHouse server; the host reads them cross-database at API time.
     CLUSTERING_ENABLED: bool = False
     CLUSTERING_DB: str = "tms_clustering"
+    # Base URL of the clustering sidecar's API, reached in-network for the
+    # /api/clustering reverse-proxy (the SPA's rich Validators/graph views call
+    # it same-origin, session-authed). Defaults to the compose service name.
+    CLUSTERING_SIDECAR_URL: str = "http://clustering:8000"
 
     # WebSocket feed. Per-client outbound queue depth: a client lagging by
     # more than this many events starts losing the OLDEST ones (the feed is

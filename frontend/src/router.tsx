@@ -9,6 +9,8 @@ import { AttacksPage } from "@/pages/AttacksPage";
 import { ImportAttackPage } from "@/pages/ImportAttackPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { UsersPage } from "@/pages/UsersPage";
+import { ValidatorDetailPage } from "@/pages/ValidatorDetailPage";
+import { ValidatorsPage } from "@/pages/ValidatorsPage";
 import { EmailSentPage } from "@/pages/auth/EmailSentPage";
 import { SignUpPage as LoginPage } from "@/pages/auth/SignUpPage";
 import { VerifyPage } from "@/pages/auth/VerifyPage";
@@ -46,6 +48,11 @@ export const router = createBrowserRouter([
 					// the popup.
 					{ path: "/attacks/:id", element: <AttacksPage /> },
 					{ path: "/reports", element: <ReportsPage /> },
+					// Clustering module surfaces. The pages self-gate on the
+					// clustering_enabled health flag (showing a disabled notice when
+					// off), so no separate route guard is needed.
+					{ path: "/validators", element: <ValidatorsPage /> },
+					{ path: "/validators/:target", element: <ValidatorDetailPage /> },
 					{ path: "/archive", element: <ArchivePage /> },
 					// Same component as /archive — ArchivePage reads `:id` from
 					// useParams and renders the AttackDetailPage (archived view)
