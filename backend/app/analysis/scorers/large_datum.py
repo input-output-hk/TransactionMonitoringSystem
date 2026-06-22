@@ -238,21 +238,15 @@ class LargeDatumScorer(BaseScorer):
         self, output: Dict, address: str, datum_bytes: int, datum_flag: int,
         network: str, max_script_datum_bytes: int,
     ) -> ScorerResult:
-        import json
-
         value = output.get("value", {})
         if not isinstance(value, dict):
             value = {"lovelace": 0}
 
         value_cbor = feat_mod._estimate_value_cbor_bytes(value)
-
-        # Estimate total UTxO bytes
-        addr_bytes = len(address.encode()) if address else 0
-        script_ref = output.get("script")
-        script_bytes = len(json.dumps(script_ref).encode()) if script_ref else 0
-        utxo_total = addr_bytes + value_cbor + datum_bytes + script_bytes
-
-        datum_ratio = datum_bytes / (utxo_total + 1e-6) if utxo_total > 0 else 0.0
+        utxo_total = feat_mod.estimate_utxo_total_bytes(
+            address, value_cbor, datum_bytes, output.get("script")
+        )
+        datum_ratio = feat_mod.datum_ratio_of(datum_bytes, utxo_total)
 
         # datum_bytes: per-script baseline
         p50_db, p99_db, bl1 = _resolve(

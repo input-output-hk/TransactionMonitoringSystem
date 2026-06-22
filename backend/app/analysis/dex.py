@@ -12,7 +12,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.scorer_config import get as _get_cfg
-from app.analysis.features import SCRIPT_ADDRESS_PREFIXES
+from app.analysis.features import SCRIPT_ADDRESS_PREFIXES, is_script_address
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,12 @@ _SCRIPT_ADDR_PREFIXES = SCRIPT_ADDRESS_PREFIXES
 
 
 def _is_script_address(addr: str) -> bool:
-    """Check if a Cardano address is a script address by Bech32 prefix."""
-    return addr.lower().startswith(_SCRIPT_ADDR_PREFIXES)
+    """Check if a Cardano address is a script address by Bech32 prefix.
+
+    Delegates to the canonical features.is_script_address (the single CIP-19
+    source) so this detector cannot fork from the scorers' definition.
+    """
+    return is_script_address(addr)
 
 
 def _network_script_prefixes(network: str) -> List[str]:

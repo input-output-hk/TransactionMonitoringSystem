@@ -73,6 +73,7 @@ from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
     BAND_MODERATE_THRESHOLD,
+    EPSILON,
     normalise,
     normalise_inverted,
 )
@@ -89,8 +90,6 @@ from app.analysis.features import extract_lovelace as _extract_lovelace
 from app.analysis.features import iter_assets as _iter_assets  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-EPSILON = 1e-6
 
 _CFG = _get_cfg("multiple_sat")
 _W = _CFG["weights"]

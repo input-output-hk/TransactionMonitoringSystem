@@ -163,11 +163,7 @@ class LargeValueScorer(BaseScorer):
         if not isinstance(value, dict):
             value = {"lovelace": 0}
 
-        ada_obj = value.get("ada")
-        if isinstance(ada_obj, dict):
-            ada_amount = int(ada_obj.get("lovelace", 0))
-        else:
-            ada_amount = int(value.get("lovelace", 0))
+        ada_amount = feat_mod.extract_lovelace(value)
         value_cbor = feat_mod._estimate_value_cbor_bytes(value)
         qty_digits = _max_quantity_digits(value)
         policy_id, asset_name_hex, max_quantity = _primary_asset(value)
