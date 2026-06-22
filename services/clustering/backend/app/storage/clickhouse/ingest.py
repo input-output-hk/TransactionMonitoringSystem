@@ -1,0 +1,182 @@
+"""Ingestion writes (transactions/utxos/assets), the resume cursor, the target
+listing, and feature-extraction reads."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import fields
+from typing import Any
+
+import pandas as pd
+
+from app.models import AssetRecord, TxRecord, UtxoRecord
+
+from .base import _RepoBase
+
+TX_COLUMNS = [f.name for f in fields(TxRecord)]
+UTXO_COLUMNS = [f.name for f in fields(UtxoRecord)]
+ASSET_COLUMNS = [f.name for f in fields(AssetRecord)]
+
+# The canonical transaction shape-context projection, shared by the tx-joined reads
+# that surface the full context (latest interactions, top anomalies). It assumes the
+# transactions subquery is aliased ``t`` (every such read uses that alias). Keep
+# ``TX_CONTEXT_SELECT`` and ``TX_CONTEXT_KEYS`` in lockstep — the select aliases ARE
+# the dict keys, in this order — so a column can't drift between the two callers.
+TX_CONTEXT_SELECT = (
+    "toString(t.block_time) AS block_time, t.fees AS fees, t.size AS size, "
+    "t.total_input_lovelace AS total_input_lovelace, "
+    "t.total_output_lovelace AS total_output_lovelace, "
+    "CAST(t.total_output_lovelace AS Int64) - CAST(t.total_input_lovelace AS Int64) "
+    "AS net_lovelace, "
+    "t.input_count AS input_count, t.output_count AS output_count, "
+    "t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count"
+)
+TX_CONTEXT_KEYS = [
+    "block_time", "fees", "size", "total_input_lovelace", "total_output_lovelace",
+    "net_lovelace", "input_count", "output_count", "distinct_assets", "redeemer_count",
+]
+
+
+class _IngestMixin(_RepoBase):
+    """Fact-table inserts, ingest cursor, target listing and feature reads."""
+
+    # --- Inserts ---------------------------------------------------------------
+
+    def insert_transactions(self, rows: Sequence[TxRecord]) -> None:
+        self._insert_records("transactions", TX_COLUMNS, rows)
+
+    def insert_utxos(self, rows: Sequence[UtxoRecord]) -> None:
+        self._insert_records("tx_utxos", UTXO_COLUMNS, rows)
+
+    def insert_assets(self, rows: Sequence[AssetRecord]) -> None:
+        self._insert_records("tx_utxo_assets", ASSET_COLUMNS, rows)
+
+    # --- Ingest cursor ---------------------------------------------------------
+
+    def get_cursor(self, target: str) -> dict[str, Any] | None:
+        rows = self.client.query(
+            f"SELECT target, target_type, cursor, source, last_page, last_tx_hash, "
+            f"txs_seen, done "
+            f"FROM {self._db}.ingest_cursor FINAL WHERE target = {{t:String}} LIMIT 1",
+            parameters={"t": target},
+        ).result_rows
+        if not rows:
+            return None
+        keys = [
+            "target", "target_type", "cursor", "source", "last_page", "last_tx_hash",
+            "txs_seen", "done",
+        ]
+        row = self._rows_to_dicts(keys, rows)[0]
+        # Legacy shim: rows written before 006_cursor.sql carry only the Blockfrost
+        # page number. The migration backfills this same encoding; the shim covers a
+        # row racing the backfill. Remove when last_page is dropped.
+        if not row["cursor"] and int(row.get("last_page") or 0) > 0:
+            row["cursor"] = f"page:{row['last_page']}"
+        return row
+
+    def upsert_cursor(
+        self,
+        target: str,
+        target_type: str,
+        *,
+        cursor: str,
+        last_tx_hash: str,
+        txs_seen: int,
+        done: bool,
+    ) -> None:
+        """Persist the source-owned resume cursor. ``source`` records which
+        CHAIN_SOURCE produced it so a cursor is never replayed into a different
+        provider; ``last_page`` is a dead legacy column (left at 0 on new rows)."""
+        self._insert(
+            "ingest_cursor",
+            ["target", "target_type", "cursor", "source", "last_tx_hash", "txs_seen", "done"],
+            [[
+                target, target_type, cursor, self.settings.chain_source,
+                last_tx_hash, txs_seen, int(done),
+            ]],
+        )
+
+    # --- Targets ---------------------------------------------------------------
+
+    def list_targets(self) -> list[dict[str, Any]]:
+        rows = self.client.query(
+            f"SELECT target, any(target_type) AS target_type, "
+            f"count(DISTINCT tx_hash) AS tx_count "
+            f"FROM {self._db}.transactions GROUP BY target ORDER BY tx_count DESC"
+        ).result_rows
+        return [
+            {"target": t, "target_type": tt, "tx_count": int(c)} for (t, tt, c) in rows
+        ]
+
+    # --- Feature extraction ----------------------------------------------------
+
+    # Shape feature projection — single source of truth shared by the
+    # whole-target and by-hash fetches (and by app.features.shape, which expects
+    # exactly these columns).
+    _SHAPE_FEATURE_SELECT = """
+        toString(tx_hash) AS tx_hash,
+        fees,
+        size,
+        input_count,
+        output_count,
+        total_input_lovelace,
+        total_output_lovelace,
+        CAST(total_output_lovelace AS Int64) - CAST(total_input_lovelace AS Int64)
+            AS net_lovelace,
+        distinct_assets,
+        redeemer_count,
+        toHour(block_time) AS hour_of_day,
+        toDayOfWeek(block_time) AS day_of_week
+    """
+
+    def fetch_shape_features(self, target: str) -> pd.DataFrame:
+        """Per-tx numeric columns used to build the shape feature matrix."""
+        return self.client.query_df(
+            f"SELECT {self._SHAPE_FEATURE_SELECT} FROM {self._db}.transactions FINAL "
+            "WHERE target = {t:String} ORDER BY tx_hash",
+            parameters={"t": target},
+        )
+
+    def fetch_tx_addresses(self, target: str) -> pd.DataFrame:
+        """(tx_hash, address) pairs for the address co-occurrence features."""
+        return self.client.query_df(
+            f"""
+            SELECT DISTINCT toString(tx_hash) AS tx_hash, address
+            FROM {self._db}.tx_utxos FINAL
+            WHERE target = {{t:String}} AND address != ''
+            ORDER BY tx_hash
+            """,
+            parameters={"t": target},
+        )
+
+    def fetch_addresses_for_txs(self, target: str, tx_hashes: Sequence[str]) -> pd.DataFrame:
+        if not tx_hashes:
+            return pd.DataFrame(columns=["tx_hash", "address"])
+        return self.client.query_df(
+            f"""
+            SELECT DISTINCT toString(tx_hash) AS tx_hash, address
+            FROM {self._db}.tx_utxos FINAL
+            WHERE target = {{t:String}} AND toString(tx_hash) IN {{hashes:Array(String)}}
+              AND address != ''
+            """,
+            parameters={"t": target, "hashes": list(tx_hashes)},
+        )
+
+    def fetch_shape_features_for(self, target: str, tx_hashes: Sequence[str]) -> pd.DataFrame:
+        """Per-tx shape feature columns for a specific set of hashes (the new ones
+        to score). Callers chunk to keep the ``IN`` array bounded."""
+        if not tx_hashes:
+            return pd.DataFrame()
+        return self.client.query_df(
+            f"SELECT {self._SHAPE_FEATURE_SELECT} FROM {self._db}.transactions FINAL "
+            "WHERE target = {t:String} AND toString(tx_hash) IN {hs:Array(String)} "
+            "ORDER BY tx_hash",
+            parameters={"t": target, "hs": list(tx_hashes)},
+        )
+
+    def count_transactions(self, target: str) -> int:
+        rows = self.client.query(
+            f"SELECT count() FROM {self._db}.transactions FINAL WHERE target = {{t:String}}",
+            parameters={"t": target},
+        ).result_rows
+        return int(rows[0][0]) if rows else 0

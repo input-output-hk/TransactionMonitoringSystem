@@ -227,26 +227,26 @@ services:
     profiles:
       - app  # Use 'docker-compose --profile app up' to include this service
 
-  # Optional clustering sidecar (the TMS-clustering engine running as
-  # CHAIN_SOURCE=host_ch). Activated only with `--profile clustering`; the host
-  # app reads its verdicts (contract_anomaly) cross-database when CLUSTERING_ENABLED
-  # is set, and ignores them otherwise — so the module is fully opt-in.
+  # Clustering module: contract-anomaly detection (services/clustering). Runs
+  # only with `--profile clustering`; the API merges its verdicts
+  # (contract_anomaly) when CLUSTERING_ENABLED is set and ignores them otherwise,
+  # so the module is fully opt-in.
   #
-  # It shares THIS ClickHouse server: engine-owned state lives in tms_clustering,
-  # raw tx/feature reads come from tms_analytics (HostBackedRepo), so no chain
-  # data is duplicated and no Blockfrost is used. `app.cli migrate` creates the
-  # tms_clustering schema idempotently on boot (the `tms` token is rewritten to
-  # tms_clustering). Build context is the sibling TMS-clustering checkout.
+  # It shares THIS ClickHouse server: its own state lives in tms_clustering,
+  # while transaction/feature reads come from tms_analytics (the same chain data
+  # the core scorers use), so no chain data is duplicated. `app.cli migrate`
+  # creates the tms_clustering schema idempotently on boot.
   clustering:
     build:
-      context: ../TMS-clustering/backend
+      context: ./services/clustering/backend
       target: ${CLUSTERING_BUILD_TARGET:-runtime}
     container_name: tms-clustering-sidecar
     env_file:
       - .env
       - .env.${TMS_ENV:-preprod}
     environment:
-      # Source/topology: read host data, write engine state to the sibling DB.
+      # Topology: read chain data from tms_analytics, write module state to the
+      # tms_clustering database on the same ClickHouse server.
       - CHAIN_SOURCE=host_ch
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_HTTP_PORT=8123
@@ -273,7 +273,7 @@ services:
     command: ["sh", "-c", "python -m app.cli migrate && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"]
     volumes:
       # Migration source for `app.cli migrate` (the engine's init SQL).
-      - ../TMS-clustering/clickhouse/init:/init:ro
+      - ./services/clustering/clickhouse/init:/init:ro
     ports:
       # Loopback only; the host app reaches it in-network for the /api/clustering
       # proxy. Exposed for debugging/observability.

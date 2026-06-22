@@ -49,6 +49,19 @@ therefore does not extend to this project's source code.
 |---|---|---|---|---|
 | Ogmios | v6 | MPL-2.0 (Mozilla Public License 2.0) | WebSocket network connection, not linked or compiled in | **None.** MPL-2.0 is file-level copyleft; it does not extend across a network boundary. This project's source files are unaffected. |
 
+## Bundled data
+
+The clustering module ships a point-in-time snapshot of the StricaHQ
+[cardano-contracts-registry](https://github.com/StricaHQ/cardano-contracts-registry)
+under `services/clustering/backend/app/registry/data/`, used to label known
+script addresses and minting policies. It is Apache-2.0 (same as this project);
+the upstream license is retained verbatim alongside the data at
+`services/clustering/backend/app/registry/data/LICENSE`.
+
+| Bundled asset | Source | License | Integration method |
+|---|---|---|---|
+| Cardano contracts registry snapshot | StricaHQ/cardano-contracts-registry | Apache-2.0 | Data files only (not code); refreshed via the registry sync helper |
+
 ## License compatibility summary
 
 | License | Count | Permissive? | Conditions |

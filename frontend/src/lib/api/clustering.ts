@@ -1,13 +1,13 @@
 /**
- * Client for the clustering sidecar, reached through the host's
- * `/api/clustering` reverse-proxy (which forwards to the sidecar's `/api/v1`,
- * session-authed and same-origin). Powers the Validators surfaces: the watched-
- * contract registry, cluster summaries, anomaly tables, and the cluster graph.
+ * Client for the clustering module, reached through the `/api/clustering`
+ * reverse-proxy (session-authed, same-origin). Powers the Validators surfaces:
+ * the watched-contract registry, cluster summaries, anomaly tables, and the
+ * cluster graph.
  *
- * The integrated deployment auto-feeds and auto-fits each watched contract (the
- * sidecar's scheduler), so this client is read + manage only: add/remove a
- * watched contract and label clusters/transactions. It does not expose the
- * standalone engine's manual download/evaluate/cluster controls.
+ * The clustering module auto-feeds and auto-fits each watched contract as the
+ * chain is ingested, so this client is read + manage only: add/remove a watched
+ * contract and label clusters/transactions. Onboarding/refit happen
+ * automatically, so there are no manual download/evaluate/cluster controls.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
