@@ -148,6 +148,38 @@ export function FakeTokenIcon({ className }: IconProps) {
 	);
 }
 
+// Contract Anomaly: a dense cluster of points with one separated outlier — the
+// shape DBSCAN/anomaly-ensemble verdict the clustering sidecar surfaces.
+export function ContractAnomalyIcon({ className }: IconProps) {
+	return (
+		<svg className={className} {...SVG_PROPS}>
+			{/* Cluster boundary */}
+			<circle
+				cx="9"
+				cy="14"
+				r="5"
+				stroke="currentColor"
+				strokeOpacity="0.5"
+				strokeDasharray="2 2"
+				fill="none"
+			/>
+			{/* In-cluster points */}
+			<circle cx="7.5" cy="13" r="1" fill="currentColor" fillOpacity="0.5" />
+			<circle cx="10.5" cy="13.5" r="1" fill="currentColor" fillOpacity="0.5" />
+			<circle cx="9" cy="15.5" r="1" fill="currentColor" fillOpacity="0.5" />
+			{/* Outlier (the anomaly) */}
+			<circle
+				cx="17"
+				cy="6"
+				r="1.5"
+				stroke="currentColor"
+				strokeOpacity="0.5"
+				fill="none"
+			/>
+		</svg>
+	);
+}
+
 export function PhishingIcon({ className }: IconProps) {
 	return (
 		<svg className={className} {...SVG_PROPS}>

@@ -32,6 +32,40 @@ protocol_limits:
 composite_corroboration:
   corroboration_threshold: 40.0
 
+# Contract-anomaly projection. Maps the optional clustering sidecar's per-tx
+# verdict (consensus in [0,1], votes, and a verdict label) onto the host's
+# 0-100 score + risk band, so its findings surface as the synthetic
+# `contract_anomaly` attack class. This is NOT a scorer section (no weights or
+# anchors): the sidecar computes one score per transaction from these knobs.
+# The merge into /api/analysis/results is additive (only ever raises max_score
+# via max(...)), so it cannot lower a per-tx detection: recall-first holds.
+contract_anomaly:
+  # Score floor per verdict. The clustering engine's verdict precedence is
+  # explicit-label > cluster-inherited (malicious/benign) > auto-anomaly
+  # (votes >= FLAG_VOTE_THRESHOLD == 2) > normal. A human-labeled malicious
+  # cluster is the strongest signal, so it floors into Critical; an
+  # auto-anomaly floors into High; benign/normal carry no floor and let the
+  # consensus term decide. Votes are already folded into the `anomaly`
+  # verdict upstream, so they are evidence-only here (no double counting).
+  verdict_floors:
+    malicious: 80.0   # BAND_CRITICAL_THRESHOLD: human-labeled malicious cluster
+    anomaly: 60.0     # BAND_HIGH_THRESHOLD: auto-anomaly (>= 2 detector votes)
+    benign: 0.0       # human-labeled safe: no floor (consensus may still raise)
+    normal: 0.0       # no signal: consensus decides
+  # The ensemble consensus is in [0,1]; multiplying by 100 maps it onto the
+  # 0-100 score scale. Final score = clamp(max(floor, consensus * scale)).
+  consensus_scale: 100.0
+  # A contract_anomaly score at or above this counts as a corroborating signal
+  # for analyst triage (surfaced as contract_anomaly_corroborates, separate
+  # from the stored, server-filterable corroboration_count over the 9 classes).
+  # Kept equal to composite_corroboration.corroboration_threshold by intent.
+  corroboration_threshold: 40.0
+  # A merged verdict older than this is considered stale (the sidecar may be
+  # down). The API still surfaces it (a stale-but-real malicious verdict is
+  # worth keeping visible, recall-first) but stamps contract_anomaly_scored_at
+  # so the UI can mark it. 0 disables the staleness stamp.
+  freshness_seconds: 3600
+
 # Baseline-resolution tunables shared by every percentile-baselined scorer
 # (consumed by normalise.py / scorer_config.py, not by a single scorer).
 baselines:

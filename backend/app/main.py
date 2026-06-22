@@ -352,7 +352,42 @@ async def health_detail(api_key: str = Security(verify_api_key)):
         ogmios_status = ogmios_client.status
         result["ogmios"] = ogmios_status
         result["pipeline_state"] = ogmios_status["pipeline_state"]
+    if settings.CLUSTERING_ENABLED:
+        result["clustering"] = await _clustering_health()
     return result
+
+
+async def _clustering_health() -> dict:
+    """Freshness of the clustering sidecar's verdicts (best-effort).
+
+    With CLUSTERING_ENABLED set but the sidecar down or never run, the read-merge
+    would silently serve stale/empty contract_anomaly verdicts. This surfaces
+    that as a degraded state instead: ``absent`` when the sibling table is
+    unreachable/empty, ``stale`` when the newest verdict is older than the
+    configured freshness window, else ``ok``.
+    """
+    from datetime import datetime, timezone
+
+    from app.analysis.contract_anomaly import freshness_seconds
+    from app.db import clustering_queries
+
+    try:
+        latest = await clustering_queries.latest_scored_at_async(settings.CARDANO_NETWORK)
+    except Exception:  # noqa: BLE001 - health probe never raises
+        return {"state": "error", "last_scored_at": None}
+    if latest is None:
+        return {"state": "absent", "last_scored_at": None}
+    window = freshness_seconds()
+    age = (datetime.now(timezone.utc) - _as_aware_utc(latest)).total_seconds()
+    state = "stale" if (window and age > window) else "ok"
+    return {"state": state, "last_scored_at": str(latest), "age_seconds": round(age)}
+
+
+def _as_aware_utc(dt):
+    """Treat a naive ClickHouse DateTime as UTC (it stores UTC wall-clock)."""
+    from datetime import timezone
+
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 # SPA mount goes LAST so /api/*, /health, /ws, etc. still match their routes

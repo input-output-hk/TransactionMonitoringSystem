@@ -182,6 +182,14 @@ class Settings(BaseSettings):
     # path never fetches). Matches the registry cache TTL.
     TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS: int = 24
 
+    # Clustering module (optional sidecar). When False (default), the analysis
+    # API does not merge contract_anomaly verdicts and the UI hides the class,
+    # so a deployment without the `clustering` compose profile pays no cost.
+    # The sidecar writes its verdicts to a sibling database on the SAME
+    # ClickHouse server; the host reads them cross-database at API time.
+    CLUSTERING_ENABLED: bool = False
+    CLUSTERING_DB: str = "tms_clustering"
+
     # WebSocket feed. Per-client outbound queue depth: a client lagging by
     # more than this many events starts losing the OLDEST ones (the feed is
     # a live view, not the system of record). Connection cap prevents

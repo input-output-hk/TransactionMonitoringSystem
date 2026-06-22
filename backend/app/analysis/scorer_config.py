@@ -226,6 +226,20 @@ _REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
     "corroboration_threshold",
 )
 
+# Required keys for the top-level contract_anomaly block (projection of the
+# clustering sidecar's verdict onto the host score; see detection.yaml). A
+# top-level projection block, not a scorer section, so it has no weights or
+# anchors. Dotted leaves so a missing floor fails fast with its full path.
+_REQUIRED_CONTRACT_ANOMALY: Tuple[str, ...] = (
+    "verdict_floors.malicious",
+    "verdict_floors.anomaly",
+    "verdict_floors.benign",
+    "verdict_floors.normal",
+    "consensus_scale",
+    "corroboration_threshold",
+    "freshness_seconds",
+)
+
 # Dotted leaves so a missing nested tunable fails fast with its full path
 # at load time instead of a raw KeyError at first use.
 _REQUIRED_BASELINES: Tuple[str, ...] = (
@@ -279,12 +293,15 @@ def _allowed_paths() -> set:
     ``p50`` / ``p99`` children (the shape ``anchor()`` reads).
     """
     allowed: set = {
-        "protocol_limits", "composite_corroboration", "baselines", "scorers",
+        "protocol_limits", "composite_corroboration", "contract_anomaly",
+        "baselines", "scorers",
     }
     for key in _REQUIRED_PROTOCOL_LIMITS:
         _add_dotted(allowed, "protocol_limits", key)
     for key in _REQUIRED_COMPOSITE_CORROBORATION:
         _add_dotted(allowed, "composite_corroboration", key)
+    for key in _REQUIRED_CONTRACT_ANOMALY:
+        _add_dotted(allowed, "contract_anomaly", key)
     for key in _REQUIRED_BASELINES:
         _add_dotted(allowed, "baselines", key)
     for scorer, keys in _REQUIRED_KEYS.items():
@@ -390,6 +407,20 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
             f"Detection config {path} missing composite_corroboration keys: "
             f"{', '.join(missing_corr)}"
         )
+    contract_anomaly = data.get("contract_anomaly")
+    if not isinstance(contract_anomaly, dict):
+        raise RuntimeError(
+            f"Detection config {path} must contain a top-level "
+            f"'contract_anomaly' mapping."
+        )
+    missing_ca = _missing_dotted(
+        contract_anomaly, _REQUIRED_CONTRACT_ANOMALY, "contract_anomaly",
+    )
+    if missing_ca:
+        raise RuntimeError(
+            f"Detection config {path} missing contract_anomaly keys: "
+            f"{', '.join(missing_ca)}"
+        )
     baselines = data.get("baselines")
     if not isinstance(baselines, dict):
         raise RuntimeError(
@@ -492,6 +523,18 @@ def composite_corroboration_config() -> Dict[str, Any]:
     keys are enforced at load time by :func:`_validate`.
     """
     return _CFG["composite_corroboration"]
+
+
+def contract_anomaly_config() -> Dict[str, Any]:
+    """Return the top-level contract_anomaly projection block.
+
+    Maps the clustering sidecar's verdict (consensus, votes, verdict label)
+    onto the host 0-100 score + risk band (not a scorer section). Presence and
+    required keys are enforced at load time by :func:`_validate`. Shared by the
+    sidecar (write-time score mapping) and the host API (corroboration /
+    staleness thresholds) so the two cannot disagree.
+    """
+    return _CFG["contract_anomaly"]
 
 
 def protocol_limit(name: str) -> int:
