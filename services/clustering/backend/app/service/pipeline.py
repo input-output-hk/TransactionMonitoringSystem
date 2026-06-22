@@ -119,7 +119,7 @@ async def process_contract(
         )["run_id"]
 
         # Surface this fit's flagged verdicts to the TMS as contract_anomaly
-        # rows (skipped when running against the optional blockfrost source).
+        # rows (the host_ch sidecar path; a non-host_ch source would skip this).
         if get_settings().chain_source == "host_ch":
             from app.service.publish import publish_contract_anomaly
 

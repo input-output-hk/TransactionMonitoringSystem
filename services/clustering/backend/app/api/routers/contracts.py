@@ -36,7 +36,7 @@ def list_targets(repo: Repo = RepoDep) -> list[dict[str, Any]]:
 
 @router.get("/registry/identify", response_model=IdentifyOut)
 def identify_target(target: str = Query(min_length=1, max_length=256)) -> dict[str, Any]:
-    """Resolve a target to its script hash + registry label (offline, no Blockfrost).
+    """Resolve a target to its script hash + registry label (offline, registry-only).
 
     Used by the Add Contract form for a live preview while the user types, so an
     unparseable target returns ``valid: false`` rather than an error.

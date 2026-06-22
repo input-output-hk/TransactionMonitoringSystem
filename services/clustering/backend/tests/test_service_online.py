@@ -9,10 +9,20 @@ import pandas as pd
 import pytest
 
 from app.clustering.model import MODEL_SCHEMA_VERSION
+from app.config import get_settings
 from app.ingest.ingester import IngestResult
 from app.service import classify_new_transactions, update_contract
 from app.sources.base import SourceRateLimited
 from tests.fakes import FakeRepoBase
+
+
+def _force_download_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``update_contract`` skips the tip walk under host_ch (the default), reading
+    from the host instead. These two cases exercise the *downloading* path a future
+    node/db-sync adapter takes, so pin CHAIN_SOURCE to a non-host_ch value (the
+    stubbed get_source means the name never has to resolve to a real adapter)."""
+    monkeypatch.setenv("CHAIN_SOURCE", "node")
+    get_settings.cache_clear()
 
 # --- Incremental classification (fit/score) --------------------------------
 
@@ -208,6 +218,7 @@ async def test_update_contract_persists_drift_and_suggests_recluster(
 ) -> None:
     """A completed refresh stores the trailing noise rate on the contract and, when
     it crosses the threshold, surfaces a re-cluster recommendation in the job detail."""
+    _force_download_path(monkeypatch)
     monkeypatch.setattr("app.service.online.get_source", lambda settings: _FakeSource())
 
     async def _completed(**kwargs: Any) -> IngestResult:
@@ -233,6 +244,7 @@ async def test_update_contract_rate_limited_fails_without_classifying(
 ) -> None:
     """A rate-limited tip walk stops short of the tip; the incremental refresh
     must fail (resumable) rather than classify a partial catch-up and mark done."""
+    _force_download_path(monkeypatch)
     monkeypatch.setattr("app.service.online.get_source", lambda settings: _FakeSource())
 
     async def _rate_limited(**kwargs: Any) -> IngestResult:

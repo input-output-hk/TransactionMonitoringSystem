@@ -8,13 +8,6 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Blockfrost base URLs per Cardano network.
-_BLOCKFROST_BASE_URLS = {
-    "mainnet": "https://cardano-mainnet.blockfrost.io/api/v0",
-    "preprod": "https://cardano-preprod.blockfrost.io/api/v0",
-    "preview": "https://cardano-preview.blockfrost.io/api/v0",
-}
-
 
 class Settings(BaseSettings):
     """Runtime configuration sourced from the environment / `.env`."""
@@ -23,22 +16,14 @@ class Settings(BaseSettings):
 
     # Chain data source: which ChainSource adapter the pipeline/CLI use (see
     # app/sources/factory.py). The TMS deployment runs "host_ch" (reads the
-    # TMS's own ingested chain data; set explicitly by the clustering compose
-    # service). "blockfrost" is an optional adapter with its own download.
-    chain_source: str = Field(default="blockfrost", alias="CHAIN_SOURCE")
+    # TMS's own ingested chain data; the clustering compose service sets it
+    # explicitly). The seam admits a future node/db-sync adapter behind the same
+    # protocol without touching analysis code.
+    chain_source: str = Field(default="host_ch", alias="CHAIN_SOURCE")
 
-    # Blockfrost
-    blockfrost_project_id: str = Field(default="", alias="BLOCKFROST_PROJECT_ID")
+    # Cardano network the sidecar is pinned to; matches the host TMS's network and
+    # keys both the host_ch reads and the published contract_anomaly rows.
     cardano_network: str = Field(default="mainnet", alias="CARDANO_NETWORK")
-    # Free tier: 10 req/s sustained, burst of 500 refilling at 10/s.
-    blockfrost_max_rps: float = Field(default=10.0, alias="BLOCKFROST_MAX_RPS")
-    blockfrost_burst: int = Field(default=500, alias="BLOCKFROST_BURST")
-    blockfrost_page_size: int = Field(default=100, alias="BLOCKFROST_PAGE_SIZE")
-    # Per-request HTTP timeout, max retry attempts for transient errors (429/5xx/
-    # transport), and the ceiling on exponential backoff between those retries.
-    blockfrost_timeout_s: float = Field(default=30.0, alias="BLOCKFROST_TIMEOUT_S")
-    blockfrost_max_retries: int = Field(default=6, alias="BLOCKFROST_MAX_RETRIES")
-    blockfrost_backoff_cap_s: float = Field(default=30.0, alias="BLOCKFROST_BACKOFF_CAP_S")
 
     # Upper bound on transactions fed to the O(n^2) precomputed-Jaccard graph
     # clustering. Above this the tx set is sampled (and the drop is logged) to
@@ -71,7 +56,7 @@ class Settings(BaseSettings):
     # Host-backed integration (CHAIN_SOURCE=host_ch). When the engine runs as
     # the TMS clustering sidecar it reads each watched contract's transactions
     # directly from the host TMS's analytics database on the SAME ClickHouse
-    # server (no Blockfrost, no raw-tx duplication): engine-owned state is
+    # server (no external provider, no raw-tx duplication): engine-owned state is
     # written to ``clickhouse_db`` (tms_clustering); raw tx/feature reads come
     # from ``host_clickhouse_db`` (tms_analytics) via the HostBackedRepo.
     host_clickhouse_db: str = Field(default="tms_analytics", alias="HOST_CLICKHOUSE_DB")
@@ -129,16 +114,6 @@ class Settings(BaseSettings):
         the API (``ContractOut.reclustering_suggested``) and the classify job's
         detail message — keep both reading this so they can't disagree."""
         return drift_score >= self.recluster_noise_threshold
-
-    @property
-    def blockfrost_base_url(self) -> str:
-        try:
-            return _BLOCKFROST_BASE_URLS[self.cardano_network]
-        except KeyError as exc:  # pragma: no cover - defensive
-            raise ValueError(
-                f"Unknown CARDANO_NETWORK {self.cardano_network!r}; "
-                f"expected one of {sorted(_BLOCKFROST_BASE_URLS)}"
-            ) from exc
 
 
 @lru_cache

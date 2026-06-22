@@ -69,16 +69,16 @@ class ChainSource(Protocol):
 
     Implementations own their wire-format → domain-record normalization and
     translate provider errors into the ``SourceError`` hierarchy, so no analysis
-    code imports a provider package. Blockfrost is one implementation
-    (``app.blockfrost.source.BlockfrostSource``); a Kupo/db-sync adapter drops in
-    behind this protocol. A *streaming* node source (Ogmios chainsync) is a
-    different shape — it pushes whole blocks and rollbacks rather than answering
-    queries — and gets its own ``TipSource`` protocol when implemented; see
+    code imports a provider package. ``host_ch`` (reading the host TMS's ingested
+    ClickHouse) is the implementation today; a Kupo/db-sync adapter drops in behind
+    this protocol. A *streaming* node source (Ogmios chainsync) is a different shape
+    (it pushes whole blocks and rollbacks rather than answering queries) and gets
+    its own ``TipSource`` protocol when implemented; see
     docs/online-classification-design.md ("Node-fed ingestion").
 
-    Cursors are **owned by the source**: an opaque-but-tagged string (Blockfrost:
-    ``"page:42"``, or ``"page:42;from:10422911"`` when the walk is anchored to a
-    recent window; a node adapter: ``"point:<slot>.<block_hash>"``). The engine
+    Cursors are **owned by the source**: an opaque-but-tagged string (a page-based
+    adapter: ``"page:42"``, or ``"page:42;from:10422911"`` when the walk is anchored
+    to a recent window; a node adapter: ``"point:<slot>.<block_hash>"``). The engine
     persists and replays them verbatim, never doing arithmetic on them, and the
     stored cursor is only replayed into the same ``CHAIN_SOURCE`` that produced it.
     """

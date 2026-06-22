@@ -1,7 +1,7 @@
 """Tests for target classification (address vs minting policy).
 
-The on-chain metadata fetch moved to the Blockfrost data-source adapter; its tests
-live in test_blockfrost_source.py.
+The on-chain metadata fetch lives with the data-source adapter (app/sources/host_ch);
+the ChainSource conformance suite (tests/sources) covers it.
 """
 
 from __future__ import annotations
