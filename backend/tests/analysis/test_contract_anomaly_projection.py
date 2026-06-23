@@ -332,22 +332,49 @@ def test_list_rescue_skips_rows_still_below_filter(client, monkeypatch):
     assert body["total"] == 0
 
 
-def test_list_surfaces_buried_high_anomaly_unfiltered(client, monkeypatch):
-    """Unfiltered list: a low-stored-score tx flagged malicious is surfaced on
-    page 1 (it would otherwise be buried at the bottom by stored-score order)."""
+def test_list_rescue_inactive_when_unfiltered(client, monkeypatch):
+    """Unfiltered list: the rescue is gated off. An unfiltered score-sorted page
+    orders on the stored score, and force-surfacing a buried tx onto a full page 1
+    would strand a real DB row off pagination, so it isn't done (the tx is
+    reachable on its later page, and the band counts/timeseries are reconciled
+    separately). The default view is date-sorted, where recent CA txs appear."""
+    from app.config import settings
+    from app.db import clustering_queries
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    flagged_called = False
+
+    async def _flagged(_net, *a, **k):
+        nonlocal flagged_called
+        flagged_called = True
+        return {"lowtx": [_row("malicious")]}
+
+    _bind_list_stubs(monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[])
+    monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+    r = client.get("/api/analysis/results?network=preprod")  # no score/band filter
+    assert r.status_code == 200
+    assert flagged_called is False  # gated off when unfiltered
+
+
+def test_list_rescue_caps_page_to_limit(client, monkeypatch):
+    """Rescued rows are re-ranked and the page is capped back to `limit`, so a
+    request never returns more than `limit` rows."""
     from app.config import settings
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    # DB page already full at limit=2 (both pass the filter); two more flagged txs
+    # are rescued, but the response must still cap at 2.
     _bind_list_stubs(
         monkeypatch,
-        page_rows=[_full_score_row("hightx", 90.0)],  # the visible top of page 1
-        total=1,
-        flagged={"lowtx": [_row("malicious")]},        # -> 80 (Critical)
-        by_hashes=[_full_score_row("lowtx", 20.0)],    # buried by stored score
+        page_rows=[_full_score_row("a", 95.0), _full_score_row("b", 92.0)],
+        total=2,
+        flagged={"c": [_row("malicious")], "d": [_row("malicious")]},
+        by_hashes=[_full_score_row("c", 10.0), _full_score_row("d", 10.0)],
     )
-    r = client.get("/api/analysis/results?network=preprod")  # no filter
+    r = client.get("/api/analysis/results?network=preprod&min_score=70&limit=2")
     assert r.status_code == 200
-    hashes = [d["tx_hash"] for d in r.json()["data"]]
-    assert "lowtx" in hashes, "a buried high-anomaly tx must surface on page 1"
+    body = r.json()
+    assert len(body["data"]) == 2          # capped to limit
+    assert body["count"] == 2
+    assert body["total"] == 4              # 2 stored + 2 genuinely rescued
 
 
 def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
@@ -403,6 +430,8 @@ def test_stats_reclassifies_flagged_tx_to_effective_band(client, monkeypatch):
     body = r.json()
     assert body["critical_count"] == 1
     assert body["moderate_count"] == 0
+    # Avg Risk lifts by the per-tx delta (malicious floor 80 - stored 45) / total 1.
+    assert body["avg_max_score"] == pytest.approx(80.0)
 
 
 def test_timeseries_adds_contract_anomaly_only_alerts(client, monkeypatch):
