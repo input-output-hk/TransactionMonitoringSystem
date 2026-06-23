@@ -71,6 +71,35 @@ def _merge_contract_anomaly(
     result.contract_anomaly_scored_at = resolved.get("scored_at")
 
 
+def _passes_score_band(
+    score: float, band: RiskBand, min_score: float, bands: Optional[List[str]],
+) -> bool:
+    """Whether a (score, band) pair satisfies the list view's score/band filter.
+
+    Mirrors the DB-side predicate in ``_score_filter_conditions`` (max_score >=
+    min_score AND lower(risk_band) IN bands) so the contract_anomaly rescue
+    admits exactly the rows the DB filter would have, had it seen the merged
+    score. Empty/None ``bands`` means no band restriction."""
+    if min_score > 0 and score < min_score:
+        return False
+    if bands and band.value.lower() not in {b.lower() for b in bands}:
+        return False
+    return True
+
+
+def _within_analyzed_window(
+    analyzed_at: Any, analyzed_from: Optional[datetime], analyzed_to: Optional[datetime],
+) -> bool:
+    """Mirror the DB analyzed_at bounds (>= from, < to) for a rescued row."""
+    if analyzed_at is None:
+        return analyzed_from is None and analyzed_to is None
+    if analyzed_from is not None and analyzed_at < analyzed_from:
+        return False
+    if analyzed_to is not None and analyzed_at >= analyzed_to:
+        return False
+    return True
+
+
 def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
     scores = {name: float(row.get(name, -1)) for name in _CLASS_NAMES}
     def _decode_json_field(key: str) -> Dict[str, Any]:
@@ -212,10 +241,9 @@ async def list_analysis_results(
         data = [_row_to_class_score(r) for r in rows]
         if settings.CLUSTERING_ENABLED and data:
             # Batch-merge sidecar verdicts into the page, mirroring the
-            # fee/output_count batch-fetch pattern. Server-side filter/sort on
-            # the synthetic class is intentionally out of scope for now (the
-            # page is still ordered by the stored max_score); the merge only
-            # enriches each row's payload. Best-effort: never fail the list.
+            # fee/output_count batch-fetch pattern. The merge only RAISES
+            # score/band (recall-safe); it enriches each row's payload.
+            # Best-effort: never fail the list.
             try:
                 ca_by_hash = await clustering_queries.get_contract_anomaly_batch_async(
                     query_network, [d.tx_hash for d in data],
@@ -226,9 +254,72 @@ async def list_analysis_results(
                         _merge_contract_anomaly(d, ca)
             except Exception as e:
                 logger.warning(f"contract_anomaly batch merge failed: {e}")
+        # Recall rescue (recall-first, see CLAUDE.md): the score/band filter is
+        # applied by the DB on the STORED 9-class score, before the merge above.
+        # A tx whose stored score sits below the filter but whose contract_anomaly
+        # verdict projects ABOVE it would be silently dropped from a filtered
+        # page. Re-admit those flagged txs so a filtered triage view can never
+        # hide a sidecar detection. Scoped to the first page (rescued rows ride
+        # on top of it) and to score/band filters; attack_class and
+        # min_corroboration are 9-class-specific (the synthetic class is neither
+        # a max_class value nor counted in corroboration_count), so a rescue
+        # under them would contradict the filter's intent.
+        rescued_total = 0
+        rescue_active = (
+            settings.CLUSTERING_ENABLED
+            and offset == 0
+            and (min_score > 0 or bool(rbs))
+            and not attack_class
+            and min_corroboration == 0
+        )
+        if rescue_active:
+            try:
+                flagged = await clustering_queries.flagged_for_network_async(
+                    query_network,
+                )
+                present = {d.tx_hash for d in data}
+                rescue_hashes = [h for h in flagged if h not in present]
+                if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
+                    # No silent caps: a truncated rescue set could omit a flagged
+                    # tx from a filtered page; surface it so the cap can be raised.
+                    logger.warning(
+                        "contract_anomaly rescue hit the fetch cap (%d) for %s; "
+                        "older flagged txs may be absent from filtered lists",
+                        clustering_queries._RESCUE_FETCH_CAP, query_network,
+                    )
+                if rescue_hashes:
+                    rescue_rows = await clickhouse.get_class_scores_by_hashes_async(
+                        query_network, rescue_hashes,
+                    )
+                    for r in rescue_rows:
+                        res = _row_to_class_score(r)
+                        stored_meets = _passes_score_band(
+                            res.max_score, res.risk_band, min_score, rbs,
+                        )
+                        _merge_contract_anomaly(res, flagged[res.tx_hash])
+                        # Genuinely rescued only: stored score missed the filter
+                        # but the merged (contract_anomaly-raised) score meets it.
+                        # A row whose stored score already met the filter is in
+                        # the normal paginated set and must not be double-counted.
+                        if (
+                            not stored_meets
+                            and _passes_score_band(res.max_score, res.risk_band, min_score, rbs)
+                            and _within_analyzed_window(res.analyzed_at, analyzed_from, analyzed_to)
+                        ):
+                            data.append(res)
+                            rescued_total += 1
+            except Exception as e:
+                logger.warning(f"contract_anomaly rescue failed: {e}")
+        # Re-sort so rescued rows interleave by rank rather than trailing the
+        # page; matches the SQL ORDER BY (score: max_score then recency).
+        if rescued_total:
+            if sort == "date":
+                data.sort(key=lambda d: (d.analyzed_at, d.max_score), reverse=True)
+            else:
+                data.sort(key=lambda d: (d.max_score, d.analyzed_at), reverse=True)
         return {
-            "count": len(rows),
-            "total": total,
+            "count": len(data),
+            "total": total + rescued_total,
             "data": data,
         }
     except Exception as e:

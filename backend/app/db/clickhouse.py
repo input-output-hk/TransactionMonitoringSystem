@@ -424,9 +424,19 @@ def delete_clustering_rows(network: str, hashes: List[str]) -> None:
     cursor rewind for the NOT-IN-classifications discovery). Cross-database on
     the same ClickHouse server; a no-op unless the clustering module is enabled.
 
-    ``tx_contract_anomaly`` carries ``network`` (one host, many networks);
-    ``tx_classifications`` does not (the sidecar is single-network), so it is
-    purged by tx_hash alone — correct because every row belongs to this network.
+    ``tx_contract_anomaly`` carries ``network`` (one host, many networks), so it
+    is purged scoped by (network, tx_hash). ``tx_classifications`` has NO network
+    column, so it is purged by tx_hash alone. That is safe ONLY under the
+    deployed invariant of one sidecar database per network (see docker-compose:
+    each clustering service gets its own CLUSTERING_DB and a single
+    CARDANO_NETWORK); if that DB is ever shared across networks, this would
+    delete another network's classifications. The match is wrapped in
+    ``toString(tx_hash)`` because the sidecar stores it as FixedString(64) while
+    the host passes plain str hashes (mirrors the read path in
+    clustering_queries); raw FixedString-vs-String IN comparison is
+    padding-sensitive. Both DELETEs carry ``_LIGHTWEIGHT_DELETE_SETTINGS`` so a
+    projection on either sidecar table cannot make the purge throw (CH >= 24.7)
+    and leave a ghost verdict surviving the rollback.
     """
     if not hashes or not settings.CLUSTERING_ENABLED:
         return
@@ -435,12 +445,15 @@ def delete_clustering_rows(network: str, hashes: List[str]) -> None:
     try:
         client.execute(
             f"DELETE FROM {db}.tx_contract_anomaly "
-            "WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+            "WHERE network = %(network)s AND toString(tx_hash) IN %(hashes)s",
             {"network": network, "hashes": hashes},
+            settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
         client.execute(
-            f"DELETE FROM {db}.tx_classifications WHERE tx_hash IN %(hashes)s",
+            f"DELETE FROM {db}.tx_classifications "
+            "WHERE toString(tx_hash) IN %(hashes)s",
             {"hashes": hashes},
+            settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
     except Exception as e:  # noqa: BLE001 - sidecar tables may be absent
         # The sidecar may never have run (database/table absent); a rollback
@@ -715,6 +728,8 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     get_alert_timeseries_async,
     get_class_scores,
     get_class_scores_async,
+    get_class_scores_by_hashes,
+    get_class_scores_by_hashes_async,
     get_class_scores_list,
     get_class_scores_list_async,
     get_class_scores_stats,

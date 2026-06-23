@@ -145,6 +145,27 @@ class TestClusteringPurge:
             "tms_clustering.tx_classifications",
         ]
 
+    def test_cross_db_deletes_carry_projection_mode(self, client):
+        # Same hazard as the host purge: a projection on either sidecar table
+        # makes an unsettinged lightweight DELETE throw on CH >= 24.7, which the
+        # best-effort handler swallows -> a ghost verdict survives the rollback.
+        delete_clustering_rows("preprod", ["aa" * 32])
+        deletes = _delete_calls(client)
+        assert len(deletes) == 2
+        for call in deletes:
+            assert call.kwargs.get("settings") == _LIGHTWEIGHT_DELETE_SETTINGS
+
+    def test_classifications_purge_match_is_fixedstring_safe(self, client):
+        # tx_classifications.tx_hash is FixedString(64); the host passes str
+        # hashes, so the match must go through toString() (mirrors the read
+        # path) or padding-sensitive comparison silently misses rows.
+        delete_clustering_rows("preprod", ["aa" * 32])
+        classif = next(
+            c for c in _delete_calls(client)
+            if "tx_classifications" in c.args[0]
+        )
+        assert "toString(tx_hash)" in classif.args[0]
+
     def test_best_effort_swallows_missing_tables(self, client):
         # The sidecar may never have run; a rollback must not crash chain sync.
         client.execute.side_effect = RuntimeError("UNKNOWN_TABLE")
