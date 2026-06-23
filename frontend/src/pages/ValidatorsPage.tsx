@@ -15,8 +15,16 @@ import { useHealth } from "@/lib/api/health";
 
 export function ValidatorsPage() {
 	const health = useHealth();
-	const { data: contracts, isLoading, isError } = useContracts();
-	const { data: jobs } = useJobs();
+	// Hold the clustering polls until health confirms the module is on, so a
+	// disabled deployment (or the brief pre-health window) never hits
+	// /api/clustering/*. `undefined` keeps each hook's default poll interval.
+	const clusteringEnabled = health.data?.clustering_enabled === true;
+	const {
+		data: contracts,
+		isLoading,
+		isError,
+	} = useContracts(undefined, clusteringEnabled);
+	const { data: jobs } = useJobs(undefined, clusteringEnabled);
 
 	if (health.data && health.data.clustering_enabled === false) {
 		return (

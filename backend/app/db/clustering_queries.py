@@ -169,7 +169,13 @@ def flagged_for_network(
     try:
         rows = _client().execute(
             _select("network = %(network)s AND verdict != %(normal)s")
-            + " ORDER BY scored_at DESC LIMIT %(limit)s",
+            # Order by reconciliation recency, not source time. A newly
+            # malicious-labeled OLD transaction is re-published with a fresh
+            # published_at but keeps its original (older) scored_at; ordering by
+            # scored_at could push it past the cap and silently drop it from the
+            # rescue / stats augmentation. published_at keeps the latest-touched
+            # findings inside the cap, preserving recall on relabels.
+            + " ORDER BY published_at DESC LIMIT %(limit)s",
             {"network": network, "normal": _NORMAL_VERDICT, "limit": limit},
         )
     except Exception as e:  # noqa: BLE001 - best-effort cross-db read

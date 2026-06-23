@@ -40,11 +40,14 @@ import { get, send } from "./transport";
 
 const CONTRACTS_KEY = ["clustering", "contracts"] as const;
 
-export function useContracts(pollMs = 10_000) {
+export function useContracts(pollMs = 10_000, enabled = true) {
 	return useQuery({
 		queryKey: CONTRACTS_KEY,
 		queryFn: () => get<Contract[]>("/contracts", validateContracts),
 		refetchInterval: pollMs,
+		// Let the page hold the query off until it knows clustering is enabled, so
+		// a clustering-disabled deployment never polls /api/clustering/*.
+		enabled,
 	});
 }
 
@@ -314,11 +317,12 @@ export function useJob(jobId: string | undefined, pollMs = 2500) {
 }
 
 /** All known jobs (newest first), polled so card status badges stay live. */
-export function useJobs(pollMs = 2500) {
+export function useJobs(pollMs = 2500, enabled = true) {
 	return useQuery({
 		queryKey: ["clustering", "jobs"],
 		queryFn: () => get<Job[]>("/jobs", arrayOf("/jobs", jobItem)),
 		refetchInterval: pollMs,
+		enabled,
 	});
 }
 
