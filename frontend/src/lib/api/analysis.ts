@@ -6,6 +6,7 @@ import {
 	type Severity,
 } from "@/mocks/attacks";
 import { formatAnalyzedAt } from "@/lib/utils/dates";
+import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
 import { fetchWithAuth, getNetwork } from "./fetch";
 
@@ -75,8 +76,6 @@ const ATTACK_CLASS_BY_SNAKE: Record<string, AttackType> = Object.fromEntries(
 const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntries(
 	ATTACK_TYPES.map((t) => [t, toSnake(t)]),
 ) as Record<AttackType, string>;
-
-const LOVELACE_PER_ADA = 1_000_000;
 
 function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	const attackType = ATTACK_CLASS_BY_SNAKE[r.max_class];

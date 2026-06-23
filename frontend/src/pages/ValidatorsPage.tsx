@@ -102,7 +102,7 @@ function ContractCard({ c }: { c: Contract }) {
 
 export function ValidatorsPage() {
 	const health = useHealth();
-	const { data: contracts, isLoading } = useContracts();
+	const { data: contracts, isLoading, isError } = useContracts();
 	const add = useAddContract();
 	const [target, setTarget] = useState("");
 	const [label, setLabel] = useState("");
@@ -169,6 +169,11 @@ export function ValidatorsPage() {
 
 			{isLoading ? (
 				<p className="text-sm text-muted-foreground">Loading watchlist…</p>
+			) : isError ? (
+				<p className="text-sm text-destructive">
+					Could not load the watchlist. The clustering service may be
+					unavailable; retry shortly.
+				</p>
 			) : !contracts?.length ? (
 				<p className="text-sm text-muted-foreground">
 					No contracts watched yet. Add a script address above to start.

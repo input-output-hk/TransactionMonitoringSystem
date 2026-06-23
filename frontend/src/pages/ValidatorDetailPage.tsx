@@ -27,7 +27,7 @@ export function ValidatorDetailPage() {
 	const { target = "" } = useParams();
 	const decoded = decodeURIComponent(target);
 
-	const { data: runs } = useRuns(decoded);
+	const { data: runs, isError: runsError } = useRuns(decoded);
 	const { data: anomalyRuns } = useAnomalyRuns(decoded);
 
 	// Runs come newest-first; the latest shape run backs the clusters + graph.
@@ -39,7 +39,11 @@ export function ValidatorDetailPage() {
 		() => anomalyRuns?.find((r) => r.feature_set === "shape") ?? anomalyRuns?.[0],
 		[anomalyRuns],
 	);
-	const { data: graph, isLoading: graphLoading } = useClusterGraph(latestRun?.run_id);
+	const {
+		data: graph,
+		isLoading: graphLoading,
+		isError: graphError,
+	} = useClusterGraph(latestRun?.run_id);
 
 	return (
 		<div className="space-y-6">
@@ -58,7 +62,14 @@ export function ValidatorDetailPage() {
 				)}
 			</div>
 
-			{!latestRun ? (
+			{runsError ? (
+				<Card>
+					<CardContent className="py-8 text-center text-sm text-destructive">
+						Could not load clustering runs for this contract. The clustering
+						service may be unavailable; retry shortly.
+					</CardContent>
+				</Card>
+			) : !latestRun ? (
 				<Card>
 					<CardContent className="py-8 text-center text-sm text-muted-foreground">
 						No clustering run yet for this contract. The sidecar fits it
@@ -72,7 +83,12 @@ export function ValidatorDetailPage() {
 							<CardTitle>Cluster graph</CardTitle>
 						</CardHeader>
 						<CardContent>
-							{graphLoading ? (
+							{graphError ? (
+								<p className="text-sm text-destructive">
+									Failed to load the cluster graph. The clustering service may
+									be unavailable.
+								</p>
+							) : graphLoading ? (
 								<p className="text-sm text-muted-foreground">Building graph…</p>
 							) : graph && graph.nodes.length ? (
 								<>

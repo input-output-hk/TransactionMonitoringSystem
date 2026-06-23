@@ -96,22 +96,156 @@ export type GraphData = {
 	truncated: boolean;
 };
 
-// --- transport --------------------------------------------------------------
+// --- runtime validation -----------------------------------------------------
+//
+// zod is not a frontend dependency, so rather than add one we run pragmatic
+// hand-rolled guards on the response shapes whose fields are consumed with
+// methods that throw on `undefined` (`.toFixed`, `.toLocaleString`, `.map`,
+// arithmetic). A malformed/HTML-error-page body that slips past `res.ok`
+// would otherwise blow up deep in render with an opaque "cannot read
+// properties of undefined"; failing loud here lets the query surface an
+// error state instead. A `Validator<T>` returns the value (typed) or throws.
 
-async function get<T>(path: string): Promise<T> {
-	const res = await fetchWithAuth(`${BASE}${path}`);
-	if (!res.ok) throw new Error(`clustering ${path} failed: ${res.status}`);
-	return (await res.json()) as T;
+type Validator<T> = (raw: unknown) => T;
+
+class ResponseShapeError extends Error {
+	constructor(path: string, detail: string) {
+		super(`clustering ${path}: malformed response (${detail})`);
+		this.name = "ResponseShapeError";
+	}
 }
 
-async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
+function isObject(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null;
+}
+
+/** Build a validator that requires `obj` to be an object carrying every key in
+ *  `numberFields` as a finite number and every key in `stringFields` as a
+ *  string. Returns the value cast to T. Other fields pass through unchecked. */
+function shapeValidator<T>(
+	path: string,
+	numberFields: readonly string[],
+	stringFields: readonly string[],
+): Validator<T> {
+	return (raw) => {
+		if (!isObject(raw)) throw new ResponseShapeError(path, "expected an object");
+		for (const f of numberFields) {
+			if (typeof raw[f] !== "number" || !Number.isFinite(raw[f])) {
+				throw new ResponseShapeError(path, `field "${f}" is not a finite number`);
+			}
+		}
+		for (const f of stringFields) {
+			if (typeof raw[f] !== "string") {
+				throw new ResponseShapeError(path, `field "${f}" is not a string`);
+			}
+		}
+		return raw as T;
+	};
+}
+
+/** Wrap an item validator so it applies to every element of an array body. */
+function arrayOf<T>(path: string, item: Validator<T>): Validator<T[]> {
+	return (raw) => {
+		if (!Array.isArray(raw)) throw new ResponseShapeError(path, "expected an array");
+		return raw.map(item);
+	};
+}
+
+// Only the fields actually read with throwing methods are required; the rest of
+// each type is structural and tolerated as optional to stay forgiving.
+const validateContracts = arrayOf<Contract>(
+	"/contracts",
+	shapeValidator(
+		"/contracts",
+		["tx_count", "drift_score"],
+		["target", "status"],
+	),
+);
+
+const runItem = shapeValidator<Run>(
+	"/runs",
+	["n_points", "n_clusters", "n_noise"],
+	["run_id"],
+);
+
+const clusterItem = shapeValidator<ClusterSummary>(
+	"/runs/clusters",
+	[
+		"cluster_id",
+		"size",
+		"avg_fees",
+		"avg_output_lovelace",
+		"avg_inputs",
+		"avg_outputs",
+		"anomaly_count",
+	],
+	[],
+);
+
+const anomalyRunItem = shapeValidator<AnomalyRun>(
+	"/anomaly-runs",
+	["n_points", "n_flagged"],
+	["run_id"],
+);
+
+const candidateItem = shapeValidator<AnomalyCandidate>(
+	"/anomaly-runs/top",
+	[
+		"score_rank",
+		"consensus",
+		"votes",
+		"input_count",
+		"output_count",
+		"distinct_assets",
+	],
+	["tx_hash"],
+);
+
+const graphNodeItem = shapeValidator<GraphNode>(
+	"/runs/graph (node)",
+	["cluster"],
+	["id"],
+);
+
+const validateGraph: Validator<GraphData> = (raw) => {
+	const path = "/runs/graph";
+	const obj = shapeValidator<GraphData>(path, ["total", "shown"], ["run_id"])(raw);
+	arrayOf(path, graphNodeItem)((obj as unknown as Record<string, unknown>).nodes);
+	if (!Array.isArray((obj as unknown as Record<string, unknown>).edges)) {
+		throw new ResponseShapeError(path, 'field "edges" is not an array');
+	}
+	return obj;
+};
+
+const validateAnomalyTop: Validator<AnomalyTopResponse> = (raw) => {
+	const path = "/anomaly-runs/top";
+	if (!isObject(raw)) throw new ResponseShapeError(path, "expected an object");
+	return { candidates: arrayOf(path, candidateItem)(raw.candidates) };
+};
+
+// --- transport --------------------------------------------------------------
+
+async function get<T>(path: string, validate?: Validator<T>): Promise<T> {
+	const res = await fetchWithAuth(`${BASE}${path}`);
+	if (!res.ok) throw new Error(`clustering ${path} failed: ${res.status}`);
+	const raw = await res.json();
+	return validate ? validate(raw) : (raw as T);
+}
+
+async function send<T>(
+	method: string,
+	path: string,
+	body?: unknown,
+	validate?: Validator<T>,
+): Promise<T> {
 	const res = await fetchWithAuth(`${BASE}${path}`, {
 		method,
 		headers: { "Content-Type": "application/json" },
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
 	if (!res.ok) throw new Error(`clustering ${method} ${path} failed: ${res.status}`);
-	return (await res.json()) as T;
+	const raw = await res.json();
+	return validate ? validate(raw) : (raw as T);
 }
 
 // --- hooks: watchlist -------------------------------------------------------
@@ -121,7 +255,7 @@ const CONTRACTS_KEY = ["clustering", "contracts"] as const;
 export function useContracts(pollMs = 10_000) {
 	return useQuery({
 		queryKey: CONTRACTS_KEY,
-		queryFn: () => get<Contract[]>("/contracts"),
+		queryFn: () => get<Contract[]>("/contracts", validateContracts),
 		refetchInterval: pollMs,
 	});
 }
@@ -162,7 +296,11 @@ export function useClassifyNow() {
 export function useRuns(target: string | undefined) {
 	return useQuery({
 		queryKey: ["clustering", "runs", target],
-		queryFn: () => get<Run[]>(`/runs?target=${encodeURIComponent(target!)}`),
+		queryFn: () =>
+			get<Run[]>(
+				`/runs?target=${encodeURIComponent(target!)}`,
+				arrayOf("/runs", runItem),
+			),
 		enabled: !!target,
 	});
 }
@@ -170,7 +308,11 @@ export function useRuns(target: string | undefined) {
 export function useClusterSummary(runId: string | undefined) {
 	return useQuery({
 		queryKey: ["clustering", "clusters", runId],
-		queryFn: () => get<ClusterSummary[]>(`/runs/${runId}/clusters`),
+		queryFn: () =>
+			get<ClusterSummary[]>(
+				`/runs/${runId}/clusters`,
+				arrayOf("/runs/clusters", clusterItem),
+			),
 		enabled: !!runId,
 	});
 }
@@ -178,7 +320,11 @@ export function useClusterSummary(runId: string | undefined) {
 export function useAnomalyRuns(target: string | undefined) {
 	return useQuery({
 		queryKey: ["clustering", "anomaly-runs", target],
-		queryFn: () => get<AnomalyRun[]>(`/anomaly-runs?target=${encodeURIComponent(target!)}`),
+		queryFn: () =>
+			get<AnomalyRun[]>(
+				`/anomaly-runs?target=${encodeURIComponent(target!)}`,
+				arrayOf("/anomaly-runs", anomalyRunItem),
+			),
 		enabled: !!target,
 	});
 }
@@ -188,7 +334,11 @@ export type AnomalyTopResponse = { candidates: AnomalyCandidate[] };
 export function useTopAnomalies(runId: string | undefined, limit = 100) {
 	return useQuery({
 		queryKey: ["clustering", "anomaly-top", runId, limit],
-		queryFn: () => get<AnomalyTopResponse>(`/anomaly-runs/${runId}/top?limit=${limit}`),
+		queryFn: () =>
+			get<AnomalyTopResponse>(
+				`/anomaly-runs/${runId}/top?limit=${limit}`,
+				validateAnomalyTop,
+			),
 		enabled: !!runId,
 	});
 }
@@ -196,7 +346,8 @@ export function useTopAnomalies(runId: string | undefined, limit = 100) {
 export function useClusterGraph(runId: string | undefined, limit = 400) {
 	return useQuery({
 		queryKey: ["clustering", "graph", runId, limit],
-		queryFn: () => get<GraphData>(`/runs/${runId}/graph?limit=${limit}`),
+		queryFn: () =>
+			get<GraphData>(`/runs/${runId}/graph?limit=${limit}`, validateGraph),
 		enabled: !!runId,
 	});
 }

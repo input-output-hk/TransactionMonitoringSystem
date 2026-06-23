@@ -15,8 +15,7 @@ import {
 	useClusterSummary,
 	useLabelCluster,
 } from "@/lib/api/clustering";
-
-const ADA = 1_000_000;
+import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
 
 function clusterName(id: number): string {
 	return id < 0 ? "Noise" : `Cluster ${id}`;
@@ -61,7 +60,7 @@ export function ClusterSummaryTable({ runId }: { runId: string }) {
 							{Math.round(c.avg_fees).toLocaleString()}
 						</TableCell>
 						<TableCell className="text-right tabular-nums">
-							{(c.avg_output_lovelace / ADA).toLocaleString(undefined, {
+							{(c.avg_output_lovelace / LOVELACE_PER_ADA).toLocaleString(undefined, {
 								maximumFractionDigits: 1,
 							})}
 						</TableCell>

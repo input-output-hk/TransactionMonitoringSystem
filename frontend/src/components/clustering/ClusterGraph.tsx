@@ -21,6 +21,13 @@ type Props = {
 export function ClusterGraph({ data, onNodeTap, className }: Props) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const cyRef = useRef<cytoscape.Core | null>(null);
+	// Hold the tap callback in a ref so a changing prop identity (inline arrow
+	// callers) does not force a full cytoscape teardown + fcose relayout. The
+	// tap handler reads the latest callback from here at fire time.
+	const onNodeTapRef = useRef(onNodeTap);
+	useEffect(() => {
+		onNodeTapRef.current = onNodeTap;
+	}, [onNodeTap]);
 
 	const elements = useMemo(() => {
 		if (!data) return [];
@@ -80,17 +87,19 @@ export function ClusterGraph({ data, onNodeTap, className }: Props) {
 			maxZoom: 3,
 		});
 		cyRef.current = cy;
-		if (onNodeTap) {
-			cy.on("tap", "node", (evt) => {
-				const n = evt.target;
-				onNodeTap(n.id(), n.data("cluster"));
-			});
-		}
+		cy.on("tap", "node", (evt) => {
+			const n = evt.target;
+			onNodeTapRef.current?.(n.id(), n.data("cluster"));
+		});
 		return () => {
 			cy.destroy();
 			cyRef.current = null;
 		};
-	}, [elements, data, onNodeTap]);
+		// `elements` is derived purely from `data` (useMemo above), so depending
+		// on `data` alone is sufficient and avoids the redundant dep; the tap
+		// callback is read from a ref so it is intentionally not a dependency.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [data]);
 
 	return (
 		<div
