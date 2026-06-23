@@ -36,6 +36,7 @@ import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/utils/clipboard";
+import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
 import type { RiskAlert } from "@/mocks/attacks";
 import {
 	ARCHIVE_REASONS,
@@ -441,7 +442,7 @@ function fmtBytes(n: number | undefined): string {
 
 function fmtLovelaceAsAda(lov: number | undefined, digits = 2): string {
 	if (lov === undefined || !Number.isFinite(lov)) return EVIDENCE_PLACEHOLDER;
-	return `${(lov / 1_000_000).toFixed(digits)} ADA`;
+	return `${(lov / LOVELACE_PER_ADA).toFixed(digits)} ADA`;
 }
 
 function fmtAddress(addr: string | undefined, head = 12, tail = 8): string {
