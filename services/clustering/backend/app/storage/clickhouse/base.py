@@ -94,6 +94,7 @@ class _RepoBase:
         ("cluster_runs", "origin"),    # 007 (retro-edited into 001 without an ALTER)
         ("anomaly_runs", "origin"),    # 007 (retro-edited into 002 without an ALTER)
         ("contracts", "drift_score"),  # 008
+        ("tx_contract_anomaly", "published_at"),  # 009 (reconciliation version)
     )
 
     def missing_schema_objects(self) -> list[str]:

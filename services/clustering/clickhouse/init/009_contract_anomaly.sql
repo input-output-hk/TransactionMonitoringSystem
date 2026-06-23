@@ -29,7 +29,16 @@ CREATE TABLE IF NOT EXISTS tms.tx_contract_anomaly
     model_id        String,            -- the frozen ShapeModel that scored it
     feature_set     String,            -- shape | graph | combined
     evidence        String DEFAULT '{}',  -- JSON: top deviating features, etc.
-    scored_at       DateTime DEFAULT now()
+    scored_at       DateTime DEFAULT now(),     -- SOURCE time: the run/classify that produced the verdict
+    published_at    DateTime64(6) DEFAULT now64(6)  -- RECONCILIATION version: see below
 )
-ENGINE = ReplacingMergeTree(scored_at)
+-- Versioned by `published_at`, NOT `scored_at`. Every reconciliation (publish,
+-- relabel, clear, delete) stamps a monotonic `published_at`, so the LATEST
+-- reconciliation always wins on FINAL even when it re-publishes a positive whose
+-- SOURCE time (scored_at, from the original run/classify) is older than a prior
+-- tombstone. Versioning on scored_at instead would let a `now()` tombstone keep
+-- beating a re-published positive after a benign label is CLEARED, hiding the
+-- re-raised alert until a future fit produced a newer scored_at. DateTime64(6)
+-- (microsecond) avoids same-second version ties between back-to-back syncs.
+ENGINE = ReplacingMergeTree(published_at)
 ORDER BY (network, tx_hash, target);

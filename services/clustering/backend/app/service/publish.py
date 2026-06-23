@@ -58,7 +58,7 @@ _PUBLISHED = (VERDICT_MALICIOUS, VERDICT_ANOMALY)
 _COLUMNS = [
     "network", "tx_hash", "target", "cluster_id", "iso_score", "lof_score",
     "consensus", "votes", "verdict", "model_id", "feature_set", "evidence",
-    "scored_at",
+    "scored_at", "published_at",
 ]
 
 
@@ -71,14 +71,16 @@ def _as_datetime(value: Any) -> datetime:
 
 
 def _publish_batch(
-    repo: Repo, target: str, network: str, feature_set: str,
+    repo: Repo, target: str, network: str, feature_set: str, published_at: datetime,
 ) -> set[str]:
     """Resolve and publish the latest batch fit's flagged verdicts. Returns the
     set of tx_hashes published (empty if the target has no cluster run yet).
 
     Resolution is label-aware (``_resolve_verdicts`` folds in the target's manual
     labels), so a tx whose cluster was labeled benign resolves to ``benign`` and
-    is excluded here, which lets the reconciliation step retract any stale row."""
+    is excluded here, which lets the reconciliation step retract any stale row.
+    ``published_at`` is the reconciliation version stamped on every row (see the
+    table doc); ``scored_at`` stays the source run time."""
     cluster_of, run = _run_membership(repo, target, feature_set)
     if not run or not cluster_of:
         return set()
@@ -108,7 +110,7 @@ def _publish_batch(
         rows.append([
             network, tx, target, int(cluster_of.get(tx, -1)),
             iso, lof, consensus, int(votes.get(tx, 0)), verdict,
-            model_id, feature_set, "{}", stamp,
+            model_id, feature_set, "{}", stamp, published_at,
         ])
     db = repo._db  # type: ignore[attr-defined]
     repo.client.insert(  # type: ignore[attr-defined]
@@ -118,29 +120,42 @@ def _publish_batch(
 
 
 def _publish_online(
-    repo: Repo, target: str, network: str, feature_set: str,
+    repo: Repo, target: str, network: str, feature_set: str, published_at: datetime,
 ) -> set[str]:
     """Copy the target's flagged ``tx_classifications`` (incrementally-scored new
     txs) into ``tx_contract_anomaly``, in-database (both in ``tms_clustering``).
     Returns the set of tx_hashes published.
 
-    A human benign/cleared label overrides the model verdict: txs the analyst
-    labeled benign (or members of a cluster labeled benign — labelling writes an
-    explicit per-member row) are excluded, so the reconciliation step can retract
-    a stale alert. ``tx_labels`` reads use FINAL + ``deleted = 0``, so a CLEARED
-    benign label correctly stops suppressing the tx again."""
+    Label resolution (``tx_labels`` FINAL + ``deleted = 0``, so a CLEARED label
+    stops applying):
+    - benign-labeled txs are EXCLUDED (the human "cleared" verdict overrides the
+      model), so the reconciliation step can retract a stale alert;
+    - malicious-labeled txs are INCLUDED and published as ``malicious`` even when
+      the model verdict was ``normal`` — this covers single-tx / noise / new-tx
+      judgements (the ``label_transaction`` endpoint) that the cluster path can't
+      reach. (A malicious label on a tx with no ``tx_classifications`` row, i.e.
+      never online-scored, still can't be published here — rare; the batch path
+      covers cluster members.)
+
+    ``published_at`` is the reconciliation version (see the table doc)."""
     db = repo._db  # type: ignore[attr-defined]
     verdicts = ", ".join(f"'{v}'" for v in _PUBLISHED)
-    params = {"net": network, "tgt": target, "fs": feature_set}
+    params = {"net": network, "tgt": target, "fs": feature_set, "pub": published_at}
     # Built by concatenation (not an f-string) so the {name:Type} server-binding
-    # placeholders stay literal while db / verdicts interpolate.
+    # placeholders stay literal while db / verdicts interpolate. Active-label
+    # subqueries: FINAL + deleted=0 means a cleared label no longer applies.
+    benign_sub = (
+        "(SELECT toString(tx_hash) FROM " + db + ".tx_labels FINAL "
+        "WHERE target = {tgt:String} AND deleted = 0 AND label = 'benign')"
+    )
+    malicious_sub = (
+        "(SELECT toString(tx_hash) FROM " + db + ".tx_labels FINAL "
+        "WHERE target = {tgt:String} AND deleted = 0 AND label = 'malicious')"
+    )
     where = (
-        "target = {tgt:String} AND feature_set = {fs:String} "
-        "AND verdict IN (" + verdicts + ") "
-        "AND toString(tx_hash) NOT IN ("
-        "  SELECT toString(tx_hash) FROM " + db + ".tx_labels FINAL "
-        "  WHERE target = {tgt:String} AND deleted = 0 AND label = 'benign'"
-        ")"
+        "target = {tgt:String} AND feature_set = {fs:String} AND ("
+        "(verdict IN (" + verdicts + ") AND toString(tx_hash) NOT IN " + benign_sub + ")"
+        " OR toString(tx_hash) IN " + malicious_sub + ")"
     )
     published = {
         str(r[0])
@@ -152,11 +167,16 @@ def _publish_online(
     }
     if not published:
         return set()
+    # A human malicious label overrides the stored model verdict on publish.
+    verdict_expr = (
+        "if(toString(tx_hash) IN " + malicious_sub + ", 'malicious', toString(verdict))"
+    )
     repo.client.command(  # type: ignore[attr-defined]
         "INSERT INTO " + db + ".tx_contract_anomaly (" + ", ".join(_COLUMNS) + ") "
         "SELECT {net:String} AS network, toString(tx_hash), target, cluster_id, "
-        "iso_score, lof_score, consensus, votes, toString(verdict), model_id, "
-        "toString(feature_set), '{}' AS evidence, toDateTime(scored_at) "
+        "iso_score, lof_score, consensus, votes, " + verdict_expr + ", model_id, "
+        "toString(feature_set), '{}' AS evidence, toDateTime(scored_at), "
+        "{pub:DateTime64(6)} AS published_at "
         "FROM " + db + ".tx_classifications FINAL WHERE " + where,
         parameters=params,
     )
@@ -164,15 +184,19 @@ def _publish_online(
 
 
 def _retract_stale(
-    repo: Repo, target: str, network: str, feature_set: str, *, keep: set[str],
+    repo: Repo, target: str, network: str, feature_set: str,
+    *, keep: set[str], published_at: datetime,
 ) -> int:
     """Append a ``normal`` tombstone for every currently-published (non-normal) tx
     of this ``(network, target)`` that is NOT in ``keep`` (the freshly-published
     flagged set), so the host stops surfacing a now-benign/normal transaction.
 
-    Returns the number of rows retracted. The tombstone is stamped ``now()`` so it
-    supersedes the stale row (from a past run/classify) on FINAL, while any later
-    genuine re-flag (a future run) supersedes the tombstone in turn."""
+    Returns the number of rows retracted. The tombstone carries this
+    reconciliation's ``published_at`` version, so it supersedes the stale row on
+    FINAL, while any later reconciliation (a re-flag after a label is cleared, or
+    a future fit) gets a still-newer ``published_at`` and supersedes the tombstone
+    in turn. ``scored_at`` is set to ``published_at`` too (a tombstone has no
+    source verdict time of its own)."""
     db = repo._db  # type: ignore[attr-defined]
     current = {
         str(r[0])
@@ -186,14 +210,9 @@ def _retract_stale(
     stale = current - keep
     if not stale:
         return 0
-    # Naive UTC, matching how _as_datetime stamps the real rows (ClickHouse
-    # DateTime is tz-less UTC): an aware vs naive mix could order inconsistently
-    # in the ReplacingMergeTree version compare. now() > any past run/classify
-    # stamp (so the tombstone wins), yet < a future re-flag's run time.
-    stamp = datetime.now(UTC).replace(tzinfo=None)
     rows = [
         [network, tx, target, -1, float("nan"), float("nan"), 0.0, 0,
-         VERDICT_NORMAL, "", feature_set, "{}", stamp]
+         VERDICT_NORMAL, "", feature_set, "{}", published_at, published_at]
         for tx in stale
     ]
     repo.client.insert(  # type: ignore[attr-defined]
@@ -211,10 +230,15 @@ def publish_contract_anomaly(
     retracts any previously-published tx that is no longer flagged. Idempotent.
     Returns the number of flagged (non-tombstone) contract_anomaly rows now
     present for (network, target, feature_set) so callers can log coverage."""
-    online_flagged = _publish_online(repo, target, network, feature_set)
-    batch_flagged = _publish_batch(repo, target, network, feature_set)
+    # One monotonic reconciliation version for every row written this pass: a
+    # later publish (incl. a re-raise after a benign label is cleared) always
+    # gets a newer published_at and wins on FINAL, regardless of source times.
+    published_at = datetime.now(UTC).replace(tzinfo=None)
+    online_flagged = _publish_online(repo, target, network, feature_set, published_at)
+    batch_flagged = _publish_batch(repo, target, network, feature_set, published_at)
     retracted = _retract_stale(
-        repo, target, network, feature_set, keep=online_flagged | batch_flagged,
+        repo, target, network, feature_set,
+        keep=online_flagged | batch_flagged, published_at=published_at,
     )
     db = repo._db  # type: ignore[attr-defined]
     rows = repo.client.query(  # type: ignore[attr-defined]
