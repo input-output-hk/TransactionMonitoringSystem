@@ -6,3 +6,14 @@ __pycache__/
 *.egg-info/
 .venv/
 notebooks/
+
+# Never bake secrets or VCS metadata into an image layer. The repo-root
+# .dockerignore does NOT apply to this build context (./services/clustering/
+# backend), so the exclusions must be repeated here.
+.env
+*.env
+.env.*
+.git
+.gitignore
+*.pem
+*.key
