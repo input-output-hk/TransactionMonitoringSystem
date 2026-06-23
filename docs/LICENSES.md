@@ -67,7 +67,7 @@ the upstream license is retained verbatim alongside the data at
 | License | Count | Permissive? | Conditions |
 |---|---|---|---|
 | MIT | 11 | Yes | Attribution in distributed copies only |
-| Apache 2.0 | 3 | Yes | Attribution + patent grant; compatible with MIT/BSD |
+| Apache 2.0 | 4 | Yes | Attribution + patent grant; compatible with MIT/BSD. Includes the bundled StricaHQ registry snapshot (data, see "Bundled data"). |
 | BSD 3-Clause | 2 | Yes | Attribution; no endorsement clause |
 | PSF-2.0 | 1 | Yes | Attribution |
 | PostgreSQL License | 1 | Yes | Attribution (BSD-style, 2 clauses) |
@@ -77,4 +77,4 @@ All direct code dependencies are **compatible with Apache 2.0 and with each othe
 No GPL, LGPL, AGPL, EUPL, or other strong-copyleft license is present in the
 dependency tree.
 
-*Last updated: 2026-03-02. Verify against PyPI metadata when upgrading pinned versions.*
+*Last updated: 2026-06-23. Verify against PyPI metadata when upgrading pinned versions.*
