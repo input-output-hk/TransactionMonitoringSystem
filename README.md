@@ -66,6 +66,27 @@ because uvicorn itself does not read pydantic settings.
 
 Or use the helper script: `./scripts/start.sh`
 
+## Clustering module (optional)
+
+A first-party sidecar (`services/clustering/`) adds unsupervised, per-contract
+profiling on top of the nine supervised scorers, surfaced as a tenth attack
+class, `contract_anomaly`. It is fully opt-in and gated behind the `clustering`
+Compose profile:
+
+```bash
+# Bring it up alongside the app (shares the ClickHouse server; its state lives
+# in the tms_clustering database, chain reads come from tms_analytics):
+CLUSTERING_ENABLED=true docker compose --profile app --profile clustering up -d
+```
+
+`CLUSTERING_ENABLED=true` makes the app wire in the `/api/clustering/*`
+reverse-proxy (for the Validators / cluster-graph UI) and merge the module's
+`contract_anomaly` verdict into `/api/analysis/*`. Without the profile (or with
+`CLUSTERING_ENABLED` unset) the system runs as the nine-class engine, unchanged.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#clustering-module-contract_anomaly)
+for how it integrates and [services/clustering/README.md](services/clustering/README.md)
+for the module itself.
+
 ## Configuration
 
 Configuration is layered across files:
