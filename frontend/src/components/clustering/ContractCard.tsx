@@ -51,6 +51,7 @@ import {
 	useDeleteContract,
 	useRenameContract,
 } from "@/lib/api/clustering";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 
 function statusVariant(
 	status: string,
@@ -283,6 +284,17 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 				</CardTitle>
 			</CardHeader>
 			<CardContent className="text-muted-foreground space-y-1 text-sm">
+				{/* Full address, always visible (the title may show a label or a
+				    truncated form); break-all so the whole bech32 string wraps, and
+				    click to copy. */}
+				<button
+					type="button"
+					className="text-muted-foreground hover:text-foreground block w-full text-left font-mono text-xs break-all"
+					title="Click to copy"
+					onClick={() => copyToClipboard(c.target)}
+				>
+					{c.target}
+				</button>
 				<div className="flex justify-between">
 					<span>Transactions</span>
 					<span className="text-foreground tabular-nums">
