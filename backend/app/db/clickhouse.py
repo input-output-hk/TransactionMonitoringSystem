@@ -735,6 +735,8 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     get_class_scores_stats,
     get_class_scores_stats_async,
     get_pending_count,
+    get_tx_block_dates,
+    get_tx_block_dates_async,
     get_unanalyzed_transactions,
     insert_class_scores,
     query_multiple_sat_extraction_percentiles,

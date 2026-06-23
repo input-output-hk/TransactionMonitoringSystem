@@ -332,8 +332,27 @@ def test_list_rescue_skips_rows_still_below_filter(client, monkeypatch):
     assert body["total"] == 0
 
 
-def test_list_rescue_inactive_without_score_band_filter(client, monkeypatch):
-    """No score/band filter: the fast path runs and the rescue never fires."""
+def test_list_surfaces_buried_high_anomaly_unfiltered(client, monkeypatch):
+    """Unfiltered list: a low-stored-score tx flagged malicious is surfaced on
+    page 1 (it would otherwise be buried at the bottom by stored-score order)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    _bind_list_stubs(
+        monkeypatch,
+        page_rows=[_full_score_row("hightx", 90.0)],  # the visible top of page 1
+        total=1,
+        flagged={"lowtx": [_row("malicious")]},        # -> 80 (Critical)
+        by_hashes=[_full_score_row("lowtx", 20.0)],    # buried by stored score
+    )
+    r = client.get("/api/analysis/results?network=preprod")  # no filter
+    assert r.status_code == 200
+    hashes = [d["tx_hash"] for d in r.json()["data"]]
+    assert "lowtx" in hashes, "a buried high-anomaly tx must surface on page 1"
+
+
+def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
+    """attack_class is 9-class-specific: the synthetic class can't be a max_class,
+    so the rescue/surface never fires under it."""
     from app.config import settings
     from app.db import clustering_queries
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
@@ -348,6 +367,73 @@ def test_list_rescue_inactive_without_score_band_filter(client, monkeypatch):
         monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[],
     )
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
-    r = client.get("/api/analysis/results?network=preprod")
+    r = client.get("/api/analysis/results?network=preprod&attack_class=phishing")
     assert r.status_code == 200
-    assert flagged_called is False  # rescue gated off without a score/band filter
+    assert flagged_called is False  # gated off under a 9-class filter
+
+
+# --- Stats / timeseries contract_anomaly augmentation ------------------------
+
+def test_stats_reclassifies_flagged_tx_to_effective_band(client, monkeypatch):
+    """A tx stored Moderate but flagged malicious (Critical) moves from the
+    moderate count to the critical count, so the KPI cards don't undercount."""
+    from app.config import settings
+    from app.db import clickhouse, clustering_queries
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    base = {
+        "total": 1, "critical_count": 0, "high_count": 0, "moderate_count": 1,
+        "informational_count": 0, "avg_max_score": 45.0,
+        "last_analyzed_at": None, "per_class": {}, "pending_count": 0,
+    }
+
+    async def _stats(_net, *a, **k):
+        return dict(base)
+
+    async def _flagged(_net, *a, **k):
+        return {"lowtx": [_row("malicious")]}
+
+    async def _by_hashes(_net, _hashes, *a, **k):
+        return [_full_score_row("lowtx", 45.0)]  # stored Moderate
+
+    monkeypatch.setattr(clickhouse, "get_class_scores_stats_async", _stats)
+    monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+    monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+    r = client.get("/api/analysis/stats?network=preprod")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["critical_count"] == 1
+    assert body["moderate_count"] == 0
+
+
+def test_timeseries_adds_contract_anomaly_only_alerts(client, monkeypatch):
+    """A tx that's High/Critical only by its contract_anomaly verdict is added to
+    the daily alert count, bucketed on its block date."""
+    from app.config import settings
+    from app.db import clickhouse, clustering_queries
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    base = [
+        {"date": "2026-06-22", "count": 0},
+        {"date": "2026-06-23", "count": 1},
+    ]
+
+    async def _ts(_net, days, *a, **k):
+        return [dict(d) for d in base]
+
+    async def _flagged(_net, *a, **k):
+        return {"catx": [_row("malicious")]}  # -> Critical (alert)
+
+    async def _by_hashes(_net, _hashes, *a, **k):
+        return [_full_score_row("catx", 30.0)]  # stored Moderate (not an alert)
+
+    async def _dates(_net, _hashes, _days):
+        return {"catx": "2026-06-22"}
+
+    monkeypatch.setattr(clickhouse, "get_alert_timeseries_async", _ts)
+    monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+    monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+    monkeypatch.setattr(clickhouse, "get_tx_block_dates_async", _dates)
+    r = client.get("/api/analysis/stats/timeseries?network=preprod&days=14")
+    assert r.status_code == 200
+    by_date = {d["date"]: d["count"] for d in r.json()["data"]}
+    assert by_date["2026-06-22"] == 1  # was 0, +1 from the contract_anomaly alert
+    assert by_date["2026-06-23"] == 1  # unchanged

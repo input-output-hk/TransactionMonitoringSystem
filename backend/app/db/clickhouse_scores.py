@@ -162,6 +162,34 @@ async def get_class_scores_by_hashes_async(
     )
 
 
+def get_tx_block_dates(
+    network: str, tx_hashes: List[str], days: int,
+) -> Dict[str, str]:
+    """Map each tx_hash to its on-chain block DATE (``YYYY-MM-DD``), restricted to
+    the trailing ``days`` window. Used to bucket contract_anomaly-flagged txs into
+    the alert timeseries (which buckets on block time, not analyzed_at). A tx_hash
+    maps to exactly one block, so the plain-MergeTree duplicates a reorg may leave
+    collapse to the same date on dict assignment. Empty input → ``{}``."""
+    if not tx_hashes:
+        return {}
+    rows = _client().execute(
+        """
+        SELECT tx_hash, toDate(timestamp)
+        FROM transactions
+        WHERE network = %(network)s AND tx_hash IN %(hashes)s
+          AND timestamp >= toStartOfDay(now() - INTERVAL %(days)s DAY)
+        """,
+        {"network": network, "hashes": tx_hashes, "days": days},
+    )
+    return {r[0]: r[1].isoformat() for r in rows}
+
+
+async def get_tx_block_dates_async(
+    network: str, tx_hashes: List[str], days: int,
+) -> Dict[str, str]:
+    return await _run(partial(get_tx_block_dates, network, tx_hashes, days))
+
+
 _MULTIPLE_SAT_EVIDENCE_KEYS = (
     ("net_value_out_of_script", "value_extracted_lovelace"),
     ("n_assets_out_of_script", "n_assets_extracted"),
