@@ -26,12 +26,14 @@ table for ``(network, target)`` to exactly the currently-flagged set. A tx that
 was flagged before but is now benign/normal (re-fit reclassified it, a human
 labeled its cluster benign, or a label was applied/cleared) is RETRACTED by
 appending a superseding ``normal`` tombstone, so the host stops surfacing a
-stale Contract Anomaly. ``tx_contract_anomaly`` is ``ReplacingMergeTree(scored_at)``
-keyed by (network, tx_hash, target); the host reads FINAL, so the newest row
-(real verdict or tombstone) wins. Tombstones are stamped ``now()`` so they
-supersede the past row they retract yet are themselves superseded by any later
-genuine re-flag (whose run/classify time is later still). Re-publishing the same
-verdicts is therefore idempotent.
+stale Contract Anomaly. ``tx_contract_anomaly`` is
+``ReplacingMergeTree(published_at)`` keyed by (network, tx_hash, target); the
+host reads FINAL, so the row with the newest ``published_at`` (real verdict or
+tombstone) wins. Every reconciliation stamps one monotonic ``published_at`` on
+all the rows it writes (tombstones included), so the LATEST reconciliation
+always wins — even when it re-publishes a positive whose SOURCE time
+(``scored_at``, from the original run/classify) is older than a prior tombstone.
+Re-publishing the same verdicts is therefore idempotent.
 """
 
 from __future__ import annotations

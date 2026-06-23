@@ -47,6 +47,142 @@ def _require_one_target(address: str | None, policy_id: str | None) -> None:
         raise typer.BadParameter("Provide exactly one of --address or --policy-id.")
 
 
+# Columns of tx_contract_anomaly in the order the rebuild copies them. MUST
+# mirror clickhouse/init/009_contract_anomaly.sql (minus published_at, which the
+# backfill stamps from scored_at). An explicit list, not `SELECT *`, so a future
+# column add can't silently misalign the copy.
+_CONTRACT_ANOMALY_COLS = (
+    "network, tx_hash, target, cluster_id, iso_score, lof_score, consensus, "
+    "votes, verdict, model_id, feature_set, evidence, scored_at"
+)
+
+# The table body matching 009. A plain (non-f) string so the `'{}'` evidence
+# default stays a literal when interpolated into the CREATE below.
+_CONTRACT_ANOMALY_BODY = (
+    "network String, tx_hash String, target String, cluster_id Int32, "
+    "iso_score Float64, lof_score Float64, consensus Float64, votes UInt8, "
+    "verdict String, model_id String, feature_set String, "
+    "evidence String DEFAULT '{}', scored_at DateTime DEFAULT now(), "
+    "published_at DateTime64(6) DEFAULT now64(6)"
+)
+
+
+def _rebuild_contract_anomaly_version(repo: ClickHouseRepo, db: str) -> None:
+    """Migrate an EXISTING tx_contract_anomaly from the pre-009 schema
+    (ReplacingMergeTree(scored_at), no published_at) onto the published_at
+    reconciliation version, preserving every stored row.
+
+    A ReplacingMergeTree's version column cannot be changed by ALTER, so this
+    rebuilds via a staging table + a single atomic RENAME. Properties:
+
+    - No-op once migrated (engine already ReplacingMergeTree(published_at)) —
+      fresh and previously-migrated volumes short-circuit, so it is safe to
+      re-run; a manually ADD COLUMN'd table whose engine is still on scored_at is
+      NOT treated as migrated and gets rebuilt.
+    - Refuses to guess after a partial failed run: if leftover _v2 / backup
+      tables exist it aborts and asks an operator to inspect/clean up.
+    - Row-count parity is checked before the swap (aborts + cleans up on drift).
+    - Non-destructive: the old table is kept as a timestamped backup, to be
+      dropped explicitly once the migration has been verified.
+    """
+    from datetime import UTC, datetime
+
+    client = repo.client
+
+    def _count(sql: str, params: dict | None = None) -> int:
+        return int(client.query(sql, parameters=params or {}).result_rows[0][0])
+
+    # Decide the migration state from the table's ENGINE, not just the column.
+    # The unsafe state to catch is published_at added manually while the engine
+    # is still ReplacingMergeTree(scored_at): a column-only check would treat
+    # that as migrated and leave the recall regression in place (dedup still
+    # keyed on scored_at). So skip ONLY when the engine confirms the new version;
+    # the manual-bad-state then falls through to the rebuild below and self-heals.
+    engine_rows = client.query(
+        "SELECT engine_full FROM system.tables "
+        "WHERE database = {db:String} AND name = 'tx_contract_anomaly'",
+        parameters={"db": db},
+    ).result_rows
+    # Table absent (009's CREATE didn't run for some reason) — leave it to the
+    # schema guard to report rather than masking it here.
+    if not engine_rows:
+        return
+    # Normalise whitespace/case so the match is robust to engine_full formatting.
+    engine_full = str(engine_rows[0][0]).lower().replace(" ", "")
+    if "replacingmergetree(published_at)" in engine_full:
+        return
+
+    # Don't guess after a partial failure — make the operator inspect/clean up.
+    leftovers = [
+        r[0]
+        for r in client.query(
+            "SELECT name FROM system.tables WHERE database = {db:String} AND "
+            "(name = 'tx_contract_anomaly_v2' OR "
+            "name LIKE 'tx_contract_anomaly_backup_%')",
+            parameters={"db": db},
+        ).result_rows
+    ]
+    if leftovers:
+        typer.echo(
+            "Refusing to migrate tx_contract_anomaly: leftover table(s) from a "
+            f"previous run present ({', '.join(leftovers)}). Inspect and drop "
+            "them, then re-run migrate.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo("  tx_contract_anomaly: rebuilding onto published_at version…")
+    # 1. Staging table with the NEW engine (versioned by published_at).
+    client.command(
+        f"CREATE TABLE {db}.tx_contract_anomaly_v2 ({_CONTRACT_ANOMALY_BODY}) "
+        "ENGINE = ReplacingMergeTree(published_at) "
+        "ORDER BY (network, tx_hash, target)"
+    )
+    # 2. Backfill, explicit columns. The version source depends on whether the
+    #    OLD table already has a published_at column: PRESERVE it when present
+    #    (the bad state — column added manually while the engine stayed on
+    #    scored_at — may already hold REAL reconciliation timestamps from the new
+    #    publisher; re-stamping them from scored_at would recreate the exact
+    #    tombstone-vs-reraise recall bug). When the column is absent (the normal
+    #    old-volume path) there is no reconciliation history yet, so seed it from
+    #    scored_at (the original run/classify time).
+    has_published_at = _count(
+        "SELECT count() FROM system.columns WHERE database = {db:String} "
+        "AND table = 'tx_contract_anomaly' AND name = 'published_at'",
+        {"db": db},
+    )
+    version_src = "published_at" if has_published_at else "scored_at"
+    client.command(
+        f"INSERT INTO {db}.tx_contract_anomaly_v2 "
+        f"({_CONTRACT_ANOMALY_COLS}, published_at) "
+        f"SELECT {_CONTRACT_ANOMALY_COLS}, {version_src} FROM {db}.tx_contract_anomaly"
+    )
+    # 3. Row-count parity BEFORE the swap. The INSERT copies stored rows 1:1, so
+    #    the raw (pre-merge) counts must match exactly; abort + clean up if not.
+    old_n = _count(f"SELECT count() FROM {db}.tx_contract_anomaly")
+    new_n = _count(f"SELECT count() FROM {db}.tx_contract_anomaly_v2")
+    if old_n != new_n:
+        client.command(f"DROP TABLE {db}.tx_contract_anomaly_v2")
+        typer.echo(
+            f"Aborting tx_contract_anomaly migration: row-count mismatch "
+            f"(old {old_n}, staged {new_n}); dropped the staging table.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    # 4. Atomic swap: old → timestamped backup, staging → canonical, in one
+    #    RENAME. The backup is KEPT for verification; drop it explicitly after.
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    backup = f"tx_contract_anomaly_backup_{ts}"
+    client.command(
+        f"RENAME TABLE {db}.tx_contract_anomaly TO {db}.{backup}, "
+        f"{db}.tx_contract_anomaly_v2 TO {db}.tx_contract_anomaly"
+    )
+    typer.echo(
+        f"  tx_contract_anomaly: migrated {new_n} row(s); previous table kept as "
+        f"{backup} (drop it once verified)."
+    )
+
+
 @app.command()
 def migrate(
     init_dir: str = typer.Option(
@@ -87,6 +223,11 @@ def migrate(
             for stmt in statements:
                 repo.client.command(stmt)
             typer.echo(f"  {f.name}: {len(statements)} statement(s) applied")
+        # 009 changed tx_contract_anomaly's ReplacingMergeTree version column
+        # from scored_at to published_at. CREATE ... IF NOT EXISTS can't migrate
+        # an already-created table's engine, so rebuild it in place here
+        # (guarded + data-preserving) before the schema guard runs.
+        _rebuild_contract_anomaly_version(repo, db)
         missing = repo.missing_schema_objects()
         if missing:
             for obj in missing:
