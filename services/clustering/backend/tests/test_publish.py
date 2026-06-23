@@ -9,6 +9,7 @@ records the inserts/commands/queries the publish issues, so no ClickHouse needed
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +24,8 @@ from app.service.publish import (
 
 _VERDICT_COL = _COLUMNS.index("verdict")
 _TX_HASH_COL = _COLUMNS.index("tx_hash")
+_PUBLISHED_AT_COL = _COLUMNS.index("published_at")
+_PUB = datetime(2026, 6, 23, 12, 0, 0)  # a fixed reconciliation version for tests
 
 
 class FakeClient:
@@ -54,19 +57,24 @@ def test_retract_stale_tombstones_only_dropped_hashes() -> None:
     # Currently published (non-normal): txA, txC. Freshly flagged this run: txA, txB.
     # txC dropped out → it (and only it) must get a 'normal' tombstone.
     fake = FakeClient([[("txA",), ("txC",)]])
-    n = _retract_stale(_repo(fake), "addr1", "preprod", "shape", keep={"txA", "txB"})
+    n = _retract_stale(
+        _repo(fake), "addr1", "preprod", "shape", keep={"txA", "txB"}, published_at=_PUB,
+    )
     assert n == 1
     table, rows, cols = fake.inserts[0]
     assert table == "tms.tx_contract_anomaly"
     assert len(rows) == 1
     assert rows[0][_TX_HASH_COL] == "txC"
     assert rows[0][_VERDICT_COL] == "normal"
+    assert rows[0][_PUBLISHED_AT_COL] == _PUB  # carries the reconciliation version
     assert cols == _COLUMNS
 
 
 def test_retract_stale_noop_when_nothing_dropped() -> None:
     fake = FakeClient([[("txA",)]])
-    n = _retract_stale(_repo(fake), "addr1", "preprod", "shape", keep={"txA", "txB"})
+    n = _retract_stale(
+        _repo(fake), "addr1", "preprod", "shape", keep={"txA", "txB"}, published_at=_PUB,
+    )
     assert n == 0
     assert fake.inserts == []
 
@@ -75,7 +83,7 @@ def test_publish_online_suppresses_benign_labeled_txs() -> None:
     # The SELECT/INSERT must exclude txs a human labeled benign (FINAL+deleted=0)
     # so a "cleared"/benign label retracts instead of re-publishing the anomaly.
     fake = FakeClient([[("txB",)]])  # the flagged-and-not-benign hash
-    published = _publish_online(_repo(fake), "addr1", "preprod", "shape")
+    published = _publish_online(_repo(fake), "addr1", "preprod", "shape", _PUB)
     assert published == {"txB"}
     assert len(fake.commands) == 1  # the INSERT...SELECT
     sql = fake.commands[0]
@@ -85,9 +93,22 @@ def test_publish_online_suppresses_benign_labeled_txs() -> None:
     assert "NOT IN" in sql
 
 
+def test_publish_online_includes_malicious_labeled_txs() -> None:
+    # A human malicious label must be published even if the model verdict was
+    # normal (single-tx / noise / new-tx judgements), overridden to 'malicious'.
+    fake = FakeClient([[("txB",)]])
+    _publish_online(_repo(fake), "addr1", "preprod", "shape", _PUB)
+    sql = fake.commands[0]
+    assert "label = 'malicious'" in sql
+    # The published verdict is overridden to malicious for labeled txs.
+    assert "'malicious', toString(verdict)" in sql
+    # And every row carries the reconciliation version.
+    assert "AS published_at" in sql
+
+
 def test_publish_online_noop_when_nothing_flagged() -> None:
     fake = FakeClient([[]])  # SELECT returns no flagged hashes
-    published = _publish_online(_repo(fake), "addr1", "preprod", "shape")
+    published = _publish_online(_repo(fake), "addr1", "preprod", "shape", _PUB)
     assert published == set()
     assert fake.commands == []  # no INSERT issued
 
