@@ -1,226 +1,64 @@
 /**
  * Watched Validators: manage the contracts the clustering sidecar monitors.
  *
- * Mirrors the engine's Validators page UX (add a contract, see its status /
- * drift, open its clusters), reskinned to the TMS design system. There is no
- * "fetch from Blockfrost" action — the sidecar auto-feeds each watched contract
- * from the host's chain data. Gated on the clustering module being enabled.
+ * The page is the shell: it gates on the clustering module being enabled, loads
+ * the watchlist + live jobs, and renders the add-form and a grid of contract
+ * cards. The form (`AddContractForm`) and each card (`ContractCard`) own their
+ * own behaviour. New transactions are classified automatically as the chain is
+ * ingested; the card actions are conveniences on top of that auto feed.
  */
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-	Card,
-	CardContent,
-	CardFooter,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import {
-	type Contract,
-	MAX_TXS_CAP,
-	useAddContract,
-	useClassifyNow,
-	useContracts,
-	useDeleteContract,
-} from "@/lib/api/clustering";
+import { AddContractForm } from "@/components/clustering/AddContractForm";
+import { ContractCard } from "@/components/clustering/ContractCard";
+import { latestJobForTarget } from "@/components/clustering/jobStage";
+import { useContracts, useJobs } from "@/lib/api/clustering";
 import { useHealth } from "@/lib/api/health";
-
-function statusVariant(status: string): "low" | "medium" | "high" | "critical" | "outline" {
-	if (status === "done") return "low";
-	if (status === "failed") return "critical";
-	if (status === "insufficient_history") return "medium";
-	return "outline"; // pending / processing
-}
-
-function shortTarget(t: string): string {
-	return t.length > 24 ? `${t.slice(0, 16)}…${t.slice(-6)}` : t;
-}
-
-function ContractCard({ c }: { c: Contract }) {
-	const navigate = useNavigate();
-	const del = useDeleteContract();
-	const classify = useClassifyNow();
-	return (
-		<Card>
-			<CardHeader>
-				<CardTitle className="flex items-center justify-between gap-2">
-					<span className="truncate font-mono text-sm" title={c.target}>
-						{c.label || shortTarget(c.target)}
-					</span>
-					<Badge variant={statusVariant(c.status)}>{c.status}</Badge>
-				</CardTitle>
-			</CardHeader>
-			<CardContent className="space-y-1 text-sm text-muted-foreground">
-				<div className="flex justify-between">
-					<span>Transactions</span>
-					<span className="tabular-nums text-foreground">
-						{c.tx_count.toLocaleString()}
-					</span>
-				</div>
-				<div className="flex justify-between">
-					<span>Drift</span>
-					<span className="tabular-nums text-foreground">
-						{(c.drift_score * 100).toFixed(0)}%
-					</span>
-				</div>
-				{c.reclustering_suggested && (
-					<Badge variant="medium">re-cluster suggested</Badge>
-				)}
-			</CardContent>
-			<CardFooter className="gap-2">
-				<Button
-					size="sm"
-					onClick={() => navigate(`/validators/${encodeURIComponent(c.target)}`)}
-				>
-					Open
-				</Button>
-				<Button
-					variant="outline"
-					size="sm"
-					disabled={classify.isPending}
-					onClick={() => classify.mutate(c.target)}
-				>
-					Refresh
-				</Button>
-				<Button
-					variant="ghost"
-					size="sm"
-					disabled={del.isPending}
-					onClick={() => {
-						if (confirm(`Stop watching ${c.target}?`)) del.mutate(c.target);
-					}}
-				>
-					Remove
-				</Button>
-			</CardFooter>
-		</Card>
-	);
-}
 
 export function ValidatorsPage() {
 	const health = useHealth();
 	const { data: contracts, isLoading, isError } = useContracts();
-	const add = useAddContract();
-	const [target, setTarget] = useState("");
-	const [label, setLabel] = useState("");
-	const [maxTxs, setMaxTxs] = useState("");
-	const [reprocess, setReprocess] = useState(false);
+	const { data: jobs } = useJobs();
 
 	if (health.data && health.data.clustering_enabled === false) {
 		return (
-			<div className="text-sm text-muted-foreground">
+			<div className="text-muted-foreground text-sm">
 				The clustering module is not enabled on this deployment.
 			</div>
 		);
 	}
 
-	const onAdd = () => {
-		const t = target.trim();
-		if (!t) return;
-		const n = Number.parseInt(maxTxs, 10);
-		add.mutate(
-			{
-				target: t,
-				label: label.trim() || undefined,
-				// Omit max_txs to import the full configured window; otherwise clamp
-				// to the API cap. reprocess forces a full re-cluster on re-add.
-				...(Number.isFinite(n) && n > 0
-					? { max_txs: Math.min(n, MAX_TXS_CAP) }
-					: {}),
-				...(reprocess ? { reprocess: true } : {}),
-			},
-			{
-				onSuccess: () => {
-					setTarget("");
-					setLabel("");
-					setMaxTxs("");
-					setReprocess(false);
-				},
-			},
-		);
-	};
-
 	return (
 		<div className="space-y-6">
 			<div>
 				<h1 className="text-xl font-semibold">Watched Validators</h1>
-				<p className="text-sm text-muted-foreground">
+				<p className="text-muted-foreground text-sm">
 					Contracts monitored by the clustering engine. New transactions are
 					classified automatically as the chain is ingested; anomalies surface
-					as the <span className="font-medium">Contract Anomaly</span> attack type.
+					as the <span className="font-medium">Contract Anomaly</span> attack
+					type.
 				</p>
 			</div>
 
-			<Card>
-				<CardHeader>
-					<CardTitle>Add a contract</CardTitle>
-				</CardHeader>
-				<CardContent className="flex flex-wrap items-end gap-2">
-					<div className="flex-1 min-w-64">
-						<Input
-							placeholder="Script address (addr1… / addr_test1…)"
-							value={target}
-							onChange={(e) => setTarget(e.target.value)}
-						/>
-					</div>
-					<div className="w-48">
-						<Input
-							placeholder="Label (optional)"
-							value={label}
-							onChange={(e) => setLabel(e.target.value)}
-						/>
-					</div>
-					<div className="w-40">
-						<Input
-							type="number"
-							min={1}
-							max={MAX_TXS_CAP}
-							placeholder={`Max txs (≤ ${MAX_TXS_CAP.toLocaleString()})`}
-							value={maxTxs}
-							onChange={(e) => setMaxTxs(e.target.value)}
-						/>
-					</div>
-					<label className="flex h-9 items-center gap-1.5 text-sm text-muted-foreground select-none">
-						<input
-							type="checkbox"
-							className="h-4 w-4 accent-primary"
-							checked={reprocess}
-							onChange={(e) => setReprocess(e.target.checked)}
-						/>
-						Reprocess
-					</label>
-					<Button onClick={onAdd} disabled={add.isPending || !target.trim()}>
-						{add.isPending ? "Adding…" : "Add"}
-					</Button>
-				</CardContent>
-				{add.isError && (
-					<CardFooter>
-						<span className="text-sm text-destructive">
-							Could not add the contract. Check the address and try again.
-						</span>
-					</CardFooter>
-				)}
-			</Card>
+			<AddContractForm />
 
 			{isLoading ? (
-				<p className="text-sm text-muted-foreground">Loading watchlist…</p>
+				<p className="text-muted-foreground text-sm">Loading watchlist…</p>
 			) : isError ? (
-				<p className="text-sm text-destructive">
+				<p className="text-destructive text-sm">
 					Could not load the watchlist. The clustering service may be
 					unavailable; retry shortly.
 				</p>
 			) : !contracts?.length ? (
-				<p className="text-sm text-muted-foreground">
+				<p className="text-muted-foreground text-sm">
 					No contracts watched yet. Add a script address above to start.
 				</p>
 			) : (
 				<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
 					{contracts.map((c) => (
-						<ContractCard key={c.target} c={c} />
+						<ContractCard
+							key={c.target}
+							c={c}
+							job={latestJobForTarget(jobs, c.target)}
+						/>
 					))}
 				</div>
 			)}
