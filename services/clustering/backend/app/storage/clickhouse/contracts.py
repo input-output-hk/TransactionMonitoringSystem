@@ -75,6 +75,12 @@ _TARGET_KEYED_TABLES = (
     "tx_labels",
     "cluster_models",
     "tx_classifications",
+    # The host-visible projection: deleting a watched contract must also drop the
+    # anomalies the host TMS surfaces for it, or stale Contract Anomaly rows for a
+    # no-longer-watched target keep appearing in /api/analysis/results. Keyed by
+    # (network, tx_hash, target); single sidecar per network, so target alone
+    # scopes the purge correctly.
+    "tx_contract_anomaly",
     "contracts",
 )
 
@@ -140,7 +146,7 @@ class _ContractMixin(_RepoBase):
 
         This is the one place that issues real row deletes (``ALTER … DELETE``)
         rather than the append-tombstone pattern used elsewhere: a full purge has
-        to span 13 tables, so tombstones don't apply. ``mutations_sync = 2`` makes
+        to span 14 tables, so tombstones don't apply. ``mutations_sync = 2`` makes
         each mutation synchronous, so the call returns only once the data is gone.
 
         ``cluster_labels``/``anomaly_scores`` key on ``run_id`` (no ``target``
