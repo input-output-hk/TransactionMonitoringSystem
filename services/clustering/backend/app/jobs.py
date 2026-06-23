@@ -17,6 +17,7 @@ import threading
 from collections.abc import Callable
 
 from app.service import process_contract, update_contract
+from app.service._common import _MAX_ERROR_DETAIL, _safe_error
 from app.storage.clickhouse import ClickHouseRepo
 from app.storage.protocol import Repo
 
@@ -121,7 +122,13 @@ class JobManager:
         except Exception as exc:  # process_contract already recorded failure; backstop here
             logger.exception("job %s failed", job_id)
             try:
-                repo.update_job(job_id, status="failed", error=str(exc)[:500])
+                # Persist the client-safe error (not raw str(exc), which can leak
+                # internals), capped by the shared limit — matches process_contract's
+                # own failure path so the jobs table never carries a raw message.
+                repo.update_job(
+                    job_id, status="failed",
+                    error=_safe_error(exc)[:_MAX_ERROR_DETAIL],
+                )
             except Exception:  # pragma: no cover
                 pass
         finally:

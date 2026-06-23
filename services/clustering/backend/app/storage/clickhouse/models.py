@@ -47,6 +47,10 @@ class _ModelMixin(_RepoBase):
     def online_noise_rate(
         self, target: str, feature_set: str, model_id: str, *, window: int = 500
     ) -> tuple[float, int]:
+        # ``window`` is the drift-sensor sample size; the production value is
+        # config-driven (Settings.online_noise_window) and passed by the caller.
+        # The 500 default is a fallback for direct/test calls only — the storage
+        # layer does not import the config (layering), so it cannot read it here.
         """Trailing "online-noise rate" for a model: the fraction of its most
         recently scored ``window`` txs that fell outside every frozen cluster
         (``cluster_id == -1``). This is the drift sensor — high when recent traffic

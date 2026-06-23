@@ -79,7 +79,12 @@ def test_run_job_exception_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("app.jobs.process_contract", boom)
     JobManager(repo_factory=lambda: repo)._run_job("job-2")
     assert repo.jobs["job-2"]["status"] == "failed"
-    assert "address not found" in repo.jobs["job-2"]["error"]
+    # The backstop persists the CLIENT-SAFE error, not the raw exception text:
+    # the raw message must not leak into the jobs table, but it must point to
+    # the server logs where the full message is recorded.
+    persisted = repo.jobs["job-2"]["error"]
+    assert "address not found" not in persisted
+    assert "see server logs" in persisted
 
 
 def test_run_job_skips_terminal_job(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -108,7 +108,9 @@ def _classify_result(
     (e.g. a contract that drifted before this code shipped). Computed over a
     trailing window (not just the current batch) so the signal is stable and
     recovers as fresh traffic is scored — see Repo.online_noise_rate."""
-    drift_score, drift_n = repo.online_noise_rate(target, "shape", model_id)
+    drift_score, drift_n = repo.online_noise_rate(
+        target, "shape", model_id, window=get_settings().online_noise_window,
+    )
     return {
         "target": target,
         "model_id": model_id,
