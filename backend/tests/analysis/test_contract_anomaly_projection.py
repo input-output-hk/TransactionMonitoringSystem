@@ -245,3 +245,109 @@ def test_merge_best_effort_when_sidecar_errors(client, monkeypatch):
     body = r.json()
     assert body["max_class"] == "phishing"  # falls back to the stored vector
     assert "contract_anomaly" not in body["scores"]
+
+
+# --- List recall rescue ------------------------------------------------------
+# A tx whose STORED 9-class score is below an active score/band filter but whose
+# contract_anomaly verdict projects above it must still appear in the filtered
+# list: the DB filter sees only the stored score, so without the rescue the
+# detection is silently dropped (recall-first violation, see CLAUDE.md).
+
+def _full_score_row(tx_hash: str, max_score: float, max_class: str = "phishing") -> dict:
+    row = dict(_ROW)
+    row["tx_hash"] = tx_hash
+    row["phishing"] = max_score
+    row["max_score"] = max_score
+    row["max_class"] = max_class
+    row["risk_band"] = score_to_band(max_score)
+    return row
+
+
+def _bind_list_stubs(monkeypatch, *, page_rows, total, flagged, by_hashes):
+    """Stub the list/count/flagged/by-hash reads used by the rescue path."""
+    from app.db import clickhouse, clustering_queries
+
+    async def _list(**_kw):
+        return list(page_rows)
+
+    async def _count(**_kw):
+        return total
+
+    async def _flagged(_net, *a, **k):
+        return flagged
+
+    async def _by_hashes(_net, hashes, *a, **k):
+        return [r for r in by_hashes if r["tx_hash"] in set(hashes)]
+
+    async def _batch(_net, _hashes):
+        return {}
+
+    monkeypatch.setattr(clickhouse, "get_class_scores_list_async", _list)
+    monkeypatch.setattr(clickhouse, "count_class_scores_async", _count)
+    monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+    monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+    monkeypatch.setattr(clustering_queries, "get_contract_anomaly_batch_async", _batch)
+
+
+def test_list_rescues_high_anomaly_below_score_filter(client, monkeypatch):
+    """min_score filter: a low-stored-score tx flagged malicious is re-admitted."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    # Stored score 30 (Moderate) is below the min_score=70 filter, so the DB
+    # page is empty; the sidecar flagged it malicious (-> 80, Critical).
+    _bind_list_stubs(
+        monkeypatch,
+        page_rows=[],
+        total=0,
+        flagged={"lowtx": [_row("malicious", target="addrZ")]},
+        by_hashes=[_full_score_row("lowtx", 30.0)],
+    )
+    r = client.get("/api/analysis/results?network=preprod&min_score=70")
+    assert r.status_code == 200
+    body = r.json()
+    hashes = [d["tx_hash"] for d in body["data"]]
+    assert "lowtx" in hashes, "flagged tx must not be hidden by the score filter"
+    rescued = next(d for d in body["data"] if d["tx_hash"] == "lowtx")
+    assert rescued["max_class"] == "contract_anomaly"
+    assert rescued["risk_band"] == "Critical"
+    assert body["total"] == 1  # DB total 0 + 1 genuinely rescued
+
+
+def test_list_rescue_skips_rows_still_below_filter(client, monkeypatch):
+    """A flagged-but-benign tx that stays below the filter is NOT re-admitted."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    _bind_list_stubs(
+        monkeypatch,
+        page_rows=[],
+        total=0,
+        # benign + low consensus projects to ~10, still < 70.
+        flagged={"lowtx": [_row("benign", consensus=0.10, target="addrZ")]},
+        by_hashes=[_full_score_row("lowtx", 30.0)],
+    )
+    r = client.get("/api/analysis/results?network=preprod&min_score=70")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"] == []
+    assert body["total"] == 0
+
+
+def test_list_rescue_inactive_without_score_band_filter(client, monkeypatch):
+    """No score/band filter: the fast path runs and the rescue never fires."""
+    from app.config import settings
+    from app.db import clustering_queries
+    monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+    flagged_called = False
+
+    async def _flagged(_net, *a, **k):
+        nonlocal flagged_called
+        flagged_called = True
+        return {"lowtx": [_row("malicious")]}
+
+    _bind_list_stubs(
+        monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[],
+    )
+    monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+    r = client.get("/api/analysis/results?network=preprod")
+    assert r.status_code == 200
+    assert flagged_called is False  # rescue gated off without a score/band filter

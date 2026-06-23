@@ -39,6 +39,12 @@ _FORWARD_HEADERS = ("content-type", "accept")
 async def proxy(path: str, request: Request) -> Response:
     if not settings.CLUSTERING_ENABLED:
         raise HTTPException(status_code=503, detail="Clustering module is not enabled")
+    # Constrain the forwarded path to the /api/v1 namespace. FastAPI decodes
+    # %2f to '/', so a ``..`` segment could otherwise climb out of the prefix
+    # and reach an arbitrary path on the sidecar host. Reject any traversal
+    # segment rather than trusting the upstream to normalize it away.
+    if ".." in path.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid clustering path")
     url = f"{settings.CLUSTERING_SIDECAR_URL.rstrip('/')}/api/v1/{path}"
     body = await request.body()
     headers = {

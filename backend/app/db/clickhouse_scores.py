@@ -129,6 +129,38 @@ def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
     return _decode_score_json(dict(zip(_SCORE_COLS, rows[0])))
 
 
+def get_class_scores_by_hashes(
+    network: str, tx_hashes: List[str], include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    """Latest score vectors for a specific set of tx_hashes on a network.
+
+    Used by the list endpoint's contract_anomaly recall rescue to hydrate the
+    stored 9-class rows for sidecar-flagged transactions that an active
+    score/band filter would otherwise have excluded. Applies the same archive
+    anti-join as the list query by default so an admin-archived false positive
+    is not re-surfaced through the rescue path. Returns ``[]`` for empty input.
+    """
+    if not tx_hashes:
+        return []
+    archive_clause = (" AND " + _ARCHIVE_ANTI_JOIN) if not include_archived else ""
+    rows = _client().execute(
+        f"""
+        SELECT {_SCORE_SELECT}
+        FROM tx_class_scores FINAL
+        WHERE network = %(network)s AND tx_hash IN %(hashes)s{archive_clause}
+        """,
+        {"network": network, "hashes": tx_hashes},
+    )
+    return [_decode_score_json(dict(zip(_SCORE_COLS, row))) for row in rows]
+
+
+async def get_class_scores_by_hashes_async(
+    network: str, tx_hashes: List[str], include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    return await _run(
+        partial(get_class_scores_by_hashes, network, tx_hashes, include_archived),
+    )
+
 
 _MULTIPLE_SAT_EVIDENCE_KEYS = (
     ("net_value_out_of_script", "value_extracted_lovelace"),
