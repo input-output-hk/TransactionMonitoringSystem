@@ -113,51 +113,67 @@ _BAND_COUNT_KEY = {
 _ALERT_BANDS = frozenset({"high", "critical"})
 
 
-async def _flagged_effective_bands(
+async def _flagged_effective(
     network: str,
-) -> Dict[str, tuple[str, str]]:
+) -> Dict[str, tuple[str, float, str, float]]:
     """For every contract_anomaly-flagged tx on a network, return
-    ``{tx_hash: (stored_band, effective_ca_band)}`` (both lowercase).
+    ``{tx_hash: (stored_band, stored_score, effective_ca_band, effective_ca_score)}``
+    (bands lowercase).
 
-    The host counts/orders on the STORED 9-class band, so a tx whose sidecar
-    verdict outranks its stored band is undercounted. This resolves each flagged
-    tx's contract_anomaly band (via the same projection the merge uses) alongside
-    its stored band so the read endpoints can reconcile to the effective band.
-    Archived / unscored txs are absent (``get_class_scores_by_hashes`` applies the
-    same archive anti-join the stats/timeseries do, so they stay excluded)."""
+    The host counts/orders on the STORED 9-class score, so a tx whose sidecar
+    verdict outranks its stored score is undercounted. This resolves each flagged
+    tx's contract_anomaly score/band (via the same projection the merge uses)
+    alongside its stored score/band so the read endpoints can reconcile to the
+    effective values. Archived / unscored txs are absent
+    (``get_class_scores_by_hashes`` applies the same archive anti-join the
+    stats/timeseries do, so they stay excluded)."""
     flagged = await clustering_queries.flagged_for_network_async(network)
     if not flagged:
         return {}
     stored_rows = await clickhouse.get_class_scores_by_hashes_async(
         network, list(flagged),
     )
-    stored_band = {r["tx_hash"]: str(r["risk_band"]).lower() for r in stored_rows}
-    out: Dict[str, tuple[str, str]] = {}
+    stored = {
+        r["tx_hash"]: (str(r["risk_band"]).lower(), float(r["max_score"]))
+        for r in stored_rows
+    }
+    out: Dict[str, tuple[str, float, str, float]] = {}
     for tx, rows in flagged.items():
-        sb = stored_band.get(tx)
-        if sb is None:  # archived / unscored: excluded from the host aggregates
+        s = stored.get(tx)
+        if s is None:  # archived / unscored: excluded from the host aggregates
             continue
         resolved = ca_projection.resolve(rows)
         if resolved is None:
             continue
-        out[tx] = (sb, resolved["risk_band"].value.lower())
+        sb, ss = s
+        out[tx] = (sb, ss, resolved["risk_band"].value.lower(), float(resolved["score"]))
     return out
 
 
 async def _augment_stats_with_contract_anomaly(
     network: str, stats: Dict[str, Any],
 ) -> None:
-    """Reclassify each flagged tx into its EFFECTIVE band in the band counts, so
-    the KPI cards don't undercount Critical/High for txs whose contract_anomaly
-    verdict outranks their stored band. Mutates ``stats`` (a fresh per-call copy
-    from the cached aggregate). A no-op for txs already at/above their CA band."""
-    for sb, cb in (await _flagged_effective_bands(network)).values():
-        if _BAND_RANK.get(cb, 0) <= _BAND_RANK.get(sb, 0):
-            continue
-        sk, ck = _BAND_COUNT_KEY.get(sb), _BAND_COUNT_KEY.get(cb)
-        if sk and ck:
-            stats[sk] = max(0, int(stats.get(sk, 0)) - 1)
-            stats[ck] = int(stats.get(ck, 0)) + 1
+    """Reconcile the KPI aggregate to the EFFECTIVE per-tx score for flagged txs,
+    so contract-anomaly-only detections aren't undercounted. Moves a tx from its
+    stored band count to its (higher) effective band count, and raises
+    ``avg_max_score`` by the per-tx score delta. Mutates ``stats`` (a fresh
+    per-call copy from the cached aggregate)."""
+    flagged = await _flagged_effective(network)
+    delta_sum = 0.0
+    for sb, ss, cb, cs in flagged.values():
+        if _BAND_RANK.get(cb, 0) > _BAND_RANK.get(sb, 0):
+            sk, ck = _BAND_COUNT_KEY.get(sb), _BAND_COUNT_KEY.get(cb)
+            if sk and ck:
+                stats[sk] = max(0, int(stats.get(sk, 0)) - 1)
+                stats[ck] = int(stats.get(ck, 0)) + 1
+        if cs > ss:
+            delta_sum += cs - ss
+    # Avg Risk: the effective score raises each flagged tx's max, so lift the mean
+    # by the summed delta over the (unchanged) population size.
+    total = int(stats.get("total") or 0)
+    avg = stats.get("avg_max_score")
+    if delta_sum and total > 0 and avg is not None:
+        stats["avg_max_score"] = (float(avg) * total + delta_sum) / total
 
 
 async def _augment_timeseries_with_contract_anomaly(
@@ -168,9 +184,9 @@ async def _augment_timeseries_with_contract_anomaly(
     date (matching the timeseries). Txs already alert-banded by their stored
     score are counted by the base query, so they are skipped to avoid double
     counting. Mutates ``data`` ([{date, count}], zero-filled). Best-effort."""
-    bands = await _flagged_effective_bands(network)
+    flagged = await _flagged_effective(network)
     candidates = [
-        tx for tx, (sb, cb) in bands.items()
+        tx for tx, (sb, _ss, cb, _cs) in flagged.items()
         if cb in _ALERT_BANDS and sb not in _ALERT_BANDS
     ]
     if not candidates:
@@ -339,32 +355,36 @@ async def list_analysis_results(
                         _merge_contract_anomaly(d, ca)
             except Exception as e:
                 logger.warning(f"contract_anomaly batch merge failed: {e}")
-        # Recall rescue (recall-first, see CLAUDE.md): the score/band filter is
-        # applied by the DB on the STORED 9-class score, before the merge above.
-        # A tx whose stored score sits below the filter but whose contract_anomaly
-        # verdict projects ABOVE it would be silently dropped from a filtered
-        # page. Re-admit those flagged txs so a filtered triage view can never
-        # hide a sidecar detection. Scoped to the first page (rescued rows ride
-        # on top of it) and to score/band filters; attack_class and
-        # min_corroboration are 9-class-specific (the synthetic class is neither
-        # a max_class value nor counted in corroboration_count), so a rescue
-        # under them would contradict the filter's intent.
+        # Recall rescue (recall-first, see CLAUDE.md): a score/band filter is applied
+        # by the DB on the STORED 9-class score, before the contract_anomaly merge,
+        # so a tx whose stored score misses the filter but whose sidecar verdict
+        # projects ABOVE it would be dropped from a filtered page. Re-admit those on
+        # page 1 so a filtered triage view can never hide a sidecar detection.
+        #
+        # Pagination/scope: page 1 only; score/band filters only (attack_class and
+        # min_corroboration are 9-class-specific — the synthetic class is neither a
+        # max_class nor counted in corroboration). Rescued rows are ADDITIVE (the DB
+        # excluded them), so they never strand a DB row; after merging, the page is
+        # re-ranked and capped back to `limit`. For date sort, a rescued row must be
+        # recent enough for the page (>= the oldest shown, once the page is full) so
+        # an old alert isn't pulled onto a recent-sorted page 1.
+        #
+        # Not handled (inherent to a read-time overlay vs materialisation): an
+        # UNFILTERED score-sorted list orders on the stored score, so a
+        # low-stored/high-anomaly tx stays on its later page rather than jumping to
+        # page 1. The default view is date-sorted (where recent CA txs appear), and
+        # the band counts / timeseries are reconciled separately, so this is a
+        # ranking nuance, not a dropped detection.
         rescued_total = 0
-        # Recall surface (recall-first, see CLAUDE.md): the DB filters AND orders on
-        # the STORED 9-class score, before the contract_anomaly merge. A tx whose
-        # stored score sits below an active filter (or just below page 1 in an
-        # unfiltered list) but whose sidecar verdict projects ABOVE it would be
-        # hidden from a filtered page or buried at the bottom of an unfiltered one.
-        # Surface those flagged txs on the first page. Skipped under attack_class /
-        # min_corroboration: the synthetic class is neither a max_class value nor
-        # counted in corroboration_count, so a rescue there contradicts the filter.
+        date_sort = sort == "date"
         rescue_active = (
             settings.CLUSTERING_ENABLED
             and offset == 0
+            and (min_score > 0 or bool(rbs))
             and not attack_class
             and min_corroboration == 0
         )
-        n_db_rows = len(data)
+        page_full = len(data) >= limit
         if rescue_active:
             try:
                 flagged = await clustering_queries.flagged_for_network_async(
@@ -380,14 +400,11 @@ async def list_analysis_results(
                     )
                 present = {d.tx_hash for d in data}
                 rescue_hashes = [h for h in flagged if h not in present]
-                filtered = min_score > 0 or bool(rbs)
-                # Unfiltered: surface a buried tx only if its effective score would
-                # rank it within page 1. Once the page is full, that means beating
-                # the lowest stored score shown; while it has room, any flagged tx
-                # qualifies.
-                page_floor = (
-                    min((d.max_score for d in data), default=0.0)
-                    if len(data) >= limit else 0.0
+                # Date sort: a rescued row older than the page's oldest shown row
+                # (once full) doesn't belong on it.
+                date_floor = (
+                    min((d.analyzed_at for d in data), default=None)
+                    if page_full and date_sort else None
                 )
                 if rescue_hashes:
                     rescue_rows = await clickhouse.get_class_scores_by_hashes_async(
@@ -399,35 +416,31 @@ async def list_analysis_results(
                             res.analyzed_at, analyzed_from, analyzed_to,
                         ):
                             continue
+                        if date_floor is not None and res.analyzed_at < date_floor:
+                            continue
                         stored_meets = _passes_score_band(
                             res.max_score, res.risk_band, min_score, rbs,
                         )
                         _merge_contract_anomaly(res, flagged[res.tx_hash])
-                        if filtered:
-                            # Genuinely rescued only: stored score missed the filter
-                            # but the merged score now meets it. A row whose stored
-                            # score already met the filter is in the normal paginated
-                            # set, so it must not be added to total here.
-                            if not stored_meets and _passes_score_band(
-                                res.max_score, res.risk_band, min_score, rbs,
-                            ):
-                                data.append(res)
-                                rescued_total += 1
-                        elif res.max_score >= page_floor:
-                            # Unfiltered: the tx is already counted in `total` (its
-                            # stored row exists), so don't bump it; it surfaces on
-                            # page 1 by effective rank and may also appear on a later
-                            # stored-ordered page (recall-first favours visibility).
+                        # Genuinely rescued only: stored score missed the filter but
+                        # the merged score now meets it. A row whose stored score
+                        # already met the filter is in the normal paginated set, so
+                        # it must not be added to total here.
+                        if not stored_meets and _passes_score_band(
+                            res.max_score, res.risk_band, min_score, rbs,
+                        ):
                             data.append(res)
+                            rescued_total += 1
             except Exception as e:
                 logger.warning(f"contract_anomaly rescue failed: {e}")
-        # Re-sort so surfaced/rescued rows interleave by effective rank rather than
-        # trailing the page; matches the SQL ORDER BY (score: max_score then recency).
-        if len(data) > n_db_rows:
-            if sort == "date":
+        if rescued_total:
+            # Re-rank so rescued rows interleave by the active sort, then cap to
+            # `limit` so the page size is honoured (matches the SQL ORDER BY).
+            if date_sort:
                 data.sort(key=lambda d: (d.analyzed_at, d.max_score), reverse=True)
             else:
                 data.sort(key=lambda d: (d.max_score, d.analyzed_at), reverse=True)
+            data = data[:limit]
         return {
             "count": len(data),
             "total": total + rescued_total,
