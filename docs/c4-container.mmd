@@ -17,17 +17,19 @@ C4Container
 
         Boundary(storage, "Storage") {
             ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store, partitioned daily. Derived from the Data Lake.")
+            ContainerDb(clusterdb, "Clustering State", "ClickHouse (tms_clustering DB, same server)", "[Optional] The clustering module's own state: cluster_models, tx_classifications, and the tx_contract_anomaly projection the API reads. Empty unless the module runs.")
             ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Mutable state: transaction lifecycle (PENDING / CONFIRMED / ROLLED_BACK / DROPPED), sync checkpoint, entity state, API keys, config, audit logs.")
             ContainerDb(rawstore, "Data Lake", "Local Filesystem → S3/MinIO", "Write-once gzip-compressed JSON blobs. confirmed/ and mempool/ prefixes. Schema-on-read. Source of truth for raw Ogmios payloads; the Analytics Warehouse is derived from this layer.")
         }
 
         Boundary(services, "Services") {
-            Container(api, "API Gateway", "FastAPI + Uvicorn", "REST and WebSocket endpoints. API key authentication, per-key rate limiting, CORS.")
+            Container(api, "API Gateway", "FastAPI + Uvicorn", "REST and WebSocket endpoints. API key authentication, per-key rate limiting, CORS. Reverse-proxies /api/clustering/* to the clustering module and merges its contract_anomaly verdict into analysis results.")
             Container(analysis, "Analysis Engine", "Python", "9-class Polimi detection engine. Reads unscored transactions from Analytics Warehouse. Assigns multi-class risk scores and labels. Writes analysis results back to Analytics Warehouse.")
+            Container(clustering, "Clustering Module", "Python + FastAPI + scikit-learn", "[Optional, --profile clustering] First-party sidecar (services/clustering). Per-watched-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict; reads chain facts from the Analytics Warehouse, owns its own ClickHouse database.")
         }
 
         Boundary(presentation, "Presentation") {
-            Container(ui, "TMS Dashboard", "HTML5 (served by API Gateway)", "Real-time mempool feed, confirmed transactions, lifecycle stats. Connects to API Gateway via WebSocket.")
+            Container(ui, "TMS Dashboard", "React SPA (served by API Gateway)", "Real-time mempool feed, confirmed transactions, lifecycle stats, analysis results, and the Validators / cluster-graph views. REST + WebSocket to the API Gateway.")
         }
     }
 
@@ -44,6 +46,10 @@ C4Container
 
     Rel(api, datalake, "Query transactions + analysis results", "Native :9000")
     Rel(api, admin_db, "Read/write lifecycle + entity state + config", "TCP :5432")
+    Rel(api, clustering, "Reverse-proxy /api/clustering/* (Validators UI)", "HTTP :8000")
+    Rel(api, clusterdb, "Read contract_anomaly verdicts (merge into results)", "HTTP :8123")
+    Rel(clustering, datalake, "Read watched-contract transactions", "HTTP :8123")
+    Rel(clustering, clusterdb, "Write models + classifications + contract_anomaly", "HTTP :8123")
 
     Rel(user, ui, "Browse and investigate", "HTTPS")
     Rel(ui, api, "Fetch data", "REST API + WebSocket")
@@ -52,6 +58,8 @@ C4Container
     UpdateElementStyle(connector, $fontColor="white", $bgColor="#2e7d32", $borderColor="#1b5e20")
     UpdateElementStyle(api, $fontColor="white", $bgColor="#1a4d8f", $borderColor="#0d3b6e")
     UpdateElementStyle(analysis, $fontColor="white", $bgColor="#c62828", $borderColor="#8e0000")
+    UpdateElementStyle(clustering, $fontColor="white", $bgColor="#ad1457", $borderColor="#78002e")
+    UpdateElementStyle(clusterdb, $fontColor="white", $bgColor="#e65100", $borderColor="#bf360c")
     UpdateElementStyle(datalake, $fontColor="white", $bgColor="#e65100", $borderColor="#bf360c")
     UpdateElementStyle(admin_db, $fontColor="white", $bgColor="#e65100", $borderColor="#bf360c")
     UpdateElementStyle(rawstore, $fontColor="white", $bgColor="#e65100", $borderColor="#bf360c")

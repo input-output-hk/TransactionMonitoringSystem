@@ -10,7 +10,7 @@ C4Context
 
     Person(user, "User", "Monitors, queries, and investigates Cardano transactions via dashboard and REST API")
 
-    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides the 9-class Polimi detection engine for risk scoring. Entity clustering and unsupervised anomaly detection are deferred (see internal/DEFERRED-WORK.md).")
+    System(tms, "Transaction Monitoring System", "Ingests Cardano blockchain data in real time. Tracks transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK). Provides the 9-class Polimi detection engine for risk scoring, plus an optional first-party clustering / unsupervised-anomaly module (the contract_anomaly attack class) that profiles watched contracts.")
 
     System_Ext(cardano_node, "Cardano Node", "Full node: source of truth for chain state, mempool, and block data")
     System_Ext(ogmios, "Ogmios v6", "WebSocket bridge to Cardano node: provides ChainSync, LocalTxMonitor, and LocalStateQuery mini-protocols via JSON-RPC 2.0")
@@ -37,8 +37,10 @@ C4Container
         Container(connector, "Blockchain Connector", "Python, websockets", "Ingestion layer. Three persistent Ogmios WebSocket connections: ChainSync, LocalTxMonitor, LocalStateQuery. Normalizes transactions. Resolves mempool input UTxOs. Circuit breaker + checkpoint resumption.")
         Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. Dual auth: TMS-API-Key (programmatic) and magic-link session cookies (dashboard, Admin/Reviewer roles). Per-key/IP rate limiting. User-management + archive APIs.")
         Container(analysis, "Analysis Engine", "Python", "Services layer. 9-class Polimi detection engine. Reads unscored transactions, assigns multi-class risk scores, writes results to Analytics Warehouse.")
-        Container(ui, "TMS Dashboard", "HTML5", "Presentation layer. Real-time mempool feed, confirmed txs, lifecycle stats. Served by API Gateway.")
+        Container(ui, "TMS Dashboard", "React SPA (served by API Gateway)", "Presentation layer. Real-time mempool feed, confirmed txs, lifecycle stats, analysis results, and the Validators / cluster-graph views.")
+        Container(clustering, "Clustering Module", "Python, FastAPI, scikit-learn", "OPTIONAL first-party sidecar (services/clustering, --profile clustering). Per-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict the API merges in. Reads chain facts from the Analytics Warehouse; owns its own ClickHouse database.")
         ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Storage layer. Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store. Derived from the Data Lake.")
+        ContainerDb(clusterdb, "Clustering State", "ClickHouse (tms_clustering DB, same server)", "Storage layer. The clustering module's own state: cluster_models, tx_classifications, and tx_contract_anomaly (the projection the host reads). Empty/absent unless the module runs.")
         ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Storage layer. Mutable state: transaction lifecycle, sync checkpoint, entity state, mempool collisions, config, audit logs, and the auth tables (users, magic_link_tokens, user_sessions).")
         ContainerDb(rawstore, "Data Lake", "Local Filesystem → S3/MinIO", "Storage layer. Write-once gzip JSON blobs (confirmed/ and mempool/ prefixes). Schema-on-read. Source of truth for raw Ogmios payloads.")
     }
@@ -56,6 +58,10 @@ C4Container
     Rel(api, datalake, "Query transactions + analysis results", "Native :9000")
     Rel(api, admin_db, "Read/write lifecycle + config + entity state + auth/users", "TCP :5432")
     Rel(api, mail, "Send magic-link emails", "SMTP")
+    Rel(api, clustering, "Reverse-proxy /api/clustering/* (Validators UI)", "HTTP")
+    Rel(api, clusterdb, "Read contract_anomaly verdicts (merge into results)", "Native :9000")
+    Rel(clustering, datalake, "Read watched-contract transactions", "HTTP :8123")
+    Rel(clustering, clusterdb, "Write models + classifications + contract_anomaly", "HTTP :8123")
 ```
 
 ## Level 3: Component Diagram (FastAPI Application)
