@@ -28,6 +28,7 @@ class FakeClient:
     def __init__(self, query_rows: list[tuple[Any, ...]] | None = None) -> None:
         self.inserts: list[tuple[str, list[list[Any]], list[str]]] = []
         self.queries: list[str] = []
+        self.commands: list[str] = []
         self._query_rows = query_rows or []
 
     def insert(
@@ -38,6 +39,9 @@ class FakeClient:
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
         self.queries.append(sql)
         return SimpleNamespace(result_rows=self._query_rows)
+
+    def command(self, sql: str, parameters: dict[str, Any] | None = None) -> None:
+        self.commands.append(sql)
 
     def close(self) -> None:
         pass
@@ -444,3 +448,20 @@ def test_latest_cluster_run_near_orders_by_the_real_datetime_column() -> None:
     sql = fake.queries[-1]
     assert "dateDiff('second', cluster_runs.created_at" in sql
     assert "parseDateTimeBestEffort({near:String})" in sql
+
+
+def test_delete_contract_purges_contract_anomaly_projection() -> None:
+    """Deleting a watched contract must also drop the host-visible projection
+    (tx_contract_anomaly), or stale Contract Anomaly rows for a no-longer-watched
+    target keep surfacing in the host's /api/analysis/results."""
+    repo, fake = _repo()
+    repo.delete_contract("addr1")
+    deleted = [
+        c.split("ALTER TABLE ")[1].split(" DELETE")[0]
+        for c in fake.commands
+        if "ALTER TABLE" in c and " DELETE" in c
+    ]
+    assert "tms.tx_contract_anomaly" in deleted
+    # contracts is purged LAST so a mid-purge failure still leaves the row for the
+    # delete endpoint to find and re-run the (now mostly no-op) purge.
+    assert deleted[-1] == "tms.contracts"

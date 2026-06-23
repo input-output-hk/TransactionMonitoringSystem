@@ -9,10 +9,35 @@ how these labels resolve into effective verdicts — lives in ``verdicts``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from app.config import get_settings
 from app.service.verdicts import CLUSTER_VERDICTS
 from app.storage.protocol import Repo
+
+logger = logging.getLogger(__name__)
+
+
+def _sync_host_projection(repo: Repo, target: str) -> None:
+    """Reconcile the host-visible contract_anomaly projection after a label
+    change, so a relabel/clear retracts or raises a host alert immediately
+    instead of waiting for the next re-fit. Host-backed deployments only (the
+    projection table lives in the engine db the host reads); best-effort: a
+    failure here must not fail the label write (the next publish reconciles)."""
+    if get_settings().chain_source != "host_ch":
+        return
+    try:
+        from app.service.publish import publish_contract_anomaly
+
+        publish_contract_anomaly(
+            repo, target, network=get_settings().cardano_network,
+        )
+    except Exception:  # noqa: BLE001 - projection sync is best-effort
+        logger.warning(
+            "host contract_anomaly projection sync failed for %s; "
+            "the next publish will reconcile it", target[:24], exc_info=True,
+        )
 
 
 def label_cluster_members(
@@ -35,6 +60,7 @@ def label_cluster_members(
     if not hashes:
         raise KeyError(f"cluster {cluster_id} not found in run {run_id}")
     n = repo.set_tx_labels(target, hashes, verdict, source="cluster", note=note)
+    _sync_host_projection(repo, target)
     return {"run_id": run_id, "cluster_id": cluster_id, "verdict": verdict, "labeled": n}
 
 
@@ -47,6 +73,7 @@ def clear_cluster_members(
         raise ValueError("cannot clear the noise bucket")
     hashes = repo.cluster_member_hashes(run_id, cluster_id)
     n = repo.clear_tx_labels(target, hashes)
+    _sync_host_projection(repo, target)
     return {"run_id": run_id, "cluster_id": cluster_id, "cleared": n}
 
 
@@ -62,6 +89,7 @@ def label_transaction(
     if verdict not in CLUSTER_VERDICTS:
         raise ValueError(f"verdict must be one of {CLUSTER_VERDICTS}")
     n = repo.set_tx_labels(target, [tx_hash], verdict, source="manual_tx", note=note)
+    _sync_host_projection(repo, target)
     return {"target": target, "tx_hash": tx_hash, "verdict": verdict, "labeled": n}
 
 
@@ -70,4 +98,5 @@ def clear_transaction_label(
 ) -> dict[str, Any]:
     """Remove a single transaction's manual label (tombstone). No-op if it had none."""
     n = repo.clear_tx_labels(target, [tx_hash])
+    _sync_host_projection(repo, target)
     return {"target": target, "tx_hash": tx_hash, "cleared": n}
