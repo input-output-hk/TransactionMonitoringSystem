@@ -36,6 +36,18 @@ therefore does not extend to this project's source code.
 | uvloop | MIT | Fast event loop (Linux/macOS) |
 | httptools | MIT | Fast HTTP parser |
 
+## Frontend Libraries (`frontend/package.json`)
+
+The host SPA is built with React + Vite. The clustering UI surfaces (the Validators
+views) add a small number of libraries on top of the existing Radix/Recharts/Cytoscape
+stack; the ones introduced for that work are recorded here. All are permissive (MIT).
+
+| Package | License | SPDX identifier | Used for |
+|---|---|---|---|
+| @radix-ui/react-tabs | MIT | `MIT` | Tab strip on the validator detail view |
+| plotly.js-dist-min | MIT | `MIT` | 2-D/3-D feature-space projection scatter (code-split) |
+| react-plotly.js | MIT | `MIT` | React wrapper around the Plotly bundle |
+
 ## Infrastructure: Docker Images
 
 | Image | Version | License | Notes |

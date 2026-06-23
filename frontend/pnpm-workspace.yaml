@@ -1,0 +1,4 @@
+allowBuilds:
+  # Transitive Plotly dependency; its postinstall only prints a funding notice,
+  # so there is nothing to build.
+  es5-ext: false

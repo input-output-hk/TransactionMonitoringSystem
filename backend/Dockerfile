@@ -5,7 +5,9 @@
 FROM node:22-alpine AS frontend-build
 WORKDIR /frontend
 RUN corepack enable
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the allowBuilds policy (e.g. es5-ext: false); pnpm
+# needs it present or `install` fails the ignored-build-scripts gate.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 ARG VITE_NETWORK=preprod
