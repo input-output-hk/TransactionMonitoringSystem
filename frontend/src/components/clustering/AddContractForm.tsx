@@ -78,10 +78,10 @@ export function AddContractForm() {
 			</CardHeader>
 			<CardContent className="space-y-3">
 				<div className="space-y-1.5">
-					<Label htmlFor="add-target">Address or policy id</Label>
+					<Label htmlFor="add-target">Script address</Label>
 					<Input
 						id="add-target"
-						placeholder="addr1… / addr_test1… or 56-hex policy id"
+						placeholder="addr1… / addr_test1…"
 						value={target}
 						onChange={(e) => setTarget(e.target.value)}
 					/>
