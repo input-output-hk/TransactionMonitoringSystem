@@ -64,7 +64,10 @@ the manual counterpart to that loop rather than the only way a contract gets sco
 ```
 
 - `target` (required): classified server‑side; 56‑hex → `policy`, `addr…` (bech32)
-  → `address`; anything else → **422**.
+  → `address`; anything else → **422**. In the host‑backed deployment
+  (`CHAIN_SOURCE=host_ch`, the docker‑compose integration) the host indexes
+  transactions by address only, so a `policy` target is rejected up front with
+  **422**; use an `addr…` address there.
 - `max_txs` (optional): `1 .. 50000` (`MAX_TXS_CAP`); omitted = the full window the
   module is configured to fit over (`CLUSTERING_WINDOW_TXS`). A cap on an **address**
   target bounds the population to the most **recent** N of the contract's

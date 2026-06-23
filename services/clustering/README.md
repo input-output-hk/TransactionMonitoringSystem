@@ -47,7 +47,11 @@ docs/               detection algorithms, data model, and design reference
 # Build + run as part of the TMS stack:
 docker compose --profile clustering up -d --build clustering
 
-# Tests / lint (hermetic; no ClickHouse or network needed):
-docker exec tms-clustering-sidecar python -m pytest -q
-docker exec tms-clustering-sidecar ruff check /app/app /app/tests
+# Tests / lint (hermetic; no ClickHouse or network needed). Run locally with uv:
+# the shipped runtime image is the slim production stage and contains neither the
+# dev tooling (pytest/ruff/mypy) nor the tests/ directory.
+cd services/clustering/backend
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check app tests
 ```
