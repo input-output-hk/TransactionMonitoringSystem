@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.deps import RepoDep, reject_if_target_busy
+from app.config import get_settings
 from app.api.schemas import (
     ClassifyJobAck,
     ContractDeleteAck,
@@ -67,6 +68,21 @@ def create_contract(
         target_type = classify_target(target)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Fail fast on a target the active data source cannot serve, instead of
+    # queueing a job that deterministically fails at fetch time. The host-backed
+    # source indexes transactions by address only (not by policy id), so reject a
+    # policy target up front. Other sources accept both, so the gate is scoped to
+    # host_ch (mirrors host_ch.metadata()'s own rejection).
+    if target_type == "policy" and get_settings().chain_source == "host_ch":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Policy-id targets are not supported in the host-backed deployment: "
+                "the host TMS indexes transactions by address, not by policy id. "
+                "Provide an addr… address."
+            ),
+        )
 
     manager = request.app.state.job_manager
     with manager.enqueue_lock:  # atomic guard-then-create across request threads

@@ -508,7 +508,14 @@ def test_policy_target_case_insensitive_across_endpoints() -> None:
     assert repo.deleted == [lower]  # deleted under the canonical casing
 
 
-def test_create_contract_normalizes_policy_case() -> None:
+def test_create_contract_normalizes_policy_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Policy targets are only accepted by sources that index by policy id; run
+    # this normalization check under a non-host_ch source so the host_ch policy
+    # guard (see test below) doesn't reject it first.
+    monkeypatch.setattr(
+        "app.api.routers.contracts.get_settings",
+        lambda: Settings(CHAIN_SOURCE="other"),
+    )
     repo = FakeApiRepo()
     client = _client(repo)
     upper = ("b2" * 28).upper()
@@ -516,6 +523,22 @@ def test_create_contract_normalizes_policy_case() -> None:
     assert r.status_code == 200
     assert r.json()["target"] == upper.lower()
     assert repo.saved_contracts[0]["target"] == upper.lower()
+
+
+def test_create_contract_rejects_policy_under_host_ch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The host-backed source indexes by address only; a policy target must fail
+    # fast (422) at create time rather than queue a job that deterministically
+    # fails when it tries to fetch by policy id.
+    monkeypatch.setattr(
+        "app.api.routers.contracts.get_settings",
+        lambda: Settings(CHAIN_SOURCE="host_ch"),
+    )
+    repo = FakeApiRepo()
+    client = _client(repo)
+    r = client.post("/api/contracts", json={"target": "b2" * 28})
+    assert r.status_code == 422
+    assert "policy" in r.json()["detail"].lower()
+    assert repo.saved_contracts == []  # nothing queued
 
 
 def test_non_ascii_api_key_header_is_401_not_500(monkeypatch: pytest.MonkeyPatch) -> None:
