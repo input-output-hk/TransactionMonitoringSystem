@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # watch, >=0.25 re-cluster recommended. Re-cluster is never automatic.
     recluster_noise_threshold: float = Field(default=0.25, alias="RECLUSTER_NOISE_THRESHOLD")
 
+    # Trailing sample size for the online-noise rate above: how many of the most
+    # recently scored txs the drift sensor measures. Larger smooths the signal
+    # (slower to react, steadier); smaller reacts faster to a distribution shift
+    # but is noisier. A tunable, so it lives here beside its threshold rather
+    # than as a literal in the storage query.
+    online_noise_window: int = Field(default=500, alias="ONLINE_NOISE_WINDOW")
+
     # Number of transactions whose (tx, utxos) pairs are fetched concurrently
     # within a page during ingest. Admission is still serialized by the token
     # bucket, so this overlaps round-trip latency without exceeding the rate.
@@ -49,7 +56,12 @@ class Settings(BaseSettings):
     # ClickHouse
     clickhouse_host: str = Field(default="localhost", alias="CLICKHOUSE_HOST")
     clickhouse_http_port: int = Field(default=8123, alias="CLICKHOUSE_HTTP_PORT")
-    clickhouse_db: str = Field(default="tms", alias="CLICKHOUSE_DB")
+    # Default matches the host's CLUSTERING_DB default (app/config.py) and the
+    # docker-compose wiring, so a standalone run (no compose env) and the host's
+    # read/purge paths agree on the database name. A mismatch here would make the
+    # host silently read an empty DB (every cross-db read/purge is best-effort
+    # and swallows the resulting UNKNOWN_DATABASE), masking the misconfiguration.
+    clickhouse_db: str = Field(default="tms_clustering", alias="CLICKHOUSE_DB")
     clickhouse_user: str = Field(default="tms", alias="CLICKHOUSE_USER")
     clickhouse_password: str = Field(default="tms", alias="CLICKHOUSE_PASSWORD")
 

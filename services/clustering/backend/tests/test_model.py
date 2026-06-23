@@ -134,6 +134,40 @@ def test_score_votes_exclude_noise_and_stay_in_detector_range() -> None:
     assert all(0 <= c.votes <= 2 for c in score_shape(model, probe))
 
 
+def test_online_noise_below_auto_anomaly_bar_is_still_surfaced_for_review() -> None:
+    """Recall guard for the precision-tightening in _verdict (recall-first).
+
+    The online path raises the *auto-anomaly* bar to unanimous detectors, so a tx
+    that trips fewer than n_detectors resolves to ``normal`` and does not
+    auto-publish. That tightening is only safe because such a tx is NOT dropped:
+    an out-of-distribution point still lands in ``cluster_id == -1`` and ranks
+    ABOVE an in-distribution normal by ``consensus``, so an analyst review/sort
+    still surfaces it. This pins that the signal is never silently lost; if a
+    future change makes a sub-threshold OOD point indistinguishable from a benign
+    in-cluster one, this fails."""
+    df, cluster_of = _train_frame()
+    model = build_shape_model(
+        train_df=df, cluster_of=cluster_of, cluster_verdicts={}, eps=0.5, min_samples=4
+    )
+    probe = pd.DataFrame(
+        [
+            _row("near".ljust(64, "0"), scale=1.05),   # in-distribution, in cluster 0
+            _row("out".ljust(64, "0"), scale=5000.0),  # far outside every cluster
+        ],
+        columns=_SHAPE_COLUMNS,
+    )
+    by_hash = {c.tx_hash: c for c in score_shape(model, probe)}
+    near = by_hash["near".ljust(64, "0")]
+    out = by_hash["out".ljust(64, "0")]
+
+    # A sub-threshold OOD tx (verdict "normal", votes < n_detectors) is still
+    # surfaced: unassigned to any frozen cluster and ranked above the in-cluster
+    # normal by consensus, so it cannot hide among benign traffic.
+    assert _verdict(model, -1, votes=1, n_detectors=2) == "normal"  # the tightening
+    assert out.cluster_id == -1
+    assert out.consensus > near.consensus
+
+
 def test_verdict_inherits_cluster_label() -> None:
     df, cluster_of = _train_frame()
     model = build_shape_model(

@@ -45,7 +45,10 @@ class FakeClient:
 
 def _repo(query_rows: list[tuple[Any, ...]] | None = None) -> tuple[ClickHouseRepo, FakeClient]:
     fake = FakeClient(query_rows)
-    repo = ClickHouseRepo(Settings(), client=fake)
+    # Pin the database name so these table-qualification assertions ("tms.jobs"
+    # etc.) test the qualification logic, not the value of the CLICKHOUSE_DB
+    # default (which is "tms_clustering" to match the host integration).
+    repo = ClickHouseRepo(Settings(CLICKHOUSE_DB="tms"), client=fake)
     return repo, fake
 
 

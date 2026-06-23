@@ -125,13 +125,16 @@ class HostChainSource:
         while True:
             rows = self._client.query(
                 f"""
-                SELECT slot, tx_hash FROM (
-                    SELECT tx_hash, max(slot) AS slot
+                SELECT max_slot AS slot, tx_hash FROM (
+                    -- Alias the aggregate to a NAME DISTINCT from its source
+                    -- column (`slot`): aliasing `max(slot) AS slot` shadows the
+                    -- source column and trips ClickHouse Code 184 on 26.x.
+                    SELECT tx_hash, max(slot) AS max_slot
                     FROM {self._host_db}.address_transactions
                     WHERE network = {{net:String}} AND address = {{addr:String}}
                       AND slot >= {{from_slot:UInt64}}
                     GROUP BY tx_hash
-                ) ORDER BY slot, tx_hash LIMIT {{lim:UInt32}}
+                ) ORDER BY max_slot, tx_hash LIMIT {{lim:UInt32}}
                 """,
                 parameters={"net": self._network, "addr": address,
                             "from_slot": from_slot, "lim": _PAGE},
