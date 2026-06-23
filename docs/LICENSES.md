@@ -20,6 +20,7 @@ therefore does not extend to this project's source code.
 | websockets | ≥16.0, <17.0 | BSD 3-Clause | `BSD-3-Clause` | WebSocket client (Ogmios) |
 | clickhouse-driver | 0.2.10 | MIT | `MIT` | ClickHouse DB driver |
 | asyncpg | 0.31.0 | Apache 2.0 | `Apache-2.0` | PostgreSQL async driver |
+| httpx | 0.28.1 | BSD 3-Clause | `BSD-3-Clause` | HTTP client (clustering sidecar proxy) |
 | python-dotenv | 1.2.1 | BSD 3-Clause | `BSD-3-Clause` | `.env` file loading |
 | pytest | 9.0.2 | MIT | `MIT` | Test runner |
 | pytest-asyncio | 1.3.0 | Apache 2.0 | `Apache-2.0` | Async test support |
@@ -68,7 +69,7 @@ the upstream license is retained verbatim alongside the data at
 |---|---|---|---|
 | MIT | 11 | Yes | Attribution in distributed copies only |
 | Apache 2.0 | 4 | Yes | Attribution + patent grant; compatible with MIT/BSD. Includes the bundled StricaHQ registry snapshot (data, see "Bundled data"). |
-| BSD 3-Clause | 2 | Yes | Attribution; no endorsement clause |
+| BSD 3-Clause | 3 | Yes | Attribution; no endorsement clause |
 | PSF-2.0 | 1 | Yes | Attribution |
 | PostgreSQL License | 1 | Yes | Attribution (BSD-style, 2 clauses) |
 | MPL-2.0 | 1 (external service) | File-level copyleft | Does not apply; consumed as a service over the network |
