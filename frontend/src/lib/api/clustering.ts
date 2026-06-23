@@ -260,11 +260,20 @@ export function useContracts(pollMs = 10_000) {
 	});
 }
 
+/** Upper bound the API accepts for max_txs (MAX_TXS_CAP server-side). */
+export const MAX_TXS_CAP = 50_000;
+
 export function useAddContract() {
 	const qc = useQueryClient();
 	return useMutation({
-		mutationFn: (body: { target: string; label?: string }) =>
-			send<{ job_id: string }>("POST", "/contracts", body),
+		// max_txs: how many of the most recent txs to import (omit = the full
+		// configured window). reprocess: force a full re-cluster on re-add.
+		mutationFn: (body: {
+			target: string;
+			label?: string;
+			max_txs?: number;
+			reprocess?: boolean;
+		}) => send<{ job_id: string }>("POST", "/contracts", body),
 		onSuccess: () => qc.invalidateQueries({ queryKey: CONTRACTS_KEY }),
 	});
 }

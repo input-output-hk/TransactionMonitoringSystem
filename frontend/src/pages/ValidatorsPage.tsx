@@ -21,6 +21,7 @@ import {
 import { Input } from "@/components/ui/input";
 import {
 	type Contract,
+	MAX_TXS_CAP,
 	useAddContract,
 	useClassifyNow,
 	useContracts,
@@ -106,6 +107,8 @@ export function ValidatorsPage() {
 	const add = useAddContract();
 	const [target, setTarget] = useState("");
 	const [label, setLabel] = useState("");
+	const [maxTxs, setMaxTxs] = useState("");
+	const [reprocess, setReprocess] = useState(false);
 
 	if (health.data && health.data.clustering_enabled === false) {
 		return (
@@ -118,9 +121,26 @@ export function ValidatorsPage() {
 	const onAdd = () => {
 		const t = target.trim();
 		if (!t) return;
+		const n = Number.parseInt(maxTxs, 10);
 		add.mutate(
-			{ target: t, label: label.trim() || undefined },
-			{ onSuccess: () => { setTarget(""); setLabel(""); } },
+			{
+				target: t,
+				label: label.trim() || undefined,
+				// Omit max_txs to import the full configured window; otherwise clamp
+				// to the API cap. reprocess forces a full re-cluster on re-add.
+				...(Number.isFinite(n) && n > 0
+					? { max_txs: Math.min(n, MAX_TXS_CAP) }
+					: {}),
+				...(reprocess ? { reprocess: true } : {}),
+			},
+			{
+				onSuccess: () => {
+					setTarget("");
+					setLabel("");
+					setMaxTxs("");
+					setReprocess(false);
+				},
+			},
 		);
 	};
 
@@ -154,6 +174,25 @@ export function ValidatorsPage() {
 							onChange={(e) => setLabel(e.target.value)}
 						/>
 					</div>
+					<div className="w-40">
+						<Input
+							type="number"
+							min={1}
+							max={MAX_TXS_CAP}
+							placeholder={`Max txs (≤ ${MAX_TXS_CAP.toLocaleString()})`}
+							value={maxTxs}
+							onChange={(e) => setMaxTxs(e.target.value)}
+						/>
+					</div>
+					<label className="flex h-9 items-center gap-1.5 text-sm text-muted-foreground select-none">
+						<input
+							type="checkbox"
+							className="h-4 w-4 accent-primary"
+							checked={reprocess}
+							onChange={(e) => setReprocess(e.target.checked)}
+						/>
+						Reprocess
+					</label>
 					<Button onClick={onAdd} disabled={add.isPending || !target.trim()}>
 						{add.isPending ? "Adding…" : "Add"}
 					</Button>
