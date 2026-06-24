@@ -253,10 +253,7 @@ export function ValidatorDetailPage() {
 								</p>
 							}
 						>
-							<ProjectionScatter
-								runId={latestRun.run_id}
-								onFocusCluster={focusCluster}
-							/>
+							<ProjectionScatter runId={latestRun.run_id} />
 						</Suspense>
 					</TabsContent>
 

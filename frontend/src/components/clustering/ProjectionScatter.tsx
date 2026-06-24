@@ -1,10 +1,11 @@
 /**
  * Feature-space projection of a run's transactions, rendered with Plotly. Each
  * point is a transaction placed by the same PCA/MDS projection DBSCAN clustered
- * on, so nearby points are genuinely similar. Coloured by cluster/verdict;
- * click a point to focus its cluster. 2-D uses SVG scatter (no WebGL); 3-D is
- * scatter3d. Default export so the host can code-split it behind the Projection
- * tab (Plotly is ~1 MB).
+ * on, so nearby points are genuinely similar. Coloured by cluster/verdict.
+ * The plot is exploration-only (pan/zoom/rotate); it has no click-to-focus, so
+ * navigating it never jumps tabs on a stray click. 2-D uses SVG scatter (no
+ * WebGL); 3-D is scatter3d. Default export so the host can code-split it behind
+ * the Projection tab (Plotly is ~1 MB).
  */
 import Plotly from "plotly.js-dist-min";
 import { type ComponentType, useMemo, useState } from "react";
@@ -37,9 +38,9 @@ const AXIS = {
 	showspikes: false,
 };
 
-type Props = { runId: string; onFocusCluster?: (clusterId: number) => void };
+type Props = { runId: string };
 
-export default function ProjectionScatter({ runId, onFocusCluster }: Props) {
+export default function ProjectionScatter({ runId }: Props) {
 	const [dims, setDims] = useState<2 | 3>(2);
 	const { data, isLoading, isError } = useProjection(runId, dims);
 
@@ -103,21 +104,13 @@ export default function ProjectionScatter({ runId, onFocusCluster }: Props) {
 		return base;
 	}, [renderDims, axisName, data]);
 
-	const onClick = (e: Readonly<Plotly.PlotMouseEvent>) => {
-		const pt = e.points?.[0];
-		if (!pt) return;
-		const cd = pt.customdata as unknown;
-		const cluster = Array.isArray(cd) ? Number(cd[0]) : Number(cd);
-		if (Number.isFinite(cluster)) onFocusCluster?.(cluster);
-	};
-
 	return (
 		<div className="space-y-3">
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<p className="text-muted-foreground text-sm">
 					Each point is a transaction placed by a{" "}
 					{axisName === "MDS" ? "MDS" : "PCA"} projection of the features DBSCAN
-					clustered on. Coloured by cluster; click a point to focus its cluster.
+					clustered on. Coloured by cluster.
 				</p>
 				<div className="border-border inline-flex overflow-hidden rounded-md border">
 					{([2, 3] as const).map((d) => (
@@ -190,7 +183,6 @@ export default function ProjectionScatter({ runId, onFocusCluster }: Props) {
 						config={{ displayModeBar: false, responsive: true }}
 						useResizeHandler
 						style={{ width: "100%", height: "100%" }}
-						onClick={onClick}
 					/>
 				)}
 				{isLoading && (
