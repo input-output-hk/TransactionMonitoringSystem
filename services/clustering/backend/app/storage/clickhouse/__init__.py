@@ -51,7 +51,7 @@ def select_repo_factory(settings: Settings) -> type[ClickHouseRepo]:
     host data while a read endpoint (the co-spend graph, the tx list) queries the
     empty module tables and fails (an empty result yields a column-less frame).
     """
-    if settings.chain_source == "host_ch":
+    if settings.host_backed:
         from app.storage.clickhouse.host_backed import HostBackedRepo
 
         return HostBackedRepo

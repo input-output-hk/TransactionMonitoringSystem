@@ -25,7 +25,7 @@ def _sync_host_projection(repo: Repo, target: str) -> None:
     instead of waiting for the next re-fit. Host-backed deployments only (the
     projection table lives in the engine db the host reads); best-effort: a
     failure here must not fail the label write (the next publish reconciles)."""
-    if get_settings().chain_source != "host_ch":
+    if not get_settings().host_backed:
         return
     try:
         from app.service.publish import publish_contract_anomaly

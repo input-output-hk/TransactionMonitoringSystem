@@ -129,7 +129,7 @@ async def process_contract(
 
         # Surface this fit's flagged verdicts to the TMS as contract_anomaly
         # rows (the host_ch sidecar path; a non-host_ch source would skip this).
-        if get_settings().chain_source == "host_ch":
+        if get_settings().host_backed:
             from app.service.publish import publish_contract_anomaly
 
             publish_contract_anomaly(repo, target, network=get_settings().cardano_network)

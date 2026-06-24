@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ClickHouse, so its worker uses HostBackedRepo. A future downloading adapter
     # (its own ingestion) would use the default ClickHouseRepo. The request repo
     # (api/deps.py) resolves through the same helper so reads and the worker agree.
-    host_backed = settings.chain_source == "host_ch"
+    host_backed = settings.host_backed
     manager = JobManager(repo_factory=select_repo_factory(settings))
     manager.start()
     app.state.job_manager = manager
