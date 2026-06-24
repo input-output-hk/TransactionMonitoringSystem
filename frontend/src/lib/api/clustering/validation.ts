@@ -14,6 +14,7 @@ import type {
 	AnomalyCandidate,
 	AnomalyRun,
 	AnomalyTopResponse,
+	ClusteringConfig,
 	ClusterSummary,
 	Contract,
 	Evaluation,
@@ -90,6 +91,18 @@ export const validateContracts = arrayOf<Contract>(
 		["target", "status"],
 	),
 );
+
+/** `host_backed` gates the onboarding form's behaviour, so validate it as a
+ *  boolean rather than letting a missing/garbled field fall through to falsy.
+ *  `window_txs` is rendered with `.toLocaleString()`, so it must be a number. */
+export const validateConfig: Validator<ClusteringConfig> = (raw) => {
+	if (!isObject(raw)) throw new ResponseShapeError("/config", "expected an object");
+	if (typeof raw.host_backed !== "boolean")
+		throw new ResponseShapeError("/config", 'field "host_backed" is not a boolean');
+	if (typeof raw.window_txs !== "number" || !Number.isFinite(raw.window_txs))
+		throw new ResponseShapeError("/config", 'field "window_txs" is not a finite number');
+	return raw as ClusteringConfig;
+};
 
 export const runItem = shapeValidator<Run>(
 	"/runs",

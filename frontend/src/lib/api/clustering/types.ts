@@ -8,6 +8,14 @@ export type FeatureSet = "shape" | "graph" | "combined";
 /** The selectable feature sets, in display order. Single source for the pickers. */
 export const FEATURE_SETS: FeatureSet[] = ["shape", "graph", "combined"];
 
+/** Read-only deployment config (`GET /config`). When `host_backed`, the engine
+ *  reads txs from the host tables and fits over the rolling window `window_txs`,
+ *  so the onboarding form hides the (no-op) per-contract "max txs" control. */
+export type ClusteringConfig = {
+	host_backed: boolean;
+	window_txs: number;
+};
+
 export type Contract = {
 	target: string;
 	target_type: string;
