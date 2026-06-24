@@ -7,10 +7,13 @@ module maps that onto the host's 0-100 score and :class:`RiskBand` so the
 finding can surface as the synthetic ``contract_anomaly`` attack class.
 
 It is a pure function of the verdict + consensus and the validated
-``contract_anomaly`` config block (no magic numbers): the sidecar calls it at
-write time to populate ``tx_contract_anomaly.score`` / ``risk_band``. The host
-API never recomputes the score; it reads the stored value and merges it
-additively.
+``contract_anomaly`` config block (no magic numbers). The host recomputes the
+0-100 score + band from the sidecar's RAW fields (verdict, consensus) at READ
+time: the sidecar stores only those raw outputs, not a host-scale score (see
+``app.db.clustering_queries``), and :func:`resolve` projects them via this
+module on every read. So this projection is the single source of truth and a
+change to it (or to the config floors) applies to all historical rows with no
+backfill; the host never trusts a precomputed score.
 
 WHY votes are not an input: the engine's verdict precedence already folds the
 detector-vote count into the ``anomaly`` verdict (``votes >= FLAG_VOTE_THRESHOLD``
@@ -36,19 +39,26 @@ _SCORE_MAX = 100.0
 def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBand]:
     """Map a clustering verdict + consensus onto ``(score, RiskBand)``.
 
-    ``score = clamp(max(verdict_floor, consensus * consensus_scale))``: the
-    verdict supplies a floor (a human-labeled malicious cluster floors into
-    Critical, an auto-anomaly into High) and the ensemble consensus can raise a
-    no-floor verdict on its own. An unknown verdict gets no floor (treated as
-    ``normal``); a missing consensus contributes nothing. The mapping only ever
-    produces a score, never a side effect, so it is safe to call per transaction.
+    Only the POSITIVE verdicts carry a floor: a human-labeled malicious cluster
+    floors into Critical, an auto-anomaly into High. ``benign`` (human-labeled
+    safe) and ``normal`` (no finding), plus any unknown verdict, carry a 0 floor
+    and SUPPRESS the signal outright: they project to 0 regardless of consensus,
+    so a curated "safe" label is authoritative and the ensemble can never
+    manufacture a finding from it. For a positive verdict the consensus may only
+    REFINE the score upward from its floor (``max(floor, consensus * scale)``); a
+    missing consensus contributes nothing. The mapping only ever produces a
+    score, never a side effect, so it is safe to call per transaction.
     """
     cfg = contract_anomaly_config()
     floors = cfg["verdict_floors"]
     floor = float(floors.get(verdict, floors["normal"]))
+    # A 0-floor verdict is a safe/unknown label (benign, normal, ...): suppress
+    # it. Consensus refines only verdicts that already carry a positive floor, so
+    # it can never turn a curated-safe label into a surfaced finding.
+    if floor <= _SCORE_MIN:
+        return _SCORE_MIN, RiskBand(score_to_band(_SCORE_MIN))
     consensus_term = float(consensus) * float(cfg["consensus_scale"]) if consensus is not None else 0.0
-    score = max(floor, consensus_term)
-    score = min(_SCORE_MAX, max(_SCORE_MIN, score))
+    score = min(_SCORE_MAX, max(floor, consensus_term))
     return score, RiskBand(score_to_band(score))
 
 

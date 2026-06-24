@@ -29,6 +29,27 @@ router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 # so the per-tx write path stays untouched; it is injected after hydration.
 _CONTRACT_ANOMALY = "contract_anomaly"
 
+# Attack classes the list filter accepts. The nine stored classes are filterable
+# by the SQL path (max_class = attack_class); contract_anomaly is a read-time
+# overlay with no DB column, so it is filtered in Python (see
+# _list_contract_anomaly_results). It stays out of _CLASS_NAMES so the engine's
+# scorer-order contract is unaffected.
+_VALID_ATTACK_CLASSES = (*_CLASS_NAMES, _CONTRACT_ANOMALY)
+
+
+def _sort_results(results: List[ClassScoreResult], *, by_date: bool) -> None:
+    """Re-rank a hydrated result list in place to mirror the SQL ORDER BY.
+
+    ``by_date`` sorts (analyzed_at, max_score) descending; otherwise
+    (max_score, analyzed_at) descending. Shared by the contract_anomaly list
+    filter and the recall rescue so the two read paths order identically.
+    ``analyzed_at`` is a required datetime on :class:`ClassScoreResult`, so the
+    key never mixes None with datetime."""
+    if by_date:
+        results.sort(key=lambda d: (d.analyzed_at, d.max_score), reverse=True)
+    else:
+        results.sort(key=lambda d: (d.max_score, d.analyzed_at), reverse=True)
+
 
 def _merge_contract_anomaly(
     result: ClassScoreResult, rows: List[Dict[str, Any]],
@@ -148,6 +169,69 @@ async def _flagged_effective(
         sb, ss = s
         out[tx] = (sb, ss, resolved["risk_band"].value.lower(), float(resolved["score"]))
     return out
+
+
+async def _list_contract_anomaly_results(
+    network: str,
+    *,
+    bands: Optional[List[str]],
+    min_score: float,
+    analyzed_from: Optional[datetime],
+    analyzed_to: Optional[datetime],
+    min_corroboration: int,
+    sort: str,
+    limit: int,
+    offset: int,
+) -> tuple[List[ClassScoreResult], int]:
+    """List page for ``attack_class=contract_anomaly``.
+
+    The synthetic class is a read-time overlay with no ``tx_class_scores``
+    column, so the SQL path can't filter it (``max_class`` is never stored as
+    contract_anomaly). This resolves every flagged tx's effective max_class and
+    keeps the ones whose sidecar verdict projects ABOVE the stored 9-class max
+    (the only case the merge sets ``max_class = contract_anomaly``), which is the
+    in-memory analogue of the DB's ``max_class = attack_class`` predicate. It
+    then applies the same score/band/window/corroboration filters the SQL path
+    applies to the stored classes, sorts identically, and paginates.
+
+    Bounded by the flagged-set fetch cap (``flagged_for_network_async``);
+    truncation is logged, never silent. Archived false positives are excluded by
+    ``get_class_scores_by_hashes_async``'s default anti-join, matching the list
+    query. Returns ``(page, total)`` where total is the full match count."""
+    flagged = await clustering_queries.flagged_for_network_async(network)
+    if not flagged:
+        return [], 0
+    if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
+        # No silent caps: a truncated flagged set could omit a contract_anomaly
+        # detection from this filtered view; surface it so the cap can be raised.
+        logger.warning(
+            "contract_anomaly list filter hit the fetch cap (%d) for %s; "
+            "older flagged txs may be absent from the filtered list",
+            clustering_queries._RESCUE_FETCH_CAP, network,
+        )
+    stored_rows = await clickhouse.get_class_scores_by_hashes_async(
+        network, list(flagged),
+    )
+    matched: List[ClassScoreResult] = []
+    for row in stored_rows:
+        res = _row_to_class_score(row)
+        _merge_contract_anomaly(res, flagged[res.tx_hash])
+        # Only txs the verdict pushes to the top belong to this filter; one whose
+        # stored 9-class score still dominates is a stored-class detection.
+        if res.max_class != _CONTRACT_ANOMALY:
+            continue
+        if not _within_analyzed_window(res.analyzed_at, analyzed_from, analyzed_to):
+            continue
+        if not _passes_score_band(res.max_score, res.risk_band, min_score, bands):
+            continue
+        # corroboration_count is the stored 9-class signal (the synthetic class
+        # never mutates it); filter on it exactly as the SQL path does.
+        if min_corroboration and res.corroboration_count < min_corroboration:
+            continue
+        matched.append(res)
+    # Mirror the SQL ORDER BY so paging is consistent with the stored-class views.
+    _sort_results(matched, by_date=sort == "date")
+    return matched[offset:offset + limit], len(matched)
 
 
 async def _augment_stats_with_contract_anomaly(
@@ -311,10 +395,11 @@ async def list_analysis_results(
     offset: int = Query(0, ge=0),
 ):
     """List multi-class scoring results with optional filters."""
-    if attack_class and attack_class not in _CLASS_NAMES:
+    if attack_class and attack_class not in _VALID_ATTACK_CLASSES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown attack class '{attack_class}'. Valid: {_CLASS_NAMES}",
+            detail=f"Unknown attack class '{attack_class}'. "
+            f"Valid: {list(_VALID_ATTACK_CLASSES)}",
         )
     if sort not in ("score", "date"):
         raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
@@ -323,6 +408,32 @@ async def list_analysis_results(
         # Normalize the enum list to plain strings, passing None when the
         # caller didn't supply any band so the DB layer skips the WHERE.
         rbs = [b.value for b in risk_band] if risk_band else None
+        # The synthetic class has no DB column, so the SQL path can't filter it.
+        # Route it to the in-memory resolver. When clustering is disabled the
+        # class never exists, so the filtered page is legitimately empty (not an
+        # error): the frontend offers the filter unconditionally.
+        if attack_class == _CONTRACT_ANOMALY:
+            if not settings.CLUSTERING_ENABLED:
+                return {"count": 0, "total": 0, "data": []}
+            try:
+                ca_data, ca_total = await _list_contract_anomaly_results(
+                    query_network,
+                    bands=rbs,
+                    min_score=min_score,
+                    analyzed_from=analyzed_from,
+                    analyzed_to=analyzed_to,
+                    min_corroboration=min_corroboration,
+                    sort=sort,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as e:
+                # Best-effort, matching the rest of the sidecar read path: a
+                # sidecar hiccup degrades to an empty page (surfaced via the
+                # /health freshness probe) rather than failing the request.
+                logger.warning(f"contract_anomaly list filter failed: {e}")
+                ca_data, ca_total = [], 0
+            return {"count": len(ca_data), "total": ca_total, "data": ca_data}
         # Shared filter predicate: list and count MUST apply identical filters or
         # the pagination total drifts from the rows shown. sort/limit/offset are
         # list-only (they do not affect the count) and stay out of this dict.
@@ -436,10 +547,7 @@ async def list_analysis_results(
         if rescued_total:
             # Re-rank so rescued rows interleave by the active sort, then cap to
             # `limit` so the page size is honoured (matches the SQL ORDER BY).
-            if date_sort:
-                data.sort(key=lambda d: (d.analyzed_at, d.max_score), reverse=True)
-            else:
-                data.sort(key=lambda d: (d.max_score, d.analyzed_at), reverse=True)
+            _sort_results(data, by_date=date_sort)
             data = data[:limit]
         return {
             "count": len(data),
