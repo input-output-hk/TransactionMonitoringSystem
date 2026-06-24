@@ -282,7 +282,9 @@ class HostBackedRepo(ClickHouseRepo):
                 a.iso_score AS iso_score, a.lof_score AS lof_score,
                 a.dbscan_noise AS dbscan_noise, a.consensus AS consensus,
                 a.votes AS votes, a.score_rank AS score_rank,
-                {_tx_context_aliased('t')}
+                {_tx_context_aliased('t')},
+                toHour(t.block_time) AS hour_of_day,
+                toDayOfWeek(t.block_time) AS day_of_week
             FROM (
                 SELECT tx_hash, iso_score, lof_score, dbscan_noise, consensus,
                        votes, score_rank
@@ -295,7 +297,7 @@ class HostBackedRepo(ClickHouseRepo):
             parameters=params,
         ).result_rows
         keys = ["tx_hash", "iso_score", "lof_score", "dbscan_noise", "consensus",
-                "votes", "score_rank", *TX_CONTEXT_KEYS]
+                "votes", "score_rank", *TX_CONTEXT_KEYS, "hour_of_day", "day_of_week"]
         return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score", "lof_score"))
 
     def cluster_summary(self, run_id: str, target: str) -> list[dict[str, Any]]:

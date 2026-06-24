@@ -72,6 +72,32 @@ def test_select_repo_factory_downloading_adapter_is_base_repo() -> None:
     assert select_repo_factory(Settings(CHAIN_SOURCE="other")) is ClickHouseRepo
 
 
+def test_host_backed_top_anomalies_includes_hour_and_day_of_week() -> None:
+    """The host-backed top_anomalies must surface hour_of_day/day_of_week, which
+    AnomalyCandidateOut requires; without them the /top endpoint 500'd with a
+    ResponseValidationError. The score columns + every TX_CONTEXT_KEYS column +
+    the two derived time fields are returned, in that order (zip is strict, so a
+    row that doesn't match the key count would raise here)."""
+    from app.storage.clickhouse.ingest import TX_CONTEXT_KEYS
+
+    score_cols = ("a" * 64, 0.5, 1.2, 1, 0.9, 2, 1)  # tx_hash..score_rank
+    ctx_cols = ("2026-06-02 03:38:22", 100, 0, 1000, 2000, 1000, 6, 11, 5, 2)
+    derived = (3, 2)  # hour_of_day, day_of_week
+    assert len(ctx_cols) == len(TX_CONTEXT_KEYS)  # ctx fixture stays in lockstep
+    fake = FakeClient([(*score_cols, *ctx_cols, *derived)])
+    repo = HostBackedRepo(Settings(CLICKHOUSE_DB="tms"), client=fake)
+
+    rows = repo.top_anomalies("run-1", "addr", limit=10)
+
+    # The mapped keys carry the two derived fields...
+    assert rows[0]["hour_of_day"] == 3
+    assert rows[0]["day_of_week"] == 2
+    # ...and the SQL actually projects them (FakeClient ignores the query, so the
+    # row arity alone can't catch dropping the columns from the SELECT only).
+    assert "toHour(t.block_time)" in fake.queries[-1]
+    assert "toDayOfWeek(t.block_time)" in fake.queries[-1]
+
+
 def _tx() -> TxRecord:
     return TxRecord(
         target="addr",
