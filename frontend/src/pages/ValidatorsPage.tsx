@@ -7,11 +7,31 @@
  * own behaviour. New transactions are classified automatically as the chain is
  * ingested; the card actions are conveniences on top of that auto feed.
  */
+import { useMemo } from "react";
+
 import { AddContractForm } from "@/components/clustering/AddContractForm";
 import { ContractCard } from "@/components/clustering/ContractCard";
 import { latestJobForTarget } from "@/components/clustering/jobStage";
 import { useContracts, useJobs } from "@/lib/api/clustering";
+import type { Contract } from "@/lib/api/clustering";
 import { useHealth } from "@/lib/api/health";
+
+/**
+ * Stable display order for the card grid. The watchlist API orders by
+ * `updated_at DESC`, which churns on every poll (job progress, drift, status,
+ * tx_count all bump `updated_at`), so cards jumped positions every ~10s and
+ * were hard to click. Order by fields that change only on explicit user
+ * action: labelled validators first (alphabetical), then unlabelled ones by
+ * their immutable address. Nothing here moves on a background refresh.
+ */
+function byLabelThenTarget(a: Contract, b: Contract): number {
+	const la = a.label?.trim() ?? "";
+	const lb = b.label?.trim() ?? "";
+	if (Boolean(la) !== Boolean(lb)) return la ? -1 : 1; // labelled first
+	const byLabel = la.localeCompare(lb);
+	if (byLabel !== 0) return byLabel;
+	return a.target.localeCompare(b.target);
+}
 
 export function ValidatorsPage() {
 	const health = useHealth();
@@ -25,6 +45,13 @@ export function ValidatorsPage() {
 		isError,
 	} = useContracts(undefined, clusteringEnabled);
 	const { data: jobs } = useJobs(undefined, clusteringEnabled);
+
+	// Sort a copy so the rendered order stays stable across polls regardless of
+	// the order the API returns rows in.
+	const sortedContracts = useMemo(
+		() => (contracts ? [...contracts].sort(byLabelThenTarget) : contracts),
+		[contracts],
+	);
 
 	if (health.data && health.data.clustering_enabled === false) {
 		return (
@@ -55,13 +82,13 @@ export function ValidatorsPage() {
 					Could not load the watchlist. The clustering service may be
 					unavailable; retry shortly.
 				</p>
-			) : !contracts?.length ? (
+			) : !sortedContracts?.length ? (
 				<p className="text-muted-foreground text-sm">
 					No contracts watched yet. Add a script address above to start.
 				</p>
 			) : (
 				<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-					{contracts.map((c) => (
+					{sortedContracts.map((c) => (
 						<ContractCard
 							key={c.target}
 							c={c}
