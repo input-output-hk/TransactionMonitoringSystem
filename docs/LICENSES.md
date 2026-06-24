@@ -13,21 +13,21 @@ therefore does not extend to this project's source code.
 
 | Package | Pinned version | License | SPDX identifier | Category |
 |---|---|---|---|---|
-| fastapi | 0.133.0 | MIT | `MIT` | Web framework |
-| uvicorn\[standard\] | 0.41.0 | MIT | `MIT` | ASGI server |
-| pydantic | 2.12.5 | MIT | `MIT` | Data validation |
-| pydantic-settings | 2.13.1 | MIT | `MIT` | Settings management |
+| fastapi | 0.138.0 | MIT | `MIT` | Web framework |
+| uvicorn\[standard\] | 0.49.0 | MIT | `MIT` | ASGI server |
+| pydantic | 2.13.4 | MIT | `MIT` | Data validation |
+| pydantic-settings | 2.14.2 | MIT | `MIT` | Settings management |
 | websockets | ≥16.0, <17.0 | BSD 3-Clause | `BSD-3-Clause` | WebSocket client (Ogmios) |
 | clickhouse-driver | 0.2.10 | MIT | `MIT` | ClickHouse DB driver |
 | asyncpg | 0.31.0 | Apache 2.0 | `Apache-2.0` | PostgreSQL async driver |
 | httpx | 0.28.1 | BSD 3-Clause | `BSD-3-Clause` | HTTP client (clustering sidecar proxy) |
-| python-dotenv | 1.2.1 | BSD 3-Clause | `BSD-3-Clause` | `.env` file loading |
-| pytest | 9.0.2 | MIT | `MIT` | Test runner |
-| pytest-asyncio | 1.3.0 | Apache 2.0 | `Apache-2.0` | Async test support |
-| pytest-cov | 7.0.0 | MIT | `MIT` | Coverage reporting |
-| black | 26.1.0 | MIT | `MIT` | Code formatter |
-| ruff | 0.15.2 | MIT | `MIT` | Linter |
-| mypy | 1.19.1 | MIT | `MIT` | Static type checker |
+| python-dotenv | 1.2.2 | BSD 3-Clause | `BSD-3-Clause` | `.env` file loading |
+| pytest | 9.1.1 | MIT | `MIT` | Test runner |
+| pytest-asyncio | 1.4.0 | Apache 2.0 | `Apache-2.0` | Async test support |
+| pytest-cov | 7.1.0 | MIT | `MIT` | Coverage reporting |
+| black | 26.5.1 | MIT | `MIT` | Code formatter |
+| ruff | 0.15.18 | MIT | `MIT` | Linter |
+| mypy | 2.1.0 | MIT | `MIT` | Static type checker |
 
 `uvicorn[standard]` pulls in these transitive extras:
 
@@ -90,4 +90,4 @@ All direct code dependencies are **compatible with Apache 2.0 and with each othe
 No GPL, LGPL, AGPL, EUPL, or other strong-copyleft license is present in the
 dependency tree.
 
-*Last updated: 2026-06-23. Verify against PyPI metadata when upgrading pinned versions.*
+*Last updated: 2026-06-24. Verify against PyPI metadata when upgrading pinned versions.*
