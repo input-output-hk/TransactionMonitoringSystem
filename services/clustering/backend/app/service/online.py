@@ -183,7 +183,7 @@ async def update_contract(
     # chain, so there is no download — the repo's feature reads come from the
     # host tables. Skip the tip walk and classify directly against what the host
     # has; the feed scheduler is what makes this "incremental".
-    host_backed = settings.chain_source == "host_ch"
+    host_backed = settings.host_backed
 
     try:
         if not host_backed:

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from app.config import Settings
 from app.service.publish import (
     _COLUMNS,
     _publish_online,
@@ -144,7 +145,7 @@ def test_label_change_triggers_host_projection_sync(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(
         "app.service.labels.get_settings",
-        lambda: SimpleNamespace(chain_source="host_ch", cardano_network="preprod"),
+        lambda: Settings(CHAIN_SOURCE="host_ch", CARDANO_NETWORK="preprod"),
     )
     from app.service.labels import label_transaction
 
@@ -161,7 +162,7 @@ def test_label_change_skips_sync_off_host(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setattr(
         "app.service.labels.get_settings",
-        lambda: SimpleNamespace(chain_source="other", cardano_network="preprod"),
+        lambda: Settings(CHAIN_SOURCE="other", CARDANO_NETWORK="preprod"),
     )
     from app.service.labels import label_transaction
 

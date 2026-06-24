@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
+    @property
+    def host_backed(self) -> bool:
+        """True when the engine reads each contract's txs from the host's tables
+        (CHAIN_SOURCE=host_ch) instead of downloading them: no per-contract
+        download, fits run over the rolling window. Single source of truth for
+        the "host_ch" check so the many call sites can't drift."""
+        return self.chain_source == "host_ch"
+
     def recluster_recommended(self, drift_score: float) -> bool:
         """Whether an online-classifier ``drift_score`` is stale enough to recommend
         a full re-cluster. Single source of truth for the threshold rule, shared by

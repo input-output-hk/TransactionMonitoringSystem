@@ -74,7 +74,7 @@ def create_contract(
     # source indexes transactions by address only (not by policy id), so reject a
     # policy target up front. Other sources accept both, so the gate is scoped to
     # host_ch (mirrors host_ch.metadata()'s own rejection).
-    if target_type == "policy" and get_settings().chain_source == "host_ch":
+    if target_type == "policy" and get_settings().host_backed:
         raise HTTPException(
             status_code=422,
             detail=(
