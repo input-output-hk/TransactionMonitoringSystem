@@ -150,7 +150,7 @@ Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (
 ### Analysis
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`) |
+| GET | `/api/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`). Valid `attack_class` values are the nine stored classes (`token_dust`, `large_value`, `large_datum`, `multiple_sat`, `front_running`, `sandwich`, `circular`, `fake_token`, `phishing`) plus the synthetic `contract_anomaly` (resolved at read time; returns empty when the clustering profile is off). |
 | GET | `/api/analysis/results/{tx_hash}` | Analysis result for a single transaction |
 | GET | `/api/analysis/stats` | Risk-band distribution and per-class score stats |
 

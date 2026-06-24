@@ -43,11 +43,13 @@ _FIELDS = (
     "votes", "verdict", "model_id", "feature_set", "evidence", "scored_at",
 )
 
-# The engine's "no finding" verdict label (see the sidecar's verdict vocabulary:
-# malicious / anomaly / benign / normal). Only NON-normal verdicts can ever
-# project to a host score a list filter would surface, so the recall-rescue
-# query (``flagged_for_network``) restricts to ``verdict != normal``.
-_NORMAL_VERDICT = "normal"
+# Verdicts that SUPPRESS the contract_anomaly signal: the engine's "no finding"
+# baseline (``normal``) and human-labeled "safe" (``benign``). Both project to 0
+# (see app.analysis.contract_anomaly.project_score), so only the POSITIVE
+# verdicts (malicious / anomaly) can reach a surfaceable host score. The
+# recall-rescue query (``flagged_for_network``) excludes the suppressing ones to
+# keep the candidate set bounded to the findings that could matter.
+_SUPPRESSED_VERDICTS = ("normal", "benign")
 
 # Safety bound on the recall-rescue fetch. The flagged set (non-normal verdicts
 # for one network) is small relative to all traffic, but it grows with history;
@@ -162,13 +164,13 @@ def flagged_for_network(
     Powers the list endpoint's recall rescue: a transaction whose stored 9-class
     score is below an active filter but whose contract_anomaly verdict projects
     above it would otherwise be dropped by the DB filter (which sees only stored
-    scores). Restricting to ``verdict != normal`` keeps this bounded to the
-    findings that could matter. Returns ``{}`` on a clean miss or any error
-    reaching the sidecar's database (best-effort). The caller logs when ``limit``
-    is reached so a truncated rescue set is never silent."""
+    scores). Excluding the suppressing verdicts (normal / benign) keeps this
+    bounded to the findings that could matter. Returns ``{}`` on a clean miss or
+    any error reaching the sidecar's database (best-effort). The caller logs when
+    ``limit`` is reached so a truncated rescue set is never silent."""
     try:
         rows = _client().execute(
-            _select("network = %(network)s AND verdict != %(normal)s")
+            _select("network = %(network)s AND verdict NOT IN %(suppressed)s")
             # Order by reconciliation recency, not source time. A newly
             # malicious-labeled OLD transaction is re-published with a fresh
             # published_at but keeps its original (older) scored_at; ordering by
@@ -176,7 +178,7 @@ def flagged_for_network(
             # rescue / stats augmentation. published_at keeps the latest-touched
             # findings inside the cap, preserving recall on relabels.
             + " ORDER BY published_at DESC LIMIT %(limit)s",
-            {"network": network, "normal": _NORMAL_VERDICT, "limit": limit},
+            {"network": network, "suppressed": _SUPPRESSED_VERDICTS, "limit": limit},
         )
     except Exception as e:  # noqa: BLE001 - best-effort cross-db read
         logger.debug("contract_anomaly flagged lookup failed: %s", e)

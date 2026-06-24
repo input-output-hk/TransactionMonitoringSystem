@@ -44,16 +44,20 @@ contract_anomaly:
   # explicit-label > cluster-inherited (malicious/benign) > auto-anomaly
   # (votes >= FLAG_VOTE_THRESHOLD == 2) > normal. A human-labeled malicious
   # cluster is the strongest signal, so it floors into Critical; an
-  # auto-anomaly floors into High; benign/normal carry no floor and let the
-  # consensus term decide. Votes are already folded into the `anomaly`
-  # verdict upstream, so they are evidence-only here (no double counting).
+  # auto-anomaly floors into High. benign (human-labeled safe) and normal (no
+  # finding) carry a 0 floor and SUPPRESS the signal: a curated safe label is
+  # authoritative, so the verdict projects to 0 and consensus can never raise it
+  # (consensus only refines a positive verdict upward from its floor). Votes are
+  # already folded into the `anomaly` verdict upstream, so they are evidence-only
+  # here (no double counting).
   verdict_floors:
     malicious: 80.0   # BAND_CRITICAL_THRESHOLD: human-labeled malicious cluster
     anomaly: 60.0     # BAND_HIGH_THRESHOLD: auto-anomaly (>= 2 detector votes)
-    benign: 0.0       # human-labeled safe: no floor (consensus may still raise)
-    normal: 0.0       # no signal: consensus decides
+    benign: 0.0       # human-labeled safe: suppresses (0; consensus cannot raise)
+    normal: 0.0       # no finding: suppresses (0; consensus cannot raise)
   # The ensemble consensus is in [0,1]; multiplying by 100 maps it onto the
-  # 0-100 score scale. Final score = clamp(max(floor, consensus * scale)).
+  # 0-100 score scale. It REFINES a positive verdict only:
+  # score = clamp(max(floor, consensus * scale)) for malicious/anomaly, else 0.
   consensus_scale: 100.0
   # A contract_anomaly score at or above this counts as a corroborating signal
   # for analyst triage (surfaced as contract_anomaly_corroborates, separate
