@@ -457,12 +457,51 @@ class TestDurableScoreRepurge:
     def test_shutdown_inside_delay_window_keeps_pending_row(self, client, monkeypatch):
         # disconnect() inside the delay window: the task returns without
         # repurging, and the persisted row covers the replay on next start.
-        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 0)
+        #
+        # Deterministic regardless of event-loop scheduling: the delayed
+        # task is parked on a gate that stands in for the real delay sleep,
+        # _running is flipped to False while it is parked, then the gate is
+        # released so the task resumes and observes the shutdown. A bare
+        # delay of 0 raced under CPython 3.14's task scheduling, where the
+        # task could run the repurge during the handler's own post-schedule
+        # awaits, before _running was cleared.
+        monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
+        # Non-zero so the delayed task parks in the (gated) delay sleep
+        # instead of completing inline; the value is irrelevant because the
+        # gate, not wall-clock time, drives when the task resumes.
+        monkeypatch.setattr(settings, "ROLLBACK_SCORE_REPURGE_DELAY_SECONDS", 3600)
         repurge = AsyncMock()
         clear = AsyncMock()
-        self._rollback(client, monkeypatch,
-                       self._patches(clear_pending=clear, repurge=repurge),
-                       extra_ticks=3, stop_before_ticks=True)
+
+        real_sleep = asyncio.sleep
+        gate = asyncio.Event()
+
+        async def gated_sleep(delay, *args, **kwargs):
+            # Park the delayed repurge on the gate; pass the scenario's
+            # zero-delay cooperative yields straight through to the loop.
+            if delay == 0:
+                return await real_sleep(0)
+            await gate.wait()
+
+        monkeypatch.setattr(
+            "app.ingestion.ogmios_client.asyncio.sleep", gated_sleep
+        )
+
+        async def scenario():
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                for p in self._patches(clear_pending=clear, repurge=repurge):
+                    stack.enter_context(p)
+                await client._handle_roll_backward(self._result())
+                # Shutdown lands while the repurge task is parked in the
+                # window; release the gate so it resumes into the _running
+                # check rather than the repurge.
+                client._running = False
+                gate.set()
+                for _ in range(3):
+                    await asyncio.sleep(0)
+
+        _run(scenario())
         repurge.assert_not_awaited()
         clear.assert_not_awaited()
 
