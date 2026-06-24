@@ -8,6 +8,7 @@
 import { Suspense, lazy, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
+import { AnomalyHelp } from "@/components/clustering/AnomalyHelp";
 import { AnomalyRunControls } from "@/components/clustering/AnomalyRunControls";
 import { AnomalyTable } from "@/components/clustering/AnomalyTable";
 import { ClusterSummaryTable } from "@/components/clustering/ClusterSummaryTable";
@@ -34,6 +35,7 @@ const TAB_VALUES = [
 	"latest",
 	"tuning",
 ] as const;
+import { VerdictLegend } from "@/components/clustering/VerdictLegend";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -88,12 +90,15 @@ function GraphTab({
 					/>
 				</Suspense>
 			</div>
-			{graph.truncated && (
-				<p className="text-muted-foreground mt-2 text-xs">
-					Showing {graph.shown.toLocaleString()} of{" "}
-					{graph.total.toLocaleString()} transactions.
-				</p>
-			)}
+			<div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+				<VerdictLegend />
+				{graph.truncated && (
+					<p className="text-muted-foreground text-xs">
+						Showing {graph.shown.toLocaleString()} of{" "}
+						{graph.total.toLocaleString()} transactions.
+					</p>
+				)}
+			</div>
 		</>
 	);
 }
@@ -141,6 +146,8 @@ function AnomaliesTab({ target }: { target: string }) {
 					{selectedRun.methods || "—"}
 				</p>
 			)}
+
+			<AnomalyHelp showColumnKey={!!effectiveRunId} />
 			{effectiveRunId ? (
 				<AnomalyTable runId={effectiveRunId} target={target} />
 			) : (

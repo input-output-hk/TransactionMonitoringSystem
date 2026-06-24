@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
+import { HelpDetails } from "@/components/ui/help-details";
 import {
 	Select,
 	SelectContent,
@@ -110,6 +111,37 @@ export function LatestTable({ target }: { target: string }) {
 					{running ? "Fetching & classifying…" : "↓ Fetch newer from chain"}
 				</Button>
 			</div>
+
+			<HelpDetails summary="What is this?">
+				<p>
+					The most recent transactions touching this validator, newest first: a
+					quick way to check that recent activity looks OK. Each one shows its{" "}
+					<strong>live verdict</strong>, recomputed from its cluster's current
+					label:
+				</p>
+				<ul>
+					<li>
+						<strong>unclassified:</strong> not in any cluster run and not yet
+						scored; hit <strong>Fetch newer from chain</strong> to score the
+						recent ones.
+					</li>
+					<li>
+						label its cluster <strong>benign</strong>/<strong>malicious</strong>{" "}
+						in the Clusters tab and the verdict follows, retroactively and going
+						forward.
+					</li>
+					<li>
+						no label: <strong>anomaly</strong> if the detectors flag it (votes ≥
+						2), else <strong>normal</strong>.
+					</li>
+				</ul>
+				<p>
+					Two separate controls: <strong>Showing latest N stored</strong> only
+					changes how many already-downloaded transactions are listed (no
+					network call); <strong>Fetch newer from chain</strong> downloads
+					transactions newer than what's stored and classifies them.
+				</p>
+			</HelpDetails>
 
 			{errorMsg && <p className="text-destructive text-sm">{errorMsg}</p>}
 
