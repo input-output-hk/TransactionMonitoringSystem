@@ -56,6 +56,11 @@ def _payment_is_script(address: str) -> bool:
 class HostChainSource:
     """ChainSource backed by the host TMS's ClickHouse (read-only, no download)."""
 
+    # Data is already in the host tables (read via HostBackedRepo); onboarding
+    # reads features directly and must never discover+download (fetch_tx is a
+    # hard error here). The pipeline keys off this to skip the download path.
+    host_backed = True
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._host_db = settings.host_clickhouse_db
