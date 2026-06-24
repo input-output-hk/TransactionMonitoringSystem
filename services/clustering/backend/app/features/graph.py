@@ -48,7 +48,15 @@ def _build_incidence(
 
     If ``tx_order`` is given, rows follow that order (addresses for unknown txs
     are ignored); otherwise rows are the sorted unique tx hashes in ``df``.
+
+    A no-rows result is normal (a target whose txs carry no co-spend address, or
+    the empty-result frame ClickHouse's ``query_df`` returns with no columns at
+    all): build an empty incidence over ``tx_order`` rather than letting
+    ``astype`` raise KeyError on the absent columns.
     """
+    if df.empty:
+        tx_hashes = list(tx_order) if tx_order is not None else []
+        return tx_hashes, sparse.csr_matrix((len(tx_hashes), 0), dtype=np.float64)
     df = df.astype({"tx_hash": str, "address": str})
     if tx_order is None:
         tx_hashes = sorted(df["tx_hash"].unique().tolist())

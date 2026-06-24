@@ -21,7 +21,9 @@ from app.storage.clickhouse import (
     TX_COLUMNS,
     UTXO_COLUMNS,
     ClickHouseRepo,
+    select_repo_factory,
 )
+from app.storage.clickhouse.host_backed import HostBackedRepo
 
 
 class FakeClient:
@@ -54,6 +56,20 @@ def _repo(query_rows: list[tuple[Any, ...]] | None = None) -> tuple[ClickHouseRe
     # default (which is "tms_clustering" to match the host integration).
     repo = ClickHouseRepo(Settings(CLICKHOUSE_DB="tms"), client=fake)
     return repo, fake
+
+
+def test_select_repo_factory_host_ch_is_host_backed() -> None:
+    """host_ch reads chain data from the host TMS tables, so both the worker and
+    the per-request API repo must resolve to HostBackedRepo through this helper.
+    A divergence is what made the co-spend graph endpoint 500 (the request repo
+    queried the module's empty raw-tx tables)."""
+    assert select_repo_factory(Settings(CHAIN_SOURCE="host_ch")) is HostBackedRepo
+
+
+def test_select_repo_factory_downloading_adapter_is_base_repo() -> None:
+    """A non-host_ch (downloading) adapter ingests into the module's own DB and
+    uses the base ClickHouseRepo."""
+    assert select_repo_factory(Settings(CHAIN_SOURCE="other")) is ClickHouseRepo
 
 
 def _tx() -> TxRecord:

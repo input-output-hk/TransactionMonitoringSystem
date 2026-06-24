@@ -99,3 +99,16 @@ def test_graph_edges() -> None:
     edges = build_graph_edges(df, ["t1", "t2", "t3"])
     pairs = {(min(s, t), max(s, t)): w for (s, t, w) in edges}
     assert pairs == {("t1", "t2"): 1}
+
+
+def test_graph_edges_empty_address_frame() -> None:
+    """A column-less empty frame (what ClickHouse's query_df returns for a
+    zero-row result) must yield no edges, not a KeyError 500 from astype."""
+    edges = build_graph_edges(pd.DataFrame(), ["t1", "t2", "t3"])
+    assert edges == []
+
+
+def test_jaccard_distance_empty_address_frame() -> None:
+    """Same column-less empty frame on the clustering path: no rows, no crash."""
+    tx_hashes, D = build_jaccard_distance(pd.DataFrame())
+    assert tx_hashes == [] and D.shape == (0, 0)
