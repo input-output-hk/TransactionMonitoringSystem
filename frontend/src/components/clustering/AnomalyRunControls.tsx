@@ -16,6 +16,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import { HelpDetails } from "@/components/ui/help-details";
 import {
 	Select,
 	SelectContent,
@@ -79,83 +80,110 @@ export function AnomalyRunControls({
 	};
 
 	return (
-		<div className="flex flex-wrap items-center gap-3">
-			<div className="flex items-center gap-2">
-				<span className="text-muted-foreground text-sm">Run</span>
-				<Select
-					value={selectedRunId}
-					onValueChange={onSelectRun}
-					disabled={!runs.length}
-				>
-					<SelectTrigger className="h-9 w-[22rem] max-w-full">
-						<SelectValue placeholder="No runs yet" />
-					</SelectTrigger>
-					<SelectContent>
-						{runs.map((r) => (
-							<SelectItem key={r.run_id} value={r.run_id}>
-								{runLabel(r)}
-							</SelectItem>
-						))}
-					</SelectContent>
-				</Select>
-				{selectedRun && (
-					<Badge
-						variant={selectedRun.origin === "system" ? "outline" : "medium"}
+		<div className="space-y-2">
+			<div className="flex flex-wrap items-center gap-3">
+				<div className="flex items-center gap-2">
+					<span className="text-muted-foreground text-sm">Run</span>
+					<Select
+						value={selectedRunId}
+						onValueChange={onSelectRun}
+						disabled={!runs.length}
 					>
-						{selectedRun.origin === "system" ? "System" : "Custom"}
-					</Badge>
-				)}
-			</div>
-
-			<div className="ml-auto flex items-center gap-2">
-				<FeatureSetSelect
-					className="h-9 w-32"
-					value={featureSet}
-					onChange={setFeatureSet}
-				/>
-				<Button disabled={detect.isPending} onClick={onDetect}>
-					{detect.isPending ? "Detecting…" : "Detect anomalies"}
-				</Button>
-				{canDelete && (
-					<Button
-						variant="outline"
-						disabled={remove.isPending}
-						onClick={() => setConfirmDelete(true)}
-					>
-						Delete run
-					</Button>
-				)}
-			</div>
-
-			<Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-				<DialogContent>
-					<DialogHeader>
-						<DialogTitle>Delete this custom anomaly run?</DialogTitle>
-						<DialogDescription>
-							This removes the run and its scores. This cannot be undone. The
-							system-tuned run is unaffected.
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button variant="outline" onClick={() => setConfirmDelete(false)}>
-							Cancel
-						</Button>
-						<Button
-							variant="destructive"
-							disabled={remove.isPending}
-							onClick={onDelete}
+						<SelectTrigger className="h-9 w-[22rem] max-w-full">
+							<SelectValue placeholder="No runs yet" />
+						</SelectTrigger>
+						<SelectContent>
+							{runs.map((r) => (
+								<SelectItem key={r.run_id} value={r.run_id}>
+									{runLabel(r)}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+					{selectedRun && (
+						<Badge
+							variant={selectedRun.origin === "system" ? "outline" : "medium"}
 						>
-							{remove.isPending ? "Deleting…" : "Delete"}
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
+							{selectedRun.origin === "system" ? "System" : "Custom"}
+						</Badge>
+					)}
+				</div>
 
-			{detect.isError && (
-				<p className="text-destructive w-full text-sm">
-					Detection failed. The clustering service may be slow or unavailable.
+				<div className="ml-auto flex items-center gap-2">
+					<FeatureSetSelect
+						className="h-9 w-32"
+						value={featureSet}
+						onChange={setFeatureSet}
+					/>
+					<Button disabled={detect.isPending} onClick={onDetect}>
+						{detect.isPending ? "Detecting…" : "Detect anomalies"}
+					</Button>
+					{canDelete && (
+						<Button
+							variant="outline"
+							disabled={remove.isPending}
+							onClick={() => setConfirmDelete(true)}
+						>
+							Delete run
+						</Button>
+					)}
+				</div>
+
+				<Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+					<DialogContent>
+						<DialogHeader>
+							<DialogTitle>Delete this custom anomaly run?</DialogTitle>
+							<DialogDescription>
+								This removes the run and its scores. This cannot be undone. The
+								system-tuned run is unaffected.
+							</DialogDescription>
+						</DialogHeader>
+						<DialogFooter>
+							<Button variant="outline" onClick={() => setConfirmDelete(false)}>
+								Cancel
+							</Button>
+							<Button
+								variant="destructive"
+								disabled={remove.isPending}
+								onClick={onDelete}
+							>
+								{remove.isPending ? "Deleting…" : "Delete"}
+							</Button>
+						</DialogFooter>
+					</DialogContent>
+				</Dialog>
+
+				{detect.isError && (
+					<p className="text-destructive w-full text-sm">
+						Detection failed. The clustering service may be slow or unavailable.
+					</p>
+				)}
+			</div>
+
+			<HelpDetails summary="What am I selecting?">
+				<p>
+					A <strong>run</strong> is one saved anomaly-detection pass over this
+					target's transactions. Each option reads{" "}
+					<em>feature set · origin · flagged of total</em>:
 				</p>
-			)}
+				<ul>
+					<li>
+						<strong>feature set:</strong> which signals are compared:{" "}
+						<em>shape</em> (per-tx value, size, in/out counts, ADA moved,
+						assets, time), <em>graph</em> (shared addresses), or{" "}
+						<em>combined</em>.
+					</li>
+					<li>
+						<strong>origin:</strong> <em>System</em> is the canonical,
+						auto-tuned run that drives scoring; <em>Custom</em> is an experiment
+						you ran, kept separate and safe to delete.
+					</li>
+					<li>
+						<strong>flagged of total:</strong> how many transactions the
+						detectors flagged out of all that were scored.
+					</li>
+				</ul>
+			</HelpDetails>
 		</div>
 	);
 }

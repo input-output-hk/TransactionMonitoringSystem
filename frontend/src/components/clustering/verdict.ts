@@ -35,10 +35,10 @@ const CLUSTER_PALETTE = [
 	"#6366f1",
 	"#14b8a6",
 ];
-const NOISE_COLOR = "#9ca3af";
+export const NOISE_COLOR = "#9ca3af";
 // Verdict overrides the cluster colour: a flagged tx must pop regardless of
 // which cluster it sits in.
-const VERDICT_COLOR: Partial<Record<Verdict, string>> = {
+export const VERDICT_COLOR: Partial<Record<Verdict, string>> = {
 	malicious: "#ef4444",
 	anomaly: "#f59e0b",
 };

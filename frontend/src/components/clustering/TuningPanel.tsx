@@ -8,6 +8,7 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { HelpDetails } from "@/components/ui/help-details";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -129,6 +130,30 @@ export function TuningPanel({
 					</Button>
 				</div>
 
+				<HelpDetails summary="Which feature set?">
+					<p>This decides what is compared to group (or score) transactions:</p>
+					<ul>
+						<li>
+							<strong>shape:</strong> each tx as 13 numbers (fees, size, in/out
+							counts, ADA in/out and net, distinct assets, redeemers,
+							time-of-day). Groups txs that look alike regardless of who's
+							involved. Euclidean distance; fast, the default.
+						</li>
+						<li>
+							<strong>graph:</strong> compares the set of addresses each tx
+							touches (Jaccard distance). Finds txs sharing counterparties
+							(entity / co-spend structure). O(n²), capped at 5000 txs;
+							Isolation Forest can't run on it (anomaly votes max out at 2
+							there).
+						</li>
+						<li>
+							<strong>combined:</strong> shape features plus a compact (SVD)
+							embedding of the address graph. Both signals at once, and scales
+							better than graph for large targets.
+						</li>
+					</ul>
+				</HelpDetails>
+
 				{evaluation.isError && (
 					<p className="text-destructive text-sm">
 						Evaluation failed. The clustering service may be slow or
@@ -150,6 +175,45 @@ export function TuningPanel({
 							· {evalData.metric}
 						</p>
 						<KDistanceChart evaluation={evalData} />
+						<HelpDetails summary="How to read the k-distance chart">
+							<p>
+								The line is the <strong>k-distance curve</strong>: for every tx
+								we measure the distance to its <em>k</em>-th nearest neighbour
+								(k = min_samples), then sort those distances low to high. Flat
+								on the left = points sitting in dense neighbourhoods (cluster
+								cores); the sharp rise on the right = increasingly isolated
+								points (likely noise). The <strong>knee</strong> (dashed line)
+								is where it turns up, a good starting <code>eps</code>, since it
+								roughly separates "dense enough to cluster" from "too far
+								apart".
+							</p>
+							<p>
+								The table tries a few (eps, min_samples) pairs around that knee:
+							</p>
+							<ul>
+								<li>
+									<strong>eps:</strong> neighbourhood radius. Larger means
+									fewer, bigger clusters and less noise.
+								</li>
+								<li>
+									<strong>min_s</strong> (min_samples): points needed within{" "}
+									<code>eps</code> to form a core. Larger is stricter, so more
+									points fall out as noise.
+								</li>
+								<li>
+									<strong>clusters:</strong> groups found (noise excluded).
+								</li>
+								<li>
+									<strong>noise:</strong> share of txs left unassigned (DBSCAN's
+									"−1" / outliers).
+								</li>
+								<li>
+									<strong>silhouette:</strong> how clean the separation is, −1
+									to 1 (higher is better); "—" when it can't be computed (e.g.
+									fewer than 2 clusters).
+								</li>
+							</ul>
+						</HelpDetails>
 						<p className="text-muted-foreground text-xs">
 							The highlighted row is the recommendation; click any row to load
 							its parameters below.

@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { useProjection } from "@/lib/api/clustering";
 import { cn } from "@/lib/utils";
 import { nodeColor } from "./verdict";
+import { VerdictLegend } from "./VerdictLegend";
 
 // Build the React wrapper from the prebuilt (MIT) plotly bundle via the factory,
 // so we don't pull plotly.js's full source build into the chunk.
@@ -191,6 +192,8 @@ export default function ProjectionScatter({ runId }: Props) {
 					</div>
 				)}
 			</div>
+
+			<VerdictLegend />
 		</div>
 	);
 }
