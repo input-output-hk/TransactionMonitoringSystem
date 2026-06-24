@@ -29,6 +29,17 @@ VERDICT_NORMAL = "normal"
 CLUSTER_VERDICTS = (VERDICT_MALICIOUS, VERDICT_BENIGN)
 
 
+def _dominant_verdict(applied: Container[str]) -> str | None:
+    """Reduce a set of applied cluster labels to the single inheritable verdict,
+    malicious winning on conflict (malicious > benign > none). The one place this
+    precedence is expressed, shared by the cluster-inheritance resolution."""
+    if VERDICT_MALICIOUS in applied:
+        return VERDICT_MALICIOUS
+    if VERDICT_BENIGN in applied:
+        return VERDICT_BENIGN
+    return None
+
+
 def compute_verdicts(
     cluster_of: dict[str, int],
     explicit: dict[str, str],
@@ -72,11 +83,7 @@ def compute_verdicts(
         has_ben = VERDICT_BENIGN in labeled
         # Only cluster-applied (propagating) labels set the inheritable verdict.
         prop_labeled = [explicit[t] for t in txs if t in explicit and t in prop]
-        verdict = None if cid == -1 else (
-            VERDICT_MALICIOUS if VERDICT_MALICIOUS in prop_labeled
-            else VERDICT_BENIGN if VERDICT_BENIGN in prop_labeled
-            else None
-        )
+        verdict = None if cid == -1 else _dominant_verdict(prop_labeled)
         inherited[cid] = verdict
         cluster_info[cid] = {
             "verdict": verdict,
@@ -89,7 +96,7 @@ def compute_verdicts(
     for tx, cid in cluster_of.items():
         ex = explicit.get(tx)
         inh = inherited.get(cid)
-        if ex in (VERDICT_MALICIOUS, VERDICT_BENIGN):
+        if ex in CLUSTER_VERDICTS:
             tx_verdict[tx] = ex
         elif inh is not None:
             tx_verdict[tx] = inh
