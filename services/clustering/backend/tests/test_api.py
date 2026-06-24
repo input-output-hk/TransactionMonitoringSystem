@@ -192,6 +192,26 @@ def test_ready_503_when_clickhouse_down() -> None:
     assert "clickhouse" in r.json()["detail"]  # generic, no internal exc text
 
 
+def test_config_reports_host_backed_and_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    # host_ch source → host_backed True; the UI hides the per-contract max-txs cap.
+    monkeypatch.setattr(
+        "app.api.routers.system.get_settings",
+        lambda: Settings(CHAIN_SOURCE="host_ch", CLUSTERING_WINDOW_TXS=12_345),
+    )
+    body = _client(FakeApiRepo()).get("/api/config").json()
+    assert body == {"host_backed": True, "window_txs": 12_345}
+
+
+def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A download-backed source → host_backed False; the form shows the max-txs cap.
+    monkeypatch.setattr(
+        "app.api.routers.system.get_settings",
+        lambda: Settings(CHAIN_SOURCE="other", CLUSTERING_WINDOW_TXS=500),
+    )
+    body = _client(FakeApiRepo()).get("/api/config").json()
+    assert body == {"host_backed": False, "window_txs": 500}
+
+
 # --- Reads -----------------------------------------------------------------
 
 def test_list_contracts() -> None:

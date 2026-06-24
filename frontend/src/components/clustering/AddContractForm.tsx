@@ -10,7 +10,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { MAX_TXS_CAP, useAddContract, useIdentify } from "@/lib/api/clustering";
+import {
+	MAX_TXS_CAP,
+	useAddContract,
+	useClusteringConfig,
+	useIdentify,
+} from "@/lib/api/clustering";
 
 // Default onboarding window: import the most recent 500 txs unless the analyst
 // asks for more (0 = all history). Keeps first onboarding fast.
@@ -31,8 +36,18 @@ function useDebounced<T>(value: T, ms: number): T {
 	return debounced;
 }
 
-export function AddContractForm() {
+// `enabled` mirrors the page's clustering-enabled gate so the config fetch (like
+// the watchlist/jobs polls) never hits /api/clustering/* until health confirms
+// the module is on.
+export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 	const add = useAddContract();
+	const config = useClusteringConfig(enabled);
+	// On a host-backed deployment the engine reads txs from the host tables and
+	// fits over the global rolling window, so a per-contract "max txs" cap does
+	// nothing — hide the control rather than silently ignore it. Until config
+	// loads (or if it errors) we treat host-backed as unknown: the cap control
+	// stays hidden and no max_txs is sent, rather than guessing.
+	const hostBacked = config.data?.host_backed ?? false;
 	const [target, setTarget] = useState("");
 	const [nameDraft, setNameDraft] = useState("");
 	const [nameTouched, setNameTouched] = useState(false);
@@ -55,8 +70,12 @@ export function AddContractForm() {
 				target: t,
 				label: displayName.trim() || undefined,
 				// 0 means "all history": omit max_txs so the backend onboards
-				// unbounded; otherwise clamp to the API cap.
-				...(maxTxs > 0 ? { max_txs: Math.min(maxTxs, MAX_TXS_CAP) } : {}),
+				// unbounded; otherwise clamp to the API cap. Only send it once
+				// config confirms a non-host-backed source — host-backed ignores
+				// max_txs, and an unknown (loading/errored) config sends nothing.
+				...(config.data && !hostBacked && maxTxs > 0
+					? { max_txs: Math.min(maxTxs, MAX_TXS_CAP) }
+					: {}),
 				...(reprocess ? { reprocess: true } : {}),
 			},
 			{
@@ -112,22 +131,24 @@ export function AddContractForm() {
 							}}
 						/>
 					</div>
-					<div className="w-40 space-y-1.5">
-						<Label htmlFor="add-max-txs">
-							Max txs {maxTxs === 0 ? "(0 = all)" : ""}
-						</Label>
-						<Input
-							id="add-max-txs"
-							type="number"
-							min={0}
-							max={MAX_TXS_CAP}
-							value={maxTxs}
-							disabled={reprocess}
-							onChange={(e) =>
-								setMaxTxs(Math.max(0, Number(e.target.value) || 0))
-							}
-						/>
-					</div>
+					{config.data && !hostBacked && (
+						<div className="w-40 space-y-1.5">
+							<Label htmlFor="add-max-txs">
+								Max txs {maxTxs === 0 ? "(0 = all)" : ""}
+							</Label>
+							<Input
+								id="add-max-txs"
+								type="number"
+								min={0}
+								max={MAX_TXS_CAP}
+								value={maxTxs}
+								disabled={reprocess}
+								onChange={(e) =>
+									setMaxTxs(Math.max(0, Number(e.target.value) || 0))
+								}
+							/>
+						</div>
+					)}
 					<label className="text-muted-foreground flex h-11 items-center gap-1.5 text-sm select-none">
 						<input
 							type="checkbox"
@@ -141,11 +162,24 @@ export function AddContractForm() {
 						{add.isPending ? "Adding…" : reprocess ? "Re-analyze" : "Onboard"}
 					</Button>
 				</div>
-				<p className="text-muted-foreground text-xs">
-					Downloads the most recent N transactions (0 = all history), then
-					clusters and anomaly-scores them. Onboarding runs in the background;
-					the card below tracks progress.
-				</p>
+				{config.data && (
+					<p className="text-muted-foreground text-xs">
+						{hostBacked ? (
+							<>
+								Clusters and anomaly-scores this contract over its most recent{" "}
+								{config.data.window_txs.toLocaleString()} transactions already
+								monitored on-chain (the rolling fit window). Onboarding runs in
+								the background; the card below tracks progress.
+							</>
+						) : (
+							<>
+								Downloads the most recent N transactions (0 = all history), then
+								clusters and anomaly-scores them. Onboarding runs in the
+								background; the card below tracks progress.
+							</>
+						)}
+					</p>
+				)}
 				{add.isError && (
 					<p className="text-destructive text-sm">
 						Could not add the contract. Check the address and try again.

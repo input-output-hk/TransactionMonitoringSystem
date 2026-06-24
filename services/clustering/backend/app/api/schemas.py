@@ -117,6 +117,16 @@ class ReadyOut(BaseModel):
     status: str
 
 
+class ConfigOut(BaseModel):
+    # Read-only deployment facts the UI needs to shape its onboarding form.
+    # host_backed: the engine reads each contract's txs from the host tables, so
+    # there is no per-contract download to cap — fits run over the rolling
+    # window of size window_txs instead. A per-contract "max txs" is meaningless
+    # in that mode, so the form hides it.
+    host_backed: bool
+    window_txs: int
+
+
 class IdentifyOut(BaseModel):
     valid: bool
     target_type: str | None
