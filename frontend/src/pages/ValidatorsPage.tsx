@@ -73,7 +73,7 @@ export function ValidatorsPage() {
 				</p>
 			</div>
 
-			<AddContractForm />
+			<AddContractForm enabled={clusteringEnabled} />
 
 			{isLoading ? (
 				<p className="text-muted-foreground text-sm">Loading watchlist…</p>

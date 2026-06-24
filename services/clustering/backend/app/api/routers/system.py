@@ -8,7 +8,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from app.api.deps import RepoDep
-from app.api.schemas import HealthOut, ReadyOut
+from app.api.schemas import ConfigOut, HealthOut, ReadyOut
+from app.config import get_settings
 from app.storage.protocol import Repo
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,22 @@ router = APIRouter(tags=["system"])
 def health() -> dict[str, str]:
     """Liveness: the process is up. Does not touch ClickHouse (see /ready)."""
     return {"status": "ok"}
+
+
+@router.get("/config", response_model=ConfigOut)
+def config() -> ConfigOut:
+    """Read-only deployment config the UI reads to shape its onboarding form.
+
+    host_backed → the engine reads txs from the host tables (no per-contract
+    download), so fits run over the rolling window window_txs and a per-contract
+    "max txs" has no effect; the form hides it. Non-sensitive, so it sits on the
+    unauthenticated probe router (reachable only through the host's authed
+    reverse-proxy anyway)."""
+    s = get_settings()
+    return ConfigOut(
+        host_backed=s.host_backed,
+        window_txs=s.clustering_window_txs,
+    )
 
 
 @router.get("/ready", response_model=ReadyOut)
