@@ -40,7 +40,8 @@ async def process_contract(
     """The canonical onboarding/refresh pipeline — the single path every contract
     goes through (UI job worker, CLI, existing-contract backfill).
 
-    Stages: fetch metadata → (download unless ``reprocess``) → shape cluster →
+    Stages: fetch metadata → (download unless ``reprocess`` or the source is
+    host-backed) → shape cluster →
     shape anomaly → graph anomaly → mark done. Contracts with < 3 transactions
     skip clustering/anomaly and finish ``done`` with a note. When ``job_id`` is
     given, progress is also written to the ``jobs`` table for UI polling.
@@ -68,7 +69,15 @@ async def process_contract(
             contract["status"] = "processing"
             repo.save_contract(contract)
 
-            if not reprocess:
+            # A host-backed source has nothing to download: its data already
+            # lives in the host tables the engine reads via HostBackedRepo, and
+            # it has no fetch_tx (calling the download path raises SourceError →
+            # "upstream data provider error"). Skip discovery+download for it
+            # regardless of the per-job reprocess flag — the fit reads features
+            # straight from storage below. (getattr: stub sources in tests need
+            # not declare the attribute; absent means "downloading", the default.)
+            host_backed = getattr(source, "host_backed", False)
+            if not reprocess and not host_backed:
                 def on_download(msg: str) -> None:
                     set_stage("downloading", msg)
 

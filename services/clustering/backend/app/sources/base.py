@@ -83,6 +83,15 @@ class ChainSource(Protocol):
     stored cursor is only replayed into the same ``CHAIN_SOURCE`` that produced it.
     """
 
+    # Whether this source's data already lives in storage the engine reads
+    # directly (so onboarding must NOT discover+download individual txs). A
+    # host-backed source (``host_ch``, reading the host TMS's ingested tables via
+    # ``HostBackedRepo``) sets this ``True`` and has no ``fetch_tx``: the canonical
+    # fit reads features straight from the host tables, so the pipeline skips the
+    # download path for it regardless of the per-job ``reprocess`` flag. A
+    # downloading adapter (Kupo/db-sync) leaves it ``False`` (the default).
+    host_backed: bool = False
+
     async def __aenter__(self) -> ChainSource: ...
 
     async def __aexit__(self, *exc: object) -> None: ...

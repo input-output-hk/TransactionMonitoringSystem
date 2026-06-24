@@ -183,6 +183,38 @@ async def test_process_contract_reprocess_runs_full_pipeline(
     assert repo.contracts[-1]["label"] == ""
 
 
+class FakeHostSource(FakeSource):
+    """A host-backed stub (mirrors HostChainSource): its data already lives in
+    storage, so onboarding must skip the download path even with reprocess=False."""
+
+    host_backed = True
+
+
+async def test_process_contract_host_backed_skips_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: adding an address on the host_ch sidecar enqueues a job with
+    reprocess=False. A host-backed source has no download (fetch_tx raises), so
+    the pipeline must NOT take the download path — it reads features from the host
+    tables and completes. Previously this surfaced as "upstream data provider
+    error" because ingest() reached host_ch.fetch_tx."""
+    monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeHostSource())
+
+    async def _boom(**kwargs: Any) -> IngestResult:
+        raise AssertionError("download path must not run for a host-backed source")
+
+    monkeypatch.setattr("app.service.pipeline.ingest", _boom)
+    repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
+    result = await process_contract(
+        repo, target="addr1demo", target_type="address",
+        max_txs=None, reprocess=False, job_id="job-host",
+    )
+    assert result["tx_count"] == 8
+    assert result["cluster_run_id"]
+    assert repo.contracts[-1]["status"] == "done"
+    assert repo.job_updates[-1][1]["status"] == "done"
+
+
 async def test_process_contract_sets_registry_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
