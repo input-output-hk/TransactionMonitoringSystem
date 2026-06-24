@@ -22,7 +22,7 @@ from app.service import (
     evaluate_target,
     process_contract,
 )
-from app.storage.clickhouse import ClickHouseRepo
+from app.storage.clickhouse import ClickHouseRepo, select_repo_factory
 
 app = typer.Typer(add_completion=False, help="Cardano contract transaction clustering tool.")
 
@@ -35,6 +35,15 @@ def _main() -> None:
 
 def _echo(msg: str) -> None:
     typer.echo(msg)
+
+
+def _feature_repo() -> ClickHouseRepo:
+    """Repo for commands that read a target's chain features (process, evaluate,
+    cluster, anomaly, targets). Resolves through the same selector the API and
+    job worker use, so on host_ch these reads hit the host TMS's tables rather
+    than the module's own (empty) raw-tx tables. (Schema-only commands like
+    ``migrate`` keep the base ClickHouseRepo: they touch the module DB directly.)"""
+    return select_repo_factory(get_settings())()
 
 
 def _check_feature_set(feature_set: str) -> None:
@@ -245,7 +254,7 @@ def migrate(
 @app.command()
 def targets() -> None:
     """List ingested targets and their transaction counts."""
-    repo = ClickHouseRepo()
+    repo = _feature_repo()
     rows = repo.list_targets()
     if not rows:
         typer.echo("No targets ingested yet.")
@@ -266,12 +275,11 @@ def process(
     """Run the full canonical pipeline for a contract (metadata → cluster →
     shape/graph anomaly → publish). Used for onboarding and the in-place backfill;
     under host_ch the data is read from the host TMS, so use ``--reprocess``."""
-    settings = get_settings()
     _require_one_target(address, policy_id)
     target = address or policy_id
     target_type = "address" if address else "policy"
 
-    repo = ClickHouseRepo(settings)
+    repo = _feature_repo()
     try:
         summary = asyncio.run(
             process_contract(
@@ -296,7 +304,7 @@ def evaluate(
 ) -> None:
     """Run k-distance + grid-search parameter evaluation for a target."""
     _check_feature_set(feature_set)
-    repo = ClickHouseRepo()
+    repo = _feature_repo()
     report = evaluate_target(repo, target, feature_set)
 
     typer.echo(f"feature_set={report['feature_set']} metric={report['metric']} "
@@ -330,7 +338,7 @@ def cluster(
 ) -> None:
     """Run DBSCAN with the chosen parameters and persist a cluster run."""
     _check_feature_set(feature_set)
-    repo = ClickHouseRepo()
+    repo = _feature_repo()
     summary = cluster_target(repo, target, feature_set, eps, min_samples, notes=notes)
     typer.echo(
         f"run_id={summary['run_id']}\n"
@@ -352,7 +360,7 @@ def anomaly(
 ) -> None:
     """Rank transactions by ensemble anomaly score (Isolation Forest + LOF + DBSCAN)."""
     _check_feature_set(feature_set)
-    repo = ClickHouseRepo()
+    repo = _feature_repo()
     summary = detect_anomalies_for_target(
         repo, target, feature_set, eps=eps, min_samples=min_samples, top_quantile=top_quantile
     )

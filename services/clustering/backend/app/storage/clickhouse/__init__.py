@@ -9,6 +9,8 @@ constants from this package exactly as before.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .anomaly import _AnomalyMixin
 from .base import _row_to_dict
 from .clusters import _ClusterMixin
@@ -16,6 +18,9 @@ from .contracts import CONTRACT_COLUMNS, _ContractMixin
 from .ingest import ASSET_COLUMNS, TX_COLUMNS, UTXO_COLUMNS, _IngestMixin
 from .jobs import JOB_COLUMNS, _JobMixin
 from .models import _ModelMixin
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 
 class ClickHouseRepo(
@@ -31,6 +36,26 @@ class ClickHouseRepo(
     Each mixin derives from ``_RepoBase`` (client lifecycle + insert/row-mapping
     primitives), so it sits once at the tail of the MRO here.
     """
+
+
+def select_repo_factory(settings: Settings) -> type[ClickHouseRepo]:
+    """The repository class for the active deployment.
+
+    ``host_ch`` reads each watched contract's chain data from the host TMS's
+    ClickHouse (``tms_analytics``) through ``HostBackedRepo``'s feature-read
+    overrides; the module's own raw-tx tables stay empty. A downloading adapter
+    ingests into the module's own DB and uses the base ``ClickHouseRepo``.
+
+    The per-request API repo AND the job worker / feed scheduler must resolve to
+    the SAME class through this one helper: if they diverge, the worker fits on
+    host data while a read endpoint (the co-spend graph, the tx list) queries the
+    empty module tables and fails (an empty result yields a column-less frame).
+    """
+    if settings.chain_source == "host_ch":
+        from app.storage.clickhouse.host_backed import HostBackedRepo
+
+        return HostBackedRepo
+    return ClickHouseRepo
 
 
 def _drift_check() -> None:  # pragma: no cover - exists for mypy only
@@ -49,4 +74,5 @@ __all__ = [
     "UTXO_COLUMNS",
     "ClickHouseRepo",
     "_row_to_dict",
+    "select_repo_factory",
 ]

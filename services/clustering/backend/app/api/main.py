@@ -29,7 +29,7 @@ from app.api.deps import get_request_repo, verify_api_key
 from app.api.routers import anomaly, contracts, jobs, labels, runs, system
 from app.config import get_settings, setup_logging
 from app.jobs import JobManager
-from app.storage.clickhouse import ClickHouseRepo
+from app.storage.clickhouse import ClickHouseRepo, select_repo_factory
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +82,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     # host_ch (the default) reads each watched contract's data from the TMS's
     # ClickHouse, so its worker uses HostBackedRepo. A future downloading adapter
-    # (its own ingestion) would use the default ClickHouseRepo.
+    # (its own ingestion) would use the default ClickHouseRepo. The request repo
+    # (api/deps.py) resolves through the same helper so reads and the worker agree.
     host_backed = settings.chain_source == "host_ch"
-    if host_backed:
-        from app.storage.clickhouse.host_backed import HostBackedRepo
-
-        manager = JobManager(repo_factory=HostBackedRepo)
-    else:
-        manager = JobManager()
+    manager = JobManager(repo_factory=select_repo_factory(settings))
     manager.start()
     app.state.job_manager = manager
 

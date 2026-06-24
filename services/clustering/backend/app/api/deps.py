@@ -14,7 +14,7 @@ from fastapi import Depends, Header, HTTPException
 
 from app.config import get_settings
 from app.service._common import target_in_jobs
-from app.storage.clickhouse import ClickHouseRepo
+from app.storage.clickhouse import ClickHouseRepo, select_repo_factory
 from app.storage.protocol import Repo
 
 
@@ -35,8 +35,12 @@ def get_request_repo() -> Iterator[ClickHouseRepo]:
 
     A fresh client per request avoids sharing the (non-thread-safe) ClickHouse
     client across the threadpool that runs these sync endpoints.
+
+    The repo CLASS must match the job worker's (see ``select_repo_factory``):
+    on host_ch the feature reads behind the graph / tx-list endpoints live in
+    the host TMS's tables, not the module's own (empty) raw-tx tables.
     """
-    repo = ClickHouseRepo()
+    repo = select_repo_factory(get_settings())()
     try:
         yield repo
     finally:
