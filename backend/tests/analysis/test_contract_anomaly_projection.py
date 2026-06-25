@@ -192,7 +192,7 @@ def _stub_db(monkeypatch):
     """Stub the score read + archive lookup so no ClickHouse is needed."""
     from app.db import archive_queries, clickhouse
 
-    async def _get_score(_tx_hash):
+    async def _get_score(_tx_hash, _network=None):
         return dict(_ROW)
 
     async def _no_archive(_net, _tx):

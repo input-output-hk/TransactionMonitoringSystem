@@ -105,6 +105,13 @@ class MempoolMonitor:
         self._running = True   # set once here; stop() sets it False
         self.connected = False
 
+        # Strong refs to fire-and-forget raw-store writes. asyncio only weakly
+        # references tasks, so a bare create_task() can be GC'd before it runs
+        # (the raw payload silently never persists). Keeping the ref pins the
+        # task; the done-callback logs any failure (instead of swallowing it)
+        # and drops the ref.
+        self._bg_tasks: Set[asyncio.Task] = set()
+
         # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
         self._seen_mempool_txs: Set[str] = set()
 
@@ -140,6 +147,24 @@ class MempoolMonitor:
             failure_threshold=settings.OGMIOS_CIRCUIT_BREAKER_THRESHOLD,
             cooldown=settings.OGMIOS_CIRCUIT_BREAKER_COOLDOWN,
         )
+
+    def _spawn_bg(self, coro, label: str) -> None:
+        """Run a fire-and-forget coroutine with a retained ref and error logging.
+
+        Replaces a bare asyncio.create_task(), which (a) can be GC'd before it
+        finishes because asyncio holds tasks only weakly, and (b) swallows any
+        exception. The ref lives in ``self._bg_tasks`` until the task ends; the
+        callback logs a failure rather than dropping it silently.
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._bg_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("Background task %s failed: %r", label, t.exception())
+
+        task.add_done_callback(_done)
 
     # --- Seams called by the chain-sync client ---
 
@@ -472,8 +497,9 @@ class MempoolMonitor:
 
                 # Write raw mempool payload to local filesystem store (non-blocking)
                 if settings.RAW_STORE_ENABLED:
-                    asyncio.create_task(
-                        raw_store.write_mempool(self.network, tx_id, tx_data, now)
+                    self._spawn_bg(
+                        raw_store.write_mempool(self.network, tx_id, tx_data, now),
+                        label=f"raw_store.write_mempool({tx_id})",
                     )
 
                 try:
