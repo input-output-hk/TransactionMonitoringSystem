@@ -21,6 +21,11 @@ _CIRCULAR_CFG = _get_cfg("circular")
 _CYCLE_CFG = _CIRCULAR_CFG["cycle"]
 _MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
 _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
+# Per-hop row cap on the forward BFS scan. Config-backed (not an inline literal)
+# because it controls recall: rows are ordered by slot ASC so a truncation keeps
+# the earliest legs, but a hub hop with more than this many spends loses the
+# tail. Raise in config if real layering is missed; never lower for precision.
+_BFS_HOP_ROW_LIMIT = int(_CYCLE_CFG["bfs_hop_row_limit"])
 # Public alias: the engine's cycle pre-filter must key off the same knob so
 # the two sites cannot drift (the engine previously hardcoded the value).
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
@@ -158,7 +163,7 @@ def detect_cycle(
               AND t.slot <= %(max_slot)s
               AND ti.tx_hash != %(origin_tx)s
             ORDER BY t.slot ASC
-            LIMIT 500
+            LIMIT %(hop_row_limit)s
             """,
             {
                 "addresses": addr_list,
@@ -166,6 +171,7 @@ def detect_cycle(
                 "min_slot": origin_slot,
                 "max_slot": (origin_slot or 0) + _MAX_AGE_SLOTS,
                 "origin_tx": tx_hash,
+                "hop_row_limit": _BFS_HOP_ROW_LIMIT,
             },
         )
 
