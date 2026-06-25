@@ -110,6 +110,30 @@ def _decode_asset_name_strings(raw_data: Any) -> List[str]:
     return names
 
 
+def _sender_addresses(features: Dict[str, Any]) -> List[str]:
+    """Resolved input (sender) addresses for this tx, taken from the enriched
+    raw payload (``enrich_inputs_with_resolved_addresses`` writes the resolved
+    sender into ``inputs[i]["address"]``).
+
+    Output / recipient addresses are deliberately excluded: the sender
+    allowlist may suppress only known-legitimate SENDERS. Including outputs let
+    an attacker silence all phishing detection simply by paying an allowlisted
+    protocol address as a recipient. Unresolved inputs contribute nothing, so a
+    tx whose senders are unknown is never suppressed (fail open toward
+    detection, recall-first).
+    """
+    raw_data = features.get("raw_data")
+    if not isinstance(raw_data, dict):
+        return []
+    senders: List[str] = []
+    for inp in raw_data.get("inputs", []) or []:
+        if isinstance(inp, dict):
+            addr = inp.get("address")
+            if isinstance(addr, str) and addr:
+                senders.append(addr)
+    return senders
+
+
 class PhishingScorer(BaseScorer):
     name = "phishing"
 
@@ -119,12 +143,14 @@ class PhishingScorer(BaseScorer):
         reference-NFT pattern and similar datum-carried payloads), or in a
         decoded native-asset name (URL-named scam-token airdrops).
 
-        Sender allowlist: if any input address matches a known legitimate
-        sender, skip scoring to reduce false positives (Polimi Section 4.9.4).
+        Sender allowlist: if any RESOLVED INPUT (sender) address matches a known
+        legitimate sender, skip scoring to reduce false positives (Polimi
+        Section 4.9.4). Recipient (output) addresses never suppress, so an
+        attacker cannot disable detection by paying an allowlisted address.
         """
-        # Allowlist check
-        addresses = features.get("addresses") or []
-        if addresses and external.is_sender_allowlisted(addresses):
+        # Allowlist check: senders only (never recipients).
+        senders = _sender_addresses(features)
+        if senders and external.is_sender_allowlisted(senders):
             return False
 
         # Either source of URLs can trigger the scorer.

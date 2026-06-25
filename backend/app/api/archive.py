@@ -47,12 +47,15 @@ async def _audit_suppression_intent(
     entity_id: str,
     details: dict,
     request: Request,
+    actor: str,
 ) -> int:
     """Fail-closed intent audit shared by the three suppression endpoints.
 
     A suppression that cannot be audited is refused with 503: an attacker
     who could force the audit write to fail must not be able to hide a
-    detection silently.
+    detection silently. ``actor`` is the authenticated principal, recorded
+    server-side so the trail attributes the mutation to who actually called
+    it, not to the spoofable ``archived_by`` request field.
     """
     try:
         return await audit.record_fail_closed(
@@ -62,6 +65,7 @@ async def _audit_suppression_intent(
             entity_id=entity_id,
             details=details,
             request=request,
+            actor=actor,
         )
     except audit.AuditUnavailableError:
         raise HTTPException(
@@ -79,9 +83,12 @@ async def _audit_suppression_intent(
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Security(verify_api_key)],
 )
-async def archive_alert(entry: ArchiveEntry, request: Request) -> dict:
+async def archive_alert(
+    entry: ArchiveEntry,
+    request: Request,
+    principal: str = Security(verify_api_key),
+) -> dict:
     """Mark a flagged transaction as a known false positive.
 
     Returns 201 on insert, 409 if (network, tx_hash) is already archived.
@@ -118,11 +125,14 @@ async def archive_alert(entry: ArchiveEntry, request: Request) -> dict:
         entity_type="transaction",
         entity_id=f"{entry.network}:{entry.tx_hash}",
         details={
+            # archived_by is a client-supplied display label; the audit
+            # actor (below, via the authenticated principal) is authoritative.
             "archived_by": entry.archived_by,
             "note": entry.note,
             "phase": "intent",
         },
         request=request,
+        actor=audit.actor_from_principal(principal),
     )
     try:
         await archive_queries.archive_insert_async(
@@ -179,8 +189,12 @@ async def list_archived(
     return {"count": len(data), "total": total, "data": data}
 
 
-@router.post("/bulk", dependencies=[Security(verify_api_key)])
-async def bulk_import(payload_request: BulkArchiveRequest, request: Request) -> BulkArchiveResult:
+@router.post("/bulk")
+async def bulk_import(
+    payload_request: BulkArchiveRequest,
+    request: Request,
+    principal: str = Security(verify_api_key),
+) -> BulkArchiveResult:
     """Bulk upsert (skip-existing) used by CSV import.
 
     For each entry, INSERT if (network, tx_hash) is not already archived;
@@ -198,6 +212,7 @@ async def bulk_import(payload_request: BulkArchiveRequest, request: Request) -> 
             "phase": "intent",
         },
         request=request,
+        actor=audit.actor_from_principal(principal),
     )
     try:
         outcome = await archive_queries.archive_bulk_insert_async(
@@ -275,12 +290,12 @@ async def export_csv(
 @router.delete(
     "/{tx_hash}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Security(verify_api_key)],
 )
 async def restore_alert(
     request: Request,
     tx_hash: str = Path(pattern=TX_HASH_PATTERN),
     network: Optional[NetworkType] = Query(None),
+    principal: str = Security(verify_api_key),
 ) -> Response:
     """Restore a transaction by hard-deleting its archive row."""
     query_network = network or settings.CARDANO_NETWORK
@@ -314,6 +329,7 @@ async def restore_alert(
         entity_id=f"{query_network}:{tx_hash}",
         details={"phase": "intent"},
         request=request,
+        actor=audit.actor_from_principal(principal),
     )
     try:
         deleted = await archive_queries.archive_delete_async(query_network, tx_hash)

@@ -9,14 +9,22 @@ def scorer():
     return PhishingScorer()
 
 
-def _features(metadata=None, addresses=None, output_count=1, raw_data=None):
+def _features(metadata=None, addresses=None, output_count=1, raw_data=None,
+              input_addresses=None):
+    # input_addresses populate raw_data["inputs"], which is where the gate now
+    # reads SENDER addresses from (the allowlist must consider senders only).
+    rd = dict(raw_data or {})
+    if input_addresses is not None:
+        rd["inputs"] = [{"address": a} for a in input_addresses] + list(
+            rd.get("inputs", [])
+        )
     return {
         "tx_hash": "abc123",
         "network": "preprod",
         "metadata": metadata,
         "addresses": addresses or [],
         "output_count": output_count,
-        "raw_data": raw_data or {},
+        "raw_data": rd,
     }
 
 
@@ -42,9 +50,33 @@ class TestGate:
 
     def test_allowlisted_sender_skipped(self, scorer):
         meta = {"674": "visit https://evil.com"}
-        # Uses a known allowlist prefix from external.py
+        # A known allowlist prefix from external.py, as a RESOLVED INPUT (sender).
         addr = "addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer_full"
-        assert scorer.gate(_features(metadata=meta, addresses=[addr])) is False
+        assert scorer.gate(_features(metadata=meta, input_addresses=[addr])) is False
+
+    def test_allowlisted_recipient_does_not_suppress(self, scorer):
+        """Recall: an allowlisted address as a RECIPIENT (output) must NOT
+        silence detection. Previously the gate checked the merged
+        input+output set, so an attacker could pay an allowlisted protocol
+        address as an output and disable all phishing scoring on the tx."""
+        meta = {"674": "visit https://evil.com"}
+        allowlisted = "addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer_recipient"
+        attacker = "addr1qattackersender000000000000000000000000000000000"
+        feats = _features(
+            metadata=meta,
+            addresses=[attacker, allowlisted],  # merged set incl. the recipient
+            input_addresses=[attacker],  # the sender is the attacker, not allowlisted
+            raw_data={"outputs": [{"address": allowlisted}]},
+        )
+        assert scorer.gate(feats) is True
+
+    def test_unresolved_sender_does_not_suppress(self, scorer):
+        """Recall: when inputs are unresolved (no sender address available),
+        the allowlist cannot apply and detection proceeds (fail open)."""
+        meta = {"674": "visit https://evil.com"}
+        allowlisted = "addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer_full"
+        # Allowlisted address only in the merged set, no resolved inputs.
+        assert scorer.gate(_features(metadata=meta, addresses=[allowlisted])) is True
 
     def test_dict_metadata_accepted(self, scorer):
         assert scorer.gate(_features(metadata={"674": "click https://phish.net"})) is True
