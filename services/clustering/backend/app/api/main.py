@@ -66,6 +66,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     _guard_schema()
     settings = get_settings()
+    # Production safety: when REQUIRE_AUTH is set, an empty API_KEY (auth becomes
+    # a no-op) or empty MODEL_SIGNING_KEYS (unsigned pickle blobs = code execution
+    # on load) is a misconfiguration, not a warning. Fail fast, like the host
+    # app's startup guards. Default-off keeps local/test/demo zero-config.
+    if settings.require_auth:
+        missing = [
+            name
+            for name, value in (
+                ("API_KEY", settings.api_key),
+                ("MODEL_SIGNING_KEYS", settings.model_signing_keys),
+            )
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(
+                "REQUIRE_AUTH=1 but " + ", ".join(missing) + " not set. "
+                "Refusing to start a network-exposed sidecar without "
+                "authentication and signed model blobs. Set them, or unset "
+                "REQUIRE_AUTH for a local/demo run."
+            )
     if not settings.model_signing_keys:
         logger.warning(
             "MODEL_SIGNING_KEYS is not set: stored model blobs are unsigned. "
