@@ -365,9 +365,21 @@ if _spa_present:
         name="spa-assets",
     )
 
+    # Resolve once: the canonical root every served file must stay within.
+    _DIST_ROOT = FRONTEND_DIST.resolve()
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
-        candidate = FRONTEND_DIST / full_path
-        if full_path and candidate.is_file():
+        # Starlette's :path convertor matches ".." segments verbatim and does
+        # NOT normalise them, so a request like /../../etc/passwd arrives here
+        # intact. Resolve the candidate and require it to stay inside the dist
+        # root before serving; anything else falls through to index.html so
+        # client-side routing still works (no information leak on traversal).
+        candidate = (_DIST_ROOT / full_path).resolve()
+        if (
+            full_path
+            and candidate.is_file()
+            and candidate.is_relative_to(_DIST_ROOT)
+        ):
             return FileResponse(candidate)
-        return FileResponse(FRONTEND_DIST / "index.html")
+        return FileResponse(_DIST_ROOT / "index.html")

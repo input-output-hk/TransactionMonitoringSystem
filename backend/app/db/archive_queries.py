@@ -182,6 +182,11 @@ def _archive_list(
         LEFT JOIN (
             SELECT tx_hash, network, max_score, max_class, risk_band, analyzed_at
             FROM tx_class_scores FINAL
+            -- Restrict the right side to this network so ReplacingMergeTree
+            -- prunes on ORDER BY (network, tx_hash) instead of FINAL-collapsing
+            -- the entire scores table on every list page. Returned rows are
+            -- unchanged: the join already requires s.network = a.network.
+            WHERE network = %(network)s
         ) AS s
             ON s.tx_hash = a.tx_hash AND s.network = a.network
         WHERE {where}
@@ -236,6 +241,11 @@ def _archive_get_enriched(
         LEFT JOIN (
             SELECT tx_hash, network, max_score, max_class, risk_band, analyzed_at
             FROM tx_class_scores FINAL
+            -- Pin the right side to this (network, tx_hash) so the lookup
+            -- prunes on ORDER BY (network, tx_hash) instead of FINAL-collapsing
+            -- the whole scores table for a single-row fetch. Both params are
+            -- already bound; returned rows are unchanged.
+            WHERE network = %(network)s AND tx_hash = %(tx_hash)s
         ) AS s
             ON s.tx_hash = a.tx_hash AND s.network = a.network
         WHERE a.network = %(network)s AND a.tx_hash = %(tx_hash)s

@@ -25,6 +25,7 @@ make the trail tamper-evident enough for triage until real authentication
 lands.
 """
 
+import hashlib
 import json
 import logging
 from typing import Any, Dict, Optional
@@ -35,6 +36,30 @@ from app.db import postgres
 from app.net import client_ip
 
 logger = logging.getLogger(__name__)
+
+# A raw API key is a secret and must never be written to the audit trail, so a
+# key principal is reduced to a short SHA-256 prefix. 12 hex chars (48 bits) is
+# enough to tell a handful of configured keys apart in the log while staying a
+# one-way fingerprint, never the key itself.
+_ACTOR_FINGERPRINT_LEN = 12
+
+
+def actor_from_principal(principal: Optional[str]) -> str:
+    """Map the credential string returned by ``verify_api_key`` to a
+    non-sensitive, server-authoritative actor label for the audit trail.
+
+    ``verify_api_key`` returns one of: ``"dev-mode"``, ``"session:<user_id>"``,
+    or the raw API key. The first two are already safe identifiers; the raw key
+    is a secret, so it is fingerprinted rather than stored. This label is the
+    authenticated principal, not the client-supplied ``archived_by`` field, so
+    it cannot be spoofed by the request body.
+    """
+    if not principal:
+        return "unknown"
+    if principal == "dev-mode" or principal.startswith("session:"):
+        return principal
+    digest = hashlib.sha256(principal.encode()).hexdigest()[:_ACTOR_FINGERPRINT_LEN]
+    return f"api-key:{digest}"
 
 
 class AuditUnavailableError(Exception):
@@ -48,15 +73,21 @@ async def record(
     entity_id: str,
     details: Dict[str, Any],
     request: Optional[Request] = None,
+    actor: Optional[str] = None,
 ) -> None:
-    """Write one audit row best-effort; never raises."""
+    """Write one audit row best-effort; never raises.
+
+    ``actor`` is the server-derived authenticated principal (see
+    ``actor_from_principal``); it is written authoritatively into the details
+    and overrides any client-supplied ``actor`` key.
+    """
     try:
         await postgres.insert_audit_log(
             event_type=event_type,
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
-            details=json.dumps(details),
+            details=json.dumps({**details, "actor": actor}),
             ip_address=client_ip(request),
         )
     except Exception:
@@ -73,11 +104,14 @@ async def record_fail_closed(
     entity_id: str,
     details: Dict[str, Any],
     request: Optional[Request] = None,
+    actor: Optional[str] = None,
 ) -> int:
     """Write one audit row or raise AuditUnavailableError.
 
     Returns the audit row id so the caller can patch the outcome in with
-    ``append_outcome`` after the audited mutation completes.
+    ``append_outcome`` after the audited mutation completes. ``actor`` is the
+    server-derived authenticated principal, written authoritatively into the
+    details (it overrides any client-supplied ``actor`` key).
     """
     try:
         return await postgres.insert_audit_log(
@@ -85,7 +119,7 @@ async def record_fail_closed(
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
-            details=json.dumps(details),
+            details=json.dumps({**details, "actor": actor}),
             ip_address=client_ip(request),
         )
     except Exception as e:
