@@ -85,12 +85,23 @@ async def send_magic_link(
     )
 
     if not settings.SMTP_ENABLED or not settings.SMTP_HOST:
-        # Bootstrap / dev fallback: surface the link in logs so the admin
-        # can click through before SMTP is wired up.
-        logger.warning(
-            "SMTP disabled — magic link for %s (%s): %s",
-            to_email, purpose, link,
-        )
+        # The magic link embeds a live login credential, so it must not land
+        # in the logs of a real deployment that merely has SMTP unconfigured.
+        # Only surface the full link when dev mode is explicitly enabled
+        # (TMS_ALLOW_DEV_MODE=1, the same opt-in the open-API fallback uses);
+        # otherwise log a redacted notice so the credential never leaks.
+        dev_mode = settings.TMS_ALLOW_DEV_MODE.strip() == "1"
+        if dev_mode:
+            logger.warning(
+                "SMTP disabled (dev mode) — magic link for %s (%s): %s",
+                to_email, purpose, link,
+            )
+        else:
+            logger.warning(
+                "SMTP disabled and not in dev mode — magic link for %s (%s) "
+                "was NOT delivered and is redacted from logs; configure SMTP.",
+                to_email, purpose,
+            )
         return False
 
     msg = EmailMessage()

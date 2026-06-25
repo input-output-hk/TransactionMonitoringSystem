@@ -101,12 +101,14 @@ async def consume_token(
     Reasons for ``None``: unknown token, already consumed, expired,
     purpose mismatch, or redemptions exhausted.
 
-    By default ``settings.MAGIC_LINK_MAX_REDEMPTIONS`` is 1, giving
-    strict single-use semantics — the link dies the moment a real user
-    redeems it. The counter exists as a knob (not a default-on feature)
-    in case a future flow needs headless-scanner survivability:
-    bumping the setting lets the same link create N sessions before
-    the row's ``consumed_at`` is flipped.
+    ``settings.MAGIC_LINK_MAX_REDEMPTIONS`` (default 3) is only an emergency
+    ceiling, NOT the everyday single-use mechanism. Real single-use comes from
+    ``claim_session_token``: the first authenticated request on the resulting
+    session flips ``consumed_at`` and zeroes the counter, so in the happy path
+    the link dies on that first use even though the counter still shows
+    redemptions left. The counter buffer absorbs naive email-scanner prefetches
+    and double-clicks. See the ``MAGIC_LINK_MAX_REDEMPTIONS`` comment in
+    ``config.py`` for the full rationale.
 
     The atomic UPDATE keeps the decrement race-safe under concurrent
     redemption attempts regardless of the configured ceiling.

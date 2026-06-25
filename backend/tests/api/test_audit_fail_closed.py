@@ -167,6 +167,50 @@ class TestSpoofedHeaderCannotBreakAudit:
         assert ip is None or "." in ip or ":" in ip
 
 
+class TestActorIsAuthenticatedPrincipal:
+    """The audit actor is the server-derived authenticated principal, never
+    the spoofable ``archived_by`` request field (review finding)."""
+
+    def test_actor_is_server_principal_not_client_field(
+        self, client, audit_log, auth_open
+    ):
+        import json
+
+        payload = _archive_payload()
+        payload["archived_by"] = "attacker-spoofed-name"
+        resp = client.post("/api/archive", json=payload)
+        assert resp.status_code == 201
+        details = json.loads(audit_log.rows[0]["details"])
+        # dev-mode principal -> actor "dev-mode"; the client label is kept
+        # separately and is NOT what attributes the mutation.
+        assert details["actor"] == "dev-mode"
+        assert details["archived_by"] == "attacker-spoofed-name"
+
+    def test_api_key_actor_is_fingerprint_not_raw_key(
+        self, client, audit_log, monkeypatch
+    ):
+        import json
+
+        from app import audit
+        from app.auth import api_key
+        from app.config import settings
+
+        key = "super-secret-key-value"
+        monkeypatch.setattr(api_key, "_valid_keys", [key])
+        monkeypatch.setattr(api_key, "_dev_mode", False)
+        resp = client.post(
+            "/api/archive",
+            json=_archive_payload(),
+            headers={settings.API_KEY_HEADER: key},
+        )
+        assert resp.status_code == 201
+        details = json.loads(audit_log.rows[0]["details"])
+        assert details["actor"] == audit.actor_from_principal(key)
+        assert details["actor"].startswith("api-key:")
+        # The secret itself must never appear anywhere in the audit row.
+        assert key not in audit_log.rows[0]["details"]
+
+
 class TestNonSuppressionStaysBestEffort:
     def test_entity_state_write_survives_audit_outage(
         self, client, audit_log, auth_open, monkeypatch
