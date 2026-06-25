@@ -571,6 +571,12 @@ scorers:
       max_age_slots: 86400              # forward BFS horizon (Cardano ~1 slot/sec => 24h)
       max_output_fanout: 20             # skip cycle scoring for txs with > N distinct
                                         # output addresses (very unlikely to be circular)
+      # Per-hop row cap on the forward BFS query. Bounds the cost of a single
+      # hop's fan-out scan; the rows are ordered by slot ASC so the earliest
+      # (most likely to close a cycle) win when truncated. This trades recall
+      # for cost: RAISE it if real layering through high-degree hubs is missed,
+      # never lower it as a precision knob.
+      bfs_hop_row_limit: 500
     reason_threshold: 0.5
     moderate_cap: 59.0                  # top of Moderate band
     # Floor on the sum of corroborating signals (entropy + auxiliary + speed).

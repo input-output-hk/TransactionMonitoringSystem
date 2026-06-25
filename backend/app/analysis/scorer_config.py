@@ -153,7 +153,7 @@ _KNOWN_OPTIONAL_KEYS: Dict[str, Tuple[str, ...]] = {
                       "cycle.fee_tolerance_multiplier",
                       "cycle.fee_tolerance_strict",
                       "cycle.per_hop_fee_estimate", "cycle.max_age_slots",
-                      "cycle.max_output_fanout"),
+                      "cycle.max_output_fanout", "cycle.bfs_hop_row_limit"),
     "fake_token":    ("unicode_scores.zero_width",
                       "unicode_scores.mixed_scripts",
                       "unicode_scores.homoglyphs",

@@ -365,9 +365,26 @@ def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
     redeemers = raw_data.get("redeemers")
     if not redeemers:
         return []
-    items = redeemers.values() if isinstance(redeemers, dict) else redeemers
     payloads: List[str] = []
-    for r in items:
+    if isinstance(redeemers, dict):
+        # Ogmios v6: the PURPOSE lives in the key ("spend:N" / "mint:N" / ...),
+        # not in the value. The previous code looked for validator.purpose /
+        # purpose on the value, so on v6 every entry was skipped and this
+        # returned [] — silently disabling the uniform-sweep guard (it was
+        # active on v5) and zeroing the redeemer_count evidence. Reading by key
+        # restores v5/v6 parity; the spend-purpose detection mirrors
+        # features.has_spend_redeemer.
+        for key, r in redeemers.items():
+            if not str(key).startswith("spend"):
+                continue
+            payload = r.get("redeemer") if isinstance(r, dict) else None
+            if isinstance(payload, str):
+                payloads.append(payload)
+        return payloads
+    # Ogmios v5: a list of redeemer dicts carrying an explicit purpose.
+    for r in redeemers:
+        if not isinstance(r, dict):
+            continue
         validator = r.get("validator") or {}
         purpose = validator.get("purpose") or r.get("purpose")
         if purpose != "spend":

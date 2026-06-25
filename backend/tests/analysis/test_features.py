@@ -104,6 +104,15 @@ class TestFlattenAssets:
         assert flatten_assets({"ada": {"lovelace": 9}}) == {}
         assert flatten_assets("not a dict") == {}
 
+    def test_malformed_quantity_degrades_to_zero_keeps_tx(self):
+        # Recall-first: a malformed asset quantity in untrusted chain data must
+        # NOT raise (raising would drop the whole tx from the warehouse). It
+        # degrades to 0 with the asset key preserved, mirroring extract_lovelace.
+        nested = {"p1": {"aa": "not-an-int"}, "p2": {"cc": 7}}
+        assert flatten_assets(nested) == {"p1.aa": 0, "p2.cc": 7}
+        flat = {"p1.aa": None, "p2.bb": 4}
+        assert flatten_assets(flat) == {"p1.aa": 0, "p2.bb": 4}
+
 
 class TestIterAssets:
     def test_yields_policy_name_qty(self):

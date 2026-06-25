@@ -181,14 +181,27 @@ def flatten_assets(value: Any) -> Dict[str, int]:
     assets: Dict[str, int] = {}
     if not isinstance(value, dict):
         return assets
+
+    def _qty(raw: Any) -> int:
+        # Same defensive contract as extract_lovelace: a malformed quantity in
+        # untrusted chain data degrades to 0 with the asset key PRESERVED, so
+        # the asset's presence still shows. It must never raise here, because
+        # this builds transaction_inputs.assets — an exception would drop the
+        # whole transaction from the warehouse and create a detection blind
+        # spot (recall-first).
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
     for key, val in value.items():
         if key in ("lovelace", "ada"):
             continue
         if isinstance(val, dict):
             for asset_name, qty in val.items():
-                assets[f"{key}.{asset_name}"] = int(qty)
+                assets[f"{key}.{asset_name}"] = _qty(qty)
         else:
-            assets[key] = int(val)
+            assets[key] = _qty(val)
     return assets
 
 
