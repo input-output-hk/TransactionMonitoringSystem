@@ -7,8 +7,10 @@ publicly). Every ``/api/clustering/<path>`` request is forwarded to the
 sidecar's ``/api/v1/<path>`` verbatim (method, query, body), gated by
 ``CLUSTERING_ENABLED``.
 
-The proxy is authed with the host's session (``verify_api_key``); the sidecar
-itself runs zero-config on the internal network, so no credential is forwarded.
+The proxy is authed with the host's session (``verify_api_key``). When
+``CLUSTERING_SIDECAR_API_KEY`` is set it is forwarded to the sidecar as
+``X-API-Key`` so the sidecar can run locked down (REQUIRE_AUTH=1); left empty,
+the sidecar runs zero-config on the internal network and no credential is sent.
 """
 
 import logging
@@ -50,6 +52,12 @@ async def proxy(path: str, request: Request) -> Response:
     headers = {
         k: v for k, v in request.headers.items() if k.lower() in _FORWARD_HEADERS
     }
+    # Authenticate to the sidecar when a key is configured. The host's own
+    # session/API-key auth (the Security dependency above) gates who may reach
+    # this proxy; this forwarded key is a separate service credential so the
+    # sidecar can run REQUIRE_AUTH=1 and reject anything not coming through here.
+    if settings.CLUSTERING_SIDECAR_API_KEY:
+        headers["X-API-Key"] = settings.CLUSTERING_SIDECAR_API_KEY
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             upstream = await client.request(

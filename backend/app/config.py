@@ -210,6 +210,11 @@ class Settings(BaseSettings):
     # /api/clustering reverse-proxy (the SPA's rich Validators/graph views call
     # it same-origin, session-authed). Defaults to the compose service name.
     CLUSTERING_SIDECAR_URL: str = "http://clustering:8000"
+    # API key the proxy presents to the sidecar as X-API-Key. Must equal the
+    # sidecar's API_KEY. Empty by default (the sidecar runs zero-config locally);
+    # set both this and the sidecar's API_KEY (+ REQUIRE_AUTH=1) to lock the
+    # sidecar down. When empty, no credential is forwarded (legacy behaviour).
+    CLUSTERING_SIDECAR_API_KEY: str = ""
 
     # WebSocket feed. Per-client outbound queue depth: a client lagging by
     # more than this many events starts losing the OLDEST ones (the feed is

@@ -207,6 +207,9 @@ services:
       - CLUSTERING_ENABLED=${CLUSTERING_ENABLED:-false}
       - CLUSTERING_SIDECAR_URL=${CLUSTERING_SIDECAR_URL:-http://clustering:8000}
       - CLUSTERING_DB=${CLUSTERING_DB:-tms_clustering}
+      # Same key the sidecar expects (CLUSTERING_API_KEY); the proxy forwards it
+      # as X-API-Key so the sidecar can run REQUIRE_AUTH=1. Empty = no auth.
+      - CLUSTERING_SIDECAR_API_KEY=${CLUSTERING_API_KEY:-}
     mem_limit: ${APP_MEM_LIMIT:-2g}
     ports:
       # Bind to loopback only — public exposure happens via Cloudflare Tunnel
@@ -274,6 +277,13 @@ services:
       - FEED_POLL_INTERVAL_SECONDS=${FEED_POLL_INTERVAL_SECONDS:-30}
       - FEED_MAX_CONTRACTS_PER_TICK=${FEED_MAX_CONTRACTS_PER_TICK:-4}
       - MODEL_SIGNING_KEYS=${MODEL_SIGNING_KEYS:-}
+      # Auth for the sidecar API. Default off keeps local/demo zero-config; a
+      # network-exposed deployment MUST set CLUSTERING_REQUIRE_AUTH=1 plus
+      # CLUSTERING_API_KEY and MODEL_SIGNING_KEYS, or the sidecar refuses to
+      # start (see app/api/main.lifespan). See .env.example.
+      - API_KEY=${CLUSTERING_API_KEY:-}
+      - REQUIRE_AUTH=${CLUSTERING_REQUIRE_AUTH:-}
+      - CORS_ORIGINS=${CLUSTERING_CORS_ORIGINS:-}
       - LOG_FORMAT=${LOG_FORMAT:-json}
     # Re-fits hold the windowed feature matrix + IsolationForest(300) + the
     # O(n^2) silhouette in memory. The graceful bound is the APP-SIDE window

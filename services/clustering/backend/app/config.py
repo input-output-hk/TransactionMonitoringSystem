@@ -108,6 +108,12 @@ class Settings(BaseSettings):
     # REQUIRED in production — a tampered blob is pickle, i.e. code execution.
     model_signing_keys: str = Field(default="", alias="MODEL_SIGNING_KEYS")
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")  # comma-separated
+    # Production safety switch. When true, startup refuses to boot unless both
+    # API_KEY and MODEL_SIGNING_KEYS are set (an empty API_KEY makes auth a
+    # no-op, and unsigned model blobs are pickle = code execution on load).
+    # Default false so local/test/demo stay zero-config; compose sets it to 1
+    # for any network-exposed deployment.
+    require_auth: bool = Field(default=False, alias="REQUIRE_AUTH")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     # "json" = one structured object per line (aggregator-friendly; compose default),
     # "text" = human-readable (bare default, nicer for the CLI / local dev).
