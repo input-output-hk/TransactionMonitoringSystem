@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.db import clickhouse, raw_store
+from app import notifications
 from app.analysis.enrichment import (
     enrich_collision_features as _enrich_collision_features,
     enrich_cycle_features as _enrich_cycle_features,
@@ -128,6 +129,10 @@ def _score_transaction(
     scores: Dict[str, float] = {name: -1.0 for name in _CLASS_NAMES}
     sub_scores: Dict[str, Dict[str, float]] = {}
     evidence: Dict[str, Dict[str, Any]] = {}
+    # Which baseline tier each scorer used (per_script / per_policy / global /
+    # fixed / missing). Kept so the notification payload can report
+    # the winning class's baseline_source; not persisted to ClickHouse.
+    baseline_sources: Dict[str, str] = {}
     if row.get("raw_data_unavailable"):
         # The raw payload could not be recovered after the fallback budget:
         # raw_data-gated scorers will skip, so mark the degradation in
@@ -140,6 +145,7 @@ def _score_transaction(
                 result = scorer.score(features)
                 scores[scorer.name] = result.score
                 sub_scores[scorer.name] = result.sub_scores
+                baseline_sources[scorer.name] = result.baseline_source
                 if result.evidence:
                     evidence[scorer.name] = result.evidence
         except Exception:
@@ -169,6 +175,7 @@ def _score_transaction(
         "max_score": round(max_score, 2),
         "max_class": max_class,
         "risk_band": risk_band,
+        "baseline_source": baseline_sources.get(max_class, "missing"),
         "corroboration_count": len(corroborating),
         "corroborating_classes": ",".join(corroborating),
         "sub_scores": sub_scores,
@@ -387,6 +394,9 @@ def run_once(network: str) -> int:
         results.append(result)
 
     clickhouse.insert_class_scores(results)
+    # Emit immediate alerts for the just-persisted scores
+    # Fire-and-forget onto the main loop; never blocks this scoring thread.
+    notifications.on_new_scores(results, network)
     # Only after the score rows are durably written: a failed insert raises
     # above and the cursor stays put, so the batch is re-polled. Advanced
     # over ALL fetched rows (including raw-data-deferred ones, which the

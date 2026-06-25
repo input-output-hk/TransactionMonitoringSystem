@@ -39,8 +39,10 @@ from app.rate_limit import (
     stop_all_cleanups,
 )
 from app.db import postgres, clickhouse, raw_store
+from app import notifications
 from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api
 from app.tasks import analysis as analysis_task
+from app.tasks import notifications as notifications_task
 from app.routers import ui, websocket
 
 # Global state
@@ -219,6 +221,17 @@ async def lifespan(app: FastAPI):
             raw_store.init_store()
         logger.info("Databases initialized")
 
+        # Notifications: validate config/notifications.yaml at
+        # boot (a malformed file fails startup, not the first alert), capture
+        # the event loop for the executor-thread hook, and build the channels.
+        notifications.load_config()
+        notifications.set_main_loop(asyncio.get_running_loop())
+        notifications.build_channels()
+        # Periodic-report scheduler (spec 8.4). Self-gates on the YAML
+        # `periodic_report.enabled` flag each tick.
+        notifications_task.start()
+        logger.info("Notification module ready")
+
         # Start Analysis Engine background task
         if settings.ANALYSIS_ENGINE_ENABLED:
             analysis_task.start()
@@ -254,6 +267,10 @@ async def lifespan(app: FastAPI):
     stop_all_cleanups()
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
+    notifications_task.stop()
+    # Stop scheduling new notification deliveries (the scoring loop is stopped
+    # above; in-flight dispatch tasks finish on their own).
+    notifications.set_main_loop(None)
     if ogmios_client:
         await ogmios_client.disconnect()
     # disconnect() signals the supervised coroutines to return; cancel-then-

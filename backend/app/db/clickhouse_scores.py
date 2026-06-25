@@ -480,6 +480,56 @@ async def count_class_scores_async(
     ))
 
 
+def aggregate_window_counts(
+    network: str,
+    analyzed_from: Any,
+    analyzed_to: Any,
+    alert_bands: List[str],
+    include_archived: bool = False,
+) -> Dict[str, Any]:
+    """Windowed counts for the periodic report in TWO GROUP BY scans.
+
+    Returns ``{total, by_band, by_class}`` where ``by_band`` spans every band in
+    the window (``total`` is their sum) and ``by_class`` counts only rows whose
+    risk_band is in ``alert_bands`` (i.e. at/above the report's min_band), keyed
+    by the dominant ``max_class``.
+    """
+    band_conds, band_params = _score_filter_conditions(
+        network, None, None, 0.0, analyzed_from, analyzed_to, include_archived,
+    )
+    band_rows = _client().execute(
+        f"SELECT risk_band, count() FROM tx_class_scores FINAL "
+        f"WHERE {' AND '.join(band_conds)} GROUP BY risk_band",
+        band_params,
+    )
+    by_band = {str(rb): int(n) for rb, n in band_rows}
+
+    cls_conds, cls_params = _score_filter_conditions(
+        network, alert_bands, None, 0.0, analyzed_from, analyzed_to, include_archived,
+    )
+    cls_rows = _client().execute(
+        f"SELECT max_class, count() FROM tx_class_scores FINAL "
+        f"WHERE {' AND '.join(cls_conds)} GROUP BY max_class",
+        cls_params,
+    )
+    by_class = {str(c): int(n) for c, n in cls_rows}
+    return {"total": sum(by_band.values()), "by_band": by_band, "by_class": by_class}
+
+
+async def aggregate_window_counts_async(
+    network: str,
+    analyzed_from: Any,
+    analyzed_to: Any,
+    alert_bands: List[str],
+    include_archived: bool = False,
+) -> Dict[str, Any]:
+    return await _run(partial(
+        aggregate_window_counts,
+        network=network, analyzed_from=analyzed_from, analyzed_to=analyzed_to,
+        alert_bands=alert_bands, include_archived=include_archived,
+    ))
+
+
 async def get_class_scores_async(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
     return await _run(get_class_scores, tx_hash, network)
 

@@ -181,6 +181,15 @@ async def _loop():
                     )
             except Exception as e:
                 logger.error(f"Auth purge sweep failed: {e}")
+            if settings.NOTIFY_DEDUP_RETENTION_DAYS > 0:
+                try:
+                    n = await postgres.prune_notified_alerts(
+                        settings.NOTIFY_DEDUP_RETENTION_DAYS,
+                    )
+                    if n:
+                        logger.info(f"Retention: pruned {n} notified-alert dedup rows")
+                except Exception as e:
+                    logger.error(f"Notified-alerts retention sweep failed: {e}")
 
         await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
 
