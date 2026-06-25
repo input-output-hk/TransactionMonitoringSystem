@@ -277,7 +277,121 @@ async def execute_schema():
             )
         """)
 
+        # Notification de-duplication ledger. tx_class_scores
+        # is a ReplacingMergeTree and the engine re-scores the same tx (full
+        # rescans, raw-data deferrals resolving later), so a tx surfaces as
+        # "newly scored" repeatedly. band_rank records the highest band already
+        # notified; a re-score notifies again ONLY on escalation to a higher
+        # band. See claim_notification().
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS notified_alerts (
+                network     TEXT NOT NULL,
+                tx_hash     TEXT NOT NULL,
+                band_rank   SMALLINT NOT NULL,
+                notified_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, tx_hash)
+            )
+        """)
+
+        # Periodic-report scheduling state. One row per
+        # (network, report_kind); last_sent_at is the boundary the scheduler
+        # checks so a restart neither double-sends nor skips a period.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS notification_report_state (
+                network           TEXT NOT NULL,
+                report_kind       TEXT NOT NULL DEFAULT 'periodic',
+                last_sent_at      TIMESTAMPTZ,
+                last_window_start TIMESTAMPTZ,
+                last_window_end   TIMESTAMPTZ,
+                PRIMARY KEY (network, report_kind)
+            )
+        """)
+
         logger.info("PostgreSQL schema initialized")
+
+
+# --- Notification de-duplication ---
+
+# Band rank: a higher rank supersedes a lower one, so an escalation
+# (e.g. High -> Critical) re-notifies while a same/lower re-score does not.
+# WHICH bands page at all is decided by the trigger config, not here.
+_BAND_RANK = {"Informational": 0, "Moderate": 1, "High": 2, "Critical": 3}
+
+
+async def claim_notification(network: str, tx_hash: str, band: str) -> bool:
+    """Atomically claim the right to notify for (network, tx_hash) at ``band``.
+
+    Returns True only when this is the FIRST notification for the transaction
+    or a genuine escalation to a higher band than was previously notified; a
+    same-or-lower re-score returns False. Race-free: concurrent callers
+    serialize on the primary key, so exactly one wins the claim.
+
+    The single statement does the check-and-claim atomically. A row is
+    RETURNED iff we inserted a fresh row (``xmax = 0``) or the conflict's
+    ``WHERE band_rank < EXCLUDED.band_rank`` matched (escalation). When the
+    guard is false (same/lower band) the UPDATE is a no-op and NO row is
+    returned — that is the duplicate-suppression signal.
+    """
+    rank = _BAND_RANK.get(band, -1)
+    if rank < 0:
+        return False  # unknown band — never notify
+    async with get_connection() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO notified_alerts (network, tx_hash, band_rank)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (network, tx_hash) DO UPDATE
+                SET band_rank = EXCLUDED.band_rank,
+                    notified_at = CURRENT_TIMESTAMP
+                WHERE notified_alerts.band_rank < EXCLUDED.band_rank
+            RETURNING (xmax = 0) AS inserted
+        """, network, tx_hash, rank)
+    return row is not None
+
+
+async def prune_notified_alerts(older_than_days: int) -> int:
+    """Delete dedup-ledger rows older than the retention window.
+
+    Re-notification suppression only needs a recent window (a tx old enough not
+    to be re-scored no longer needs its row), so this bounds notified_alerts
+    growth — the table is otherwise one append-only row per alerted tx forever.
+    NOTIFY_DEDUP_RETENTION_DAYS=0 disables.
+    """
+    async with get_connection() as conn:
+        result = await conn.execute("""
+            DELETE FROM notified_alerts
+            WHERE notified_at < NOW() - ($1 * INTERVAL '1 day')
+        """, older_than_days)
+        return int(result.split()[1])
+
+
+async def get_report_state(
+    network: str, report_kind: str = "periodic",
+) -> Optional[Dict[str, Any]]:
+    """Last-sent bookkeeping for the periodic report, or None if never sent."""
+    async with get_connection() as conn:
+        row = await conn.fetchrow("""
+            SELECT last_sent_at, last_window_start, last_window_end
+            FROM notification_report_state
+            WHERE network = $1 AND report_kind = $2
+        """, network, report_kind)
+    return dict(row) if row else None
+
+
+async def mark_report_sent(
+    network: str, window_start: datetime, window_end: datetime,
+    sent_at: datetime, report_kind: str = "periodic",
+) -> None:
+    """Advance the report boundary after a successful send (idempotent upsert)."""
+    async with get_connection() as conn:
+        await conn.execute("""
+            INSERT INTO notification_report_state
+                (network, report_kind, last_sent_at, last_window_start, last_window_end)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (network, report_kind) DO UPDATE SET
+                last_sent_at      = EXCLUDED.last_sent_at,
+                last_window_start = EXCLUDED.last_window_start,
+                last_window_end   = EXCLUDED.last_window_end
+        """, network, report_kind, sent_at, window_start, window_end)
 
 
 # --- Transaction Lifecycle CRUD ---

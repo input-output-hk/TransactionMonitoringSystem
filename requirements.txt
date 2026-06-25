@@ -7,6 +7,9 @@ pydantic-settings==2.14.2
 # WebSocket Client (Ogmios)
 websockets>=16.0,<17.0
 
+# HTTP client (webhook notifications)
+httpx==0.28.1
+
 # Database Drivers
 clickhouse-driver==0.2.10
 asyncpg==0.31.0
