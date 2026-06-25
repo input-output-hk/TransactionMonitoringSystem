@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
 
-from app.config import settings
+from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
 
 # Configure logging before importing modules that emit log records at import time
 # (e.g. app.analysis.scorer_config which logs the config file it loaded).
@@ -126,6 +126,18 @@ def _validate_startup_settings() -> None:
                 "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
             )
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
+    # A baked-in default Postgres password is a guessable credential, never a
+    # production posture. Same fail-fast as API_KEYS / CLICKHOUSE_PASSWORD:
+    # refuse to start on the known dev default unless dev mode is explicit.
+    if settings.POSTGRES_PASSWORD == DEFAULT_DEV_POSTGRES_PASSWORD:
+        if not allow_dev_mode:
+            raise RuntimeError(
+                "POSTGRES_PASSWORD is the well-known dev default. Refusing to "
+                "start on a guessable credential. Set POSTGRES_PASSWORD (and "
+                "the matching docker-compose env) for production, or "
+                "TMS_ALLOW_DEV_MODE=1 for local dev."
+            )
+        logger.warning("POSTGRES_PASSWORD is the dev default — guessable credential (development mode)")
     # Capped ClickHouse payloads make the raw store the ONLY full copy of
     # oversized (attack-shaped) transactions; running capped without the
     # store means those txs could never be scored at full fidelity.

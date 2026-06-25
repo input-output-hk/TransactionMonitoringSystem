@@ -14,6 +14,11 @@ logger = logging.getLogger(__name__)
 # project directory via the .env.<name> path composition below.
 _TMS_ENV_RE = re.compile(r"[a-z0-9_-]+")
 
+# Well-known dev default for the Postgres password. Defined once here so the
+# field default and the production fail-fast guard (main._validate_startup_settings)
+# reference the same value rather than duplicating the literal.
+DEFAULT_DEV_POSTGRES_PASSWORD = "tms_password"
+
 
 def _env_files() -> list[str]:
     """Select which dotenv file(s) to load.
@@ -78,7 +83,11 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "tms_user"
-    POSTGRES_PASSWORD: str = "tms_password"
+    # The well-known dev default. A startup guard (main._validate_startup_settings)
+    # refuses to boot with this value unless TMS_ALLOW_DEV_MODE=1, so a production
+    # deploy that forgets to set POSTGRES_PASSWORD fails fast instead of running
+    # on a guessable credential.
+    POSTGRES_PASSWORD: str = DEFAULT_DEV_POSTGRES_PASSWORD
     POSTGRES_DB: str = "tms_db"
 
     # Database Configuration - ClickHouse
