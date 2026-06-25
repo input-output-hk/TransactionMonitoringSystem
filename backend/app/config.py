@@ -178,7 +178,11 @@ class Settings(BaseSettings):
     # Drain loop: batches pulled per interval tick while the poll comes back
     # full. Caps per-tick work so a deep backlog cannot monopolise the shared
     # ClickHouse executor; 20 x batch=100 clears 2000 txs/tick.
-    ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK: int = 20
+    # ge=1: a value of 0 (or negative) makes the drain loop's `while batches <
+    # MAX` condition false on the first iteration, so run_once is never called
+    # and ZERO transactions are scored every tick — a silent, total detection
+    # outage. Fail fast at config load instead (mirrors TRUSTED_PROXY_HOPS).
+    ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK: int = Field(default=20, ge=1)
     # Pause between drained batches: lets ingestion inserts and API reads
     # interleave on the 3-worker ClickHouse executor.
     ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS: float = 0.5

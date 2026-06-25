@@ -1,5 +1,6 @@
 """PostgreSQL database connection and operations"""
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 
 # Global connection pool
 _pool: Optional[asyncpg.Pool] = None
+# Serializes pool creation: without it two concurrent init_pool() callers could
+# both observe `_pool is None`, both create_pool(), and one pool would leak
+# (its connections never closed). asyncio.Lock() needs no running loop to
+# construct on the supported Python versions.
+_pool_init_lock = asyncio.Lock()
 
 
 def _affected_rows(command_tag: str) -> int:
@@ -23,9 +29,15 @@ def _affected_rows(command_tag: str) -> int:
 
 
 async def init_pool():
-    """Initialize PostgreSQL connection pool"""
+    """Initialize PostgreSQL connection pool (idempotent, concurrency-safe)."""
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    async with _pool_init_lock:
+        # Re-check inside the lock: a racing caller may have created it while we
+        # waited, so we must not build (and leak) a second pool.
+        if _pool is not None:
+            return _pool
         try:
             _pool = await asyncpg.create_pool(
                 host=settings.POSTGRES_HOST,

@@ -148,6 +148,19 @@ class TestTrustedProxyHopsValidation:
         assert Settings(TRUSTED_PROXY_HOPS=2).TRUSTED_PROXY_HOPS == 2
 
 
+class TestAnalysisBatchesValidation:
+    """ge=1: a 0/negative drain cap makes the engine score zero txs per tick
+    (silent total detection outage). Fail at config load, not at runtime."""
+
+    @pytest.mark.parametrize("batches", [0, -1])
+    def test_non_positive_batches_rejected(self, batches):
+        with pytest.raises(ValidationError, match="ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK"):
+            Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=batches)
+
+    def test_positive_batches_accepted(self):
+        assert Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=5).ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK == 5
+
+
 class TestDocsGating:
     def test_app_urls_match_gating_expression(self):
         # The urls are fixed at import time from (_dev_mode or

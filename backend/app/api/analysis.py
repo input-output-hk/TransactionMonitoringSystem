@@ -317,15 +317,22 @@ def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
 
 
 @router.get("/results/{tx_hash}", dependencies=[Security(verify_api_key)])
-async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
+async def get_analysis_result(
+    tx_hash: str,
+    network: Optional[NetworkType] = Query(None),
+) -> ClassScoreResult:
     """Full 9-class score vector with sub-score drill-down for a single transaction.
+
+    ``network`` defaults to the configured network; it scopes the lookup so a
+    tx_hash that also exists on another network cannot return the wrong row.
 
     If the transaction has been admin-archived as a false positive, the score is
     still returned (for audit context) and the ``archived`` field is populated
     so the UI can render it differently.
     """
+    query_network = network or settings.CARDANO_NETWORK
     try:
-        row = await clickhouse.get_class_scores_async(tx_hash)
+        row = await clickhouse.get_class_scores_async(tx_hash, query_network)
     except Exception as e:
         logger.error(f"Error fetching result for {tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch result")

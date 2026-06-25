@@ -113,16 +113,22 @@ def insert_class_scores(results: List[Dict[str, Any]]):
     )
 
 
-def get_class_scores(tx_hash: str) -> Optional[Dict[str, Any]]:
-    """Return the latest multi-class score vector for a single transaction."""
+def get_class_scores(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
+    """Return the latest multi-class score vector for a single transaction.
+
+    Network-scoped: a tx_hash is only unique WITHIN a network (the table's
+    ORDER BY is (network, tx_hash)), so without the network predicate a
+    multi-network warehouse could return the wrong network's row (the bare
+    LIMIT 1 picked an arbitrary one). Every sibling reader is already scoped.
+    """
     rows = _client().execute(
         f"""
         SELECT {_SCORE_SELECT}
         FROM tx_class_scores FINAL
-        WHERE tx_hash = %(tx_hash)s
+        WHERE network = %(network)s AND tx_hash = %(tx_hash)s
         LIMIT 1
         """,
-        {"tx_hash": tx_hash},
+        {"network": network, "tx_hash": tx_hash},
     )
     if not rows:
         return None
@@ -474,8 +480,8 @@ async def count_class_scores_async(
     ))
 
 
-async def get_class_scores_async(tx_hash: str) -> Optional[Dict[str, Any]]:
-    return await _run(get_class_scores, tx_hash)
+async def get_class_scores_async(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
+    return await _run(get_class_scores, tx_hash, network)
 
 
 # In-process TTL cache for the stats aggregate: get_class_scores_stats does

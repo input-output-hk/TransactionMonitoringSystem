@@ -40,6 +40,11 @@ from app.routers import ui, websocket
 # Global state
 active_connections: List = []
 ogmios_client = None
+# Strong references to the ingestion supervisor tasks. asyncio holds only weak
+# references to tasks, so a bare create_task() can be garbage-collected mid-run
+# (ingestion silently dies); keeping them here pins their lifetime and lets
+# shutdown await them. See lifespan().
+_ingestion_tasks: List[asyncio.Task] = []
 
 
 async def _supervised(label: str, coro_fn):
@@ -223,8 +228,13 @@ async def lifespan(app: FastAPI):
         ogmios_client = OgmiosClient(on_lifecycle_event=broadcast_lifecycle_event)
         websocket.set_active_connections(active_connections)
 
-        asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
-        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
+        _ingestion_tasks.clear()
+        _ingestion_tasks.append(
+            asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
+        )
+        _ingestion_tasks.append(
+            asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
+        )
         logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
 
     except Exception as e:
@@ -240,6 +250,15 @@ async def lifespan(app: FastAPI):
         analysis_task.stop()
     if ogmios_client:
         await ogmios_client.disconnect()
+    # disconnect() signals the supervised coroutines to return; cancel-then-
+    # gather so the tasks are actually awaited (not left dangling / GC'd) and a
+    # wedged one is force-stopped. return_exceptions keeps one failure from
+    # masking the others during shutdown.
+    for task in _ingestion_tasks:
+        task.cancel()
+    if _ingestion_tasks:
+        await asyncio.gather(*_ingestion_tasks, return_exceptions=True)
+        _ingestion_tasks.clear()
     await postgres.close_pool()
     clickhouse.close_client()
     clickhouse.shutdown_executor()
