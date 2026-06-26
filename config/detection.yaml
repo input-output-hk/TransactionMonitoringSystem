@@ -497,6 +497,10 @@ scorers:
       TX_A_CONFIRMED: 0.0
       TX1_WINS: 0.0
       TX2_WINS: 0.3
+    # Score for an UNRECOGNISED collision-outcome label (a label not in the map
+    # above). Neutral midpoint, equal to BOTH_PENDING: an unknown outcome must
+    # not silently zero the sub-score (recall-conservative). Was a bare 0.5.
+    unknown_outcome_score: 0.5
     reason_thresholds:
       outcome: 0.8
       delta: 0.5
@@ -571,6 +575,12 @@ scorers:
       max_age_slots: 86400              # forward BFS horizon (Cardano ~1 slot/sec => 24h)
       max_output_fanout: 20             # skip cycle scoring for txs with > N distinct
                                         # output addresses (very unlikely to be circular)
+      # Fallback inter-hop delta (slots) when a cycle's hop timing cannot be
+      # measured (single hop, or non-increasing slots). A moderate gap so an
+      # unmeasurable cadence does not spike the inverse-speed sub-score. Shared
+      # by the graph builder (feature) and the circular scorer (read) so the two
+      # cannot drift; was a bare 100 duplicated in both.
+      default_inter_hop_delta_slots: 100
       # Per-hop row cap on the forward BFS query. Bounds the cost of a single
       # hop's fan-out scan; the rows are ordered by slot ASC so the earliest
       # (most likely to close a cycle) win when truncated. This trades recall

@@ -40,6 +40,8 @@ _BOOT = _CFG["bootstrap_anchors"]
 _OUTCOME_SCORES: Dict[str, float] = {
     k: float(v) for k, v in _CFG["outcome_scores"].items()
 }
+# Fallback score for an unrecognised outcome label (neutral midpoint; see config).
+_UNKNOWN_OUTCOME_SCORE = float(_CFG["unknown_outcome_score"])
 _REASON_T = _CFG["reason_thresholds"]
 _MIN_RECURRENCE_WINS = int(_CFG["min_recurrence_wins"])
 _HIGH_BAND_CAP = float(_CFG["high_band_cap"])
@@ -84,7 +86,7 @@ class FrontRunningScorer(BaseScorer):
 
         # Sub-score 1: collision outcome (weight = 0.35)
         outcome = collision.get("outcome", "BOTH_PENDING")
-        s_outcome = _OUTCOME_SCORES.get(outcome, 0.5)
+        s_outcome = _OUTCOME_SCORES.get(outcome, _UNKNOWN_OUTCOME_SCORE)
 
         # Sub-score 2: mempool_delta_ms reciprocal
         delta_ms = max(collision.get("delta_ms", _DELTA_MS_DEFAULT), 1.0)
