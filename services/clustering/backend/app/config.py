@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     # Reject new onboarding jobs once this many are already non-terminal (DoS /
     # paid-quota guard on the unauthenticated-by-default enqueue endpoint).
     max_inflight_jobs: int = Field(default=8, alias="MAX_INFLIGHT_JOBS")
+    # Cap on CONCURRENT ad-hoc analysis runs (POST /anomaly, /cluster, GET
+    # /evaluation). Each loads the full window + DBSCAN + an O(n^2) silhouette,
+    # so unbounded concurrency would overload ClickHouse and the box. Excess
+    # requests WAIT for a slot (they are not rejected — an analyst's run must
+    # still complete). Keep small relative to the ClickHouse capacity.
+    max_concurrent_analyses: int = Field(default=2, ge=1, alias="MAX_CONCURRENT_ANALYSES")
 
     @property
     def cors_origin_list(self) -> list[str]:
