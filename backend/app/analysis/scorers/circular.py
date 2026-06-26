@@ -48,6 +48,9 @@ FEE_TOLERANCE_STRICT = float(_CYCLE["fee_tolerance_strict"])
 _PER_HOP_FEE = float(_CYCLE["per_hop_fee_estimate"])
 _MIN_LEN = int(_CYCLE["min_length"])
 _MAX_LEN = int(_CYCLE["max_length"])
+# Fallback inter-hop delta (slots) when a cycle record carries no measured
+# cadence. Shared with the graph builder via config so the two cannot drift.
+_DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE["default_inter_hop_delta_slots"])
 
 
 def _get_cycle_data(features: Dict[str, Any]) -> Optional[Dict]:
@@ -137,7 +140,10 @@ class CircularScorer(BaseScorer):
         s_auxiliary = (s_round + s_timing) / 2.0
 
         # Sub-score 5: inter-hop speed
-        hop_delta = max(cycle.get("mean_inter_hop_delta_slots", 100), EPSILON)
+        hop_delta = max(
+            cycle.get("mean_inter_hop_delta_slots", _DEFAULT_INTER_HOP_DELTA_SLOTS),
+            EPSILON,
+        )
         hop_inv = 1.0 / hop_delta
         p50_h, p99_h = _anchor(_FIXED, "hop_delta_inv")
         s_speed = normalise(hop_inv, p50=p50_h, p99=p99_h)

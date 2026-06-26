@@ -26,6 +26,9 @@ _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
 # the earliest legs, but a hub hop with more than this many spends loses the
 # tail. Raise in config if real layering is missed; never lower for precision.
 _BFS_HOP_ROW_LIMIT = int(_CYCLE_CFG["bfs_hop_row_limit"])
+# Fallback inter-hop delta (slots) when hop timing is unmeasurable. Shared with
+# the circular scorer via config so the feature and the read cannot drift.
+_DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE_CFG["default_inter_hop_delta_slots"])
 # Public alias: the engine's cycle pre-filter must key off the same knob so
 # the two sites cannot drift (the engine previously hardcoded the value).
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
@@ -341,9 +344,9 @@ def _build_cycle_result(
     # Mean inter-hop delta in slots
     if len(hop_slots) >= 2:
         deltas = [hop_slots[i + 1] - hop_slots[i] for i in range(len(hop_slots) - 1) if hop_slots[i + 1] > hop_slots[i]]
-        mean_delta = sum(deltas) / len(deltas) if deltas else 100.0
+        mean_delta = sum(deltas) / len(deltas) if deltas else float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
     else:
-        mean_delta = 100.0
+        mean_delta = float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
 
     return {
         "cycle_length": cycle_length,
