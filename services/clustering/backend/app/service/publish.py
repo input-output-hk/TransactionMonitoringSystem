@@ -223,6 +223,46 @@ def _retract_stale(
     return len(rows)
 
 
+def _publish_labels(
+    repo: Repo, target: str, network: str, feature_set: str, published_at: datetime,
+    *, exclude: set[str],
+) -> set[str]:
+    """Publish malicious MANUAL labels that neither the online nor batch path can
+    reach, and return ALL malicious-labeled hashes for this target.
+
+    The online path reads ``tx_classifications`` and the batch path reads cluster
+    membership, so a tx that was directly labeled malicious (``label_transaction``)
+    but was never online-scored AND is not a cluster member is published by
+    neither (the module's own docstring conceded this gap). Without this it is
+    silently never surfaced as a contract_anomaly, and ``_retract_stale`` would
+    even tombstone it if a prior pass had published it.
+
+    Source-agnostic: reads ``tx_labels`` directly (FINAL + deleted = 0, so a
+    cleared label no longer applies). Inserts a synthesized malicious row (no
+    cluster/score data of its own) for any hash not already published this pass;
+    returns the full labeled set so the caller folds it into ``keep``."""
+    db = repo._db  # type: ignore[attr-defined]
+    labeled = {
+        str(r[0])
+        for r in repo.client.query(  # type: ignore[attr-defined]
+            "SELECT DISTINCT toString(tx_hash) FROM " + db + ".tx_labels FINAL "
+            "WHERE target = {tgt:String} AND deleted = 0 AND label = {mal:String}",
+            parameters={"tgt": target, "mal": VERDICT_MALICIOUS},
+        ).result_rows
+    }
+    fresh = labeled - exclude
+    if fresh:
+        rows = [
+            [network, tx, target, -1, float("nan"), float("nan"), 0.0, 0,
+             VERDICT_MALICIOUS, "", feature_set, "{}", published_at, published_at]
+            for tx in fresh
+        ]
+        repo.client.insert(  # type: ignore[attr-defined]
+            f"{db}.tx_contract_anomaly", rows, column_names=_COLUMNS,
+        )
+    return labeled
+
+
 def publish_contract_anomaly(
     repo: Repo, target: str, *, network: str, feature_set: str = "shape",
 ) -> int:
@@ -238,9 +278,15 @@ def publish_contract_anomaly(
     published_at = datetime.now(UTC).replace(tzinfo=None)
     online_flagged = _publish_online(repo, target, network, feature_set, published_at)
     batch_flagged = _publish_batch(repo, target, network, feature_set, published_at)
+    # Malicious manual labels the online/batch paths can't reach (never-scored,
+    # non-cluster txs). Folded into keep so they are not tombstoned.
+    label_flagged = _publish_labels(
+        repo, target, network, feature_set, published_at,
+        exclude=online_flagged | batch_flagged,
+    )
     retracted = _retract_stale(
         repo, target, network, feature_set,
-        keep=online_flagged | batch_flagged, published_at=published_at,
+        keep=online_flagged | batch_flagged | label_flagged, published_at=published_at,
     )
     db = repo._db  # type: ignore[attr-defined]
     rows = repo.client.query(  # type: ignore[attr-defined]
