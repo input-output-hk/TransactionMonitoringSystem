@@ -34,6 +34,7 @@ import {
 	type User as ApiUser,
 	type UserRole,
 } from "@/lib/api/auth";
+import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
 import { initials } from "@/lib/utils/strings";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Minus, Plus, Trash2 } from "lucide-react";
@@ -46,7 +47,7 @@ const USERS_QUERY_KEY = ["users", "list"] as const;
 
 export function UsersPage() {
 	const [page, setPage] = useState(0);
-	const [pageSize, setPageSize] = useState(10);
+	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 	const [removeMode, setRemoveMode] = useState(false);
 	const [addOpen, setAddOpen] = useState(false);
 	const [pendingRemove, setPendingRemove] = useState<ApiUser | null>(null);
