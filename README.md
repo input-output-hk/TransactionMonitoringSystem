@@ -205,7 +205,27 @@ Single-process FastAPI application. Three async background tasks run in the same
 | PostgreSQL | Lifecycle state, sync checkpoint, entity state, mempool collisions, audit logs, and the auth tables (`users`, `magic_link_tokens`, `user_sessions`) |
 | Filesystem | Data Lake: write-once gzip JSON blobs of raw Ogmios payloads |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs/C4-ARCHITECTURE.md), and [docs/TECHNOLOGY-DECISIONS.md](docs/TECHNOLOGY-DECISIONS.md) for details.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs/C4-ARCHITECTURE.md), and [docs/TECHNOLOGY-DECISIONS.md](docs/TECHNOLOGY-DECISIONS.md) for details. The full documentation index is in [docs/README.md](docs/README.md).
+
+## Detection
+
+The analysis engine scores every transaction against nine supervised attack classes, each on a continuous 0-100 risk scale:
+
+| Class | What it flags |
+|---|---|
+| Token Dust | Spamming many tiny-value or dust-token outputs |
+| Large Value | Anomalously large transfers relative to the sender's baseline |
+| Large Datum | Oversized inline datums used to bloat or grief |
+| Multiple Satisfaction | One payment reused to satisfy several script conditions (double satisfaction) |
+| Front-Running | A transaction racing ahead of a victim's pending transaction |
+| Sandwich | Bracketing a victim transaction with a before-and-after pair |
+| Circular Transfers | Funds cycling through a ring of addresses |
+| Fake Token | Tokens impersonating a known policy or asset |
+| Phishing | Malicious intent signalled through transaction metadata |
+
+Scores roll up into four risk bands (Informational, Moderate, High, Critical). With the optional clustering module enabled, a tenth class, `contract_anomaly`, adds unsupervised per-contract profiling.
+
+The full reference, covering the features extracted per transaction, the scoring framework, and the per-class thresholds, is in [docs/TMS_DETECTION_SPEC.md](docs/TMS_DETECTION_SPEC.md). For how data moves through the pipeline see [docs/DATA-FLOW.md](docs/DATA-FLOW.md), or the plain-English [docs/DATA-FLOW-EXPLAINED.md](docs/DATA-FLOW-EXPLAINED.md).
 
 ## Database Management
 
@@ -220,6 +240,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs
 
 To wipe data for a single network rather than everything, prefer the network-aware `./scripts/reset.sh` (honours `TMS_ENV` / `--network`, with `--all` and `--yes` flags). See [README_DOCKER.md](README_DOCKER.md) for connection details and troubleshooting, and [RUNBOOK.md §Reset all data](RUNBOOK.md#reset-all-data) for the full reset procedure.
 
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first: it covers the development setup, how to run the tests, and the rules every change must follow (recall-first detection, no magic numbers, and the documentation style). To report a security issue, see [SECURITY.md](SECURITY.md).
+
 ## License
 
-[Apache License 2.0](LICENSE)
+Licensed under the [Apache License 2.0](LICENSE). Third-party dependency and bundled-data licenses are listed in [docs/LICENSES.md](docs/LICENSES.md).
