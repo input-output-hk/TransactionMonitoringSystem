@@ -164,6 +164,23 @@ async def _loop():
                         logger.info(f"Retention: pruned {n} audit log rows")
                 except Exception as e:
                     logger.error(f"Audit-log retention sweep failed: {e}")
+            # Auth housekeeping: expired/consumed magic-link tokens and expired
+            # sessions accumulate indefinitely otherwise (their purge helpers
+            # existed but were never scheduled — review finding). Always swept,
+            # NOT gated on a retention knob: these rows are already expired or
+            # consumed, so there is no data-retention choice to make.
+            try:
+                from app.auth.sessions import purge_expired_sessions
+                from app.auth.tokens import purge_expired_tokens
+                n_tok = await purge_expired_tokens()
+                n_sess = await purge_expired_sessions()
+                if n_tok or n_sess:
+                    logger.info(
+                        f"Auth purge: removed {n_tok} expired tokens, "
+                        f"{n_sess} expired sessions"
+                    )
+            except Exception as e:
+                logger.error(f"Auth purge sweep failed: {e}")
 
         await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
 
