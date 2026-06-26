@@ -64,6 +64,21 @@ class Settings(BaseSettings):
     clickhouse_db: str = Field(default="tms_clustering", alias="CLICKHOUSE_DB")
     clickhouse_user: str = Field(default="tms", alias="CLICKHOUSE_USER")
     clickhouse_password: str = Field(default="tms", alias="CLICKHOUSE_PASSWORD")
+    # Query ceilings (defense-in-depth; both abort with a VISIBLE error, never a
+    # silent truncation — a failed run is loud and retryable, so this does not
+    # drop transactions from analysis the way max_result_rows / a short
+    # max_execution_time would, which is why those are deliberately NOT set).
+    # send_receive_timeout: socket ceiling for a wedged query. Generous so a
+    # legitimately large windowed read never trips it.
+    clickhouse_send_receive_timeout_seconds: int = Field(
+        default=300, ge=1, alias="CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS",
+    )
+    # max_memory_usage: per-query server memory cap. 0 = unset (use the server
+    # default). Sized below the container mem_limit so a runaway query aborts
+    # instead of OOM-killing the ClickHouse container.
+    clickhouse_max_memory_usage_bytes: int = Field(
+        default=0, ge=0, alias="CLICKHOUSE_MAX_MEMORY_USAGE_BYTES",
+    )
 
     # Host-backed integration (CHAIN_SOURCE=host_ch). When the engine runs as
     # the TMS clustering sidecar it reads each watched contract's transactions

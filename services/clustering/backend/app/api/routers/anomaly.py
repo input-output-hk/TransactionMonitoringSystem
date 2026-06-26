@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import RepoDep
+from app.contracts import normalize_target
 from app.api.schemas import (
     AnomalyDetectAck,
     AnomalyRequest,
@@ -25,7 +26,7 @@ router = APIRouter(tags=["anomaly"])
 def run_anomaly(req: AnomalyRequest, repo: Repo = RepoDep) -> dict[str, Any]:
     return detect_anomalies_for_target(
         repo,
-        req.target,
+        normalize_target(req.target),
         req.feature_set,
         eps=req.eps,
         min_samples=req.min_samples,
