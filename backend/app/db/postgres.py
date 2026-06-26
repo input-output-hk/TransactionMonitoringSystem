@@ -45,14 +45,14 @@ async def init_pool():
                 user=settings.POSTGRES_USER,
                 password=settings.POSTGRES_PASSWORD,
                 database=settings.POSTGRES_DB,
-                min_size=2,
-                max_size=10,
-                # Recycle connections idle > 5 min so a PG restart or transient
-                # network blip doesn't leave stale sockets in the pool.
-                max_inactive_connection_lifetime=300.0,
-                # Cap any single statement at 30 s to prevent a stuck query from
-                # pinning a pool slot indefinitely.
-                command_timeout=30.0,
+                min_size=settings.POSTGRES_POOL_MIN_SIZE,
+                max_size=settings.POSTGRES_POOL_MAX_SIZE,
+                # Recycle connections idle beyond this so a PG restart or
+                # transient network blip doesn't leave stale sockets in the pool.
+                max_inactive_connection_lifetime=settings.POSTGRES_POOL_MAX_IDLE_SECONDS,
+                # Cap any single statement so a stuck query can't pin a pool
+                # slot indefinitely.
+                command_timeout=settings.POSTGRES_STATEMENT_TIMEOUT_SECONDS,
             )
             logger.info("PostgreSQL connection pool initialized")
         except Exception as e:

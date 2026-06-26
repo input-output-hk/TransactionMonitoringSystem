@@ -132,7 +132,7 @@ class OgmiosClient:
             self.ws_url,
             ping_interval=settings.OGMIOS_HEARTBEAT_INTERVAL,
             ping_timeout=settings.OGMIOS_HEARTBEAT_TIMEOUT,
-            max_size=64 * 1024 * 1024,  # 64MB for large blocks
+            max_size=settings.OGMIOS_WS_MAX_FRAME_BYTES,
         )
         logger.info(f"Ogmios [{label}]: connected to {self.ws_url}")
         return ws
