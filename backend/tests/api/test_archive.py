@@ -173,7 +173,7 @@ def test_archive_then_list_then_delete(client, auth_open, store):
         "network": "preprod",
         "tx_hash": VALID_HASH,
         "note": "known FP from CTF testing",
-        "archived_by": "alessio@ap901.tech",
+        "archived_by": "reviewer@example.com",
     })
     assert r.status_code == 201, r.text
     assert ("preprod", VALID_HASH) in store.rows
