@@ -17,12 +17,20 @@ def connect(settings: Settings) -> Client:
     """Create a clickhouse_connect Client from settings. Single source for the
     connection parameters so a TLS flag / timeout change lands in one place; used
     by the repo's lazy client and the host_ch source."""
+    # Server-side per-query settings. max_memory_usage only when > 0 (0 = leave
+    # the server default). Both ceilings fail a query LOUDLY rather than
+    # truncating it, so a recall-relevant fit never silently drops rows.
+    query_settings: dict[str, Any] = {}
+    if settings.clickhouse_max_memory_usage_bytes > 0:
+        query_settings["max_memory_usage"] = settings.clickhouse_max_memory_usage_bytes
     return clickhouse_connect.get_client(
         host=settings.clickhouse_host,
         port=settings.clickhouse_http_port,
         username=settings.clickhouse_user,
         password=settings.clickhouse_password,
         database=settings.clickhouse_db,
+        send_receive_timeout=settings.clickhouse_send_receive_timeout_seconds,
+        settings=query_settings or None,
     )
 
 

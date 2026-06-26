@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from app.api.deps import RepoDep, run_or_404
+from app.contracts import normalize_target
 from app.api.schemas import (
     ClusterRequest,
     ClusterRunAck,
@@ -95,14 +96,16 @@ def evaluation(
     feature_set: FeatureSet = Query(default="shape"),
     repo: Repo = RepoDep,
 ) -> dict[str, Any]:
-    return evaluate_target(repo, target, feature_set)
+    # Canonicalise (lowercases a hex policy id) so an ad-hoc run keys off the
+    # same target the contract was onboarded under. Recall-safe: rejects nothing.
+    return evaluate_target(repo, normalize_target(target), feature_set)
 
 
 @router.post("/cluster", response_model=ClusterRunAck)
 def run_cluster(req: ClusterRequest, repo: Repo = RepoDep) -> dict[str, Any]:
     return cluster_target(
         repo,
-        req.target,
+        normalize_target(req.target),
         req.feature_set,
         req.eps,
         req.min_samples,
