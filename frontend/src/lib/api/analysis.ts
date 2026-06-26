@@ -286,7 +286,6 @@ async function fetchSingleResult(txHash: string): Promise<RiskAlert | null> {
 		throw new Error(`Analysis result request failed: ${res.status}`);
 	}
 	const json = (await res.json()) as ApiAnalysisResult;
-	console.log("Fetched single analysis result:", json);
 	return toRiskAlert(json);
 }
 

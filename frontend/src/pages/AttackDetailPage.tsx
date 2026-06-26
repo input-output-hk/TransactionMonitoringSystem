@@ -109,7 +109,6 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 		return <Navigate to={`/attacks/${alert.slug}`} replace />;
 	}
 
-	console.log({ alert, archived, archivedHere });
 	return (
 		<DetailCard
 			alert={alert}

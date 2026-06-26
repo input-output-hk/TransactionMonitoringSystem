@@ -22,6 +22,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
 import { useRiskAlerts } from "@/lib/api/analysis";
 import {
 	useAlertTimeseries,
@@ -61,7 +62,7 @@ export function AttacksPage() {
 		"HIGH",
 		"CRITICAL",
 	]);
-	const [pageSize, setPageSize] = useState(10);
+	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 	const [page, setPage] = useState(0);
 
 	const { data, isPending, isError, error } = useRiskAlerts({

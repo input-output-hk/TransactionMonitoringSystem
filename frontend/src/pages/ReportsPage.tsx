@@ -35,6 +35,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
+import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
 import { fetchAlertsForExport, useRiskAlerts } from "@/lib/api/analysis";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { copyToClipboard } from "@/lib/utils/clipboard";
@@ -54,7 +55,7 @@ export function ReportsPage() {
 	const [attackFilter, setAttackFilter] = useState<string>("all");
 	const [severityFilter, setSeverityFilter] = useState<string>("all");
 	const [sortBy, setSortBy] = useState<"date" | "score">("date");
-	const [pageSize, setPageSize] = useState(10);
+	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 	const [page, setPage] = useState(0);
 	const [exporting, setExporting] = useState(false);
 	const [confirmExportOpen, setConfirmExportOpen] = useState(false);
