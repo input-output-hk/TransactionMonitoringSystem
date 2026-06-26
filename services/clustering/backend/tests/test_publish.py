@@ -18,10 +18,12 @@ import pytest
 from app.config import Settings
 from app.service.publish import (
     _COLUMNS,
+    _publish_labels,
     _publish_online,
     _retract_stale,
     publish_contract_anomaly,
 )
+from app.service.verdicts import VERDICT_MALICIOUS
 
 _VERDICT_COL = _COLUMNS.index("verdict")
 _TX_HASH_COL = _COLUMNS.index("tx_hash")
@@ -120,6 +122,9 @@ def test_publish_reconciles_then_counts(monkeypatch: pytest.MonkeyPatch) -> None
     # flagged-count query (verdict != normal) is returned.
     monkeypatch.setattr("app.service.publish._publish_online", lambda *a, **k: {"txB"})
     monkeypatch.setattr("app.service.publish._publish_batch", lambda *a, **k: {"txA"})
+    # The manual-label path is exercised on its own below; stub it here so this
+    # test stays focused on online+batch reconciliation.
+    monkeypatch.setattr("app.service.publish._publish_labels", lambda *a, **k: set())
     fake = FakeClient([
         [("txA",), ("txC",)],  # _retract_stale: current non-normal hashes
         [(2,)],                # final flagged count
@@ -169,3 +174,29 @@ def test_label_change_skips_sync_off_host(monkeypatch: pytest.MonkeyPatch) -> No
     repo = SimpleNamespace(set_tx_labels=lambda *a, **k: 1)
     label_transaction(repo, "addr1", "a" * 64, "benign")
     assert calls == []  # non-host_ch source: no host projection to sync
+
+
+def test_publish_labels_publishes_unscored_malicious() -> None:
+    # A malicious manual label the online/batch paths can't reach (never-scored,
+    # non-cluster) must be inserted as malicious and returned so the caller keeps
+    # it (otherwise _retract_stale would tombstone it).
+    fake = FakeClient([[("txMANUAL",), ("txKNOWN",)]])  # tx_labels malicious hashes
+    labeled = _publish_labels(
+        _repo(fake), "addr1", "preprod", "shape", _PUB, exclude={"txKNOWN"},
+    )
+    assert labeled == {"txMANUAL", "txKNOWN"}
+    # Only the not-already-published hash is inserted, as a malicious row.
+    assert len(fake.inserts) == 1
+    _, rows, _ = fake.inserts[0]
+    assert len(rows) == 1
+    assert rows[0][_TX_HASH_COL] == "txMANUAL"
+    assert rows[0][_VERDICT_COL] == VERDICT_MALICIOUS
+
+
+def test_publish_labels_noop_when_all_already_published() -> None:
+    fake = FakeClient([[("txKNOWN",)]])
+    labeled = _publish_labels(
+        _repo(fake), "addr1", "preprod", "shape", _PUB, exclude={"txKNOWN"},
+    )
+    assert labeled == {"txKNOWN"}
+    assert fake.inserts == []  # nothing fresh to insert
