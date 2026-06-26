@@ -7,7 +7,9 @@ and apart from the routers so tests can override ``get_request_repo`` once.
 from __future__ import annotations
 
 import hmac
+import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import Depends, Header, HTTPException
@@ -16,6 +18,36 @@ from app.config import get_settings
 from app.service._common import target_in_jobs
 from app.storage.clickhouse import ClickHouseRepo, select_repo_factory
 from app.storage.protocol import Repo
+
+# Bounds concurrent heavy analysis runs (see analysis_slot). Lazily created so
+# it binds to the configured cap, and rebuildable in tests via _reset_analysis_slot.
+_analysis_semaphore: threading.Semaphore | None = None
+_analysis_semaphore_lock = threading.Lock()
+
+
+def _get_analysis_semaphore() -> threading.Semaphore:
+    global _analysis_semaphore
+    if _analysis_semaphore is None:
+        with _analysis_semaphore_lock:
+            if _analysis_semaphore is None:
+                _analysis_semaphore = threading.Semaphore(
+                    get_settings().max_concurrent_analyses
+                )
+    return _analysis_semaphore
+
+
+@contextmanager
+def analysis_slot() -> Iterator[None]:
+    """Bound CONCURRENT ad-hoc analysis runs (full-window load + DBSCAN + the
+    O(n^2) silhouette). Excess concurrent callers WAIT for a slot rather than
+    running simultaneously and overloading ClickHouse / the box; they are never
+    rejected, so an analyst's run still completes (just later)."""
+    sem = _get_analysis_semaphore()
+    sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.api.deps import RepoDep
+from app.api.deps import RepoDep, analysis_slot
 from app.contracts import normalize_target
 from app.api.schemas import (
     AnomalyDetectAck,
@@ -24,14 +24,15 @@ router = APIRouter(tags=["anomaly"])
 
 @router.post("/anomaly", response_model=AnomalyDetectAck)
 def run_anomaly(req: AnomalyRequest, repo: Repo = RepoDep) -> dict[str, Any]:
-    return detect_anomalies_for_target(
-        repo,
-        normalize_target(req.target),
-        req.feature_set,
-        eps=req.eps,
-        min_samples=req.min_samples,
-        top_quantile=req.top_quantile,
-    )
+    with analysis_slot():
+        return detect_anomalies_for_target(
+            repo,
+            normalize_target(req.target),
+            req.feature_set,
+            eps=req.eps,
+            min_samples=req.min_samples,
+            top_quantile=req.top_quantile,
+        )
 
 
 @router.get("/anomaly-runs", response_model=list[AnomalyRunOut])
