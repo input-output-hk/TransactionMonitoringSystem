@@ -31,6 +31,8 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.preprod.example
+!.env.preview.example
 
 # IDE
 .vscode/
