@@ -89,6 +89,16 @@ class Settings(BaseSettings):
     # on a guessable credential.
     POSTGRES_PASSWORD: str = DEFAULT_DEV_POSTGRES_PASSWORD
     POSTGRES_DB: str = "tms_db"
+    # Connection-pool sizing (asyncpg). Defaults sized for a single-box deploy;
+    # raise the max for higher API concurrency. Were inline literals in
+    # db/postgres.init_pool.
+    POSTGRES_POOL_MIN_SIZE: int = Field(default=2, ge=0)
+    POSTGRES_POOL_MAX_SIZE: int = Field(default=10, ge=1)
+    # Recycle a connection idle longer than this so a PG restart / network blip
+    # doesn't leave stale sockets in the pool.
+    POSTGRES_POOL_MAX_IDLE_SECONDS: float = 300.0
+    # Cap any single statement so a stuck query can't pin a pool slot forever.
+    POSTGRES_STATEMENT_TIMEOUT_SECONDS: float = 30.0
 
     # Database Configuration - ClickHouse
     CLICKHOUSE_HOST: str = "localhost"
@@ -238,6 +248,10 @@ class Settings(BaseSettings):
     # would otherwise freeze the API/WS/mempool tasks for the parse).
     # Below it the thread handoff costs more than the parse itself.
     OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES: int = 1_048_576  # 1 MiB
+    # Max inbound WebSocket frame Ogmios may send. A busy Plutus block can
+    # serialise to tens of MB; this is the hard ceiling the socket accepts
+    # before closing the connection. Sized for the largest realistic block.
+    OGMIOS_WS_MAX_FRAME_BYTES: int = 67_108_864  # 64 MiB
 
     # Retention. ALL default 0 = keep forever (the audit's growth findings
     # are addressed by giving operators knobs, not by silently expiring
