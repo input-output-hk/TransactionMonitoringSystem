@@ -3,7 +3,19 @@
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from app.analysis.normalise import (
+    BAND_CRITICAL_THRESHOLD,
+    BAND_HIGH_THRESHOLD,
+    BAND_MODERATE_THRESHOLD,
+)
 from app.config import settings
+
+# Band cut-offs as ints for the embedded UI's filter buttons and client-side
+# band logic. Single-sourced from normalise so this legacy/dev UI cannot drift
+# from the scorer's authoritative thresholds.
+_BAND_CRITICAL = int(BAND_CRITICAL_THRESHOLD)
+_BAND_HIGH = int(BAND_HIGH_THRESHOLD)
+_BAND_MODERATE = int(BAND_MODERATE_THRESHOLD)
 
 router = APIRouter()
 
@@ -265,13 +277,13 @@ def _body(network: str) -> str:
                 </div>
                 <div class="filters" id="riskFilters">
                     <span class="filter-label">Show:</span>
-                    <button class="filter-btn band-btn active" data-band="80">
+                    <button class="filter-btn band-btn active" data-band="{_BAND_CRITICAL}">
                         <span class="band-swatch" style="background:#ff1744"></span>Critical only
                     </button>
-                    <button class="filter-btn band-btn" data-band="60">
+                    <button class="filter-btn band-btn" data-band="{_BAND_HIGH}">
                         <span class="band-swatch" style="background:#ff6d00"></span>High and above
                     </button>
-                    <button class="filter-btn band-btn" data-band="31">
+                    <button class="filter-btn band-btn" data-band="{_BAND_MODERATE}">
                         <span class="band-swatch" style="background:#ffab00"></span>Moderate and above
                     </button>
                     <button class="filter-btn band-btn" data-band="1">
@@ -507,9 +519,9 @@ def _page_script() -> str:
                     return;
                 }}
                 const bandOf = (s) => {{
-                    if (s >= 80) return 'Critical';
-                    if (s >= 60) return 'High';
-                    if (s >= 31) return 'Moderate';
+                    if (s >= {_BAND_CRITICAL}) return 'Critical';
+                    if (s >= {_BAND_HIGH}) return 'High';
+                    if (s >= {_BAND_MODERATE}) return 'Moderate';
                     return 'Informational';
                 }};
                 riskPanel.innerHTML = alerts.map(a => {{
@@ -554,9 +566,9 @@ def _page_script() -> str:
 
             let activeClassFilter = "";
             let activeSort = "date";
-            // Default: Critical band only (score >= 80). Band-min-score map
-            // mirrors normalise.score_to_band: Critical=80, High=60, Moderate=31.
-            let activeMinScore = 80;
+            // Default: Critical band only. Thresholds are injected from
+            // normalise.score_to_band (server-side), so this UI can't drift.
+            let activeMinScore = {_BAND_CRITICAL};
             let _riskTimer = null;
             function debouncedRefreshRisk() {{
                 if (_riskTimer) return;
