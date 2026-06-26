@@ -155,7 +155,12 @@ services:
     container_name: tms-app
     env_file:
       - .env
-      - .env.${TMS_ENV:-preprod}
+      # Per-network override (preprod/preview/...). Optional: with no such file
+      # present (e.g. a fresh clone) the app falls back to its built-in defaults
+      # (mainnet). Create one from .env.preprod.example / .env.preview.example
+      # and select it with TMS_ENV to monitor a testnet.
+      - path: .env.${TMS_ENV:-preprod}
+        required: false
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -256,7 +261,9 @@ services:
     container_name: tms-clustering-sidecar
     env_file:
       - .env
-      - .env.${TMS_ENV:-preprod}
+      # Optional per-network override; absent it, built-in defaults apply.
+      - path: .env.${TMS_ENV:-preprod}
+        required: false
     environment:
       # Topology: read chain data from tms_analytics, write module state to the
       # tms_clustering database on the same ClickHouse server.
