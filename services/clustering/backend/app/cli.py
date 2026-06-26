@@ -220,6 +220,18 @@ def migrate(
     # only the `tms` DB references (never `tms_clustering` or a column name); a
     # no-op when clickhouse_db == "tms".
     db = repo._db
+    # First-run bootstrap: the repo client connects WITH `db` as its default
+    # database, which a FRESH ClickHouse rejects (UNKNOWN_DATABASE) before the
+    # init files' first `CREATE DATABASE` statement can run. Create the database
+    # via a client pinned to the always-present `default` DB. `db` is a config
+    # value (not user input); idempotent and a no-op on existing volumes.
+    from app.storage.clickhouse.base import connect
+
+    boot = connect(repo._settings, database="default")
+    try:
+        boot.command(f"CREATE DATABASE IF NOT EXISTS {db}")
+    finally:
+        boot.close()
     try:
         for f in files:
             # Strip `--` comments BEFORE splitting on ';' — comments may contain
