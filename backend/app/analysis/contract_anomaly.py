@@ -35,28 +35,68 @@ from app.models.transaction import RiskBand
 _SCORE_MIN = 0.0
 _SCORE_MAX = 100.0
 
+# Verdicts that can carry a finding. A POSITIVE verdict (a human-labeled
+# malicious cluster, or an auto-anomaly) is scored from its configured floor and
+# refined upward by consensus. Every OTHER verdict (benign = human-labeled safe,
+# normal = no finding, and any unrecognised label) is a safe / no-finding label
+# that SUPPRESSES to 0 unconditionally, so the ensemble consensus can never
+# manufacture a finding from a curated-safe verdict.
+#
+# Suppression keys on the verdict IDENTITY, not on the numeric floor: the
+# `anomaly` floor is 0 (pure consensus-driven, so it reaches High only when
+# consensus scales to BAND_HIGH_THRESHOLD), so a "floor <= 0 means suppress" test
+# would wrongly zero out every anomaly. The distinction between a safe verdict
+# and a positive verdict that happens to have a 0 floor must therefore be the
+# label, not the value.
+#
+# This set is the AUTHORITY for which verdicts score. To add a positive verdict
+# you MUST update BOTH this set AND verdict_floors in detection.yaml: a
+# config-only addition falls through to the suppress branch and projects to 0 (a
+# silent, recall-negative drop). The import-time guard below keeps the two in
+# sync for the KeyError case (a positive verdict with no configured floor).
+_POSITIVE_VERDICTS = frozenset({"malicious", "anomaly"})
+
+# Fail loud at import if a positive verdict has no configured floor: the
+# cfg["verdict_floors"][verdict] lookup in project_score would otherwise KeyError
+# at request time. Mirrors multiple_sat's import-time floor guard.
+_missing_positive_floors = _POSITIVE_VERDICTS.difference(
+    contract_anomaly_config()["verdict_floors"]
+)
+if _missing_positive_floors:
+    raise RuntimeError(
+        "contract_anomaly positive verdicts missing a configured floor: "
+        f"{sorted(_missing_positive_floors)}. Add them to verdict_floors in "
+        "config/detection.yaml (or remove them from _POSITIVE_VERDICTS)."
+    )
+
 
 def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBand]:
     """Map a clustering verdict + consensus onto ``(score, RiskBand)``.
 
-    Only the POSITIVE verdicts carry a floor: a human-labeled malicious cluster
-    floors into Critical, an auto-anomaly into High. ``benign`` (human-labeled
-    safe) and ``normal`` (no finding), plus any unknown verdict, carry a 0 floor
-    and SUPPRESS the signal outright: they project to 0 regardless of consensus,
-    so a curated "safe" label is authoritative and the ensemble can never
-    manufacture a finding from it. For a positive verdict the consensus may only
-    REFINE the score upward from its floor (``max(floor, consensus * scale)``); a
-    missing consensus contributes nothing. The mapping only ever produces a
-    score, never a side effect, so it is safe to call per transaction.
+    Only the POSITIVE verdicts carry a score (see :data:`_POSITIVE_VERDICTS`): a
+    human-labeled malicious cluster floors into Critical, while an auto-anomaly
+    carries NO floor and is driven purely by the ensemble consensus, so it bands
+    Informational / Moderate / High by strength and reaches High only once
+    consensus scales to ``BAND_HIGH_THRESHOLD`` (consensus >= 0.60 at the default
+    scale of 100). ``benign`` (human-labeled safe), ``normal`` (no finding), and
+    any unknown verdict SUPPRESS the signal outright: they project to 0 regardless
+    of consensus, so a curated "safe" label is authoritative and the ensemble can
+    never manufacture a finding from it. For a positive verdict the consensus may
+    only REFINE the score upward from its floor (``max(floor, consensus * scale)``);
+    a missing consensus contributes nothing, so a malicious verdict still floors to
+    Critical while an anomaly with no consensus suppresses to 0. The mapping only
+    ever produces a score, never a side effect, so it is safe to call per
+    transaction.
     """
     cfg = contract_anomaly_config()
-    floors = cfg["verdict_floors"]
-    floor = float(floors.get(verdict, floors["normal"]))
-    # A 0-floor verdict is a safe/unknown label (benign, normal, ...): suppress
-    # it. Consensus refines only verdicts that already carry a positive floor, so
-    # it can never turn a curated-safe label into a surfaced finding.
-    if floor <= _SCORE_MIN:
+    # Suppression is keyed on the verdict identity, not the floor value: a safe
+    # (benign) / no-finding (normal) / unrecognised label must never be lifted
+    # into a finding by consensus, so it projects to 0. A positive verdict
+    # (malicious / anomaly) is scored from its configured floor below; both keys
+    # are required by the config validator, so the lookup cannot KeyError.
+    if verdict not in _POSITIVE_VERDICTS:
         return _SCORE_MIN, RiskBand(score_to_band(_SCORE_MIN))
+    floor = float(cfg["verdict_floors"][verdict])
     consensus_term = float(consensus) * float(cfg["consensus_scale"]) if consensus is not None else 0.0
     score = min(_SCORE_MAX, max(floor, consensus_term))
     return score, RiskBand(score_to_band(score))
