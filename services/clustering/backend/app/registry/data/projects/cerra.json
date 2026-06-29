@@ -1,0 +1,77 @@
+{
+  "projectName": "Cerra",
+  "labelPrefix": "Cerra",
+  "website": "https://cerra.io",
+  "twitter": "Cerra_io",
+  "discord": "https://discord.gg/NAhSpAvg4a",
+  "category": "DEFI",
+  "contracts": [
+    {
+      "name": "P2P Lending Contract",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "fc7fa1cfd7b5b4db904bd2ab95df8ba8050b8fb7c7fc776cd214ec8f",
+      "github": "https://github.com/cerraio/lending-plutus"
+    },
+    {
+      "name": "Loan Factory MP",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "8c220b94e8622eb3b5c8000cdeb40795f9dd5950c05b31c602626a1d",
+      "github": "https://github.com/cerraio/lending-plutus"
+    },
+    {
+      "name": "Lender MP",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "aab5e178051c0fefe20d4816afea177b0c21d3349e64a93fe9700e4a",
+      "github": "https://github.com/cerraio/lending-plutus"
+    },
+    {
+      "name": "Borrower MP",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "36ae1a5a1430fe3d5a22c7d591a7fcce5343095d85e79efe3f81d051",
+      "github": "https://github.com/cerraio/lending-plutus"
+    },
+    {
+      "name": "AMM pool contract",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "3e7e7b0e2c5052a159d1f008d95eeb7c369c3a2122441599823b71f2"
+    },
+    {
+      "name": "AMM batcher contract",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "32a3548883f31e79c13b5403ab92d3d0c4e54e9230a3d72cb1fb4c24"
+    },
+    {
+      "name": "Pool Factory MP",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "2532b16fc0eeaf578da99728fbaaa105259c2164ae6738ea0ba51442"
+    },
+    {
+      "name": "LP MP",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "df629edc2fa5d501c827a4d6400a164a5612e1699069dd7f14d8ee23"
+    },
+    {
+      "name": "Pool NFT MP",
+      "version": 1,
+      "language": "PLUTUS",
+      "languageVersion": 2,
+      "scriptHash": "ab2999f6dbb32833efb5f877305c3cfcf1f292e89f5364d07a47f841"
+    }
+  ]
+}

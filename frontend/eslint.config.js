@@ -18,5 +18,10 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // Debug console.log/.debug/.info must not ship to production; intentional
+      // diagnostics use console.warn / console.error (allowed).
+      'no-console': ['error', { allow: ['warn', 'error'] }],
+    },
   },
 ])

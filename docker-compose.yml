@@ -155,7 +155,12 @@ services:
     container_name: tms-app
     env_file:
       - .env
-      - .env.${TMS_ENV:-preprod}
+      # Per-network override (preprod/preview/...). Optional: with no such file
+      # present (e.g. a fresh clone) the app falls back to its built-in defaults
+      # (mainnet). Create one from .env.preprod.example / .env.preview.example
+      # and select it with TMS_ENV to monitor a testnet.
+      - path: .env.${TMS_ENV:-preprod}
+        required: false
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -197,6 +202,19 @@ services:
       # No default: production must set the dashboard origin explicitly
       # (the app refuses to start with '*' when API keys are configured).
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}
+      # Clustering sidecar wiring. Opt-in: defaults OFF so the app behaves
+      # identically without the module. Set CLUSTERING_ENABLED=true (in .env)
+      # when bringing up `--profile clustering`, or the /api/clustering proxy
+      # returns 503 and the contract_anomaly read-merge stays disabled. The URL
+      # targets the in-network `clustering` service; CLUSTERING_DB must match the
+      # sidecar's CLICKHOUSE_DB (both default to tms_clustering) so the host
+      # reads/purges the same database the sidecar writes.
+      - CLUSTERING_ENABLED=${CLUSTERING_ENABLED:-false}
+      - CLUSTERING_SIDECAR_URL=${CLUSTERING_SIDECAR_URL:-http://clustering:8000}
+      - CLUSTERING_DB=${CLUSTERING_DB:-tms_clustering}
+      # Same key the sidecar expects (CLUSTERING_API_KEY); the proxy forwards it
+      # as X-API-Key so the sidecar can run REQUIRE_AUTH=1. Empty = no auth.
+      - CLUSTERING_SIDECAR_API_KEY=${CLUSTERING_API_KEY:-}
     mem_limit: ${APP_MEM_LIMIT:-2g}
     ports:
       # Bind to loopback only — public exposure happens via Cloudflare Tunnel
@@ -226,6 +244,87 @@ services:
       - tms-network
     profiles:
       - app  # Use 'docker-compose --profile app up' to include this service
+
+  # Clustering module: contract-anomaly detection (services/clustering). Runs
+  # only with `--profile clustering`; the API merges its verdicts
+  # (contract_anomaly) when CLUSTERING_ENABLED is set and ignores them otherwise,
+  # so the module is fully opt-in.
+  #
+  # It shares THIS ClickHouse server: its own state lives in tms_clustering,
+  # while transaction/feature reads come from tms_analytics (the same chain data
+  # the core scorers use), so no chain data is duplicated. `app.cli migrate`
+  # creates the tms_clustering schema idempotently on boot.
+  clustering:
+    build:
+      context: ./services/clustering/backend
+      target: ${CLUSTERING_BUILD_TARGET:-runtime}
+    container_name: tms-clustering-sidecar
+    env_file:
+      - .env
+      # Optional per-network override; absent it, built-in defaults apply.
+      - path: .env.${TMS_ENV:-preprod}
+        required: false
+    environment:
+      # Topology: read chain data from tms_analytics, write module state to the
+      # tms_clustering database on the same ClickHouse server.
+      - CHAIN_SOURCE=host_ch
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_HTTP_PORT=8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLUSTERING_DB:-tms_clustering}
+      - HOST_CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
+      # CARDANO_NETWORK comes from .env.${TMS_ENV}; one sidecar per network keeps
+      # the engine single-network (no network column on its tables).
+      # Scale / feed knobs (see engine Settings). Window bounds the fit memory.
+      - CLUSTERING_WINDOW_TXS=${CLUSTERING_WINDOW_TXS:-50000}
+      - CLUSTERING_DEFAULT_FEATURE_SET=${CLUSTERING_DEFAULT_FEATURE_SET:-shape}
+      - MAX_GRAPH_TXS=${MAX_GRAPH_TXS:-5000}
+      - FEED_ENABLED=${FEED_ENABLED:-true}
+      - FEED_POLL_INTERVAL_SECONDS=${FEED_POLL_INTERVAL_SECONDS:-30}
+      - FEED_MAX_CONTRACTS_PER_TICK=${FEED_MAX_CONTRACTS_PER_TICK:-4}
+      - MODEL_SIGNING_KEYS=${MODEL_SIGNING_KEYS:-}
+      # Auth for the sidecar API. Default off keeps local/demo zero-config; a
+      # network-exposed deployment MUST set CLUSTERING_REQUIRE_AUTH=1 plus
+      # CLUSTERING_API_KEY and MODEL_SIGNING_KEYS, or the sidecar refuses to
+      # start (see app/api/main.lifespan). See .env.example.
+      - API_KEY=${CLUSTERING_API_KEY:-}
+      - REQUIRE_AUTH=${CLUSTERING_REQUIRE_AUTH:-}
+      - CORS_ORIGINS=${CLUSTERING_CORS_ORIGINS:-}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+    # Re-fits hold the windowed feature matrix + IsolationForest(300) + the
+    # O(n^2) silhouette in memory. The graceful bound is the APP-SIDE window
+    # (CLUSTERING_WINDOW_TXS, the fit-population cap): keep it sized so a re-fit
+    # fits under this limit. mem_limit is the HARD backstop: exceed it and the
+    # kernel OOM-kills the container (then restart:unless-stopped recovers it)
+    # rather than starving ClickHouse (4g) + app (2g) + postgres (1g) on one box.
+    # It bounds blast radius; it does NOT degrade gracefully, so the window cap
+    # is what must keep a fit from reaching it.
+    mem_limit: ${CLUSTERING_MEM_LIMIT:-3g}
+    # Create/upgrade the tms_clustering schema, then serve + run the feed.
+    command: ["sh", "-c", "python -m app.cli migrate && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"]
+    volumes:
+      # Migration source for `app.cli migrate` (the engine's init SQL).
+      - ./services/clustering/clickhouse/init:/init:ro
+    ports:
+      # Loopback only; the host app reaches it in-network for the /api/clustering
+      # proxy. Exposed for debugging/observability.
+      - "127.0.0.1:${CLUSTERING_PORT:-8010}:8000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - tms-network
+    profiles:
+      - clustering  # `docker compose --profile clustering up` to include it
 
 volumes:
   postgres_data:

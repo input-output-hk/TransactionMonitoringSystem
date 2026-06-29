@@ -10,6 +10,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { TableFooter } from "@/components/ui/table-footer";
+import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
 import { archiveApi } from "@/lib/api/archive";
 import { useArchivedAlerts } from "@/lib/archive-store";
 import { ATTACK_ICON } from "@/lib/attack-display";
@@ -37,7 +38,7 @@ export function ArchivePage() {
 	const { id: detailId } = useParams<{ id?: string }>();
 	const [startDate, setStartDate] = useState(() => nDaysAgoISODate(60));
 	const [endDate, setEndDate] = useState(todayISODate);
-	const [pageSize, setPageSize] = useState(10);
+	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 	const [page, setPage] = useState(0);
 
 	const {

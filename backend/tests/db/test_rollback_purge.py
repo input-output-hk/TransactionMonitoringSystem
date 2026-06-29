@@ -11,10 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.config import settings
 from app.db import clickhouse
 from app.db.clickhouse import (
     _LIGHTWEIGHT_DELETE_SETTINGS,
     _ROLLBACK_CLEANUP_TABLES,
+    delete_clustering_rows,
     delete_rolled_back_txs,
 )
 
@@ -111,3 +113,60 @@ class TestPurgeStructure:
             _ROLLBACK_CLEANUP_TABLES
         )
         assert delete_rolled_back_txs("preprod", 100) == ["aa" * 32, "bb" * 32]
+
+
+class TestClusteringPurge:
+    """delete_clustering_rows: gated cross-database purge of the sidecar's
+    verdicts so a rollback leaves no ghost contract_anomaly rows and re-confirmed
+    txs get re-classified by the feed."""
+
+    @pytest.fixture(autouse=True)
+    def _enabled(self, monkeypatch):
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        monkeypatch.setattr(settings, "CLUSTERING_DB", "tms_clustering")
+
+    def test_noop_when_module_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", False)
+        delete_clustering_rows("preprod", ["aa" * 32])
+        assert _delete_calls(client) == []
+
+    def test_noop_on_empty_hashes(self, client):
+        delete_clustering_rows("preprod", [])
+        assert _delete_calls(client) == []
+
+    def test_purges_both_sidecar_tables(self, client):
+        delete_clustering_rows("preprod", ["aa" * 32])
+        targets = [
+            c.args[0].split("DELETE FROM ")[1].split(" ")[0]
+            for c in _delete_calls(client)
+        ]
+        assert targets == [
+            "tms_clustering.tx_contract_anomaly",
+            "tms_clustering.tx_classifications",
+        ]
+
+    def test_cross_db_deletes_carry_projection_mode(self, client):
+        # Same hazard as the host purge: a projection on either sidecar table
+        # makes an unsettinged lightweight DELETE throw on CH >= 24.7, which the
+        # best-effort handler swallows -> a ghost verdict survives the rollback.
+        delete_clustering_rows("preprod", ["aa" * 32])
+        deletes = _delete_calls(client)
+        assert len(deletes) == 2
+        for call in deletes:
+            assert call.kwargs.get("settings") == _LIGHTWEIGHT_DELETE_SETTINGS
+
+    def test_classifications_purge_match_is_fixedstring_safe(self, client):
+        # tx_classifications.tx_hash is FixedString(64); the host passes str
+        # hashes, so the match must go through toString() (mirrors the read
+        # path) or padding-sensitive comparison silently misses rows.
+        delete_clustering_rows("preprod", ["aa" * 32])
+        classif = next(
+            c for c in _delete_calls(client)
+            if "tx_classifications" in c.args[0]
+        )
+        assert "toString(tx_hash)" in classif.args[0]
+
+    def test_best_effort_swallows_missing_tables(self, client):
+        # The sidecar may never have run; a rollback must not crash chain sync.
+        client.execute.side_effect = RuntimeError("UNKNOWN_TABLE")
+        delete_clustering_rows("preprod", ["aa" * 32])  # must not raise

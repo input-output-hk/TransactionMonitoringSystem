@@ -5,7 +5,9 @@
 FROM node:22-alpine AS frontend-build
 WORKDIR /frontend
 RUN corepack enable
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the allowBuilds policy (e.g. es5-ext: false); pnpm
+# needs it present or `install` fails the ignored-build-scripts gate.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 ARG VITE_NETWORK=preprod
@@ -25,8 +27,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy config files (e.g., detection.yaml)
-COPY --chown=appuser:appgroup ../config/ ./config/
+# Copy config files (e.g., detection.yaml). The compose build context is the
+# repo root (see docker-compose.yml: build.context = .), so config/ is reached
+# directly; `../config/` pointed outside the context and failed the build.
+COPY --chown=appuser:appgroup config/ ./config/
 
 # Copy application code with correct ownership
 COPY --chown=appuser:appgroup backend/ ./backend/

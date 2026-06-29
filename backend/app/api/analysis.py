@@ -1,15 +1,25 @@
 """API endpoints for the multi-class Analysis Engine"""
 
-import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
+from app.analysis.engine import _CLASS_NAMES
+from app.api.contract_anomaly_read import (
+    _CONTRACT_ANOMALY,
+    _augment_stats_with_contract_anomaly,
+    _augment_timeseries_with_contract_anomaly,
+    _list_contract_anomaly_results,
+    _merge_contract_anomaly,
+    _merge_overlay_onto_page,
+    _rescue_flagged_onto_page,
+    _row_to_class_score,
+)
 from app.auth import verify_api_key
 from app.config import settings
-from app.db import archive_queries, clickhouse
+from app.db import archive_queries, clickhouse, clustering_queries
 from app.models.transaction import ClassScoreResult, NetworkType, RiskBand
 from app.utils.datetime_utils import format_iso_utc
 
@@ -17,53 +27,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
-_CLASS_NAMES = [
-    "token_dust", "large_value", "large_datum", "multiple_sat",
-    "front_running", "sandwich", "circular", "fake_token", "phishing",
-]
+# _CLASS_NAMES is imported from app.analysis.engine (the canonical scorer-order
+# source) so the API's class validation can't drift from the engine's order.
 
-
-def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
-    scores = {name: float(row.get(name, -1)) for name in _CLASS_NAMES}
-    def _decode_json_field(key: str) -> Dict[str, Any]:
-        value = row.get(key, {})
-        if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                return {}
-        return value or {}
-
-    sub_scores = _decode_json_field("sub_scores")
-    evidence = _decode_json_field("evidence")
-    return ClassScoreResult(
-        tx_hash=row["tx_hash"],
-        network=row["network"],
-        scores=scores,
-        max_score=float(row["max_score"]),
-        max_class=row["max_class"],
-        risk_band=RiskBand(row["risk_band"]),
-        sub_scores=sub_scores,
-        evidence=evidence,
-        analysis_version=row["analysis_version"],
-        analyzed_at=row["analyzed_at"],
-        corroboration_count=int(row.get("corroboration_count", 0) or 0),
-        corroborating_classes=row.get("corroborating_classes", "") or "",
-        fee=row.get("fee"),
-        output_count=row.get("output_count"),
-    )
+# Attack classes the list filter accepts. The nine stored classes are filterable
+# by the SQL path (max_class = attack_class); contract_anomaly is a read-time
+# overlay with no DB column, so it is filtered in Python (see
+# _list_contract_anomaly_results). It stays out of _CLASS_NAMES so the engine's
+# scorer-order contract is unaffected.
+_VALID_ATTACK_CLASSES = (*_CLASS_NAMES, _CONTRACT_ANOMALY)
 
 
 @router.get("/results/{tx_hash}", dependencies=[Security(verify_api_key)])
-async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
+async def get_analysis_result(
+    tx_hash: str,
+    network: Optional[NetworkType] = Query(None),
+) -> ClassScoreResult:
     """Full 9-class score vector with sub-score drill-down for a single transaction.
+
+    ``network`` defaults to the configured network; it scopes the lookup so a
+    tx_hash that also exists on another network cannot return the wrong row.
 
     If the transaction has been admin-archived as a false positive, the score is
     still returned (for audit context) and the ``archived`` field is populated
     so the UI can render it differently.
     """
+    query_network = network or settings.CARDANO_NETWORK
     try:
-        row = await clickhouse.get_class_scores_async(tx_hash)
+        row = await clickhouse.get_class_scores_async(tx_hash, query_network)
     except Exception as e:
         logger.error(f"Error fetching result for {tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch result")
@@ -84,6 +75,16 @@ async def get_analysis_result(tx_hash: str) -> ClassScoreResult:
     except Exception as e:
         # Archive enrichment is best-effort; never fail the main fetch.
         logger.warning(f"Archive enrichment failed for {tx_hash}: {e}")
+    if settings.CLUSTERING_ENABLED:
+        try:
+            ca = await clustering_queries.get_contract_anomaly_async(
+                row["network"], row["tx_hash"],
+            )
+            if ca:
+                _merge_contract_anomaly(result, ca)
+        except Exception as e:
+            # Read-time merge is best-effort; never fail the main fetch.
+            logger.warning(f"contract_anomaly merge failed for {tx_hash}: {e}")
     return result
 
 
@@ -123,10 +124,11 @@ async def list_analysis_results(
     offset: int = Query(0, ge=0),
 ):
     """List multi-class scoring results with optional filters."""
-    if attack_class and attack_class not in _CLASS_NAMES:
+    if attack_class and attack_class not in _VALID_ATTACK_CLASSES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown attack class '{attack_class}'. Valid: {_CLASS_NAMES}",
+            detail=f"Unknown attack class '{attack_class}'. "
+            f"Valid: {list(_VALID_ATTACK_CLASSES)}",
         )
     if sort not in ("score", "date"):
         raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
@@ -135,31 +137,64 @@ async def list_analysis_results(
         # Normalize the enum list to plain strings, passing None when the
         # caller didn't supply any band so the DB layer skips the WHERE.
         rbs = [b.value for b in risk_band] if risk_band else None
-        rows = await clickhouse.get_class_scores_list_async(
+        # The synthetic class has no DB column, so the SQL path can't filter it.
+        # Route it to the in-memory resolver. When clustering is disabled the
+        # class never exists, so the filtered page is legitimately empty (not an
+        # error): the frontend offers the filter unconditionally.
+        if attack_class == _CONTRACT_ANOMALY:
+            if not settings.CLUSTERING_ENABLED:
+                return {"count": 0, "total": 0, "data": []}
+            try:
+                ca_data, ca_total = await _list_contract_anomaly_results(
+                    query_network,
+                    bands=rbs,
+                    min_score=min_score,
+                    analyzed_from=analyzed_from,
+                    analyzed_to=analyzed_to,
+                    min_corroboration=min_corroboration,
+                    sort=sort,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as e:
+                # Best-effort, matching the rest of the sidecar read path: a
+                # sidecar hiccup degrades to an empty page (surfaced via the
+                # /health freshness probe) rather than failing the request.
+                logger.warning(f"contract_anomaly list filter failed: {e}")
+                ca_data, ca_total = [], 0
+            return {"count": len(ca_data), "total": ca_total, "data": ca_data}
+        # Shared filter predicate: list and count MUST apply identical filters or
+        # the pagination total drifts from the rows shown. sort/limit/offset are
+        # list-only (they do not affect the count) and stay out of this dict.
+        filters = dict(
             network=query_network,
             risk_band=rbs,
             attack_class=attack_class,
             min_score=min_score,
-            sort=sort,
             analyzed_from=analyzed_from,
             analyzed_to=analyzed_to,
-            limit=limit,
-            offset=offset,
             min_corroboration=min_corroboration,
         )
-        total = await clickhouse.count_class_scores_async(
-            network=query_network,
-            risk_band=rbs,
-            attack_class=attack_class,
-            min_score=min_score,
-            analyzed_from=analyzed_from,
-            analyzed_to=analyzed_to,
-            min_corroboration=min_corroboration,
+        rows = await clickhouse.get_class_scores_list_async(
+            **filters, sort=sort, limit=limit, offset=offset,
+        )
+        total = await clickhouse.count_class_scores_async(**filters)
+        data = [_row_to_class_score(r) for r in rows]
+        # Enrich the page with sidecar verdicts, then re-admit any flagged tx the
+        # DB filter dropped on its stored score (recall rescue). Both are
+        # recall-safe and best-effort; see the helper docstrings.
+        await _merge_overlay_onto_page(query_network, data)
+        rescued_total = await _rescue_flagged_onto_page(
+            query_network, data,
+            min_score=min_score, bands=rbs,
+            attack_class=attack_class, min_corroboration=min_corroboration,
+            analyzed_from=analyzed_from, analyzed_to=analyzed_to,
+            sort=sort, limit=limit, offset=offset,
         )
         return {
-            "count": len(rows),
-            "total": total,
-            "data": [_row_to_class_score(r) for r in rows],
+            "count": len(data),
+            "total": total + rescued_total,
+            "data": data,
         }
     except Exception as e:
         logger.error(f"Error listing results: {e}")
@@ -173,7 +208,16 @@ async def analysis_stats(
     """Per-class score distributions, band counts, and aggregate stats."""
     query_network = network or settings.CARDANO_NETWORK
     try:
-        return await clickhouse.get_class_scores_stats_async(query_network)
+        stats = await clickhouse.get_class_scores_stats_async(query_network)
+        if settings.CLUSTERING_ENABLED:
+            # Reconcile band counts to the EFFECTIVE band so contract-anomaly-only
+            # detections aren't undercounted in the KPI cards. Best-effort: the
+            # sidecar being down must not fail the dashboard's stats.
+            try:
+                await _augment_stats_with_contract_anomaly(query_network, stats)
+            except Exception as e:
+                logger.warning(f"contract_anomaly stats augmentation failed: {e}")
+        return stats
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch stats")
@@ -190,6 +234,16 @@ async def analysis_stats_timeseries(
     query_network = network or settings.CARDANO_NETWORK
     try:
         data = await clickhouse.get_alert_timeseries_async(query_network, days)
+        if settings.CLUSTERING_ENABLED:
+            # Fold contract-anomaly-only alerts (High/Critical by effective band)
+            # into the daily counts so the sparkline matches the KPI cards.
+            # Best-effort: never fail the timeseries on a sidecar hiccup.
+            try:
+                await _augment_timeseries_with_contract_anomaly(
+                    query_network, days, data,
+                )
+            except Exception as e:
+                logger.warning(f"contract_anomaly timeseries augmentation failed: {e}")
         return {"network": query_network, "days": days, "data": data}
     except Exception as e:
         logger.error(f"Error fetching timeseries: {e}")

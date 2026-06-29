@@ -9,7 +9,7 @@ import logging
 import math
 import statistics
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
@@ -21,6 +21,14 @@ _CIRCULAR_CFG = _get_cfg("circular")
 _CYCLE_CFG = _CIRCULAR_CFG["cycle"]
 _MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
 _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
+# Per-hop row cap on the forward BFS scan. Config-backed (not an inline literal)
+# because it controls recall: rows are ordered by slot ASC so a truncation keeps
+# the earliest legs, but a hub hop with more than this many spends loses the
+# tail. Raise in config if real layering is missed; never lower for precision.
+_BFS_HOP_ROW_LIMIT = int(_CYCLE_CFG["bfs_hop_row_limit"])
+# Fallback inter-hop delta (slots) when hop timing is unmeasurable. Shared with
+# the circular scorer via config so the feature and the read cannot drift.
+_DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE_CFG["default_inter_hop_delta_slots"])
 # Public alias: the engine's cycle pre-filter must key off the same knob so
 # the two sites cannot drift (the engine previously hardcoded the value).
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
@@ -158,7 +166,7 @@ def detect_cycle(
               AND t.slot <= %(max_slot)s
               AND ti.tx_hash != %(origin_tx)s
             ORDER BY t.slot ASC
-            LIMIT 500
+            LIMIT %(hop_row_limit)s
             """,
             {
                 "addresses": addr_list,
@@ -166,6 +174,7 @@ def detect_cycle(
                 "min_slot": origin_slot,
                 "max_slot": (origin_slot or 0) + _MAX_AGE_SLOTS,
                 "origin_tx": tx_hash,
+                "hop_row_limit": _BFS_HOP_ROW_LIMIT,
             },
         )
 
@@ -335,9 +344,9 @@ def _build_cycle_result(
     # Mean inter-hop delta in slots
     if len(hop_slots) >= 2:
         deltas = [hop_slots[i + 1] - hop_slots[i] for i in range(len(hop_slots) - 1) if hop_slots[i + 1] > hop_slots[i]]
-        mean_delta = sum(deltas) / len(deltas) if deltas else 100.0
+        mean_delta = sum(deltas) / len(deltas) if deltas else float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
     else:
-        mean_delta = 100.0
+        mean_delta = float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
 
     return {
         "cycle_length": cycle_length,

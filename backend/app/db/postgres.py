@@ -1,5 +1,6 @@
 """PostgreSQL database connection and operations"""
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -13,12 +14,30 @@ logger = logging.getLogger(__name__)
 
 # Global connection pool
 _pool: Optional[asyncpg.Pool] = None
+# Serializes pool creation: without it two concurrent init_pool() callers could
+# both observe `_pool is None`, both create_pool(), and one pool would leak
+# (its connections never closed). asyncio.Lock() needs no running loop to
+# construct on the supported Python versions.
+_pool_init_lock = asyncio.Lock()
+
+
+def _affected_rows(command_tag: str) -> int:
+    """Row count from an asyncpg command tag. asyncpg returns the SQL command tag
+    string ('UPDATE 3', 'DELETE 12') for non-SELECT statements; the affected-row
+    count is its last whitespace-separated token."""
+    return int(command_tag.split()[1])
 
 
 async def init_pool():
-    """Initialize PostgreSQL connection pool"""
+    """Initialize PostgreSQL connection pool (idempotent, concurrency-safe)."""
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    async with _pool_init_lock:
+        # Re-check inside the lock: a racing caller may have created it while we
+        # waited, so we must not build (and leak) a second pool.
+        if _pool is not None:
+            return _pool
         try:
             _pool = await asyncpg.create_pool(
                 host=settings.POSTGRES_HOST,
@@ -26,14 +45,14 @@ async def init_pool():
                 user=settings.POSTGRES_USER,
                 password=settings.POSTGRES_PASSWORD,
                 database=settings.POSTGRES_DB,
-                min_size=2,
-                max_size=10,
-                # Recycle connections idle > 5 min so a PG restart or transient
-                # network blip doesn't leave stale sockets in the pool.
-                max_inactive_connection_lifetime=300.0,
-                # Cap any single statement at 30 s to prevent a stuck query from
-                # pinning a pool slot indefinitely.
-                command_timeout=30.0,
+                min_size=settings.POSTGRES_POOL_MIN_SIZE,
+                max_size=settings.POSTGRES_POOL_MAX_SIZE,
+                # Recycle connections idle beyond this so a PG restart or
+                # transient network blip doesn't leave stale sockets in the pool.
+                max_inactive_connection_lifetime=settings.POSTGRES_POOL_MAX_IDLE_SECONDS,
+                # Cap any single statement so a stuck query can't pin a pool
+                # slot indefinitely.
+                command_timeout=settings.POSTGRES_STATEMENT_TIMEOUT_SECONDS,
             )
             logger.info("PostgreSQL connection pool initialized")
         except Exception as e:
@@ -532,8 +551,7 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
               AND status        = 'PENDING'
               AND first_seen_at < NOW() - ($2 * INTERVAL '1 second')
         """, network, older_than_seconds)
-        # asyncpg returns "UPDATE N" — extract the row count
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 async def insert_audit_log(
@@ -584,7 +602,7 @@ async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
               AND status IN ('DROPPED', 'ROLLED_BACK')
               AND updated_at < NOW() - ($2 * INTERVAL '1 day')
         """, network, older_than_days)
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 async def prune_audit_logs(older_than_days: int) -> int:
@@ -599,7 +617,7 @@ async def prune_audit_logs(older_than_days: int) -> int:
             DELETE FROM audit_logs
             WHERE created_at < NOW() - ($1 * INTERVAL '1 day')
         """, older_than_days)
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
@@ -616,7 +634,7 @@ async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
             WHERE network    = $1
               AND created_at < NOW() - ($2 * INTERVAL '1 day')
         """, network, older_than_days)
-        return int(result.split()[1])
+        return _affected_rows(result)
 
 
 # --- Mempool Collision Tracking (Front-Running Detection) ---
@@ -751,18 +769,3 @@ async def update_collision_outcome(confirmed_tx_hash: str, network: str):
               AND (tx_a = $1 OR tx_b = $1)
               AND outcome = 'BOTH_PENDING'
         """, confirmed_tx_hash, network)
-
-
-async def count_collision_wins(address: str, network: str) -> int:
-    """Count how many collisions an address cluster has won (for recurrence scoring)."""
-    async with get_connection() as conn:
-        row = await conn.fetchrow("""
-            SELECT COUNT(*) AS cnt
-            FROM mempool_collisions
-            WHERE network = $1
-              AND (
-                  (outcome = 'TX_A_CONFIRMED' AND tx_a_first_input_addr = $2)
-                  OR (outcome = 'TX_B_CONFIRMED' AND tx_b_first_input_addr = $2)
-              )
-        """, network, address)
-        return row["cnt"] if row else 0

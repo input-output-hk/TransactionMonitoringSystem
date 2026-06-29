@@ -24,7 +24,7 @@ from app.ingestion.input_enrichment import (
 )
 from app.ingestion.mempool_monitor import MempoolMonitor
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
-from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
+from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
@@ -132,7 +132,7 @@ class OgmiosClient:
             self.ws_url,
             ping_interval=settings.OGMIOS_HEARTBEAT_INTERVAL,
             ping_timeout=settings.OGMIOS_HEARTBEAT_TIMEOUT,
-            max_size=64 * 1024 * 1024,  # 64MB for large blocks
+            max_size=settings.OGMIOS_WS_MAX_FRAME_BYTES,
         )
         logger.info(f"Ogmios [{label}]: connected to {self.ws_url}")
         return ws
@@ -194,34 +194,29 @@ class OgmiosClient:
 
     async def run_chain_sync(self):
         """Connect to Ogmios and run the ChainSync mini-protocol with resilience."""
-        while self._running:
-            if not self._circuit_breaker_chain.can_attempt():
-                logger.warning("Ogmios [chain]: circuit breaker OPEN, waiting for cooldown")
-                await asyncio.sleep(10)
-                continue
+        async def _connect():
+            self._chain_ws = await self._connect_ws("chain")
+            return self._chain_ws
 
-            try:
-                self._chain_ws = await self._connect_ws("chain")
-                self._connected_chain = True
-                self._circuit_breaker_chain.record_success()
-                self._backoff_chain.reset()
+        async def _close():
+            if self._chain_ws:
+                await self._chain_ws.close()
+                self._chain_ws = None
 
-                await self._chain_sync_loop(self._chain_ws)
+        def _set_connected(value: bool) -> None:
+            self._connected_chain = value
 
-            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-                logger.warning(f"Ogmios [chain]: connection lost: {e}")
-                self._connected_chain = False
-                self._circuit_breaker_chain.record_failure()
-                await self._backoff_chain.wait()
-            except Exception as e:
-                logger.error(f"Ogmios [chain]: unexpected error: {e}")
-                self._connected_chain = False
-                self._circuit_breaker_chain.record_failure()
-                await self._backoff_chain.wait()
-            finally:
-                if self._chain_ws:
-                    await self._chain_ws.close()
-                    self._chain_ws = None
+        await run_with_reconnect(
+            name="chain",
+            is_running=lambda: self._running,
+            breaker=self._circuit_breaker_chain,
+            backoff=self._backoff_chain,
+            connect=_connect,
+            run_session=self._chain_sync_loop,
+            on_connected=_set_connected,
+            close=_close,
+            poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+        )
 
     async def _chain_sync_loop(self, ws):
         """ChainSync: findIntersection → nextBlock loop."""
@@ -520,6 +515,14 @@ class OgmiosClient:
                 self._repurge_tasks.add(task)
                 task.add_done_callback(self._repurge_tasks.discard)
 
+                # Purge the optional clustering sidecar's verdicts for the same
+                # orphaned txs (no-op when the module is off): drops ghost
+                # contract_anomaly rows for vanished txs and makes any
+                # re-confirmed tx "unclassified" again so the feed re-scores it.
+                await clickhouse.delete_clustering_rows_async(
+                    self.network, purged_hashes,
+                )
+
         if rollback_id:
             await postgres.save_sync_point(self.network, rollback_slot, rollback_id)
 
@@ -617,12 +620,15 @@ class OgmiosClient:
 
     @property
     def pipeline_state(self) -> str:
-        """Derived health state for the chain-sync pipeline.
+        """Derived health state for the chain-sync pipeline, using the PIPELINE_*
+        thresholds in config:
 
-        OK       — circuit breaker closed, block received within last 120 s
-        DEGRADED — circuit breaker half-open, or no block for 120-300 s
-        DOWN     — circuit breaker open, or no block for > 300 s, or never
-                   connected after a 60 s grace period
+        OK:       circuit breaker closed and a block seen within
+                  PIPELINE_BLOCK_AGE_DEGRADED_SECONDS
+        DEGRADED: circuit breaker half-open, or block age between the DEGRADED and
+                  DOWN thresholds
+        DOWN:     circuit breaker open, block age past PIPELINE_BLOCK_AGE_DOWN_SECONDS,
+                  or never connected after PIPELINE_STARTUP_GRACE_SECONDS
         """
         cb = self._circuit_breaker_chain.state.value
         if cb == "OPEN":
@@ -630,12 +636,12 @@ class OgmiosClient:
 
         if self._last_block_at is None:
             uptime = (datetime.now(timezone.utc) - self._started_at).total_seconds()
-            return "OK" if uptime < 60 else "DEGRADED"
+            return "OK" if uptime < settings.PIPELINE_STARTUP_GRACE_SECONDS else "DEGRADED"
 
         block_age = (datetime.now(timezone.utc) - self._last_block_at).total_seconds()
-        if block_age > 300:
+        if block_age > settings.PIPELINE_BLOCK_AGE_DOWN_SECONDS:
             return "DOWN"
-        if block_age > 120 or cb == "HALF_OPEN":
+        if block_age > settings.PIPELINE_BLOCK_AGE_DEGRADED_SECONDS or cb == "HALF_OPEN":
             return "DEGRADED"
         return "OK"
 

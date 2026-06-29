@@ -74,6 +74,9 @@ def _minimal_config():
         "composite_corroboration": {
             k: 40.0 for k in sc._REQUIRED_COMPOSITE_CORROBORATION
         },
+        # Top-level contract_anomaly projection block, built from the loader's
+        # own declared requirements so a new required key auto-appears here.
+        "contract_anomaly": _expand_dotted(sc._REQUIRED_CONTRACT_ANOMALY, 40.0),
         # Values mirror the shipped config: tests that do NOT reload read
         # scorer_config module globals (e.g. _P99_CAP_MULTIPLIER), and a
         # reload from this fixture must not silently change them.
@@ -169,6 +172,24 @@ class TestValidation:
         cfg = _minimal_config()
         cfg["scorers"]["multiple_sat"] = "not a mapping"
         with pytest.raises(RuntimeError, match="must be a mapping"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_missing_contract_anomaly_raises(self, tmp_path, monkeypatch):
+        cfg = _minimal_config()
+        del cfg["contract_anomaly"]
+        with pytest.raises(RuntimeError, match="top-level 'contract_anomaly' mapping"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_missing_contract_anomaly_floor_raises_with_path(
+        self, tmp_path, monkeypatch
+    ):
+        # A missing verdict floor must fail fast with its full dotted path, so a
+        # mis-edited projection cannot silently score every verdict at 0.
+        cfg = _minimal_config()
+        del cfg["contract_anomaly"]["verdict_floors"]["malicious"]
+        with pytest.raises(
+            RuntimeError, match=r"contract_anomaly\.verdict_floors\.malicious",
+        ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_missing_baselines_drift_leaf_raises_with_path(

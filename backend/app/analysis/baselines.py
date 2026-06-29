@@ -442,15 +442,29 @@ def _query_percentiles(
     feature: str,
     network: str,
     window_days: int,
+    *,
+    scope_column: Optional[str] = None,
+    scope_value: Optional[str] = None,
 ) -> Optional[Tuple[float, float, int]]:
-    """Query p50 and p99 for a feature from a ClickHouse table.
+    """Query p50 and p99 for a feature over the chain-time window.
 
-    Returns (p50, p99, sample_count) or None if no data.
+    With ``scope_column``/``scope_value`` set, the percentiles are restricted to a
+    single address or policy; the scope predicate is applied INSIDE the feature
+    subquery (before the JOIN) so it filters which feature rows feed the quantiles
+    and never touches the chain-time window side. Returns (p50, p99, sample_count)
+    or None if no data.
     """
     if table not in _ALLOWED_TABLES:
         raise ValueError(f"Disallowed table: {table}")
     if feature not in _ALLOWED_FEATURES:
         raise ValueError(f"Disallowed feature: {feature}")
+    scope_sql = ""
+    params = {"network": network, "days": window_days}
+    if scope_column is not None:
+        if scope_column not in _ALLOWED_SCOPE_COLUMNS:
+            raise ValueError(f"Disallowed scope_column: {scope_column}")
+        scope_sql = f"\n                  AND {scope_column} = %(scope_value)s"
+        params["scope_value"] = scope_value
     try:
         client = clickhouse._get_client()
         # Window on CHAIN time (transactions.timestamp), not ingestion time:
@@ -469,13 +483,18 @@ def _query_percentiles(
         # JOIN exists to prevent. The retention coupling (transactions
         # retention shorter than the window silently shrinks the sample)
         # is surfaced by the warning in clickhouse_schema.apply_retention_ttls.
+        # The optional scope predicate lives in the feature subquery so it never
+        # filters the chain-time window side.
         rows = client.execute(
             f"""
             SELECT
                 quantileExact(0.50)(toFloat64(f.{feature})) AS p50,
                 quantileExact(0.99)(toFloat64(f.{feature})) AS p99,
                 count() AS cnt
-            FROM (SELECT * FROM {table} FINAL WHERE network = %(network)s) f
+            FROM (
+                SELECT * FROM {table} FINAL
+                WHERE network = %(network)s{scope_sql}
+            ) f
             JOIN (
                 SELECT tx_hash, network, timestamp FROM transactions FINAL
                 WHERE network = %(network)s
@@ -483,12 +502,13 @@ def _query_percentiles(
             ) t ON f.tx_hash = t.tx_hash AND f.network = t.network
             WHERE t.timestamp >= now() - INTERVAL %(days)s DAY
             """,
-            {"network": network, "days": window_days},
+            params,
         )
         if rows and rows[0][2] > 0:
             return float(rows[0][0]), float(rows[0][1]), int(rows[0][2])
     except Exception:
-        logger.exception(f"Failed to query percentiles for {table}.{feature}")
+        scope = "" if scope_column is None else f" @ {scope_column}={str(scope_value)[:16]}"
+        logger.exception(f"Failed to query percentiles for {table}.{feature}{scope}")
     return None
 
 
@@ -500,42 +520,8 @@ def _query_percentiles_scoped(
     scope_value: str,
     window_days: int,
 ) -> Optional[Tuple[float, float, int]]:
-    """Query p50 and p99 scoped to a specific address or policy."""
-    if table not in _ALLOWED_TABLES:
-        raise ValueError(f"Disallowed table: {table}")
-    if feature not in _ALLOWED_FEATURES:
-        raise ValueError(f"Disallowed feature: {feature}")
-    if scope_column not in _ALLOWED_SCOPE_COLUMNS:
-        raise ValueError(f"Disallowed scope_column: {scope_column}")
-    try:
-        client = clickhouse._get_client()
-        # Chain-time window + exact quantiles + FINAL dedup: same rationale
-        # as _query_percentiles above.
-        rows = client.execute(
-            f"""
-            SELECT
-                quantileExact(0.50)(toFloat64(f.{feature})) AS p50,
-                quantileExact(0.99)(toFloat64(f.{feature})) AS p99,
-                count() AS cnt
-            FROM (
-                SELECT * FROM {table} FINAL
-                WHERE network = %(network)s
-                  AND {scope_column} = %(scope_value)s
-            ) f
-            JOIN (
-                SELECT tx_hash, network, timestamp FROM transactions FINAL
-                WHERE network = %(network)s
-                  AND timestamp >= now() - INTERVAL %(days)s DAY
-            ) t ON f.tx_hash = t.tx_hash AND f.network = t.network
-            WHERE t.timestamp >= now() - INTERVAL %(days)s DAY
-            """,
-            {"network": network, "scope_value": scope_value, "days": window_days},
-        )
-        if rows and rows[0][2] > 0:
-            return float(rows[0][0]), float(rows[0][1]), int(rows[0][2])
-    except Exception:
-        logger.exception(
-            f"Failed to query scoped percentiles for "
-            f"{table}.{feature} @ {scope_column}={scope_value[:16]}"
-        )
-    return None
+    """Per-address/policy p50/p99 (thin wrapper over _query_percentiles)."""
+    return _query_percentiles(
+        table, feature, network, window_days,
+        scope_column=scope_column, scope_value=scope_value,
+    )

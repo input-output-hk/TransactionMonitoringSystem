@@ -23,13 +23,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-import websockets
-
 from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
 from app.db import postgres, raw_store
 from app.ingestion.input_enrichment import parse_resolved_utxo
-from app.ingestion.resilience import ExponentialBackoff, CircuitBreaker
+from app.ingestion.ogmios_parser import ogmios_input_ref
+from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
@@ -106,6 +105,13 @@ class MempoolMonitor:
         self._running = True   # set once here; stop() sets it False
         self.connected = False
 
+        # Strong refs to fire-and-forget raw-store writes. asyncio only weakly
+        # references tasks, so a bare create_task() can be GC'd before it runs
+        # (the raw payload silently never persists). Keeping the ref pins the
+        # task; the done-callback logs any failure (instead of swallowing it)
+        # and drops the ref.
+        self._bg_tasks: Set[asyncio.Task] = set()
+
         # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
         self._seen_mempool_txs: Set[str] = set()
 
@@ -141,6 +147,24 @@ class MempoolMonitor:
             failure_threshold=settings.OGMIOS_CIRCUIT_BREAKER_THRESHOLD,
             cooldown=settings.OGMIOS_CIRCUIT_BREAKER_COOLDOWN,
         )
+
+    def _spawn_bg(self, coro, label: str) -> None:
+        """Run a fire-and-forget coroutine with a retained ref and error logging.
+
+        Replaces a bare asyncio.create_task(), which (a) can be GC'd before it
+        finishes because asyncio holds tasks only weakly, and (b) swallows any
+        exception. The ref lives in ``self._bg_tasks`` until the task ends; the
+        callback logs a failure rather than dropping it silently.
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._bg_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("Background task %s failed: %r", label, t.exception())
+
+        task.add_done_callback(_done)
 
     # --- Seams called by the chain-sync client ---
 
@@ -282,33 +306,29 @@ class MempoolMonitor:
 
     async def run(self):
         """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
-        while self._running:
-            if not self._circuit_breaker.can_attempt():
-                await asyncio.sleep(10)
-                continue
+        async def _connect():
+            self._ws = await self._connect_ws("mempool")
+            return self._ws
 
-            try:
-                self._ws = await self._connect_ws("mempool")
-                self.connected = True
-                self._circuit_breaker.record_success()
-                self._backoff.reset()
+        async def _close():
+            if self._ws:
+                await self._ws.close()
+                self._ws = None
 
-                await self._mempool_loop(self._ws)
+        def _set_connected(value: bool) -> None:
+            self.connected = value
 
-            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-                logger.warning(f"Ogmios [mempool]: connection lost: {e}")
-                self.connected = False
-                self._circuit_breaker.record_failure()
-                await self._backoff.wait()
-            except Exception as e:
-                logger.error(f"Ogmios [mempool]: unexpected error: {e}")
-                self.connected = False
-                self._circuit_breaker.record_failure()
-                await self._backoff.wait()
-            finally:
-                if self._ws:
-                    await self._ws.close()
-                    self._ws = None
+        await run_with_reconnect(
+            name="mempool",
+            is_running=lambda: self._running,
+            breaker=self._circuit_breaker,
+            backoff=self._backoff,
+            connect=_connect,
+            run_session=self._mempool_loop,
+            on_connected=_set_connected,
+            close=_close,
+            poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+        )
 
     async def _record_mempool_collisions(
         self, tx_id: str, tx_data: dict, now: datetime,
@@ -332,9 +352,7 @@ class MempoolMonitor:
         if first_inp:
             first_input_addr = first_inp.get("address", "")
         for inp in tx_data.get("inputs", []):
-            inp_tx = inp.get("transaction", {})
-            inp_hash = inp_tx.get("id", "") if isinstance(inp_tx, dict) else str(inp_tx)
-            input_refs.add((inp_hash, inp.get("index", 0)))
+            input_refs.add(ogmios_input_ref(inp))
 
         if input_refs:
             # Check for collisions with existing pending txs
@@ -479,8 +497,9 @@ class MempoolMonitor:
 
                 # Write raw mempool payload to local filesystem store (non-blocking)
                 if settings.RAW_STORE_ENABLED:
-                    asyncio.create_task(
-                        raw_store.write_mempool(self.network, tx_id, tx_data, now)
+                    self._spawn_bg(
+                        raw_store.write_mempool(self.network, tx_id, tx_data, now),
+                        label=f"raw_store.write_mempool({tx_id})",
                     )
 
                 try:
