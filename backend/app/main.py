@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
 
-from app.config import settings
+from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
 
 # Configure logging before importing modules that emit log records at import time
 # (e.g. app.analysis.scorer_config which logs the config file it loaded).
@@ -33,13 +33,18 @@ from app.rate_limit import (
     stop_all_cleanups,
 )
 from app.db import postgres, clickhouse, raw_store
-from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api
+from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api
 from app.tasks import analysis as analysis_task
 from app.routers import ui, websocket
 
 # Global state
 active_connections: List = []
 ogmios_client = None
+# Strong references to the ingestion supervisor tasks. asyncio holds only weak
+# references to tasks, so a bare create_task() can be garbage-collected mid-run
+# (ingestion silently dies); keeping them here pins their lifetime and lets
+# shutdown await them. See lifespan().
+_ingestion_tasks: List[asyncio.Task] = []
 
 
 async def _supervised(label: str, coro_fn):
@@ -126,6 +131,18 @@ def _validate_startup_settings() -> None:
                 "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
             )
         logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
+    # A baked-in default Postgres password is a guessable credential, never a
+    # production posture. Same fail-fast as API_KEYS / CLICKHOUSE_PASSWORD:
+    # refuse to start on the known dev default unless dev mode is explicit.
+    if settings.POSTGRES_PASSWORD == DEFAULT_DEV_POSTGRES_PASSWORD:
+        if not allow_dev_mode:
+            raise RuntimeError(
+                "POSTGRES_PASSWORD is the well-known dev default. Refusing to "
+                "start on a guessable credential. Set POSTGRES_PASSWORD (and "
+                "the matching docker-compose env) for production, or "
+                "TMS_ALLOW_DEV_MODE=1 for local dev."
+            )
+        logger.warning("POSTGRES_PASSWORD is the dev default — guessable credential (development mode)")
     # Capped ClickHouse payloads make the raw store the ONLY full copy of
     # oversized (attack-shaped) transactions; running capped without the
     # store means those txs could never be scored at full fidelity.
@@ -211,8 +228,13 @@ async def lifespan(app: FastAPI):
         ogmios_client = OgmiosClient(on_lifecycle_event=broadcast_lifecycle_event)
         websocket.set_active_connections(active_connections)
 
-        asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
-        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
+        _ingestion_tasks.clear()
+        _ingestion_tasks.append(
+            asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
+        )
+        _ingestion_tasks.append(
+            asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
+        )
         logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
 
     except Exception as e:
@@ -228,6 +250,15 @@ async def lifespan(app: FastAPI):
         analysis_task.stop()
     if ogmios_client:
         await ogmios_client.disconnect()
+    # disconnect() signals the supervised coroutines to return; cancel-then-
+    # gather so the tasks are actually awaited (not left dangling / GC'd) and a
+    # wedged one is force-stopped. return_exceptions keeps one failure from
+    # masking the others during shutdown.
+    for task in _ingestion_tasks:
+        task.cancel()
+    if _ingestion_tasks:
+        await asyncio.gather(*_ingestion_tasks, return_exceptions=True)
+        _ingestion_tasks.clear()
     await postgres.close_pool()
     clickhouse.close_client()
     clickhouse.shutdown_executor()
@@ -304,6 +335,7 @@ app.include_router(analysis.router)
 app.include_router(archive.router)
 app.include_router(auth_api.router)
 app.include_router(users_api.router)
+app.include_router(clustering_api.router)
 
 
 @app.get("/health")
@@ -347,12 +379,49 @@ async def health_detail(api_key: str = Security(verify_api_key)):
         "network": settings.CARDANO_NETWORK,
         "connections": len(active_connections),
         "pipeline_state": "UNKNOWN",
+        # Lets the SPA show the Validators surfaces only when the module is on.
+        "clustering_enabled": settings.CLUSTERING_ENABLED,
     }
     if ogmios_client:
         ogmios_status = ogmios_client.status
         result["ogmios"] = ogmios_status
         result["pipeline_state"] = ogmios_status["pipeline_state"]
+    if settings.CLUSTERING_ENABLED:
+        result["clustering"] = await _clustering_health()
     return result
+
+
+async def _clustering_health() -> dict:
+    """Freshness of the clustering sidecar's verdicts (best-effort).
+
+    With CLUSTERING_ENABLED set but the sidecar down or never run, the read-merge
+    would silently serve stale/empty contract_anomaly verdicts. This surfaces
+    that as a degraded state instead: ``absent`` when the sibling table is
+    unreachable/empty, ``stale`` when the newest verdict is older than the
+    configured freshness window, else ``ok``.
+    """
+    from datetime import datetime, timezone
+
+    from app.analysis.contract_anomaly import freshness_seconds
+    from app.db import clustering_queries
+
+    try:
+        latest = await clustering_queries.latest_scored_at_async(settings.CARDANO_NETWORK)
+    except Exception:  # noqa: BLE001 - health probe never raises
+        return {"state": "error", "last_scored_at": None}
+    if latest is None:
+        return {"state": "absent", "last_scored_at": None}
+    window = freshness_seconds()
+    age = (datetime.now(timezone.utc) - _as_aware_utc(latest)).total_seconds()
+    state = "stale" if (window and age > window) else "ok"
+    return {"state": state, "last_scored_at": str(latest), "age_seconds": round(age)}
+
+
+def _as_aware_utc(dt):
+    """Treat a naive ClickHouse DateTime as UTC (it stores UTC wall-clock)."""
+    from datetime import timezone
+
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 # SPA mount goes LAST so /api/*, /health, /ws, etc. still match their routes

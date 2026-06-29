@@ -8,6 +8,9 @@ export const ATTACK_TYPES = [
 	"Circular",
 	"Fake Token",
 	"Phishing",
+	// Synthetic class merged in from the optional clustering sidecar (read-time);
+	// see backend AttackClass.CONTRACT_ANOMALY. toSnake -> "contract_anomaly".
+	"Contract Anomaly",
 ] as const;
 
 export type AttackType = (typeof ATTACK_TYPES)[number];
@@ -53,6 +56,26 @@ export const SUB_SCORE_LABELS: Record<
 	AttackType,
 	Array<{ key: string; label: string; description: string }>
 > = {
+	"Contract Anomaly": [
+		{
+			key: "consensus",
+			label: "Ensemble Consensus",
+			description:
+				"Agreement across the clustering engine's anomaly detectors (Isolation Forest, Local Outlier Factor, DBSCAN-noise) that this transaction is an outlier within its contract's population, in [0,1].",
+		},
+		{
+			key: "votes",
+			label: "Detector Votes",
+			description:
+				"How many independent detectors flagged the transaction. Two or more votes is treated as an auto-anomaly verdict.",
+		},
+		{
+			key: "cluster_id",
+			label: "Cluster",
+			description:
+				"The DBSCAN cluster the transaction was assigned to within its contract (-1 = noise / unassigned, i.e. it matches no learned behaviour cluster).",
+		},
+	],
 	Phishing: [
 		{
 			key: "domain_suspicion",
@@ -433,6 +456,15 @@ export const ATTACK_META: Record<
 	AttackType,
 	{ description: string; subScores: SubScore[] }
 > = {
+	"Contract Anomaly": {
+		description:
+			"The clustering sidecar found this transaction to be an outlier within its watched contract's transaction population (it matches no learned behaviour cluster or trips multiple anomaly detectors).",
+		subScores: [
+			{ label: "Ensemble Consensus", percent: 66 },
+			{ label: "Detector Votes", percent: 67 },
+			{ label: "Cluster Membership", percent: 50 },
+		],
+	},
 	Sandwich: {
 		description:
 			"Front-runs a victim transaction and back-runs it to extract value by manipulating the AMM price.",

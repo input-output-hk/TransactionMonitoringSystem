@@ -62,7 +62,17 @@ class RiskBand(str, Enum):
 
 
 class AttackClass(str, Enum):
-    """The nine attack classes defined by the Polimi detection spec."""
+    """The nine attack classes defined by the Polimi detection spec, plus the
+    read-time-only ``contract_anomaly`` class.
+
+    The first nine are produced by the in-process per-transaction scorers and
+    written to ``tx_class_scores``. ``contract_anomaly`` is NOT one of them: it
+    is the verdict of the optional clustering sidecar, stored in
+    ``tms_clustering.tx_contract_anomaly`` and merged into the score vector at
+    API read time (see ``db/clustering_queries.py`` and the analysis router).
+    It is deliberately absent from the per-tx write path so the host scoring
+    engine can never write or clobber it.
+    """
     TOKEN_DUST = "token_dust"
     LARGE_VALUE = "large_value"
     LARGE_DATUM = "large_datum"
@@ -72,6 +82,7 @@ class AttackClass(str, Enum):
     CIRCULAR = "circular"
     FAKE_TOKEN = "fake_token"
     PHISHING = "phishing"
+    CONTRACT_ANOMALY = "contract_anomaly"
 
 
 class TransactionLifecycleEvent(BaseModel):
@@ -175,6 +186,24 @@ class ClassScoreResult(BaseModel):
     corroborating_classes: str = Field(
         "",
         description="Comma-separated names of the corroborating classes.",
+    )
+    contract_anomaly_corroborates: bool = Field(
+        False,
+        description=(
+            "True when the clustering sidecar's contract_anomaly score (if "
+            "present) is at or above the corroboration threshold. Surfaced "
+            "separately from corroboration_count, which is the stored, "
+            "server-side-filterable count over the nine per-tx classes and is "
+            "never mutated by the read-time merge."
+        ),
+    )
+    contract_anomaly_scored_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "When the clustering sidecar last scored this transaction. Lets "
+            "the UI mark a contract_anomaly verdict as stale if the sidecar is "
+            "down. Absent when no contract_anomaly verdict was merged."
+        ),
     )
     fee: Optional[int] = Field(None, description="Transaction fee in lovelace")
     output_count: Optional[int] = Field(None, description="Number of transaction outputs")

@@ -4,7 +4,11 @@ import asyncio
 import logging
 import random
 import time
+from collections.abc import Awaitable, Callable
 from enum import Enum
+from typing import Any
+
+import websockets
 
 logger = logging.getLogger(__name__)
 
@@ -86,3 +90,54 @@ class CircuitBreaker:
             logger.info(f"Circuit breaker: {self.state} → CLOSED (connection succeeded)")
         self.state = CircuitState.CLOSED
         self._failures.clear()
+
+
+async def run_with_reconnect(
+    *,
+    name: str,
+    is_running: Callable[[], bool],
+    breaker: CircuitBreaker,
+    backoff: ExponentialBackoff,
+    connect: Callable[[], Awaitable[Any]],
+    run_session: Callable[[Any], Awaitable[None]],
+    on_connected: Callable[[bool], None],
+    close: Callable[[], Awaitable[None]],
+    poll_seconds: int,
+) -> None:
+    """Resilient connect -> run-session -> backoff-reconnect loop shared by the
+    Ogmios chain-sync and mempool clients.
+
+    Each iteration (while ``is_running()``): if the circuit breaker is open, wait
+    ``poll_seconds`` and re-check; otherwise ``connect()``, mark connected, record
+    the success and reset backoff, then ``run_session(session)`` until it returns
+    or raises. A connection-class error or any unexpected error marks the client
+    disconnected, records a breaker failure, and waits the backoff. ``close()``
+    runs in ``finally`` so the session is always torn down before the next attempt.
+
+    The caller supplies the per-client pieces (its breaker/backoff, the connect
+    and session coroutines, the connected-flag setter, and ws teardown) as
+    callbacks, so the chain and mempool loops share one resilience contract.
+    """
+    while is_running():
+        if not breaker.can_attempt():
+            logger.warning("Ogmios [%s]: circuit breaker OPEN, waiting for cooldown", name)
+            await asyncio.sleep(poll_seconds)
+            continue
+        try:
+            session = await connect()
+            on_connected(True)
+            breaker.record_success()
+            backoff.reset()
+            await run_session(session)
+        except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
+            logger.warning("Ogmios [%s]: connection lost: %s", name, e)
+            on_connected(False)
+            breaker.record_failure()
+            await backoff.wait()
+        except Exception as e:
+            logger.error("Ogmios [%s]: unexpected error: %s", name, e)
+            on_connected(False)
+            breaker.record_failure()
+            await backoff.wait()
+        finally:
+            await close()

@@ -1,7 +1,8 @@
 /** Em-dash placeholder shown in KPI cards when a value can't be computed. */
 export const PLACEHOLDER_KPI = "—";
 
-const LOVELACE_PER_ADA = 1_000_000;
+/** 1 ADA = 1,000,000 lovelace (Cardano protocol fixed denomination). */
+export const LOVELACE_PER_ADA = 1_000_000;
 
 /**
  * Format a lovelace integer as a compact ADA string with K/M suffixes for

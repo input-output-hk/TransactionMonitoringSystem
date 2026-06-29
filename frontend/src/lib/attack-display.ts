@@ -1,5 +1,6 @@
 import {
 	CircularIcon,
+	ContractAnomalyIcon,
 	FakeTokenIcon,
 	FrontRunningIcon,
 	LargeDatumIcon,
@@ -34,4 +35,5 @@ export const ATTACK_ICON: Record<
 	"Token Dust": TokenDustIcon,
 	"Front Running": FrontRunningIcon,
 	"Fake Token": FakeTokenIcon,
+	"Contract Anomaly": ContractAnomalyIcon,
 };

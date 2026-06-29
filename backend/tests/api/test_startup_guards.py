@@ -21,6 +21,9 @@ def prod_mode(monkeypatch):
     monkeypatch.setattr(settings, "TMS_ALLOW_DEV_MODE", "0")
     monkeypatch.delenv("TMS_ALLOW_DEV_MODE", raising=False)
     monkeypatch.setattr(settings, "CLICKHOUSE_PASSWORD", "secret")
+    # A real production posture also sets a non-default Postgres password;
+    # otherwise the credential guard (below) fires first.
+    monkeypatch.setattr(settings, "POSTGRES_PASSWORD", "secret")
     monkeypatch.setattr(settings, "RAW_DATA_MAX_BYTES", 0)
 
 
@@ -49,6 +52,43 @@ class TestCorsFailFast:
         monkeypatch.setattr(auth, "_dev_mode", True)
         monkeypatch.setattr(settings, "TMS_ALLOW_DEV_MODE", "1")
         monkeypatch.setattr(settings, "CORS_ALLOW_ORIGINS", "*")
+        _validate_startup_settings()
+
+
+class TestPostgresPasswordFailFast:
+    """A baked-in default Postgres password must refuse to start in prod
+    (review finding: guessable credential with no fail-fast), but stays a
+    warning in explicit dev mode."""
+
+    def test_default_password_with_keys_refuses_start(self, prod_mode, monkeypatch):
+        from app.config import DEFAULT_DEV_POSTGRES_PASSWORD
+
+        monkeypatch.setattr(
+            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+        )
+        monkeypatch.setattr(
+            settings, "POSTGRES_PASSWORD", DEFAULT_DEV_POSTGRES_PASSWORD,
+        )
+        with pytest.raises(RuntimeError, match="POSTGRES_PASSWORD"):
+            _validate_startup_settings()
+
+    def test_custom_password_passes(self, prod_mode, monkeypatch):
+        monkeypatch.setattr(
+            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+        )
+        monkeypatch.setattr(settings, "POSTGRES_PASSWORD", "a-real-secret")
+        _validate_startup_settings()
+
+    def test_default_password_in_dev_mode_passes(self, monkeypatch):
+        from app import auth
+        from app.config import DEFAULT_DEV_POSTGRES_PASSWORD
+
+        monkeypatch.setattr(auth, "_dev_mode", True)
+        monkeypatch.setattr(settings, "TMS_ALLOW_DEV_MODE", "1")
+        monkeypatch.setattr(settings, "CORS_ALLOW_ORIGINS", "*")
+        monkeypatch.setattr(
+            settings, "POSTGRES_PASSWORD", DEFAULT_DEV_POSTGRES_PASSWORD,
+        )
         _validate_startup_settings()
 
 
@@ -106,6 +146,19 @@ class TestTrustedProxyHopsValidation:
 
     def test_positive_hops_accepted(self):
         assert Settings(TRUSTED_PROXY_HOPS=2).TRUSTED_PROXY_HOPS == 2
+
+
+class TestAnalysisBatchesValidation:
+    """ge=1: a 0/negative drain cap makes the engine score zero txs per tick
+    (silent total detection outage). Fail at config load, not at runtime."""
+
+    @pytest.mark.parametrize("batches", [0, -1])
+    def test_non_positive_batches_rejected(self, batches):
+        with pytest.raises(ValidationError, match="ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK"):
+            Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=batches)
+
+    def test_positive_batches_accepted(self):
+        assert Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=5).ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK == 5
 
 
 class TestDocsGating:

@@ -16,6 +16,8 @@ import math
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.analysis.normalise import EPSILON
+
 logger = logging.getLogger(__name__)
 
 # Lazy-load cbor2 to avoid import errors when the package is not installed
@@ -132,6 +134,25 @@ def extract_lovelace(value: Any) -> int:
     return 0
 
 
+def estimate_utxo_total_bytes(
+    address: str, value_cbor: int, datum_bytes: int, script_ref: Any
+) -> int:
+    """Approximate the on-chain UTxO size in bytes: address + value CBOR + datum +
+    script-ref bytes. Single-sourced so the stored large_datum feature and the
+    score-time recompute cannot drift."""
+    address_bytes = len(address.encode()) if address else 0
+    script_bytes = len(json.dumps(script_ref).encode()) if script_ref else 0
+    return address_bytes + value_cbor + datum_bytes + script_bytes
+
+
+def datum_ratio_of(datum_bytes: int, utxo_total: int) -> float:
+    """``datum_bytes / utxo_total`` with the shared EPSILON guard; 0.0 when the
+    UTxO has no bytes. The guard must match between the stored feature and the
+    score-time recompute (the large_datum separator anchors are calibrated on
+    this exact ratio)."""
+    return datum_bytes / (utxo_total + EPSILON) if utxo_total > 0 else 0.0
+
+
 def extract_fee(tx_data: Any) -> int:
     """Transaction fee in lovelace, handling both Ogmios schema versions.
 
@@ -160,14 +181,27 @@ def flatten_assets(value: Any) -> Dict[str, int]:
     assets: Dict[str, int] = {}
     if not isinstance(value, dict):
         return assets
+
+    def _qty(raw: Any) -> int:
+        # Same defensive contract as extract_lovelace: a malformed quantity in
+        # untrusted chain data degrades to 0 with the asset key PRESERVED, so
+        # the asset's presence still shows. It must never raise here, because
+        # this builds transaction_inputs.assets — an exception would drop the
+        # whole transaction from the warehouse and create a detection blind
+        # spot (recall-first).
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
     for key, val in value.items():
         if key in ("lovelace", "ada"):
             continue
         if isinstance(val, dict):
             for asset_name, qty in val.items():
-                assets[f"{key}.{asset_name}"] = int(qty)
+                assets[f"{key}.{asset_name}"] = _qty(qty)
         else:
-            assets[key] = int(val)
+            assets[key] = _qty(val)
     return assets
 
 
@@ -451,13 +485,10 @@ def extract_utxo_features(
         policy_count, token_count = count_assets(value)
         datum_flag, datum_bytes = _extract_datum_info(out)
 
-        # Estimate total UTxO bytes (address + value + datum + script ref)
-        address_bytes = len(address.encode()) if address else 0
-        script_ref = out.get("script")
-        script_bytes = len(json.dumps(script_ref).encode()) if script_ref else 0
-        utxo_total = address_bytes + value_cbor + datum_bytes + script_bytes
-
-        datum_ratio = datum_bytes / (utxo_total + 1e-6) if utxo_total > 0 else 0.0
+        utxo_total = estimate_utxo_total_bytes(
+            address, value_cbor, datum_bytes, out.get("script")
+        )
+        datum_ratio = datum_ratio_of(datum_bytes, utxo_total)
 
         rows.append((
             tx_hash,
@@ -547,21 +578,3 @@ def extract_tx_script_features(
         mint_policy_count,
         mint_entries_json,
     )
-
-
-# ---------------------------------------------------------------------------
-# Convenience: extract all features for a batch
-# ---------------------------------------------------------------------------
-
-def extract_all_features(
-    tx_hash: str,
-    network: str,
-    raw_data: Dict[str, Any],
-) -> Tuple[List[tuple], Optional[tuple]]:
-    """Extract both UTxO-level and tx-level features from raw data.
-
-    Returns (utxo_feature_rows, tx_script_feature_row).
-    """
-    utxo_rows = extract_utxo_features(tx_hash, network, raw_data)
-    script_row = extract_tx_script_features(tx_hash, network, raw_data)
-    return utxo_rows, script_row

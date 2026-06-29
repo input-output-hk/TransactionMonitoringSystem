@@ -4,6 +4,8 @@
 
 Single-process FastAPI application. On startup, it initialises two databases and launches background tasks under a supervisor loop. The HTTP/WebSocket server runs in the same event loop. A minimal unauthenticated `/health` returns `{"status":"healthy"}` for liveness probes; the authenticated `/health/detail` exposes `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_seconds`, `last_processed_slot`, and `last_ogmios_msg_at`.
 
+An **optional** first-party clustering module (`services/clustering/`, the `clustering` Compose profile) runs as a sidecar and contributes a tenth, unsupervised attack class, `contract_anomaly`; the host merges its verdicts at read time. See [Clustering module](#clustering-module-contract_anomaly) below. Absent the profile, the system is exactly the nine-class detection engine described here.
+
 ## Data Flow
 
 ```text
@@ -116,13 +118,15 @@ backend/app/
 │   ├── clickhouse.py        Analytics Warehouse: client/executor, batch insert, analytical queries
 │   ├── clickhouse_schema.py ClickHouse DDL, migrations, retention
 │   ├── clickhouse_scores.py tx_class_scores read/write (per-class score vectors)
+│   ├── clustering_queries.py Read-only access to the clustering sidecar's contract_anomaly verdicts (cross-DB, best-effort)
 │   ├── postgres.py          Operational Database: tx_lifecycle, sync_checkpoint, entity_state, audit, schema
 │   ├── archive_queries.py   Archive list/count/export queries
 │   └── raw_store.py         Data Lake: async gzip writes, atomic rename, read-back
 ├── api/
 │   ├── transactions.py      GET /api/transactions/*
 │   ├── lifecycle.py         GET /api/lifecycle/*
-│   ├── analysis.py          GET /api/analysis/*
+│   ├── analysis.py          GET /api/analysis/* (merges the contract_anomaly verdict + reconciles stats/timeseries when the clustering module is enabled)
+│   ├── clustering.py        /api/clustering/* reverse-proxy to the optional clustering sidecar (session-authed, host-fixed)
 │   ├── entities.py          GET/PUT /api/entities/*
 │   ├── archive.py           GET/POST/DELETE /api/archive/* (false-positive curation)
 │   ├── auth.py              POST/GET /api/auth/* (magic-link login, session, /me)
@@ -131,6 +135,7 @@ backend/app/
 │   ├── engine.py            Multi-class orchestrator (9 attack classes, enrichment, scoring)
 │   ├── scorer_config.py     Validated loader for config/detection.yaml
 │   ├── normalise.py         Percentile-based normalisation and baseline resolution
+│   ├── contract_anomaly.py  Projects the clustering sidecar's verdict onto the host 0-100 score / RiskBand (the synthetic contract_anomaly class)
 │   ├── baselines.py         Baseline computation and drift detection
 │   ├── features.py          UTxO/tx feature extraction (incl. decode_hex_asset_name, extract_ttl, is_script_address)
 │   ├── enrichment.py        Cross-tx enrichment (collisions, cycles, ref-tx fan-in)
@@ -157,10 +162,20 @@ backend/app/
     └── ui.py                GET /: operator dashboard (HTML)
 ```
 
+## Clustering module (contract_anomaly)
+
+A first-party, **optional** sidecar (`services/clustering/`, gated behind the `clustering` Compose profile) that complements the nine supervised scorers with unsupervised, per-contract profiling. It is the source of the synthetic tenth attack class, `contract_anomaly`.
+
+- **What it does:** for each watched contract (address) it pulls that contract's transactions, extracts shape/graph features, runs DBSCAN clustering plus an IsolationForest + LOF anomaly ensemble, and resolves a per-tx verdict (`malicious` / `benign` / `anomaly` / `normal`, with human labels overriding).
+- **Topology:** it shares the same ClickHouse server as the host but owns a separate database (`tms_clustering`). It **reads** chain facts from the host's Analytics Warehouse (`tms_analytics`, no chain data is duplicated) and **writes** its own state (`cluster_models`, `tx_classifications`, and the `tx_contract_anomaly` projection).
+- **How the host consumes it (read-time overlay, recall-first):** the host derives every score at read time and never trusts a precomputed one. `db/clustering_queries.py` reads the raw verdicts from `tx_contract_anomaly`; `analysis/contract_anomaly.py` projects them onto the 0-100 host scale via `config/detection.yaml` (so a calibration change there applies to all historical rows with no backfill, and `benign` / `normal` verdicts suppress to 0 while only `malicious` / `anomaly` carry a score); `api/analysis.py` merges that into results additively (it can only ever **raise** a tx's score/band, never lower it), supports filtering the list by `attack_class=contract_anomaly`, and reconciles the list view, band-count KPIs, and the alert timeseries. The Validators / cluster-graph UI talks to the sidecar through the `api/clustering.py` reverse-proxy (same-origin, session-authed; the sidecar is never exposed publicly).
+- **Authoritative projection:** `tx_contract_anomaly` is versioned by a monotonic `published_at`, so every reconciliation (a re-fit, a relabel, a clear) supersedes the prior state: stale alerts are retracted, not just added. A chain rollback or a contract deletion purges the corresponding rows so the host never surfaces a ghost verdict.
+- **Opt-in & isolation:** absent the profile, none of this runs and the host behaves exactly as the nine-class system. See [services/clustering/README.md](../services/clustering/README.md) and `services/clustering/docs/` for the module's own architecture, data model, and algorithms.
+
 ## Deployment
 
 See [C4-ARCHITECTURE.md](C4-ARCHITECTURE.md) for full C4 diagrams (context, container, component, deployment) and [TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md) for ADRs covering each technology choice.
 
-Databases run in Docker Compose. App can run on host or as a Docker container (`docker-compose --profile app up -d`). TLS must be handled at the reverse-proxy layer (nginx, Caddy, etc.).
+Databases run in Docker Compose. App can run on host or as a Docker container (`docker-compose --profile app up -d`). The optional clustering module is added with `docker compose --profile clustering up -d` (set `CLUSTERING_ENABLED=true` so the app wires in the proxy + verdict merge). TLS must be handled at the reverse-proxy layer (nginx, Caddy, etc.).
 
 **Ogmios version pinning:** TMS targets **Ogmios v6.14.0** (JSON-RPC 2.0 interface) co-located with **cardano-node 11.0.1**, which is required for the van Rossem PV11 hard fork (earlier 8.x/9.x/10.x nodes stall at the PV11 boundary). The message shapes in `ogmios_parser.py` are tied to the v6 schema. When upgrading cardano-node, verify the matching Ogmios version and re-validate parser output before deploying. See ADR-004 in [TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md) for the upgrade checklist.

@@ -32,6 +32,55 @@ protocol_limits:
 composite_corroboration:
   corroboration_threshold: 40.0
 
+# Contract-anomaly projection. Maps the optional clustering sidecar's per-tx
+# verdict (consensus in [0,1], votes, and a verdict label) onto the host's
+# 0-100 score + risk band, so its findings surface as the synthetic
+# `contract_anomaly` attack class. This is NOT a scorer section (no weights or
+# anchors): the sidecar computes one score per transaction from these knobs.
+# The merge into /api/analysis/results is additive (only ever raises max_score
+# via max(...)), so it cannot lower a per-tx detection: recall-first holds.
+contract_anomaly:
+  # Score floor per verdict. The clustering engine's verdict precedence is
+  # explicit-label > cluster-inherited (malicious/benign) > auto-anomaly
+  # (votes >= FLAG_VOTE_THRESHOLD == 2) > normal. A human-labeled malicious
+  # cluster is the strongest signal, so it floors into Critical. An auto-anomaly
+  # carries NO floor (0): its score is driven purely by the ensemble consensus,
+  # so a weak anomaly bands Informational/Moderate and only a strong one reaches
+  # High. This avoids banding every auto-anomaly High regardless of confidence;
+  # the unsupervised ensemble fires at minimum agreement (2 votes) on benign
+  # contract drift, so a flat High floor manufactured a wall of false positives.
+  # Recall is preserved: a strong anomaly (consensus that scales to >= the High
+  # threshold) still alerts High, a malicious LABEL still floors to Critical, and
+  # no flagged tx is dropped (it is still scored and queryable, just banded by
+  # strength). benign (human-labeled safe) and normal (no finding) SUPPRESS the
+  # signal: a curated safe label is authoritative, so the verdict projects to 0
+  # and consensus can never raise it. Suppression is keyed on the verdict label,
+  # NOT the floor value (anomaly and normal both have a 0 floor but anomaly is
+  # consensus-driven while normal suppresses); see contract_anomaly.py
+  # _POSITIVE_VERDICTS. Votes are already folded into the `anomaly` verdict
+  # upstream, so they are evidence-only here (no double counting).
+  verdict_floors:
+    malicious: 80.0   # BAND_CRITICAL_THRESHOLD: human-labeled malicious cluster
+    anomaly: 0.0      # no floor: auto-anomaly is consensus-driven (High at >= 0.60)
+    benign: 0.0       # human-labeled safe: suppresses by label (consensus cannot raise)
+    normal: 0.0       # no finding: suppresses by label (consensus cannot raise)
+  # The ensemble consensus is in [0,1]; multiplying by 100 maps it onto the
+  # 0-100 score scale (so the band thresholds apply to consensus directly: a
+  # consensus of 0.60 scales to the High threshold of 60). For a POSITIVE verdict
+  # (malicious/anomaly) the score is clamp(max(floor, consensus * scale)); every
+  # other verdict (benign/normal/unknown) suppresses to 0 by label.
+  consensus_scale: 100.0
+  # A contract_anomaly score at or above this counts as a corroborating signal
+  # for analyst triage (surfaced as contract_anomaly_corroborates, separate
+  # from the stored, server-filterable corroboration_count over the 9 classes).
+  # Kept equal to composite_corroboration.corroboration_threshold by intent.
+  corroboration_threshold: 40.0
+  # A merged verdict older than this is considered stale (the sidecar may be
+  # down). The API still surfaces it (a stale-but-real malicious verdict is
+  # worth keeping visible, recall-first) but stamps contract_anomaly_scored_at
+  # so the UI can mark it. 0 disables the staleness stamp.
+  freshness_seconds: 3600
+
 # Baseline-resolution tunables shared by every percentile-baselined scorer
 # (consumed by normalise.py / scorer_config.py, not by a single scorer).
 baselines:
@@ -459,6 +508,10 @@ scorers:
       TX_A_CONFIRMED: 0.0
       TX1_WINS: 0.0
       TX2_WINS: 0.3
+    # Score for an UNRECOGNISED collision-outcome label (a label not in the map
+    # above). Neutral midpoint, equal to BOTH_PENDING: an unknown outcome must
+    # not silently zero the sub-score (recall-conservative). Was a bare 0.5.
+    unknown_outcome_score: 0.5
     reason_thresholds:
       outcome: 0.8
       delta: 0.5
@@ -533,6 +586,18 @@ scorers:
       max_age_slots: 86400              # forward BFS horizon (Cardano ~1 slot/sec => 24h)
       max_output_fanout: 20             # skip cycle scoring for txs with > N distinct
                                         # output addresses (very unlikely to be circular)
+      # Fallback inter-hop delta (slots) when a cycle's hop timing cannot be
+      # measured (single hop, or non-increasing slots). A moderate gap so an
+      # unmeasurable cadence does not spike the inverse-speed sub-score. Shared
+      # by the graph builder (feature) and the circular scorer (read) so the two
+      # cannot drift; was a bare 100 duplicated in both.
+      default_inter_hop_delta_slots: 100
+      # Per-hop row cap on the forward BFS query. Bounds the cost of a single
+      # hop's fan-out scan; the rows are ordered by slot ASC so the earliest
+      # (most likely to close a cycle) win when truncated. This trades recall
+      # for cost: RAISE it if real layering through high-degree hubs is missed,
+      # never lower it as a precision knob.
+      bfs_hop_row_limit: 500
     reason_threshold: 0.5
     moderate_cap: 59.0                  # top of Moderate band
     # Floor on the sum of corroborating signals (entropy + auxiliary + speed).

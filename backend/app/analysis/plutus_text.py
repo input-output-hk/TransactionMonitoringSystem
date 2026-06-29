@@ -7,6 +7,7 @@ spans to its URL and social-engineering scans; any future datum-content
 consumer can reuse this without importing a scorer.
 """
 
+from collections.abc import Mapping
 from typing import Any, List, Optional
 
 from app.analysis.features import get_cbor2
@@ -66,9 +67,11 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
 
     def _walk_cbor(node: Any) -> None:
         """Walk the cbor2-parsed structure. CBOR text strings come out
-        as ``str``, byte strings as ``bytes``, maps as ``dict``, arrays
-        as ``list``, and Plutus-Data constructors as ``cbor2.CBORTag``
-        whose ``.value`` is the fields array."""
+        as ``str``, byte strings as ``bytes``, maps as ``dict`` or (cbor2
+        v6, for maps nested inside a tag) the hashable ``cbor2.frozendict``,
+        arrays as ``list``/``tuple``, and Plutus-Data constructors as
+        ``cbor2.CBORTag`` whose ``.value`` is the fields array. Match maps
+        by ``Mapping`` so frozendict leaves are not silently skipped."""
         if isinstance(node, bytes):
             _emit_bytes(node)
             return
@@ -76,7 +79,7 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
             if len(node) >= min_len:
                 results.append(node)
             return
-        if isinstance(node, dict):
+        if isinstance(node, Mapping):
             for k, v in node.items():
                 _walk_cbor(k)
                 _walk_cbor(v)

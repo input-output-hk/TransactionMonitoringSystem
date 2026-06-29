@@ -7,13 +7,17 @@ from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # TMS_ENV must look like a bare identifier so it cannot traverse out of the
 # project directory via the .env.<name> path composition below.
 _TMS_ENV_RE = re.compile(r"[a-z0-9_-]+")
+
+# Well-known dev default for the Postgres password. Defined once here so the
+# field default and the production fail-fast guard (main._validate_startup_settings)
+# reference the same value rather than duplicating the literal.
+DEFAULT_DEV_POSTGRES_PASSWORD = "tms_password"
 
 
 def _env_files() -> list[str]:
@@ -59,6 +63,15 @@ class Settings(BaseSettings):
     OGMIOS_HEARTBEAT_TIMEOUT: int = 90  # pong timeout in seconds
     OGMIOS_CIRCUIT_BREAKER_THRESHOLD: int = 5  # failures before cooldown
     OGMIOS_CIRCUIT_BREAKER_COOLDOWN: int = 120  # cooldown in seconds
+    # Poll interval while the breaker is OPEN: how long run_chain_sync /
+    # MempoolMonitor.run sleep before re-checking can_attempt() during cooldown.
+    OGMIOS_CIRCUIT_OPEN_POLL_SECONDS: int = 10
+    # Chain-sync pipeline health bands (ChainSyncClient.pipeline_state): block-age
+    # thresholds for DEGRADED/DOWN, and the startup grace before a not-yet-connected
+    # pipeline counts as DEGRADED rather than OK.
+    PIPELINE_STARTUP_GRACE_SECONDS: int = 60
+    PIPELINE_BLOCK_AGE_DEGRADED_SECONDS: int = 120
+    PIPELINE_BLOCK_AGE_DOWN_SECONDS: int = 300
 
     # API Server Configuration
     API_HOST: str = "0.0.0.0"
@@ -70,8 +83,22 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "tms_user"
-    POSTGRES_PASSWORD: str = "tms_password"
+    # The well-known dev default. A startup guard (main._validate_startup_settings)
+    # refuses to boot with this value unless TMS_ALLOW_DEV_MODE=1, so a production
+    # deploy that forgets to set POSTGRES_PASSWORD fails fast instead of running
+    # on a guessable credential.
+    POSTGRES_PASSWORD: str = DEFAULT_DEV_POSTGRES_PASSWORD
     POSTGRES_DB: str = "tms_db"
+    # Connection-pool sizing (asyncpg). Defaults sized for a single-box deploy;
+    # raise the max for higher API concurrency. Were inline literals in
+    # db/postgres.init_pool.
+    POSTGRES_POOL_MIN_SIZE: int = Field(default=2, ge=0)
+    POSTGRES_POOL_MAX_SIZE: int = Field(default=10, ge=1)
+    # Recycle a connection idle longer than this so a PG restart / network blip
+    # doesn't leave stale sockets in the pool.
+    POSTGRES_POOL_MAX_IDLE_SECONDS: float = 300.0
+    # Cap any single statement so a stuck query can't pin a pool slot forever.
+    POSTGRES_STATEMENT_TIMEOUT_SECONDS: float = 30.0
 
     # Database Configuration - ClickHouse
     CLICKHOUSE_HOST: str = "localhost"
@@ -161,7 +188,11 @@ class Settings(BaseSettings):
     # Drain loop: batches pulled per interval tick while the poll comes back
     # full. Caps per-tick work so a deep backlog cannot monopolise the shared
     # ClickHouse executor; 20 x batch=100 clears 2000 txs/tick.
-    ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK: int = 20
+    # ge=1: a value of 0 (or negative) makes the drain loop's `while batches <
+    # MAX` condition false on the first iteration, so run_once is never called
+    # and ZERO transactions are scored every tick — a silent, total detection
+    # outage. Fail fast at config load instead (mirrors TRUSTED_PROXY_HOPS).
+    ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK: int = Field(default=20, ge=1)
     # Pause between drained batches: lets ingestion inserts and API reads
     # interleave on the 3-worker ClickHouse executor.
     ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS: float = 0.5
@@ -182,6 +213,23 @@ class Settings(BaseSettings):
     # path never fetches). Matches the registry cache TTL.
     TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS: int = 24
 
+    # Clustering module (optional sidecar). When False (default), the analysis
+    # API does not merge contract_anomaly verdicts and the UI hides the class,
+    # so a deployment without the `clustering` compose profile pays no cost.
+    # The sidecar writes its verdicts to a sibling database on the SAME
+    # ClickHouse server; the host reads them cross-database at API time.
+    CLUSTERING_ENABLED: bool = False
+    CLUSTERING_DB: str = "tms_clustering"
+    # Base URL of the clustering sidecar's API, reached in-network for the
+    # /api/clustering reverse-proxy (the SPA's rich Validators/graph views call
+    # it same-origin, session-authed). Defaults to the compose service name.
+    CLUSTERING_SIDECAR_URL: str = "http://clustering:8000"
+    # API key the proxy presents to the sidecar as X-API-Key. Must equal the
+    # sidecar's API_KEY. Empty by default (the sidecar runs zero-config locally);
+    # set both this and the sidecar's API_KEY (+ REQUIRE_AUTH=1) to lock the
+    # sidecar down. When empty, no credential is forwarded (legacy behaviour).
+    CLUSTERING_SIDECAR_API_KEY: str = ""
+
     # WebSocket feed. Per-client outbound queue depth: a client lagging by
     # more than this many events starts losing the OLDEST ones (the feed is
     # a live view, not the system of record). Connection cap prevents
@@ -200,6 +248,10 @@ class Settings(BaseSettings):
     # would otherwise freeze the API/WS/mempool tasks for the parse).
     # Below it the thread handoff costs more than the parse itself.
     OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES: int = 1_048_576  # 1 MiB
+    # Max inbound WebSocket frame Ogmios may send. A busy Plutus block can
+    # serialise to tens of MB; this is the hard ceiling the socket accepts
+    # before closing the connection. Sized for the largest realistic block.
+    OGMIOS_WS_MAX_FRAME_BYTES: int = 67_108_864  # 64 MiB
 
     # Retention. ALL default 0 = keep forever (the audit's growth findings
     # are addressed by giving operators knobs, not by silently expiring

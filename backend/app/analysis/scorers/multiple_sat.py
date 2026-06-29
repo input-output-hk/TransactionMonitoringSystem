@@ -73,6 +73,7 @@ from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
     BAND_MODERATE_THRESHOLD,
+    EPSILON,
     normalise,
     normalise_inverted,
 )
@@ -89,8 +90,6 @@ from app.analysis.features import extract_lovelace as _extract_lovelace
 from app.analysis.features import iter_assets as _iter_assets  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-EPSILON = 1e-6
 
 _CFG = _get_cfg("multiple_sat")
 _W = _CFG["weights"]
@@ -293,18 +292,6 @@ def _compute_lovelace_flow(
     return value_in, value_out
 
 
-def _compute_net_value_out(
-    inputs: List[Dict], outputs: List[Dict], script_key: str,
-) -> int:
-    """Net lovelace extraction: ``max(0, in - out)`` over the script.
-
-    Kept as a thin wrapper over :func:`_compute_lovelace_flow` so existing
-    call sites (and tests) don't have to change.
-    """
-    value_in, value_out = _compute_lovelace_flow(inputs, outputs, script_key)
-    return max(0, value_in - value_out)
-
-
 def _compute_n_assets_out(
     inputs: List[Dict], outputs: List[Dict], script_key: str,
 ) -> int:
@@ -378,9 +365,26 @@ def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
     redeemers = raw_data.get("redeemers")
     if not redeemers:
         return []
-    items = redeemers.values() if isinstance(redeemers, dict) else redeemers
     payloads: List[str] = []
-    for r in items:
+    if isinstance(redeemers, dict):
+        # Ogmios v6: the PURPOSE lives in the key ("spend:N" / "mint:N" / ...),
+        # not in the value. The previous code looked for validator.purpose /
+        # purpose on the value, so on v6 every entry was skipped and this
+        # returned [] — silently disabling the uniform-sweep guard (it was
+        # active on v5) and zeroing the redeemer_count evidence. Reading by key
+        # restores v5/v6 parity; the spend-purpose detection mirrors
+        # features.has_spend_redeemer.
+        for key, r in redeemers.items():
+            if not str(key).startswith("spend"):
+                continue
+            payload = r.get("redeemer") if isinstance(r, dict) else None
+            if isinstance(payload, str):
+                payloads.append(payload)
+        return payloads
+    # Ogmios v5: a list of redeemer dicts carrying an explicit purpose.
+    for r in redeemers:
+        if not isinstance(r, dict):
+            continue
         validator = r.get("validator") or {}
         purpose = validator.get("purpose") or r.get("purpose")
         if purpose != "spend":

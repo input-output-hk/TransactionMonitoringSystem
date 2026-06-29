@@ -55,27 +55,6 @@ def _max_quantity_digits(value: Dict[str, Any]) -> int:
     return max_digits
 
 
-def _primary_policy_id(value: Dict[str, Any]) -> str:
-    """Return the policy ID of the asset with the largest quantity."""
-    best_policy = ""
-    best_qty = 0
-    for key, val in value.items():
-        if key in ("lovelace", "ada"):
-            continue
-        if isinstance(val, dict):
-            for qty in val.values():
-                q = abs(int(qty)) if qty else 0
-                if q > best_qty:
-                    best_qty = q
-                    best_policy = key
-        else:
-            q = abs(int(val)) if val else 0
-            if q > best_qty:
-                best_qty = q
-                best_policy = key
-    return best_policy
-
-
 def _primary_asset(value: Dict[str, Any]) -> Tuple[str, str, int]:
     """Return ``(policy_id, asset_name_hex, quantity)`` for the largest asset.
 
@@ -184,11 +163,7 @@ class LargeValueScorer(BaseScorer):
         if not isinstance(value, dict):
             value = {"lovelace": 0}
 
-        ada_obj = value.get("ada")
-        if isinstance(ada_obj, dict):
-            ada_amount = int(ada_obj.get("lovelace", 0))
-        else:
-            ada_amount = int(value.get("lovelace", 0))
+        ada_amount = feat_mod.extract_lovelace(value)
         value_cbor = feat_mod._estimate_value_cbor_bytes(value)
         qty_digits = _max_quantity_digits(value)
         policy_id, asset_name_hex, max_quantity = _primary_asset(value)

@@ -11,6 +11,7 @@ from app.analysis.scorers.multiple_sat import (
     _compute_n_assets_out,
     _iter_assets,
     _reweight_without_extraction,
+    _spend_redeemer_payloads,
 )
 
 _W_EXTRACTION = float(_WEIGHTS["extraction"])
@@ -39,6 +40,43 @@ def _features(inputs, outputs=None, redeemers=None, sender_recurrence=0.0, netwo
             "redeemers": redeemers,
         },
     }
+
+
+class TestSpendRedeemerPayloads:
+    """Ogmios v6 carries the redeemer purpose in the key ("spend:N"), not on
+    the value. A prior bug looked for purpose on the value, so v6 returned []
+    — disabling the uniform-sweep guard (active on v5) and zeroing redeemer
+    evidence. These pin v5/v6 parity."""
+
+    def test_v6_dict_extracts_spend_payloads_by_key(self):
+        redeemers = {
+            "spend:0": {"redeemer": "d8799f00ff", "executionUnits": {"memory": 1, "cpu": 1}},
+            "spend:1": {"redeemer": "d8799f01ff", "executionUnits": {"memory": 1, "cpu": 1}},
+            "mint:0": {"redeemer": "d8799fffff", "executionUnits": {"memory": 1, "cpu": 1}},
+        }
+        assert _spend_redeemer_payloads({"redeemers": redeemers}) == [
+            "d8799f00ff", "d8799f01ff",
+        ]
+
+    def test_v6_uniform_payloads_collapse_to_one(self):
+        redeemers = {
+            "spend:0": {"redeemer": "aa"},
+            "spend:1": {"redeemer": "aa"},
+        }
+        payloads = _spend_redeemer_payloads({"redeemers": redeemers})
+        assert len(payloads) == 2 and len(set(payloads)) == 1
+
+    def test_v5_list_still_extracts_spend(self):
+        redeemers = [
+            {"validator": {"purpose": "spend"}, "redeemer": "aa"},
+            {"validator": {"purpose": "mint"}, "redeemer": "bb"},
+            {"purpose": "spend", "redeemer": "cc"},
+        ]
+        assert _spend_redeemer_payloads({"redeemers": redeemers}) == ["aa", "cc"]
+
+    def test_empty_and_missing(self):
+        assert _spend_redeemer_payloads({}) == []
+        assert _spend_redeemer_payloads({"redeemers": None}) == []
 
 
 class TestGate:
