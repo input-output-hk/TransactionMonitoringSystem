@@ -1,6 +1,6 @@
 """Email delivery channel (the primary native channel).
 
-Enabled independently via ``EMAIL_NOTIFY_ENABLED`` + the YAML `enabled` flag,
+Enabled independently via ``EMAIL_NOTIFY_ENABLED`` + the config `enabled` flag,
 so notification email can be unplugged without affecting sign-in emails.
 """
 
@@ -20,10 +20,20 @@ from app.notifications.channels.base import (
 
 logger = logging.getLogger(__name__)
 
+# Canonical band -> human-facing label. The domain enum, the stored data, and
+# the webhook JSON payload all keep the canonical "Moderate"; only the text a
+# human reads in an email says "Medium", matching the dashboard (which maps it
+# the same way). Display-only — never use for the wire payload or config keys.
+_BAND_DISPLAY = {"Moderate": "Medium"}
+
+
+def _band_label(band: str) -> str:
+    return _BAND_DISPLAY.get(band, band)
+
 
 def _render_immediate(payload) -> Tuple[str, str]:
     """(subject, plain-text body) for an immediate alert."""
-    band = payload.risk_band
+    band = _band_label(payload.risk_band)
     subject = (
         f"[TMS {band}] {payload.attack_class} — {payload.risk_score:.0f}/100"
     )
@@ -58,7 +68,7 @@ def _render_report(payload) -> Tuple[str, str]:
         f"({win.get('from', '')[:10]} → {win.get('to', '')[:10]})"
     )
     by_band = "  ".join(
-        f"{b}={s.alerts_by_band.get(b, 0)}"
+        f"{_band_label(b)}={s.alerts_by_band.get(b, 0)}"
         for b in ("Critical", "High", "Moderate", "Informational")
     )
     classes = "\n".join(
@@ -66,7 +76,7 @@ def _render_report(payload) -> Tuple[str, str]:
     ) or "    (none in window)"
     if payload.top_alerts:
         tops = "\n".join(
-            f"    {i + 1:>2}. {a.risk_band:<13} {a.risk_score:6.2f}  "
+            f"    {i + 1:>2}. {_band_label(a.risk_band):<13} {a.risk_score:6.2f}  "
             f"{a.attack_class:<14} {a.tx_hash}"
             for i, a in enumerate(payload.top_alerts)
         )

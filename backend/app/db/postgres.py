@@ -307,6 +307,20 @@ async def execute_schema():
             )
         """)
 
+        # Notification config document (channels, triggers, recipients, report
+        # settings). Single row enforced by the BOOLEAN-PK + CHECK(id) guard;
+        # edited at runtime via the admin UI. Secrets are NOT stored here.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS notification_config (
+                id          BOOLEAN PRIMARY KEY DEFAULT TRUE,
+                version     INT NOT NULL DEFAULT 1,
+                config      JSONB NOT NULL,
+                updated_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                updated_by  TEXT,
+                CONSTRAINT  notification_config_singleton CHECK (id)
+            )
+        """)
+
         logger.info("PostgreSQL schema initialized")
 
 
@@ -392,6 +406,34 @@ async def mark_report_sent(
                 last_window_start = EXCLUDED.last_window_start,
                 last_window_end   = EXCLUDED.last_window_end
         """, network, report_kind, sent_at, window_start, window_end)
+
+
+# --- Notification config document (admin-managed) ---
+
+async def get_notification_config() -> Optional[Dict[str, Any]]:
+    """The stored notification config document, or None if never set."""
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT config FROM notification_config WHERE id = TRUE"
+        )
+    if not row:
+        return None
+    value = row["config"]
+    # asyncpg returns JSONB as text unless a codec is registered.
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def set_notification_config(doc: Dict[str, Any], updated_by: str) -> None:
+    """Upsert the single notification config row (JSONB)."""
+    async with get_connection() as conn:
+        await conn.execute("""
+            INSERT INTO notification_config (id, config, updated_by)
+            VALUES (TRUE, $1::jsonb, $2)
+            ON CONFLICT (id) DO UPDATE SET
+                config     = EXCLUDED.config,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = EXCLUDED.updated_by
+        """, json.dumps(doc), updated_by)
 
 
 # --- Transaction Lifecycle CRUD ---

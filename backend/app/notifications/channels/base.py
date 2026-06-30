@@ -1,9 +1,9 @@
 """Channel abstraction + the trigger->dispatch contract.
 
 A channel is hot-swappable: implement :class:`NotificationChannel`, register
-it in ``app.notifications.registry``, and add a block to
-``config/notifications.yaml``. The dispatcher, the hook, the trigger engine,
-and the payload models never reference a concrete channel — that is the
+it in ``app.notifications.registry``, and add a channel block to the
+notification config. The dispatcher, the hook, the trigger engine, and the
+payload models never reference a concrete channel — that is the
 "unplug Email, drop in SMS" requirement.
 """
 

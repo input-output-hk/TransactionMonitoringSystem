@@ -40,7 +40,7 @@ from app.rate_limit import (
 )
 from app.db import postgres, clickhouse, raw_store
 from app import notifications
-from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api
+from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
 from app.tasks import analysis as analysis_task
 from app.tasks import notifications as notifications_task
 from app.routers import ui, websocket
@@ -221,14 +221,15 @@ async def lifespan(app: FastAPI):
             raw_store.init_store()
         logger.info("Databases initialized")
 
-        # Notifications: validate config/notifications.yaml at
-        # boot (a malformed file fails startup, not the first alert), capture
-        # the event loop for the executor-thread hook, and build the channels.
-        notifications.load_config()
+        # Notifications: load + validate the stored config at
+        # boot (a malformed stored doc fails startup, not the first alert;
+        # seeds safe defaults on a fresh DB), capture the event loop for the
+        # executor-thread hook, and build the channels.
+        await notifications.load_config()
         notifications.set_main_loop(asyncio.get_running_loop())
         notifications.build_channels()
-        # Periodic-report scheduler (spec 8.4). Self-gates on the YAML
-        # `periodic_report.enabled` flag each tick.
+        # Periodic-report scheduler. Self-gates on the `periodic_report.enabled`
+        # flag each tick.
         notifications_task.start()
         logger.info("Notification module ready")
 
@@ -359,6 +360,7 @@ app.include_router(archive.router)
 app.include_router(auth_api.router)
 app.include_router(users_api.router)
 app.include_router(clustering_api.router)
+app.include_router(notifications_config.router)
 
 
 @app.get("/health")
