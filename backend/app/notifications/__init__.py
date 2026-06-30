@@ -36,9 +36,11 @@ def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
     _main_loop = loop
 
 
-def load_config() -> None:
-    """Force-load + validate config/notifications.yaml (fail fast at boot)."""
-    config.load()
+async def load_config() -> None:
+    """Load + validate the config from the DB into the cache (seeding the safe
+    default on first boot), then warn on public webhook egress. Fails the boot
+    loudly if the stored document is invalid."""
+    await config.refresh_from_db()
     config.warn_if_webhook_egress_public()
 
 
@@ -66,8 +68,8 @@ def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
             # when a band is routed for diagnostics.
             if not band or not r.get("max_class") or float(r.get("max_score") or 0) <= 0:
                 continue
-            # The YAML trigger matrix is the single source of truth for which
-            # (band, class) page and to where. Bands with no configured channels
+            # The trigger matrix (DB-backed config) is the single source of truth
+            # for which (band, class) page and to where. Bands with no configured channels
             # (Moderate/Informational by default) resolve to [] and are skipped
             # here before any I/O.
             dispatches = triggers.resolve_dispatch(band, r["max_class"])

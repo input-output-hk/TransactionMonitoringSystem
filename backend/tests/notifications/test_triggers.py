@@ -168,3 +168,48 @@ def test_email_with_no_recipients_is_dropped(use_config):
     use_config(cfg)
     out = triggers.resolve_dispatch("Critical", "phishing")
     assert set(_by_channel(out)) == {"webhook"}  # email has no recipients -> dropped
+
+
+def test_present_but_empty_email_override_suppresses_email(use_config):
+    # A rule that explicitly sets recipients.email = [] means "to nobody" for
+    # email (the override is PRESENT) -> email is dropped. Distinct from OMITTING
+    # the key (next test), which falls back to the channel's global recipients.
+    cfg = {
+        **BASE,
+        "triggers": {
+            "defaults": {"Critical": ["email", "webhook"]},
+            "rules": [
+                {
+                    "band": "Critical",
+                    "attack_classes": ["phishing"],
+                    "channels": ["email", "webhook"],
+                    "recipients": {"email": []},
+                }
+            ],
+        },
+    }
+    use_config(cfg)
+    out = triggers.resolve_dispatch("Critical", "phishing")
+    assert set(_by_channel(out)) == {"webhook"}  # email override empty -> dropped
+
+
+def test_absent_email_override_falls_back_to_global(use_config):
+    # A rule that omits `recipients` entirely (what the UI produces when an
+    # override is cleared) falls back to the channel's global recipient list.
+    cfg = {
+        **BASE,
+        "triggers": {
+            "defaults": {"Critical": ["email"]},
+            "rules": [
+                {
+                    "band": "Critical",
+                    "attack_classes": ["phishing"],
+                    "channels": ["email"],
+                }
+            ],
+        },
+    }
+    use_config(cfg)
+    by = _by_channel(triggers.resolve_dispatch("Critical", "phishing"))
+    assert set(by) == {"email"}
+    assert by["email"].recipients == ["ops@x.com", "alice@x.com", "bob@x.com"]

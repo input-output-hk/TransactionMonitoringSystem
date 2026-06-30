@@ -448,11 +448,11 @@ class Settings(BaseSettings):
     SMTP_ENABLED: bool = True
 
     # ── Notifications ──────────────────
-    # Channel structure, the trigger matrix, and recipient lists live in
-    # config/notifications.yaml. These are the deployment master switches and
-    # operational knobs; SMTP_* (above) supplies the email transport. A
-    # channel fires only when its env switch AND its YAML `enabled` are both
-    # on, so either layer can unplug it.
+    # Channel structure, the trigger matrix, and recipient lists live in the
+    # notification config document (admin UI / notification_config table).
+    # These are the deployment master switches and operational knobs; SMTP_*
+    # (above) supplies the email transport. A channel fires only when its env
+    # switch AND its config `enabled` are both on, so either layer can unplug it.
     EMAIL_NOTIFY_ENABLED: bool = True        # master switch for alert emails
     WEBHOOK_NOTIFY_ENABLED: bool = True      # master switch for webhook posts
     NOTIFY_TOP_FEATURES: int = 5             # top-N contributing sub-scores in payload
@@ -461,8 +461,8 @@ class Settings(BaseSettings):
     WEBHOOK_MAX_RETRIES: int = 2             # extra attempts on 5xx / network error
     WEBHOOK_RETRY_BACKOFF_SECONDS: float = 1.0  # linear backoff between attempts
     WEBHOOK_SIGNING_SECRET: str = ""         # HMAC-SHA256 key for signing webhook request bodies
-    # Periodic report. Frequency/window/recipients live in
-    # notifications.yaml; these are operational knobs.
+    # Periodic report. Frequency/window/recipients live in the notification
+    # config document; these are operational knobs.
     NOTIFY_REPORT_CHECK_INTERVAL_SECONDS: int = 60   # how often the scheduler checks if due
     NOTIFY_REPORT_TOP_ALERTS: int = 10               # top-N transactions in the report
     # Dedup ledger (notified_alerts) retention; bounds its growth. The sweep

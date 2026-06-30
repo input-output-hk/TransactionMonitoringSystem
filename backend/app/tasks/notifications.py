@@ -31,7 +31,8 @@ _task: "asyncio.Task | None" = None
 
 async def _tick() -> None:
     if not config.report_enabled():
-        return  # disabled — stay idle (config changes require a restart)
+        return  # disabled — stay idle. Re-enabling via the admin UI hot-refreshes
+        #         the cache, so the next tick picks it up without a restart.
 
     cfg = config.periodic_report_config()
     network = settings.CARDANO_NETWORK

@@ -2,9 +2,9 @@
 
 ``_FACTORY`` maps a channel name to its implementation. To add a channel
 (e.g. SMS): implement ``NotificationChannel`` in ``channels/sms.py``, add one
-line here, and add an ``sms:`` block to ``config/notifications.yaml``. Nothing
-else in the module changes. To remove one: ``enabled: false`` in the YAML (or
-its env switch) — no code change.
+line here, and add an ``sms`` channel block via the admin UI. Nothing else in
+the module changes. To remove one: disable it in the config (or its env
+switch) — no code change.
 """
 
 from typing import Dict, List, Optional, Type
