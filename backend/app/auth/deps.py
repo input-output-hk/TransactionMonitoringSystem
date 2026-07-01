@@ -34,11 +34,11 @@ async def current_user(request: Request) -> Optional[dict]:
 
     Side effect: if the session row still carries a
     ``created_by_token_hash`` (i.e. this is the FIRST authenticated
-    request after a magic-link redemption), claim the token: mark it
-    consumed and clear the back-reference. From then on, the
-    originating magic link can't be redeemed again — turning the
-    counter-based ``consume_token`` into effective single-use the
-    moment a real session starts being used.
+    request after a magic-link redemption), claim this session: delete
+    any other session still linked to the same token and clear this
+    one's back-reference. The originating magic link itself is left
+    alone — it can still be redeemed again up to
+    ``MAGIC_LINK_MAX_REDEMPTIONS`` — see ``tokens.claim_session_token``.
 
     Never raises — endpoints that want a hard requirement should chain
     on top with :func:`require_user` or :func:`require_admin`.
