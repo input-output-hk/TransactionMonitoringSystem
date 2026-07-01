@@ -73,8 +73,8 @@ async def _tick() -> None:
     # of the outbound path).
     await postgres.mark_report_sent(network, window_start, now, now)
     logger.info(
-        "Periodic report sent for %s (window=%dd, channels=%s)",
-        network, window_days, [d.channel for d in dispatches],
+        "Periodic report sent (window=%dd, channels=%s)",
+         window_days, [d.channel for d in dispatches],
     )
 
 
