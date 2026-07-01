@@ -26,6 +26,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Magic-link tokens ride in `/api/auth/verify?token=...`; without this,
+# uvicorn's access log writes that live credential in plaintext for every
+# redemption (review finding).
+from app.logging_utils import configure_access_log_redaction
+configure_access_log_redaction()
+
 from app.rate_limit import (
     RateLimitMiddleware,
     RateLimiter,

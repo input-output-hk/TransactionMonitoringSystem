@@ -119,9 +119,13 @@ async def execute_auth_schema() -> None:
         # `created_by_token_hash` back-references the magic-link token
         # that established this session. The first authenticated request
         # that comes with a valid session AND a still-set back-reference
-        # claims the token (marks it consumed, clears the column). After
-        # that, the token can't be redeemed again — even if its
-        # redemption counter hasn't hit zero.
+        # claims the SESSION (clears the column and deletes any other
+        # session row still linked to the same token) — see
+        # `tokens.claim_session_token`. It deliberately does NOT kill the
+        # token itself: the link can still be redeemed again up to
+        # MAGIC_LINK_MAX_REDEMPTIONS, so a second honest open of the same
+        # email link keeps working instead of dying the instant the first
+        # one is used.
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_sessions (
@@ -155,6 +159,17 @@ async def execute_auth_schema() -> None:
             """
             CREATE INDEX IF NOT EXISTS user_sessions_expires_idx
             ON user_sessions (expires_at)
+            """,
+        )
+        # Powers claim_session_token's sibling-revocation DELETE (WHERE
+        # created_by_token_hash = $1). Partial: the column goes NULL once
+        # a session claims or loses the race, so most rows never qualify —
+        # indexing only the live back-references keeps it small.
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS user_sessions_created_by_token_hash_idx
+            ON user_sessions (created_by_token_hash)
+            WHERE created_by_token_hash IS NOT NULL
             """,
         )
 

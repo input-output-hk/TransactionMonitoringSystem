@@ -1,10 +1,15 @@
-"""Magic-link token generation and single-use redemption.
+"""Magic-link token generation and bounded-redemption consumption.
 
 The token in the email is a URL-safe random string. We store only its
 SHA-256 hash in Postgres so a database read can't be replayed as a login.
-Tokens are single-use: ``consumed_at`` is stamped on the first successful
-redemption inside the same transaction that does the lookup, blocking a
-second concurrent redemption attempt.
+Each token allows up to ``MAGIC_LINK_MAX_REDEMPTIONS`` redemptions (default
+3) before ``consume_token`` refuses it — that budget is what absorbs a
+few "drive-by" GETs (an email security scanner, a chat-app link unfurl,
+the same person opening the link twice) without the link dying before its
+intended use. ``claim_session_token`` separately cleans up *sessions*
+spawned by those drive-by redemptions once one of them is actually used;
+see its docstring for why that's a session-level concern rather than a
+reason to kill the token early.
 
 Two purposes share the same table:
 
@@ -101,14 +106,20 @@ async def consume_token(
     Reasons for ``None``: unknown token, already consumed, expired,
     purpose mismatch, or redemptions exhausted.
 
-    ``settings.MAGIC_LINK_MAX_REDEMPTIONS`` (default 3) is only an emergency
-    ceiling, NOT the everyday single-use mechanism. Real single-use comes from
-    ``claim_session_token``: the first authenticated request on the resulting
-    session flips ``consumed_at`` and zeroes the counter, so in the happy path
-    the link dies on that first use even though the counter still shows
-    redemptions left. The counter buffer absorbs naive email-scanner prefetches
-    and double-clicks. See the ``MAGIC_LINK_MAX_REDEMPTIONS`` comment in
-    ``config.py`` for the full rationale.
+    ``settings.MAGIC_LINK_MAX_REDEMPTIONS`` (default 3) IS the single-use
+    budget — this decrement is the only thing that ever kills a token
+    (besides expiry). An earlier revision also had ``claim_session_token``
+    zero the counter on the first authenticated request, meant to give a
+    tighter "single-use feel"; that back-fired on the ordinary case of a
+    user opening the same email link twice (slow first load, a second
+    click "just in case", the same link on a second device) — the first
+    open succeeded and silently killed the link before the second open
+    ran, which then saw "invalid or expired" for no real reason. Now the
+    budget alone decides, so a second honest open of the same link keeps
+    working as long as redemptions remain. See the
+    ``MAGIC_LINK_MAX_REDEMPTIONS`` comment in ``config.py`` for the full
+    rationale, and ``claim_session_token`` for the complementary
+    session-cleanup job.
 
     The atomic UPDATE keeps the decrement race-safe under concurrent
     redemption attempts regardless of the configured ceiling.
@@ -141,30 +152,30 @@ async def consume_token(
     return row["user_id"]
 
 
-async def claim_session_token(session_id: str, token_hash: str) -> None:
-    """Mark a magic-link token as fully consumed and clear the session's
-    back-reference, in one transaction.
-
-    Triggered on the first authenticated request after a magic-link
-    redemption — see `auth/deps.py:current_user`. This is what gives
-    the system its single-use feel even though `consume_token` keeps a
-    redemption counter: the moment a real session is actually used, any
-    leftover redemptions on the token are wiped.
-
-    Idempotent: subsequent calls (e.g. concurrent claim attempts from
-    parallel requests) no-op because the `consumed_at IS NULL` and
-    `created_by_token_hash IS NOT NULL` predicates only match once.
+async def claim_session_token(session_id: str, token_hash: str) -> int:
+    """Claim this SESSION on behalf of a magic-link redemption: delete any
+    other session still linked to the same token, then clear this one's
+    own back-reference.
     """
     async with get_connection() as conn:
         async with conn.transaction():
+            # Pure lock acquisition (see "Serialization" above) — forces
+            # concurrent claims for this token to run one at a time.
             await conn.execute(
+                "SELECT 1 FROM magic_link_tokens WHERE token_hash = $1 FOR UPDATE",
+                token_hash,
+            )
+            # Kill every OTHER session minted from this token that hasn't
+            # claimed itself yet. Sessions that already ran this function
+            # have a NULL created_by_token_hash and so are naturally
+            # excluded from this DELETE.
+            result = await conn.execute(
                 """
-                UPDATE magic_link_tokens
-                SET consumed_at = now(),
-                    redemptions_remaining = 0
-                WHERE token_hash = $1 AND consumed_at IS NULL
+                DELETE FROM user_sessions
+                WHERE created_by_token_hash = $1 AND session_id <> $2
                 """,
                 token_hash,
+                session_id,
             )
             await conn.execute(
                 """
@@ -174,6 +185,18 @@ async def claim_session_token(session_id: str, token_hash: str) -> None:
                 """,
                 session_id,
             )
+    try:
+        revoked = int(result.split()[-1])
+    except (ValueError, IndexError):
+        revoked = 0
+    if revoked:
+        logger.warning(
+            "claim_session_token: revoked %d sibling session(s) for a "
+            "magic-link token (hash prefix %s…) — the link was evidently "
+            "redeemed by more than one party",
+            revoked, token_hash[:12],
+        )
+    return revoked
 
 
 async def purge_expired_tokens() -> int:

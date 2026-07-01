@@ -93,11 +93,11 @@ async def verify_api_key(
         from app.auth.sessions import lookup_session  # local to dodge cycles
         user = await lookup_session(session_id)
         if user:
-            # Same one-shot token claim as `deps.current_user`. Lives in
-            # both call sites so any authenticated request reaching
-            # endpoints that still go through `verify_api_key` (the
-            # bulk of the existing API) also triggers the magic-link
-            # invalidation. See `tokens.claim_session_token`.
+            # Same session-claim as `deps.current_user`. Lives in both
+            # call sites so any authenticated request reaching endpoints
+            # that still go through `verify_api_key` (the bulk of the
+            # existing API) also triggers sibling-session cleanup. See
+            # `tokens.claim_session_token`.
             if user.get("created_by_token_hash"):
                 from app.auth.tokens import claim_session_token
                 await claim_session_token(
