@@ -1,15 +1,6 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-	AlertCircle,
-	ArrowUp,
-	Copy,
-	ExternalLink,
-} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DateField } from "@/components/ui/date-field";
-import { TableFooter } from "@/components/ui/table-footer";
 import {
 	Dialog,
 	DialogContent,
@@ -34,8 +25,8 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
 import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
+import { TableFooter } from "@/components/ui/table-footer";
 import { fetchAlertsForExport, useRiskAlerts } from "@/lib/api/analysis";
 import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { copyToClipboard } from "@/lib/utils/clipboard";
@@ -46,15 +37,37 @@ import {
 	nextDayISO,
 	startOfDayISO,
 } from "@/lib/utils/dates";
+import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
+import { AlertCircle, ArrowUp, Copy, ExternalLink } from "lucide-react";
+import { useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 export function ReportsPage() {
 	const navigate = useNavigate();
-	const [startDate, setStartDate] = useState(defaultStart());
-	const [endDate, setEndDate] = useState(defaultEnd());
-	const [attackFilter, setAttackFilter] = useState<string>("all");
-	const [severityFilter, setSeverityFilter] = useState<string>("all");
-	const [sortBy, setSortBy] = useState<"date" | "score">("date");
+	const [searchParams] = useSearchParams();
+	const qpDate = (k: string, fallback: string) => {
+		const v = searchParams.get(k);
+		return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : fallback;
+	};
+	const qpAttack = searchParams.get("attack");
+	const qpSeverity = searchParams.get("severity");
+	const [startDate, setStartDate] = useState(qpDate("from", defaultStart()));
+	const [endDate, setEndDate] = useState(qpDate("to", defaultEnd()));
+	const [attackFilter, setAttackFilter] = useState<string>(
+		qpAttack && (ATTACK_TYPES as readonly string[]).includes(qpAttack)
+			? qpAttack
+			: "all",
+	);
+	const [severityFilter, setSeverityFilter] = useState<string>(
+		qpSeverity &&
+			["INFORMATIONAL", "MEDIUM", "HIGH", "CRITICAL"].includes(qpSeverity)
+			? qpSeverity
+			: "all",
+	);
+	const [sortBy, setSortBy] = useState<"date" | "score">(
+		searchParams.get("sort") === "score" ? "score" : "date",
+	);
 	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 	const [page, setPage] = useState(0);
 	const [exporting, setExporting] = useState(false);

@@ -80,7 +80,12 @@ export function MultiSelect<T extends string = string>({
 		else set.add(v);
 		// Preserve the original option order so the array shape is stable
 		// across toggles — easier for query-key equality in React Query.
-		onChange(options.map((o) => o.value).filter((x) => set.has(x)));
+		const known = options.map((o) => o.value).filter((x) => set.has(x));
+		// Keep any currently-selected values that aren't in `options` (e.g. a
+		// stored config value the caller's option list doesn't include) so a
+		// toggle never silently drops them — preserves the verbatim round-trip.
+		const extra = [...set].filter((x) => !options.some((o) => o.value === x));
+		onChange([...known, ...extra]);
 	};
 
 	const summary = summarize(value, options, placeholder, label, pluralLabel);

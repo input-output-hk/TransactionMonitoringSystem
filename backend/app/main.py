@@ -39,8 +39,10 @@ from app.rate_limit import (
     stop_all_cleanups,
 )
 from app.db import postgres, clickhouse, raw_store
-from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api
+from app import notifications
+from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
 from app.tasks import analysis as analysis_task
+from app.tasks import notifications as notifications_task
 from app.routers import ui, websocket
 
 # Global state
@@ -219,6 +221,18 @@ async def lifespan(app: FastAPI):
             raw_store.init_store()
         logger.info("Databases initialized")
 
+        # Notifications: load + validate the stored config at
+        # boot (a malformed stored doc fails startup, not the first alert;
+        # seeds safe defaults on a fresh DB), capture the event loop for the
+        # executor-thread hook, and build the channels.
+        await notifications.load_config()
+        notifications.set_main_loop(asyncio.get_running_loop())
+        notifications.build_channels()
+        # Periodic-report scheduler. Self-gates on the `periodic_report.enabled`
+        # flag each tick.
+        notifications_task.start()
+        logger.info("Notification module ready")
+
         # Start Analysis Engine background task
         if settings.ANALYSIS_ENGINE_ENABLED:
             analysis_task.start()
@@ -254,6 +268,10 @@ async def lifespan(app: FastAPI):
     stop_all_cleanups()
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
+    notifications_task.stop()
+    # Stop scheduling new notification deliveries (the scoring loop is stopped
+    # above; in-flight dispatch tasks finish on their own).
+    notifications.set_main_loop(None)
     if ogmios_client:
         await ogmios_client.disconnect()
     # disconnect() signals the supervised coroutines to return; cancel-then-
@@ -342,6 +360,7 @@ app.include_router(archive.router)
 app.include_router(auth_api.router)
 app.include_router(users_api.router)
 app.include_router(clustering_api.router)
+app.include_router(notifications_config.router)
 
 
 @app.get("/health")

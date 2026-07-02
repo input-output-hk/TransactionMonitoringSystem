@@ -71,6 +71,31 @@ def _render(
     return subject, body
 
 
+async def send_smtp(msg: EmailMessage) -> bool:
+    """Send a prepared message over the configured SMTP transport.
+
+    Never raises — returns True on success, False on any failure (the caller
+    decides whether/how to surface it). Shared by magic-link auth and the
+    notification email channel (``app.notifications.channels.email``) so the
+    TLS/STARTTLS/credential/timeout plumbing lives in exactly one place.
+    """
+    try:
+        await aiosmtplib.send(
+            msg,
+            hostname=settings.SMTP_HOST,
+            port=settings.SMTP_PORT,
+            username=settings.SMTP_USER or None,
+            password=settings.SMTP_PASSWORD or None,
+            use_tls=settings.SMTP_USE_TLS,
+            start_tls=settings.SMTP_USE_STARTTLS,
+            timeout=settings.SMTP_TIMEOUT_SECONDS,
+        )
+        return True
+    except Exception as e:
+        logger.error("SMTP send failed: %s", e)
+        return False
+
+
 async def send_magic_link(
     to_email: str, full_name: str, token: str, purpose: EmailPurpose,
 ) -> bool:
@@ -110,21 +135,11 @@ async def send_magic_link(
     msg["To"] = to_email
     msg.set_content(body)
 
-    try:
-        await aiosmtplib.send(
-            msg,
-            hostname=settings.SMTP_HOST,
-            port=settings.SMTP_PORT,
-            username=settings.SMTP_USER or None,
-            password=settings.SMTP_PASSWORD or None,
-            use_tls=settings.SMTP_USE_TLS,
-            start_tls=settings.SMTP_USE_STARTTLS,
-            timeout=10,
-        )
+    # Critical to swallow failures: the public endpoint must not leak whether
+    # an email matched a real user via different timings or status codes.
+    # send_smtp never raises and returns False on any error.
+    if await send_smtp(msg):
         logger.info("Sent %s magic-link email to %s", purpose, to_email)
         return True
-    except Exception as e:
-        # Critical to swallow: the public endpoint must not leak whether an
-        # email matched a real user via different timings or status codes.
-        logger.error("SMTP send failed for %s (%s): %s", to_email, purpose, e)
-        return False
+    logger.error("SMTP send failed for %s (%s)", to_email, purpose)
+    return False

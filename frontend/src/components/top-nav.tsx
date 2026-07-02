@@ -246,6 +246,9 @@ export function TopNav() {
 						<NavItem to="/validators">Validators</NavItem>
 					)}
 					{user?.role === "Admin" && <NavItem to="/users">Users</NavItem>}
+					{user?.role === "Admin" && (
+						<NavItem to="/settings/notifications">Notifications</NavItem>
+					)}
 				</nav>
 
 				<div className="flex items-center gap-5">
