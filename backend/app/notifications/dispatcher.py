@@ -24,13 +24,15 @@ logger = logging.getLogger(__name__)
 async def dispatch(
     payload, dispatches: List[Dispatch],
     attachments: "Optional[List[Attachment]]" = None,
-) -> None:
+) -> bool:
     """Deliver ``payload`` to every channel in ``dispatches``, fully isolated.
 
+    Returns True iff at least one channel actually delivered (used by the
+    immediate-alert path to decide whether to record the dedup claim).
     ``attachments`` (e.g. the periodic report CSV) reach channels that support
     them; others ignore them."""
     if not dispatches:
-        return
+        return False
     results = await asyncio.gather(
         *(_send_one(d, payload, attachments) for d in dispatches),
         return_exceptions=True,
@@ -56,6 +58,7 @@ async def dispatch(
                 "failed": failed,
             },
         )
+    return bool(sent)
 
 
 async def _send_one(d: Dispatch, payload, attachments=None) -> NotificationResult:

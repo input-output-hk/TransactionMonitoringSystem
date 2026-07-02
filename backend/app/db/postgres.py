@@ -362,6 +362,26 @@ async def claim_notification(network: str, tx_hash: str, band: str) -> bool:
     return row is not None
 
 
+async def already_notified(network: str, tx_hash: str, band: str) -> bool:
+    """True if (network, tx_hash) was already notified at >= ``band``.
+
+    Read-only dedup pre-check for the delivery path: it lets a same-or-lower
+    re-score skip WITHOUT recording a claim, so the claim is written only after
+    a channel actually delivers (see notifications._deliver_with_dedup). A
+    failed send therefore leaves the tx eligible to retry on the next re-score
+    (recall-first: never silently drop a real alert).
+    """
+    rank = _BAND_RANK.get(band, -1)
+    if rank < 0:
+        return True  # unknown band: matches claim_notification's never-notify
+    async with get_connection() as conn:
+        row = await conn.fetchrow("""
+            SELECT 1 FROM notified_alerts
+            WHERE network = $1 AND tx_hash = $2 AND band_rank >= $3
+        """, network, tx_hash, rank)
+    return row is not None
+
+
 async def prune_notified_alerts(older_than_days: int) -> int:
     """Delete dedup-ledger rows older than the retention window.
 

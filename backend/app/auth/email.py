@@ -88,7 +88,7 @@ async def send_smtp(msg: EmailMessage) -> bool:
             password=settings.SMTP_PASSWORD or None,
             use_tls=settings.SMTP_USE_TLS,
             start_tls=settings.SMTP_USE_STARTTLS,
-            timeout=10,
+            timeout=settings.SMTP_TIMEOUT_SECONDS,
         )
         return True
     except Exception as e:

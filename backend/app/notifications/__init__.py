@@ -11,8 +11,8 @@ Why the work is split across a thread boundary: ``engine.run_once`` (and thus
 ``on_new_scores`` does only fast in-memory work and schedules the async
 delivery onto the captured main loop with ``run_coroutine_threadsafe``,
 discarding the future — fire-and-forget, so a slow/broken channel can never
-stall scoring. The dedup claim + the channel sends run in
-``_claim_then_dispatch`` on the main loop.
+stall scoring. The delivery and the dedup claim run in
+``_deliver_with_dedup`` on the main loop.
 """
 
 import asyncio
@@ -77,7 +77,7 @@ def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
                 continue
             payload = build_immediate_alert(r, network)
             asyncio.run_coroutine_threadsafe(
-                _claim_then_dispatch(network, r["tx_hash"], band, payload, dispatches),
+                _deliver_with_dedup(network, r["tx_hash"], band, payload, dispatches),
                 loop,
             )  # future intentionally discarded — fire-and-forget
         except Exception:
@@ -88,15 +88,35 @@ def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
             )
 
 
-async def _claim_then_dispatch(
+async def _deliver_with_dedup(
     network: str, tx_hash: str, band: str, payload, dispatches,
 ) -> None:
-    """On the main loop: de-dup, then fan out. Resolve-then-claim ordering."""
+    """On the main loop: skip duplicates, deliver, then record the claim.
+
+    Deliver-then-claim ordering: the dedup is a READ pre-check and the claim is
+    written only AFTER at least one channel actually delivered. So a transient
+    total-channel failure records nothing and the alert is retried on the next
+    re-score (recall-first: never silently drop a real alert). The small TOCTOU
+    window where two concurrent re-scores both deliver risks at most a duplicate
+    push, never a miss, which is the trade this system prefers.
+    """
     try:
-        claimed = await postgres.claim_notification(network, tx_hash, band)
+        if await postgres.already_notified(network, tx_hash, band):
+            return  # already notified at >= this band (duplicate / non-escalating)
     except Exception:
-        logger.exception("notification dedup claim failed for %s/%s", network, tx_hash)
-        return
-    if not claimed:
-        return  # already notified at >= this band (duplicate / non-escalating)
-    await dispatcher.dispatch(payload, dispatches)
+        # Dedup check failed: prefer a possible duplicate over a missed alert.
+        logger.exception(
+            "notification dedup check failed for %s/%s; delivering anyway",
+            network, tx_hash,
+        )
+    delivered = await dispatcher.dispatch(payload, dispatches)
+    if not delivered:
+        return  # nothing sent: leave unclaimed so a re-score retries
+    try:
+        await postgres.claim_notification(network, tx_hash, band)
+    except Exception:
+        # Delivered but couldn't record the claim: a later re-score may
+        # re-notify (duplicate). Acceptable under recall-first.
+        logger.exception(
+            "notification claim record failed for %s/%s", network, tx_hash,
+        )
