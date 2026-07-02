@@ -1,12 +1,18 @@
-"""Background task: periodic notification report scheduler.
+"""Background notification tasks: the periodic report scheduler and the
+clustering-sidecar contract_anomaly poller.
 
-Wakes on a short interval, checks whether a report is due (the configured
-frequency vs the persisted ``last_sent_at``), and when due assembles +
-dispatches the report, then advances the boundary so a restart neither
-double-sends nor skips a period.
+The report scheduler wakes on a short interval, checks whether a report is due
+(the configured frequency vs the persisted ``last_sent_at``), and when due
+assembles + dispatches the report, then advances the boundary so a restart
+neither double-sends nor skips a period.
 
-Mirrors :mod:`app.tasks.analysis`: a module-level ``_task``, idempotent
-``start()``/``stop()``, and a ``_loop`` with per-tick error isolation.
+The contract_anomaly poller (only started when ``CLUSTERING_ENABLED``) reads the
+clustering sidecar's verdicts and fires an immediate alert for each routed one.
+contract_anomaly is the sidecar's read-time-only class — it never reaches
+``on_new_scores`` — so this poller is its only notification path.
+
+Mirrors :mod:`app.tasks.analysis`: module-level tasks, idempotent
+``start()``/``stop()``, and ``_loop``s with per-tick error isolation.
 """
 
 import asyncio
@@ -16,8 +22,9 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.db import postgres
-from app.notifications import config, dispatcher, reports
+from app.notifications import _deliver_with_dedup, config, dispatcher, reports, triggers
 from app.notifications.channels.base import Attachment
+from app.notifications.payloads import build_contract_anomaly_alert
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +34,7 @@ logger = logging.getLogger(__name__)
 _CSV_GZIP_THRESHOLD_BYTES = 1_000_000
 
 _task: "asyncio.Task | None" = None
+_ca_task: "asyncio.Task | None" = None
 
 
 async def _tick() -> None:
@@ -91,17 +99,68 @@ async def _loop() -> None:
         await asyncio.sleep(settings.NOTIFY_REPORT_CHECK_INTERVAL_SECONDS)
 
 
+async def _contract_anomaly_tick() -> None:
+    """Poll the clustering sidecar for positive contract_anomaly verdicts and
+    fire an immediate alert for each routed one.
+
+    Deduped in the ``'contract_anomaly'`` stream so it never collides with the
+    per-tx scorer alerts for the same transaction. Per-tx failures are isolated:
+    one bad verdict is logged and skipped, never aborting the tick.
+    """
+    from app.analysis import contract_anomaly as ca  # local: keep import tree light
+    from app.db import clustering_queries
+
+    network = settings.CARDANO_NETWORK
+    flagged = await clustering_queries.flagged_for_network_async(network)
+    for tx_hash, rows in flagged.items():
+        try:
+            winner = ca.resolve(rows)
+            if winner is None:
+                continue
+            raw_band = winner.get("risk_band")
+            band = raw_band.value if hasattr(raw_band, "value") else str(raw_band or "")
+            dispatches = triggers.resolve_dispatch(band, "contract_anomaly")
+            if not dispatches:
+                continue  # this (band, contract_anomaly) isn't routed anywhere
+            payload = build_contract_anomaly_alert(tx_hash, network, winner)
+            await _deliver_with_dedup(
+                network, tx_hash, band, payload, dispatches,
+                source="contract_anomaly",
+            )
+        except Exception:
+            logger.exception("contract_anomaly poll: skipping %s", tx_hash)
+
+
+async def _contract_anomaly_loop() -> None:
+    logger.info(
+        "contract_anomaly poller started (interval=%ss)",
+        settings.NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS,
+    )
+    while True:
+        try:
+            await _contract_anomaly_tick()
+        except Exception as e:
+            logger.error("contract_anomaly poller error: %r", e)
+        await asyncio.sleep(settings.NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS)
+
+
 def start() -> None:
-    """Schedule the report loop as a background task (idempotent)."""
-    global _task
+    """Schedule the report loop (always) plus, when the clustering sidecar is
+    enabled, the contract_anomaly poller. Idempotent."""
+    global _task, _ca_task
     if _task is not None and not _task.done():
         logger.warning("Notification scheduler already running; start() ignored")
         return
     _task = asyncio.create_task(_loop())
+    if settings.CLUSTERING_ENABLED:
+        _ca_task = asyncio.create_task(_contract_anomaly_loop())
 
 
 def stop() -> None:
-    global _task
+    global _task, _ca_task
     if _task and not _task.done():
         _task.cancel()
     _task = None
+    if _ca_task and not _ca_task.done():
+        _ca_task.cancel()
+    _ca_task = None

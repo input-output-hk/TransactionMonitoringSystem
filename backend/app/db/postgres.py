@@ -283,14 +283,42 @@ async def execute_schema():
         # "newly scored" repeatedly. band_rank records the highest band already
         # notified; a re-score notifies again ONLY on escalation to a higher
         # band. See claim_notification().
+        #
+        # ``source`` separates independent dedup streams for the SAME tx: the
+        # per-tx scorer alerts ('scorer') vs the clustering sidecar's
+        # contract_anomaly verdicts ('contract_anomaly'). They are distinct
+        # detections, so a tx flagged by both notifies once PER source rather
+        # than having one suppress the other. Dedup + escalation are per
+        # (network, tx_hash, source).
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS notified_alerts (
                 network     TEXT NOT NULL,
                 tx_hash     TEXT NOT NULL,
+                source      TEXT NOT NULL DEFAULT 'scorer',
                 band_rank   SMALLINT NOT NULL,
                 notified_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (network, tx_hash)
+                PRIMARY KEY (network, tx_hash, source)
             )
+        """)
+        # Idempotent migration for installs created before ``source`` existed:
+        # add the column and widen the primary key to include it. Guarded on the
+        # column's absence so it runs exactly once; a no-op on fresh installs
+        # (the CREATE TABLE above already has the column) and on every reboot
+        # after. Existing rows default to 'scorer', preserving their dedup.
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'notified_alerts' AND column_name = 'source'
+                ) THEN
+                    ALTER TABLE notified_alerts
+                        ADD COLUMN source TEXT NOT NULL DEFAULT 'scorer';
+                    ALTER TABLE notified_alerts DROP CONSTRAINT notified_alerts_pkey;
+                    ALTER TABLE notified_alerts
+                        ADD PRIMARY KEY (network, tx_hash, source);
+                END IF;
+            END $$;
         """)
 
         # Periodic-report scheduling state. One row per
@@ -332,13 +360,18 @@ async def execute_schema():
 _BAND_RANK = {"Informational": 0, "Moderate": 1, "High": 2, "Critical": 3}
 
 
-async def claim_notification(network: str, tx_hash: str, band: str) -> bool:
-    """Atomically claim the right to notify for (network, tx_hash) at ``band``.
+async def claim_notification(
+    network: str, tx_hash: str, band: str, source: str = "scorer",
+) -> bool:
+    """Atomically claim the right to notify for (network, tx_hash, source) at ``band``.
 
-    Returns True only when this is the FIRST notification for the transaction
-    or a genuine escalation to a higher band than was previously notified; a
-    same-or-lower re-score returns False. Race-free: concurrent callers
-    serialize on the primary key, so exactly one wins the claim.
+    ``source`` separates dedup streams (``'scorer'`` for per-tx scorer alerts,
+    ``'contract_anomaly'`` for the clustering sidecar's verdicts) so the same tx
+    can notify once per source. Returns True only when this is the FIRST
+    notification for (transaction, source) or a genuine escalation to a higher
+    band than was previously notified for that source; a same-or-lower re-score
+    returns False. Race-free: concurrent callers serialize on the primary key,
+    so exactly one wins the claim.
 
     The single statement does the check-and-claim atomically. A row is
     RETURNED iff we inserted a fresh row (``xmax = 0``) or the conflict's
@@ -351,25 +384,28 @@ async def claim_notification(network: str, tx_hash: str, band: str) -> bool:
         return False  # unknown band — never notify
     async with get_connection() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO notified_alerts (network, tx_hash, band_rank)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (network, tx_hash) DO UPDATE
+            INSERT INTO notified_alerts (network, tx_hash, source, band_rank)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (network, tx_hash, source) DO UPDATE
                 SET band_rank = EXCLUDED.band_rank,
                     notified_at = CURRENT_TIMESTAMP
                 WHERE notified_alerts.band_rank < EXCLUDED.band_rank
             RETURNING (xmax = 0) AS inserted
-        """, network, tx_hash, rank)
+        """, network, tx_hash, source, rank)
     return row is not None
 
 
-async def already_notified(network: str, tx_hash: str, band: str) -> bool:
-    """True if (network, tx_hash) was already notified at >= ``band``.
+async def already_notified(
+    network: str, tx_hash: str, band: str, source: str = "scorer",
+) -> bool:
+    """True if (network, tx_hash, source) was already notified at >= ``band``.
 
     Read-only dedup pre-check for the delivery path: it lets a same-or-lower
     re-score skip WITHOUT recording a claim, so the claim is written only after
     a channel actually delivers (see notifications._deliver_with_dedup). A
     failed send therefore leaves the tx eligible to retry on the next re-score
-    (recall-first: never silently drop a real alert).
+    (recall-first: never silently drop a real alert). ``source`` scopes the
+    check to one dedup stream (scorer vs contract_anomaly).
     """
     rank = _BAND_RANK.get(band, -1)
     if rank < 0:
@@ -377,8 +413,8 @@ async def already_notified(network: str, tx_hash: str, band: str) -> bool:
     async with get_connection() as conn:
         row = await conn.fetchrow("""
             SELECT 1 FROM notified_alerts
-            WHERE network = $1 AND tx_hash = $2 AND band_rank >= $3
-        """, network, tx_hash, rank)
+            WHERE network = $1 AND tx_hash = $2 AND source = $3 AND band_rank >= $4
+        """, network, tx_hash, source, rank)
     return row is not None
 
 

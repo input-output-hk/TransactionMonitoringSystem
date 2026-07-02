@@ -90,6 +90,7 @@ def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
 
 async def _deliver_with_dedup(
     network: str, tx_hash: str, band: str, payload, dispatches,
+    source: str = "scorer",
 ) -> None:
     """On the main loop: skip duplicates, deliver, then record the claim.
 
@@ -99,9 +100,13 @@ async def _deliver_with_dedup(
     re-score (recall-first: never silently drop a real alert). The small TOCTOU
     window where two concurrent re-scores both deliver risks at most a duplicate
     push, never a miss, which is the trade this system prefers.
+
+    ``source`` selects the dedup stream: ``'scorer'`` for the per-tx immediate
+    alerts (default) and ``'contract_anomaly'`` for the clustering poller, so
+    the two never suppress each other for the same tx.
     """
     try:
-        if await postgres.already_notified(network, tx_hash, band):
+        if await postgres.already_notified(network, tx_hash, band, source=source):
             return  # already notified at >= this band (duplicate / non-escalating)
     except Exception:
         # Dedup check failed: prefer a possible duplicate over a missed alert.
@@ -113,7 +118,7 @@ async def _deliver_with_dedup(
     if not delivered:
         return  # nothing sent: leave unclaimed so a re-score retries
     try:
-        await postgres.claim_notification(network, tx_hash, band)
+        await postgres.claim_notification(network, tx_hash, band, source=source)
     except Exception:
         # Delivered but couldn't record the claim: a later re-score may
         # re-notify (duplicate). Acceptable under recall-first.

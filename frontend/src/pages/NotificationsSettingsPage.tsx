@@ -49,6 +49,14 @@ const ATTACK_CLASS_OPTIONS = [
 	{ value: "fake_token", label: "Fake Token" },
 	{ value: "phishing", label: "Phishing" },
 ];
+// The clustering sidecar's read-time-only class. Offered for rule/report
+// authoring only when the sidecar is enabled (GET `clustering_enabled`); an
+// already-stored contract_anomaly value still renders because MultiSelect keeps
+// values not in its options, so turning the sidecar off never silently drops it.
+const CONTRACT_ANOMALY_OPTION = {
+	value: "contract_anomaly",
+	label: "Contract Anomaly",
+};
 
 const EMAIL_DEFAULT: ChannelConfig = { enabled: false, recipients: [] };
 const WEBHOOK_DEFAULT: ChannelConfig = { enabled: false, default_url: "" };
@@ -221,6 +229,11 @@ export function NotificationsSettingsPage() {
 		return <p className="text-muted-foreground p-6 text-sm">Loading…</p>;
 
 	const channelNames = Object.keys(cfg.channels);
+	// contract_anomaly is selectable only when the sidecar is enabled; an already
+	// stored value still displays (MultiSelect keeps values outside its options).
+	const attackClassOptions = data?.clustering_enabled
+		? [...ATTACK_CLASS_OPTIONS, CONTRACT_ANOMALY_OPTION]
+		: ATTACK_CLASS_OPTIONS;
 	const channelOptions = channelNames.map((c) => ({ value: c, label: c }));
 
 	return (
@@ -412,6 +425,7 @@ export function NotificationsSettingsPage() {
 						key={i}
 						rule={rule}
 						channelOptions={channelOptions}
+						attackClassOptions={attackClassOptions}
 						onChange={(next) =>
 							patch((d) => {
 								d.triggers.rules[i] = next;
@@ -535,7 +549,7 @@ export function NotificationsSettingsPage() {
 					/>
 					{cfg.periodic_report.attack_classes !== "all" && (
 						<MultiSelect
-							options={ATTACK_CLASS_OPTIONS}
+							options={attackClassOptions}
 							value={cfg.periodic_report.attack_classes}
 							onChange={(next) =>
 								patch((d) => {
@@ -592,11 +606,13 @@ function LabeledSelect({
 function RuleEditor({
 	rule,
 	channelOptions,
+	attackClassOptions,
 	onChange,
 	onRemove,
 }: {
 	rule: TriggerRule;
 	channelOptions: { value: string; label: string }[];
+	attackClassOptions: { value: string; label: string }[];
 	onChange: (next: TriggerRule) => void;
 	onRemove: () => void;
 }) {
@@ -615,7 +631,7 @@ function RuleEditor({
 						Attack classes
 					</Label>
 					<MultiSelect
-						options={ATTACK_CLASS_OPTIONS}
+						options={attackClassOptions}
 						value={rule.attack_classes}
 						onChange={(next) => onChange({ ...rule, attack_classes: next })}
 						placeholder="classes"

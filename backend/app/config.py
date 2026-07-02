@@ -468,6 +468,9 @@ class Settings(BaseSettings):
     # config document; these are operational knobs.
     NOTIFY_REPORT_CHECK_INTERVAL_SECONDS: int = 60   # how often the scheduler checks if due
     NOTIFY_REPORT_TOP_ALERTS: int = 10               # top-N transactions in the report
+    # Clustering-sidecar poller: how often to check for new contract_anomaly
+    # verdicts to notify on. Only runs when CLUSTERING_ENABLED.
+    NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS: int = 60
     # Dedup ledger (notified_alerts) retention; bounds its growth. The sweep
     # runs on RETENTION_SWEEP_INTERVAL_HOURS. 0 disables (keeps everything).
     NOTIFY_DEDUP_RETENTION_DAYS: int = 30
