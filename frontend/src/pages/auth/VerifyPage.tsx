@@ -29,21 +29,21 @@ export function VerifyPage() {
 	const navigate = useNavigate();
 	const { refetchUser } = useAuth();
 
-	const [phase, setPhase] = useState<Phase>("verifying");
-	const [error, setError] = useState<string | null>(null);
+	// Initial state is derived from the token synchronously (no setState in the
+	// effect for the missing-token case): a blank token renders the error state
+	// on the first paint, which also avoids a cascading re-render.
+	const [phase, setPhase] = useState<Phase>(token ? "verifying" : "error");
+	const [error, setError] = useState<string | null>(
+		token ? null : "This link is missing its token.",
+	);
 	// Guard against React 18 StrictMode double-mount → token consumption
 	// is single-use so the second call would always 400.
 	const fired = useRef(false);
 
 	useEffect(() => {
+		if (!token) return; // nothing to verify; initial state already shows the error
 		if (fired.current) return;
 		fired.current = true;
-
-		if (!token) {
-			setPhase("error");
-			setError("This link is missing its token.");
-			return;
-		}
 
 		(async () => {
 			try {
