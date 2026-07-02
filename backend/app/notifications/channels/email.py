@@ -35,7 +35,7 @@ def _render_immediate(payload) -> Tuple[str, str]:
     """(subject, plain-text body) for an immediate alert."""
     band = _band_label(payload.risk_band)
     subject = (
-        f"[TMS {band}] {payload.attack_class} — {payload.risk_score:.0f}/100"
+        f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
     )
     if payload.contributing_features:
         feats = "\n".join(
@@ -54,7 +54,7 @@ def _render_immediate(payload) -> Tuple[str, str]:
         f"  Detected at : {payload.timestamp}\n\n"
         f"  Top contributing features:\n{feats}\n\n"
         f"  View in dashboard: {payload.dashboard_url}\n\n"
-        f"— TMS Alerting\n"
+        f"-- TMS Alerting\n"
     )
     return subject, body
 
@@ -64,7 +64,7 @@ def _render_report(payload) -> Tuple[str, str]:
     s = payload.summary
     win = payload.report_window
     subject = (
-        f"[TMS] Periodic report — {payload.network} "
+        f"[TMS] Periodic report: {payload.network} "
         f"({win.get('from', '')[:10]} → {win.get('to', '')[:10]})"
     )
     by_band = "  ".join(
@@ -91,7 +91,7 @@ def _render_report(payload) -> Tuple[str, str]:
         f"  Alerts by attack class:\n{classes}\n\n"
         f"  Top alerts:\n{tops}\n\n"
         f"  Open dashboard: {payload.dashboard_url}\n\n"
-        f"— TMS Alerting\n"
+        f"-- TMS Alerting\n"
     )
     return subject, body
 

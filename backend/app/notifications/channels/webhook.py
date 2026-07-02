@@ -73,24 +73,26 @@ class WebhookChannel(NotificationChannel):
 
         attempts = max(1, settings.WEBHOOK_MAX_RETRIES + 1)
         last = "no attempt made"
-        for i in range(attempts):
-            try:
-                async with httpx.AsyncClient(
-                    timeout=settings.WEBHOOK_TIMEOUT_SECONDS
-                ) as client:
+        # One client for all attempts: connection-pool and TLS reuse across
+        # retries. Each attempt is still bounded by the per-request timeout.
+        async with httpx.AsyncClient(
+            timeout=settings.WEBHOOK_TIMEOUT_SECONDS
+        ) as client:
+            for i in range(attempts):
+                try:
                     resp = await client.post(url, content=raw, headers=headers)
-                if resp.status_code < 400:
-                    return NotificationResult(
-                        self.name, ok=True, detail=f"http {resp.status_code}"
+                    if resp.status_code < 400:
+                        return NotificationResult(
+                            self.name, ok=True, detail=f"http {resp.status_code}"
+                        )
+                    last = f"http {resp.status_code}"
+                    # 4xx is a permanent client error: don't waste retries on it.
+                    if resp.status_code < 500:
+                        return NotificationResult(self.name, ok=False, detail=last)
+                except Exception as e:  # network / DNS / TLS / timeout
+                    last = repr(e)
+                if i < attempts - 1:
+                    await asyncio.sleep(
+                        settings.WEBHOOK_RETRY_BACKOFF_SECONDS * (i + 1)
                     )
-                last = f"http {resp.status_code}"
-                # 4xx is a permanent client error — don't waste retries on it.
-                if resp.status_code < 500:
-                    return NotificationResult(self.name, ok=False, detail=last)
-            except Exception as e:  # network / DNS / TLS / timeout
-                last = repr(e)
-            if i < attempts - 1:
-                await asyncio.sleep(
-                    settings.WEBHOOK_RETRY_BACKOFF_SECONDS * (i + 1)
-                )
         return NotificationResult(self.name, ok=False, detail=last)

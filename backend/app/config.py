@@ -443,6 +443,9 @@ class Settings(BaseSettings):
     SMTP_USE_STARTTLS: bool = False  # opportunistic STARTTLS upgrade
     SMTP_FROM_EMAIL: str = "noreply@tms.local"
     SMTP_FROM_NAME: str = "TMS"
+    # Per-send transport ceiling, shared by magic-link auth and the
+    # notification email channel so a hung SMTP server can't pin either path.
+    SMTP_TIMEOUT_SECONDS: int = 10
     # When SMTP_HOST is unset/empty we log the magic link instead of sending
     # an email — useful for tests and bootstrap before SMTP is configured.
     SMTP_ENABLED: bool = True
