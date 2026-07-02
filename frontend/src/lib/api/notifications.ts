@@ -49,6 +49,9 @@ export type SecretsStatus = {
 export type NotificationConfigResponse = {
 	config: NotificationConfig;
 	secrets_status: SecretsStatus;
+	// Whether the clustering sidecar is on; gates the read-time-only
+	// contract_anomaly attack class in the rule/report class pickers.
+	clustering_enabled: boolean;
 };
 
 export async function fetchNotificationConfig(): Promise<NotificationConfigResponse> {
