@@ -97,3 +97,5 @@ def test_get_returns_config_and_secret_status(mocked):
     assert set(body["secrets_status"]) == {
         "webhook_signing_secret_configured", "smtp_configured",
     }
+    # The UI gates the read-time-only contract_anomaly attack class on this flag.
+    assert isinstance(body["clustering_enabled"], bool)

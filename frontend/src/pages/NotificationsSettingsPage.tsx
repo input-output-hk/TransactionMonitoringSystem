@@ -49,6 +49,14 @@ const ATTACK_CLASS_OPTIONS = [
 	{ value: "fake_token", label: "Fake Token" },
 	{ value: "phishing", label: "Phishing" },
 ];
+// The clustering sidecar's read-time-only class. Offered for rule/report
+// authoring only when the sidecar is enabled (GET `clustering_enabled`); an
+// already-stored contract_anomaly value still renders because MultiSelect keeps
+// values not in its options, so turning the sidecar off never silently drops it.
+const CONTRACT_ANOMALY_OPTION = {
+	value: "contract_anomaly",
+	label: "Contract Anomaly",
+};
 
 const EMAIL_DEFAULT: ChannelConfig = { enabled: false, recipients: [] };
 const WEBHOOK_DEFAULT: ChannelConfig = { enabled: false, default_url: "" };
@@ -83,6 +91,61 @@ function withDefaults(c: NotificationConfig): NotificationConfig {
 		},
 		periodic_report: { ...REPORT_DEFAULT, ...c.periodic_report },
 	};
+}
+
+/**
+ * Human-readable config problems that silently prevent delivery, surfaced
+ * before save so an operator doesn't repeat the classic mistakes: routing a
+ * channel that is switched off, or routing webhook with nowhere to POST. A
+ * disabled channel is skipped at dispatch no matter what the matrix or rules
+ * say, so the backend accepts these without complaint and nothing arrives.
+ */
+function configWarnings(cfg: NotificationConfig): string[] {
+	const out: string[] = [];
+	const isOn = (c: string) => !!cfg.channels[c]?.enabled;
+	const webhookUrl = cfg.channels.webhook?.default_url?.trim();
+	const routedInDefaults = (c: string) =>
+		BANDS.some((b) => (cfg.triggers.defaults[b] ?? []).includes(c));
+	const routedInRules = (c: string) =>
+		cfg.triggers.rules.some((r) => (r.channels ?? []).includes(c));
+
+	// Routed (matrix or rule) but the channel itself is switched off: the
+	// master-gate mistake. One line per channel, whichever way it's routed.
+	const offButRouted = new Set<string>();
+	for (const band of BANDS)
+		for (const c of cfg.triggers.defaults[band] ?? [])
+			if (!isOn(c)) offButRouted.add(c);
+	for (const r of cfg.triggers.rules)
+		for (const c of r.channels ?? []) if (!isOn(c)) offButRouted.add(c);
+	for (const c of offButRouted)
+		out.push(
+			`"${c}" is routed below but the ${c} channel is off under Channels, so it never fires. Enable it above.`,
+		);
+
+	// Webhook routed but with nowhere to deliver.
+	if (isOn("webhook") && !webhookUrl && routedInDefaults("webhook"))
+		out.push(
+			"Webhook is routed in the band defaults but has no Default URL, so those alerts can't be delivered. Set a Default URL under Channels.",
+		);
+	if (
+		isOn("webhook") &&
+		!webhookUrl &&
+		cfg.triggers.rules.some(
+			(r) => (r.channels ?? []).includes("webhook") && !r.webhook_url?.trim(),
+		)
+	)
+		out.push(
+			"A per-class rule routes to webhook but sets no URL, and Channels has no Default URL to fall back on, so it can't be delivered.",
+		);
+
+	// Enabled but never routed anywhere: the inverse mistake.
+	for (const c of Object.keys(cfg.channels))
+		if (isOn(c) && !routedInDefaults(c) && !routedInRules(c))
+			out.push(
+				`The ${c} channel is enabled but not selected in any band default or rule, so it won't fire until you route it below.`,
+			);
+
+	return out;
 }
 
 function Toggle({
@@ -221,7 +284,13 @@ export function NotificationsSettingsPage() {
 		return <p className="text-muted-foreground p-6 text-sm">Loading…</p>;
 
 	const channelNames = Object.keys(cfg.channels);
+	// contract_anomaly is selectable only when the sidecar is enabled; an already
+	// stored value still displays (MultiSelect keeps values outside its options).
+	const attackClassOptions = data?.clustering_enabled
+		? [...ATTACK_CLASS_OPTIONS, CONTRACT_ANOMALY_OPTION]
+		: ATTACK_CLASS_OPTIONS;
 	const channelOptions = channelNames.map((c) => ({ value: c, label: c }));
+	const warnings = configWarnings(cfg);
 
 	return (
 		<div className="flex flex-col gap-4 pb-10">
@@ -238,8 +307,27 @@ export function NotificationsSettingsPage() {
 				</Button>
 			</div>
 
+			{warnings.length > 0 && (
+				<div className="border-status-warning/40 bg-status-warning/10 rounded-lg border-2 px-5 py-3">
+					<p className="text-status-warning text-xs font-semibold">
+						These settings won't deliver as-is
+					</p>
+					<ul className="text-muted-foreground mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs">
+						{warnings.map((w) => (
+							<li key={w}>{w}</li>
+						))}
+					</ul>
+				</div>
+			)}
+
 			{/* Channels */}
 			<Section title="Channels">
+				<p className="text-muted-foreground text-xs">
+					Turn a channel on here and give it a destination (recipients for
+					email, a Default URL for webhook). A channel that is off is skipped
+					everywhere: ticking it in a band default or a rule below does nothing
+					until it is enabled here.
+				</p>
 				<div className="flex flex-col gap-2">
 					<div className="flex items-center justify-between">
 						<Toggle
@@ -290,7 +378,10 @@ export function NotificationsSettingsPage() {
 								: "not set ✗"}
 						</span>
 					</div>
-					<Label className="text-muted-foreground text-xs">Default URL</Label>
+					<Label className="text-muted-foreground text-xs">
+						Default URL (where webhook alerts are POSTed; required unless a rule
+						sets its own URL)
+					</Label>
 					<Input
 						value={cfg.channels.webhook?.default_url ?? ""}
 						onChange={(e) =>
@@ -355,8 +446,9 @@ export function NotificationsSettingsPage() {
 			{/* Trigger defaults matrix */}
 			<Section title="Triggers — defaults (band → channels)">
 				<p className="text-muted-foreground text-xs">
-					Which channels fire for each band when no rule below matches. Disabled
-					channels are skipped at dispatch.
+					The baseline: which channels fire for each band. Only channels enabled
+					under Channels above fire; a column marked (off) is ignored. A matching
+					per-class rule below replaces the row for that class.
 				</p>
 				<div className="overflow-x-auto">
 					<table className="text-sm">
@@ -366,6 +458,11 @@ export function NotificationsSettingsPage() {
 								{channelNames.map((c) => (
 									<th key={c} className="px-3 py-1 text-left">
 										{c}
+										{!cfg.channels[c]?.enabled && (
+											<span className="text-status-warning ml-1 font-normal">
+												(off)
+											</span>
+										)}
 									</th>
 								))}
 							</tr>
@@ -404,14 +501,17 @@ export function NotificationsSettingsPage() {
 			{/* Trigger rules */}
 			<Section title="Triggers — per-class rules">
 				<p className="text-muted-foreground text-xs">
-					The last matching rule (band + the alert's attack class) overrides the
-					band default.
+					A rule replaces (not adds to) the band default for its listed attack
+					classes; unlisted classes keep the defaults. If several rules match,
+					the last wins. Only enabled channels fire, so enable the channel under
+					Channels above before relying on a rule.
 				</p>
 				{cfg.triggers.rules.map((rule, i) => (
 					<RuleEditor
 						key={i}
 						rule={rule}
 						channelOptions={channelOptions}
+						attackClassOptions={attackClassOptions}
 						onChange={(next) =>
 							patch((d) => {
 								d.triggers.rules[i] = next;
@@ -535,7 +635,7 @@ export function NotificationsSettingsPage() {
 					/>
 					{cfg.periodic_report.attack_classes !== "all" && (
 						<MultiSelect
-							options={ATTACK_CLASS_OPTIONS}
+							options={attackClassOptions}
 							value={cfg.periodic_report.attack_classes}
 							onChange={(next) =>
 								patch((d) => {
@@ -592,11 +692,13 @@ function LabeledSelect({
 function RuleEditor({
 	rule,
 	channelOptions,
+	attackClassOptions,
 	onChange,
 	onRemove,
 }: {
 	rule: TriggerRule;
 	channelOptions: { value: string; label: string }[];
+	attackClassOptions: { value: string; label: string }[];
 	onChange: (next: TriggerRule) => void;
 	onRemove: () => void;
 }) {
@@ -615,7 +717,7 @@ function RuleEditor({
 						Attack classes
 					</Label>
 					<MultiSelect
-						options={ATTACK_CLASS_OPTIONS}
+						options={attackClassOptions}
 						value={rule.attack_classes}
 						onChange={(next) => onChange({ ...rule, attack_classes: next })}
 						placeholder="classes"

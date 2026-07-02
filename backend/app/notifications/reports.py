@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from urllib.parse import urlencode
 
@@ -71,6 +71,73 @@ def _date_param(dt: Any) -> str:
     return dt.date().isoformat() if hasattr(dt, "date") else str(dt)[:10]
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Treat a naive datetime as UTC (ClickHouse returns naive UTC for these
+    tables); pass an aware datetime through unchanged."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _in_window(stamps: List[Any], window_start: datetime, window_end: datetime) -> bool:
+    """True if ANY of the given timestamps (naive treated as UTC) lands in the
+    window; non-datetimes are ignored."""
+    return any(
+        isinstance(s, datetime) and window_start <= _as_utc(s) <= window_end
+        for s in stamps
+    )
+
+
+async def _contract_anomaly_in_window(
+    network: str, window_start: datetime, window_end: datetime, min_band: str,
+) -> List[Dict[str, Any]]:
+    """Resolved sidecar contract_anomaly findings at/above ``min_band`` that fall
+    in the window, highest score first. Powers BOTH the per-class count and the
+    top-alerts fold, so the summary number and the listed rows come from one set.
+
+    A finding is in-window if EITHER the winner's ``scored_at`` OR any of the
+    tx's rows' ``published_at`` lands in it. ``scored_at`` is the ORIGINAL
+    scoring time and stays fixed across relabels; ``published_at`` is bumped on
+    every reconciliation. Windowing on ``scored_at`` alone would drop a tx
+    relabeled malicious THIS window (fresh published_at, old scored_at) from
+    every report, i.e. exactly the human-confirmed findings that matter most,
+    even though the poller alerted on it. Reuses :func:`contract_anomaly.resolve`
+    so the report agrees with the alerts that fired.
+
+    Best-effort: on a sidecar miss/outage the window counts 0 rather than failing
+    the whole report, but the outage is logged (a silent 0 in a client-facing
+    compliance report would misrepresent "no findings"). Cap-truncation is logged
+    inside :func:`clustering_queries.flagged_for_network` (on RAW rows, so a
+    multi-target tx can't hide a truncation the way a grouped count would).
+    """
+    from app.analysis import contract_anomaly as ca
+    from app.db import clustering_queries
+
+    try:
+        flagged = await clustering_queries.flagged_for_network_async(
+            network, raise_on_error=True,
+        )
+    except Exception:
+        logger.warning(
+            "periodic report: contract_anomaly fetch failed for %s; counting 0 "
+            "for this window (sidecar unreachable)", network, exc_info=True,
+        )
+        return []
+    allowed = set(_bands_at_or_above(min_band))
+    found: List[Dict[str, Any]] = []
+    for rows in flagged.values():
+        winner = ca.resolve(rows)
+        if winner is None:
+            continue
+        raw_band = winner.get("risk_band")
+        band = raw_band.value if hasattr(raw_band, "value") else str(raw_band or "")
+        if band not in allowed:
+            continue
+        stamps = [winner.get("scored_at"), *(r.get("published_at") for r in rows)]
+        if _in_window(stamps, window_start, window_end):
+            found.append(winner)
+    found.sort(key=lambda w: float(w.get("score") or 0.0), reverse=True)
+    return found
+
+
 async def build_periodic_report(
     network: str, window_start: datetime, window_end: datetime, cfg: Dict[str, Any],
 ) -> PeriodicReport:
@@ -100,6 +167,21 @@ async def build_periodic_report(
         cls: (counts["by_class"].get(cls, 0) if cls in in_scope else 0)
         for cls in _CLASS_NAMES
     }
+    # contract_anomaly is the sidecar's read-time-only class: it never lands in
+    # tx_class_scores, so the GROUP BY above always counts it 0. When the sidecar
+    # is enabled (and the class is in scope), replace that 0 with the real count
+    # of flagged verdicts in the window so the per-class breakdown matches the
+    # immediate alerts the poller fires. The same findings are folded into
+    # top_alerts below (they can never come from the tx_class_scores query).
+    # Intentionally NOT added to total_transactions_scored or alerts_by_band:
+    # those are per-transaction scorer stats and a flagged tx is already counted
+    # there by its 9-class score; folding it in again would double-count the tx.
+    ca_findings: List[Dict[str, Any]] = []
+    if settings.CLUSTERING_ENABLED and "contract_anomaly" in in_scope:
+        ca_findings = await _contract_anomaly_in_window(
+            network, window_start, window_end, min_band,
+        )
+        alerts_by_class["contract_anomaly"] = len(ca_findings)
 
     false_positives = await archive_queries.archive_count_async(
         network, date_from=window_start, date_to=window_end,
@@ -126,6 +208,25 @@ async def build_periodic_report(
         ))
         if len(top_alerts) >= top_n:
             break
+
+    # Fold the contract_anomaly findings into the top list: they can never come
+    # from the tx_class_scores query above, so without this the summary could
+    # report contract_anomaly: N while the top list shows none of them. Merge,
+    # re-rank by score, and truncate so the list is the true top-N across both
+    # sources. (The attached CSV still mirrors the web UI's manual export, which
+    # is 9-class-only; see build_report_csv.)
+    for w in ca_findings:
+        raw_band = w.get("risk_band")
+        top_alerts.append(TopAlert(
+            tx_hash=w.get("tx_hash", ""),
+            attack_class="contract_anomaly",
+            risk_score=float(w.get("score") or 0.0),
+            risk_band=raw_band.value if hasattr(raw_band, "value") else str(raw_band or ""),
+            timestamp=_iso(w.get("scored_at")),
+        ))
+    if ca_findings:
+        top_alerts.sort(key=lambda a: a.risk_score, reverse=True)
+        top_alerts = top_alerts[:top_n]
 
     base = settings.APP_BASE_URL.rstrip("/")
     return PeriodicReport(
@@ -188,6 +289,12 @@ async def build_report_csv(
     Same format the web interface produces for manual download (one row per
     alert at/above min_band, in scope, ordered by score). Paginated to the
     same hard cap as the frontend export.
+
+    Scope note: this covers the nine STORED scorer classes only (the
+    tx_class_scores columns), deliberately matching the web UI's manual export
+    byte-for-byte. contract_anomaly is read-time-only and has no per-tx row here,
+    so it is summarised/counted in the report body (see build_periodic_report)
+    but does not appear in this attachment.
     """
     min_band = cfg.get("min_band", "Moderate")
     attack_classes = cfg.get("attack_classes", "all")

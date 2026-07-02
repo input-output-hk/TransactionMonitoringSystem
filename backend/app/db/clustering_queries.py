@@ -37,10 +37,14 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Raw verdict columns read from the sidecar's table. tx_hash drives grouping;
-# the rest describe one (contract, transaction) verdict.
+# the rest describe one (contract, transaction) verdict. published_at is the
+# reconciliation-recency stamp (fresh on every relabel/republish, unlike
+# scored_at which keeps the ORIGINAL scoring time); the report windows on it so a
+# late-published old finding is still counted (see reports._count_...).
 _FIELDS = (
     "target", "cluster_id", "iso_score", "lof_score", "consensus",
     "votes", "verdict", "model_id", "feature_set", "evidence", "scored_at",
+    "published_at",
 )
 
 # Verdicts that SUPPRESS the contract_anomaly signal: the engine's "no finding"
@@ -156,7 +160,7 @@ async def get_contract_anomaly_batch_async(
 
 
 def flagged_for_network(
-    network: str, limit: int = _RESCUE_FETCH_CAP,
+    network: str, limit: int = _RESCUE_FETCH_CAP, raise_on_error: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Raw verdict rows (grouped by tx_hash) for every NON-normal sidecar
     finding on a network, newest first, capped at ``limit``.
@@ -165,9 +169,17 @@ def flagged_for_network(
     score is below an active filter but whose contract_anomaly verdict projects
     above it would otherwise be dropped by the DB filter (which sees only stored
     scores). Excluding the suppressing verdicts (normal / benign) keeps this
-    bounded to the findings that could matter. Returns ``{}`` on a clean miss or
-    any error reaching the sidecar's database (best-effort). The caller logs when
-    ``limit`` is reached so a truncated rescue set is never silent."""
+    bounded to the findings that could matter.
+
+    ``raise_on_error`` selects the failure contract. The default (False) is
+    best-effort: a clean miss OR any error reaching the sidecar's database
+    returns ``{}``, which is correct for the ADDITIVE API read/rescue path (a
+    missed row only omits a signal, never corrupts one). The notification poller
+    passes True: for the alerting path a swallowed error would mean the ONLY
+    contract_anomaly notification channel silently goes dark (a missed real
+    attack with zero observability), so the poller must SEE the failure, log it
+    at ERROR, and retry next tick rather than report an empty, healthy-looking
+    set."""
     try:
         rows = _client().execute(
             _select("network = %(network)s AND verdict NOT IN %(suppressed)s")
@@ -181,15 +193,28 @@ def flagged_for_network(
             {"network": network, "suppressed": _SUPPRESSED_VERDICTS, "limit": limit},
         )
     except Exception as e:  # noqa: BLE001 - best-effort cross-db read
+        if raise_on_error:
+            raise
         logger.debug("contract_anomaly flagged lookup failed: %s", e)
         return {}
+    # Cap warning keys on RAW rows, not the grouped tx count: a tx touched by
+    # several watched contracts contributes multiple rows, so a grouped-count
+    # check would under-report truncation. At the cap the OLDEST-by-published_at
+    # findings are dropped, so a caller may silently under-count / under-alert;
+    # log loudly so an operator raises the cap rather than lose a flagged tx.
+    if len(rows) >= limit:
+        logger.warning(
+            "contract_anomaly flagged fetch hit the cap (%d raw rows) for %s; "
+            "oldest findings beyond the cap are dropped and may be missed",
+            limit, network,
+        )
     return _group(rows)
 
 
 async def flagged_for_network_async(
-    network: str, limit: int = _RESCUE_FETCH_CAP,
+    network: str, limit: int = _RESCUE_FETCH_CAP, raise_on_error: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    return await _run(partial(flagged_for_network, network, limit))
+    return await _run(partial(flagged_for_network, network, limit, raise_on_error))
 
 
 def latest_scored_at(network: str) -> Optional[Any]:
