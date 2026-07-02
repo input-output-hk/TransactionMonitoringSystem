@@ -11,7 +11,6 @@ dependencies = [
     "pandas>=2.2",
     "scipy>=1.14",
     "kneed>=0.8",
-    "networkx>=3.3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.8",
@@ -28,12 +27,6 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
     "mypy>=1.11",
-]
-# Plotting deps used only by backend/notebooks (param_evaluation.ipynb), not by
-# the runtime app — kept out of the production image.
-notebook = [
-    "matplotlib>=3.9",
-    "jupyter>=1.0",
 ]
 
 [project.scripts]
