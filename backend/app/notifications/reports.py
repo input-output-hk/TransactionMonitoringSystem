@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 from urllib.parse import urlencode
 
@@ -71,6 +71,51 @@ def _date_param(dt: Any) -> str:
     return dt.date().isoformat() if hasattr(dt, "date") else str(dt)[:10]
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Treat a naive datetime as UTC (ClickHouse returns naive UTC for these
+    tables); pass an aware datetime through unchanged."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+async def _count_contract_anomaly_in_window(
+    network: str, window_start: datetime, window_end: datetime, min_band: str,
+) -> int:
+    """Count sidecar contract_anomaly findings whose projected band is at/above
+    ``min_band`` and whose ``scored_at`` falls in the window.
+
+    Reuses the same projection (:func:`contract_anomaly.resolve`) the immediate
+    poller and the API read path use, so the report agrees with the alerts that
+    fired. Best-effort (empty on a sidecar miss/outage) and bounded by the
+    rescue cap: a window holding more flagged verdicts than the cap undercounts;
+    the cap-hit is logged when the fetched set fills it.
+    """
+    from app.analysis import contract_anomaly as ca
+    from app.db import clustering_queries
+
+    flagged = await clustering_queries.flagged_for_network_async(network)
+    if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
+        logger.warning(
+            "periodic report: contract_anomaly count hit the rescue cap (%d); "
+            "the window may undercount", clustering_queries._RESCUE_FETCH_CAP,
+        )
+    allowed = set(_bands_at_or_above(min_band))
+    count = 0
+    for rows in flagged.values():
+        winner = ca.resolve(rows)
+        if winner is None:
+            continue
+        scored_at = winner.get("scored_at")
+        if not isinstance(scored_at, datetime):
+            continue
+        if not (window_start <= _as_utc(scored_at) <= window_end):
+            continue
+        raw_band = winner.get("risk_band")
+        band = raw_band.value if hasattr(raw_band, "value") else str(raw_band or "")
+        if band in allowed:
+            count += 1
+    return count
+
+
 async def build_periodic_report(
     network: str, window_start: datetime, window_end: datetime, cfg: Dict[str, Any],
 ) -> PeriodicReport:
@@ -100,6 +145,18 @@ async def build_periodic_report(
         cls: (counts["by_class"].get(cls, 0) if cls in in_scope else 0)
         for cls in _CLASS_NAMES
     }
+    # contract_anomaly is the sidecar's read-time-only class: it never lands in
+    # tx_class_scores, so the GROUP BY above always counts it 0. When the sidecar
+    # is enabled (and the class is in scope), replace that 0 with the real count
+    # of flagged verdicts in the window so the per-class breakdown matches the
+    # immediate alerts the poller fires. Intentionally NOT added to
+    # total_transactions_scored or alerts_by_band: those are per-transaction
+    # scorer stats and a flagged tx is already counted there by its 9-class
+    # score — folding it in again would double-count the transaction.
+    if settings.CLUSTERING_ENABLED and "contract_anomaly" in in_scope:
+        alerts_by_class["contract_anomaly"] = await _count_contract_anomaly_in_window(
+            network, window_start, window_end, min_band,
+        )
 
     false_positives = await archive_queries.archive_count_async(
         network, date_from=window_start, date_to=window_end,

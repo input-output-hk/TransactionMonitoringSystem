@@ -55,6 +55,7 @@ async def get_config(_admin: dict = Depends(require_admin)) -> dict:
             "webhook_signing_secret_configured": bool(settings.WEBHOOK_SIGNING_SECRET),
             "smtp_configured": bool(settings.SMTP_HOST) and settings.SMTP_ENABLED,
         },
+        "clustering_enabled": settings.CLUSTERING_ENABLED,
     }
 
 

@@ -27,12 +27,12 @@ def spy(monkeypatch):
         "already_returns": False, "dispatch_returns": True,
     }
 
-    async def fake_already(network, tx_hash, band):
-        calls["already"].append((network, tx_hash, band))
+    async def fake_already(network, tx_hash, band, source="scorer"):
+        calls["already"].append((network, tx_hash, band, source))
         return calls["already_returns"]
 
-    async def fake_claim(network, tx_hash, band):
-        calls["claim"].append((network, tx_hash, band))
+    async def fake_claim(network, tx_hash, band, source="scorer"):
+        calls["claim"].append((network, tx_hash, band, source))
         return True
 
     async def fake_dispatch(payload, dispatches, attachments=None):
@@ -62,8 +62,8 @@ async def test_successful_delivery_is_claimed(spy):
         "preprod", "tx_ok", "Critical", object(), [object()],
     )
     assert spy["dispatch"], "delivery should have been attempted"
-    assert spy["claim"] == [("preprod", "tx_ok", "Critical")], (
-        "a successful delivery must record exactly one claim"
+    assert spy["claim"] == [("preprod", "tx_ok", "Critical", "scorer")], (
+        "a successful delivery must record exactly one claim (default source)"
     )
 
 
@@ -80,7 +80,7 @@ async def test_duplicate_is_skipped_before_delivery(spy):
 async def test_dedup_check_failure_still_delivers(spy, monkeypatch):
     # If the dedup pre-check itself errors, prefer a possible duplicate over a
     # missed alert: delivery proceeds.
-    async def boom(network, tx_hash, band):
+    async def boom(network, tx_hash, band, source="scorer"):
         raise RuntimeError("pg down")
 
     spy["dispatch_returns"] = True
@@ -89,3 +89,15 @@ async def test_dedup_check_failure_still_delivers(spy, monkeypatch):
         "preprod", "tx_err", "Critical", object(), [object()],
     )
     assert spy["dispatch"], "a dedup-check error must not suppress the alert"
+
+
+async def test_source_is_threaded_to_both_dedup_calls(spy):
+    # The clustering poller delivers under a SEPARATE dedup stream so a
+    # contract_anomaly alert never suppresses (or is suppressed by) the per-tx
+    # scorer alert for the same transaction.
+    await notifications._deliver_with_dedup(
+        "preprod", "tx_ca", "High", object(), [object()],
+        source="contract_anomaly",
+    )
+    assert spy["already"] == [("preprod", "tx_ca", "High", "contract_anomaly")]
+    assert spy["claim"] == [("preprod", "tx_ca", "High", "contract_anomaly")]

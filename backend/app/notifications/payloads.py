@@ -8,7 +8,7 @@ The payload is the wire format delivered by every channel — the webhook posts
 so the field names and types are stable wire contracts.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -35,7 +35,7 @@ class ReportSummary(BaseModel):
 
     total_transactions_scored: int
     alerts_by_band: Dict[str, int]      # {Critical, High, Moderate, Informational}
-    alerts_by_class: Dict[str, int]     # the 9 attack classes
+    alerts_by_class: Dict[str, int]     # per attack class (+ contract_anomaly when sidecar on)
     false_positives_archived: int
 
 
@@ -99,6 +99,47 @@ def build_immediate_alert(result: Dict, network: str) -> ImmediateAlert:
             result.get("sub_scores", {}), attack_class, settings.NOTIFY_TOP_FEATURES,
         ),
         baseline_source=_spec_baseline_source(result.get("baseline_source")),
+        dashboard_url=f"{base}/attacks/{tx_hash}",
+    )
+
+
+def build_contract_anomaly_alert(
+    tx_hash: str, network: str, winner: Dict,
+) -> ImmediateAlert:
+    """Map a resolved clustering contract_anomaly verdict -> ImmediateAlert.
+
+    ``winner`` is ``analysis.contract_anomaly.resolve(...)``'s output: the
+    highest-severity raw verdict row for the tx, plus the host-scale ``score``
+    (0-100) and ``risk_band`` it projects to. contract_anomaly is the sidecar's
+    read-time-only class (never in the per-tx scoring path), so the clustering
+    poller builds the alert from the verdict directly rather than from an engine
+    result dict.
+    """
+    band = winner.get("risk_band")
+    band_str = band.value if hasattr(band, "value") else str(band or "")
+    scored_at = winner.get("scored_at")
+    timestamp = (
+        scored_at.isoformat() if hasattr(scored_at, "isoformat")
+        else str(scored_at or "")
+    )
+    # Surface the discriminating raw verdict signals as "contributing features".
+    feats = {
+        k: round(float(winner[k]), 4)
+        for k in ("consensus", "iso_score", "lof_score", "votes")
+        if isinstance(winner.get(k), (int, float)) and not isinstance(winner.get(k), bool)
+    }
+    base = settings.APP_BASE_URL.rstrip("/")
+    return ImmediateAlert(
+        timestamp=timestamp,
+        attack_class="contract_anomaly",
+        risk_score=float(winner.get("score", 0.0)),
+        risk_band=band_str,
+        tx_hash=tx_hash,
+        network=network,
+        contributing_features=feats,
+        # A clustering/consensus verdict, not a per-script/per-policy baseline,
+        # so it maps to the global_fallback tier of the payload enum.
+        baseline_source="global_fallback",
         dashboard_url=f"{base}/attacks/{tx_hash}",
     )
 
