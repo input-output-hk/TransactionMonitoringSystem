@@ -8,11 +8,30 @@ The payload is the wire format delivered by every channel — the webhook posts
 so the field names and types are stable wire contracts.
 """
 
-from typing import Dict, List, Literal, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from app.config import settings
+
+# Decimal places for the normalised [0,1] feature values surfaced in a payload.
+# Shared by both alert builders so the two sources round contributing_features
+# identically (four places keeps small sub-scores distinguishable without wire
+# noise); used in _top_features and build_contract_anomaly_alert.
+_FEATURE_ROUND_DIGITS = 4
+
+
+def _utc_isoformat(dt: Any) -> str:
+    """ISO 8601 with an explicit UTC offset. ClickHouse hands back naive-UTC
+    datetimes (the sidecar's scored_at), so stamp them as UTC before formatting;
+    an already-aware datetime passes through. Keeps the ``timestamp`` wire field
+    consistent across alert sources (the scorer path is already offset-aware), so
+    a consumer that treats a bare naive string as local time can't skew it."""
+    if isinstance(dt, datetime):
+        aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        return aware.isoformat()
+    return str(dt or "")
 
 
 class ImmediateAlert(BaseModel):
@@ -75,7 +94,7 @@ def _top_features(
         if isinstance(v, (int, float)) and not isinstance(v, bool)
     ]
     items.sort(key=lambda kv: kv[1], reverse=True)
-    return {k: round(v, 4) for k, v in items[: max(0, n)]}
+    return {k: round(v, _FEATURE_ROUND_DIGITS) for k, v in items[: max(0, n)]}
 
 
 def build_immediate_alert(result: Dict, network: str) -> ImmediateAlert:
@@ -117,14 +136,10 @@ def build_contract_anomaly_alert(
     """
     band = winner.get("risk_band")
     band_str = band.value if hasattr(band, "value") else str(band or "")
-    scored_at = winner.get("scored_at")
-    timestamp = (
-        scored_at.isoformat() if hasattr(scored_at, "isoformat")
-        else str(scored_at or "")
-    )
+    timestamp = _utc_isoformat(winner.get("scored_at"))
     # Surface the discriminating raw verdict signals as "contributing features".
     feats = {
-        k: round(float(winner[k]), 4)
+        k: round(float(winner[k]), _FEATURE_ROUND_DIGITS)
         for k in ("consensus", "iso_score", "lof_score", "votes")
         if isinstance(winner.get(k), (int, float)) and not isinstance(winner.get(k), bool)
     }
@@ -139,6 +154,31 @@ def build_contract_anomaly_alert(
         contributing_features=feats,
         # A clustering/consensus verdict, not a per-script/per-policy baseline,
         # so it maps to the global_fallback tier of the payload enum.
+        baseline_source="global_fallback",
+        dashboard_url=f"{base}/attacks/{tx_hash}",
+    )
+
+
+def build_degraded_contract_anomaly_alert(
+    tx_hash: str, network: str, band: str, score: Any,
+) -> ImmediateAlert:
+    """Minimal contract_anomaly alert for when the full builder raises.
+
+    Recall-first fallback: the verdict already projected to a ROUTED band, so the
+    finding MUST still page. This carries only the already-computed ``band`` and
+    ``score`` (passed by the poller, so it can't re-trigger the failure that hit
+    the full builder) and drops the best-effort evidence/timestamp fields. Takes
+    scalars, not the raw ``winner`` row, precisely so it stays trivially
+    unfailable."""
+    base = settings.APP_BASE_URL.rstrip("/")
+    return ImmediateAlert(
+        timestamp="",  # best-effort field dropped in the degraded path
+        attack_class="contract_anomaly",
+        risk_score=float(score or 0.0),
+        risk_band=str(band or ""),
+        tx_hash=tx_hash,
+        network=network,
+        contributing_features={},
         baseline_source="global_fallback",
         dashboard_url=f"{base}/attacks/{tx_hash}",
     )
