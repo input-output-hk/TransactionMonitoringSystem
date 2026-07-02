@@ -7,6 +7,7 @@ import {
 import { ArchivePage } from "@/pages/ArchivePage";
 import { AttacksPage } from "@/pages/AttacksPage";
 import { ImportAttackPage } from "@/pages/ImportAttackPage";
+import { NotificationsSettingsPage } from "@/pages/NotificationsSettingsPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { ValidatorDetailPage } from "@/pages/ValidatorDetailPage";
@@ -62,7 +63,7 @@ export const router = createBrowserRouter([
 					// land here from a typed URL → silent redirect to dashboard.
 					{
 						element: <RequireAdmin />,
-						children: [{ path: "/users", element: <UsersPage /> }],
+						children: [{ path: "/users", element: <UsersPage /> }, { path: "/settings/notifications", element: <NotificationsSettingsPage /> }],
 					},
 					{ path: "/import", element: <ImportAttackPage /> },
 				],
