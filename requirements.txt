@@ -7,16 +7,13 @@ pydantic-settings==2.14.2
 # WebSocket Client (Ogmios)
 websockets>=16.0,<17.0
 
-# HTTP client (webhook notifications)
+# HTTP client: webhook notifications + the clustering sidecar reverse-proxy
+# (app/api/clustering.py). Pinned to match the sidecar's resolved httpx.
 httpx==0.28.1
 
 # Database Drivers
 clickhouse-driver==0.2.10
 asyncpg==0.31.0
-
-# HTTP client for the clustering sidecar reverse-proxy (app/api/clustering.py).
-# Pinned to match the sidecar's resolved httpx so the two stay in lockstep.
-httpx==0.28.1
 
 # Email (magic-link auth)
 aiosmtplib==5.1.2
