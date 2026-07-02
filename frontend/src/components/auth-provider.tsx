@@ -3,7 +3,8 @@
  *
  * Mounts once at the root of the tree (see `main.tsx`) and shares the
  * resolved user via context. Components that need auth state pull it
- * with `useAuth()` from `@/lib/auth`, which re-exports the hook here.
+ * with `useAuth()` from `@/lib/auth`, which wraps `useAuthContext`
+ * (defined in `@/components/auth-context`).
  *
  * TanStack Query handles caching + revalidation:
  * - `staleTime: 5min` — the user's role/email rarely change mid-session,
@@ -20,30 +21,9 @@
  * the UI flips immediately, before the network round-trip completes).
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, type ReactNode } from "react";
-import { fetchMe, logout as apiLogout, type User } from "@/lib/api/auth";
-
-type AuthContextValue = {
-	user: User | null;
-	/** True while the initial `/me` request hasn't resolved yet. */
-	isLoading: boolean;
-	/** True once `/me` has resolved (regardless of authenticated state). */
-	isReady: boolean;
-	/**
-	 * True when `/me` failed with a non-401 error (network down, 5xx).
-	 * Distinguishes "anonymous user" (`user === null`, `isError === false`)
-	 * from "we don't know yet because the backend is misbehaving"
-	 * (`user === null`, `isError === true`). Route guards branch on this
-	 * so a transient 5xx doesn't silently redirect to /login.
-	 */
-	isError: boolean;
-	/** Re-fetch `/me` — called after login completes via /auth/verify. */
-	refetchUser: () => Promise<void>;
-	/** Call `/api/auth/logout` and clear local user state. */
-	logout: () => Promise<void>;
-};
-
-const AuthContext = createContext<AuthContextValue | null>(null);
+import { useCallback, type ReactNode } from "react";
+import { fetchMe, logout as apiLogout } from "@/lib/api/auth";
+import { AuthContext, type AuthContextValue } from "@/components/auth-context";
 
 const ME_QUERY_KEY = ["auth", "me"] as const;
 
@@ -86,15 +66,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	};
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-
-/** Access auth state from any component inside `<AuthProvider>`. */
-export function useAuthContext(): AuthContextValue {
-	const ctx = useContext(AuthContext);
-	if (!ctx) {
-		throw new Error(
-			"useAuthContext must be used inside <AuthProvider> (wrap your app root)",
-		);
-	}
-	return ctx;
 }
