@@ -24,4 +24,14 @@ export default defineConfig([
       'no-console': ['error', { allow: ['warn', 'error'] }],
     },
   },
+  {
+    // shadcn/ui primitives re-export Radix components (`const X = Primitive.Root`),
+    // which the Fast Refresh heuristic can't recognize as components. These are
+    // vendored UI building blocks; HMR granularity here isn't worth splitting
+    // every file, so the dev-only rule is disabled for the ui/ folder.
+    files: ['src/components/ui/**/*.{ts,tsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

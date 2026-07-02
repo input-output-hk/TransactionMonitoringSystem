@@ -15,7 +15,7 @@
  * (no self-signup, verification happens via the URL token), and have
  * been replaced by `requestLink(email)` in `@/lib/api/auth`.
  */
-import { useAuthContext } from "@/components/auth-provider";
+import { useAuthContext } from "@/components/auth-context";
 import type { User } from "@/lib/api/auth";
 
 export type { User };
