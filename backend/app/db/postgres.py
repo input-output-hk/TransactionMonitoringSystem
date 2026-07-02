@@ -310,7 +310,9 @@ async def execute_schema():
             BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'notified_alerts' AND column_name = 'source'
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'notified_alerts'
+                      AND column_name = 'source'
                 ) THEN
                     ALTER TABLE notified_alerts
                         ADD COLUMN source TEXT NOT NULL DEFAULT 'scorer';
@@ -419,17 +421,26 @@ async def already_notified(
 
 
 async def prune_notified_alerts(older_than_days: int) -> int:
-    """Delete dedup-ledger rows older than the retention window.
+    """Delete aged scorer dedup-ledger rows older than the retention window.
 
     Re-notification suppression only needs a recent window (a tx old enough not
     to be re-scored no longer needs its row), so this bounds notified_alerts
-    growth — the table is otherwise one append-only row per alerted tx forever.
+    growth: the table is otherwise one append-only row per alerted tx forever.
     NOTIFY_DEDUP_RETENTION_DAYS=0 disables.
+
+    The prune is scoped to source='scorer'. The contract_anomaly stream must NOT
+    be pruned: the poller re-reads the ENTIRE flagged set every tick, so deleting
+    a still-flagged finding's claim would make it re-alert on the next poll and
+    then again each retention period forever. A CA claim's lifetime is therefore
+    the verdict's flagged lifetime (bounded by the flagged set + the fetch cap),
+    not a fixed age; its row is naturally superseded when the sidecar retracts
+    the verdict (the poll no longer surfaces it).
     """
     async with get_connection() as conn:
         result = await conn.execute("""
             DELETE FROM notified_alerts
             WHERE notified_at < NOW() - ($1 * INTERVAL '1 day')
+              AND source = 'scorer'
         """, older_than_days)
         return int(result.split()[1])
 

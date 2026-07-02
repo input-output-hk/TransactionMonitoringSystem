@@ -25,6 +25,17 @@ from app.notifications.payloads import build_immediate_alert
 
 logger = logging.getLogger(__name__)
 
+# Outcome of a dedup-gated delivery, returned by _deliver_with_dedup so a caller
+# that budgets send attempts (the contract_anomaly poller) can tell a free
+# no-op from a real attempt. DUPLICATE cost nothing on the wire; SENT and FAILED
+# both consumed a delivery attempt (FAILED still hit the channel, e.g. a timeout
+# or SMTP error), so both count against a per-tick cap. FAILED additionally
+# signals "retry me" (no claim was recorded), which the poller uses to keep
+# draining rather than idle on an unchanged upstream.
+DELIVER_DUPLICATE = "duplicate"
+DELIVER_SENT = "sent"
+DELIVER_FAILED = "failed"
+
 # Captured at startup (main.lifespan) so the executor-thread hook can schedule
 # coroutines onto the running event loop. None => notifications are inert.
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -91,7 +102,7 @@ def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
 async def _deliver_with_dedup(
     network: str, tx_hash: str, band: str, payload, dispatches,
     source: str = "scorer",
-) -> None:
+) -> str:
     """On the main loop: skip duplicates, deliver, then record the claim.
 
     Deliver-then-claim ordering: the dedup is a READ pre-check and the claim is
@@ -104,10 +115,15 @@ async def _deliver_with_dedup(
     ``source`` selects the dedup stream: ``'scorer'`` for the per-tx immediate
     alerts (default) and ``'contract_anomaly'`` for the clustering poller, so
     the two never suppress each other for the same tx.
+
+    Returns one of :data:`DELIVER_DUPLICATE` / :data:`DELIVER_SENT` /
+    :data:`DELIVER_FAILED` so a budgeting caller can distinguish a free dedup
+    no-op from a real send attempt. The scorer path ignores the return
+    (fire-and-forget).
     """
     try:
         if await postgres.already_notified(network, tx_hash, band, source=source):
-            return  # already notified at >= this band (duplicate / non-escalating)
+            return DELIVER_DUPLICATE  # already notified at >= this band
     except Exception:
         # Dedup check failed: prefer a possible duplicate over a missed alert.
         logger.exception(
@@ -116,7 +132,7 @@ async def _deliver_with_dedup(
         )
     delivered = await dispatcher.dispatch(payload, dispatches)
     if not delivered:
-        return  # nothing sent: leave unclaimed so a re-score retries
+        return DELIVER_FAILED  # nothing sent: leave unclaimed so a re-score retries
     try:
         await postgres.claim_notification(network, tx_hash, band, source=source)
     except Exception:
@@ -125,3 +141,4 @@ async def _deliver_with_dedup(
         logger.exception(
             "notification claim record failed for %s/%s", network, tx_hash,
         )
+    return DELIVER_SENT
