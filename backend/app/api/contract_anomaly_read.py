@@ -33,6 +33,7 @@ from app.analysis.normalise import score_to_band
 from app.config import settings
 from app.db import clickhouse, clustering_queries
 from app.models.transaction import ClassScoreResult, RiskBand
+from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -116,12 +117,23 @@ def _passes_score_band(
 def _within_analyzed_window(
     analyzed_at: Any, analyzed_from: Optional[datetime], analyzed_to: Optional[datetime],
 ) -> bool:
-    """Mirror the DB analyzed_at bounds (>= from, < to) for a rescued row."""
+    """Mirror the DB analyzed_at bounds (>= from, < to) for a rescued row.
+
+    The stored-class path filters analyzed_at IN THE DB, so it never compares
+    datetimes in Python. This synthetic class filters in Python instead, mixing
+    ClickHouse's naive-UTC ``analyzed_at`` with the API's ``analyzed_from`` /
+    ``analyzed_to`` (the frontend sends ``...Z``, so FastAPI parses them
+    tz-AWARE). :func:`to_aware_utc` normalises both sides so the compare can't
+    raise the naive-vs-aware TypeError (which the endpoint would swallow into an
+    empty page)."""
     if analyzed_at is None:
         return analyzed_from is None and analyzed_to is None
-    if analyzed_from is not None and analyzed_at < analyzed_from:
+    at = to_aware_utc(analyzed_at)
+    lo = to_aware_utc(analyzed_from)
+    hi = to_aware_utc(analyzed_to)
+    if lo is not None and at < lo:
         return False
-    if analyzed_to is not None and analyzed_at >= analyzed_to:
+    if hi is not None and at >= hi:
         return False
     return True
 
@@ -439,8 +451,16 @@ async def _rescue_flagged_onto_page(
                 ):
                     data.append(res)
                     rescued_total += 1
-    except Exception as e:
-        logger.warning(f"contract_anomaly rescue failed: {e}")
+    except Exception:
+        # Recall rescue is best-effort, so a failure just skips the rescue rather
+        # than failing the page. But log at ERROR WITH the traceback: the
+        # clustering reads swallow a sidecar hiccup upstream, so reaching here is
+        # an UNEXPECTED in-process error (e.g. the naive/aware compare bug), which
+        # at WARNING would silently stop rescuing flagged detections onto page 1.
+        logger.error(
+            "contract_anomaly rescue: unexpected error, skipping rescue for %s",
+            network, exc_info=True,
+        )
     if rescued_total:
         # Re-rank so rescued rows interleave by the active sort, then cap to
         # `limit` so the page size is honoured (matches the SQL ORDER BY).
