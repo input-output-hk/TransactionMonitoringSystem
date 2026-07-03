@@ -156,11 +156,19 @@ async def list_analysis_results(
                     limit=limit,
                     offset=offset,
                 )
-            except Exception as e:
-                # Best-effort, matching the rest of the sidecar read path: a
-                # sidecar hiccup degrades to an empty page (surfaced via the
-                # /health freshness probe) rather than failing the request.
-                logger.warning(f"contract_anomaly list filter failed: {e}")
+            except Exception:
+                # Degrade to an empty page rather than fail the request (matching
+                # the sidecar read path). But log at ERROR WITH the traceback: the
+                # clustering reads already swallow a sidecar hiccup upstream
+                # (returning {}), so anything reaching here is an UNEXPECTED
+                # in-process error, not a routine outage. Logging it at WARNING is
+                # what let a naive/aware TypeError masquerade as "no anomalies" —
+                # a silent recall loss. ERROR + exc_info makes the next such bug
+                # loud instead of an invisible empty page.
+                logger.error(
+                    "contract_anomaly list filter: unexpected error, returning "
+                    "empty page", exc_info=True,
+                )
                 ca_data, ca_total = [], 0
             return {"count": len(ca_data), "total": ca_total, "data": ca_data}
         # Shared filter predicate: list and count MUST apply identical filters or
