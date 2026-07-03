@@ -457,9 +457,12 @@ async def _rescue_flagged_onto_page(
         # clustering reads swallow a sidecar hiccup upstream, so reaching here is
         # an UNEXPECTED in-process error (e.g. the naive/aware compare bug), which
         # at WARNING would silently stop rescuing flagged detections onto page 1.
+        # Don't interpolate `network` (request-derived) into the log — the
+        # exc_info traceback carries the diagnostic, and logging untrusted request
+        # input is what CodeQL flags (clear-text logging of sensitive data).
         logger.error(
-            "contract_anomaly rescue: unexpected error, skipping rescue for %s",
-            network, exc_info=True,
+            "contract_anomaly rescue: unexpected error, skipping rescue",
+            exc_info=True,
         )
     if rescued_total:
         # Re-rank so rescued rows interleave by the active sort, then cap to
