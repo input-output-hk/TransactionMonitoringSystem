@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 from urllib.parse import urlencode
 
@@ -20,6 +20,7 @@ from app.models.transaction import AttackClass
 from app.notifications import config
 from app.notifications.channels.base import Dispatch
 from app.notifications.payloads import PeriodicReport, ReportSummary, TopAlert
+from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -71,17 +72,15 @@ def _date_param(dt: Any) -> str:
     return dt.date().isoformat() if hasattr(dt, "date") else str(dt)[:10]
 
 
-def _as_utc(dt: datetime) -> datetime:
-    """Treat a naive datetime as UTC (ClickHouse returns naive UTC for these
-    tables); pass an aware datetime through unchanged."""
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-
-
 def _in_window(stamps: List[Any], window_start: datetime, window_end: datetime) -> bool:
-    """True if ANY of the given timestamps (naive treated as UTC) lands in the
-    window; non-datetimes are ignored."""
+    """True if ANY of the given timestamps lands in the window; non-datetimes are
+    ignored. Both the stamps AND the bounds are normalised through
+    :func:`to_aware_utc` (naive treated as UTC) so a naive ClickHouse stamp and a
+    caller's bound can never raise the naive-vs-aware TypeError that silently
+    emptied the read path's contract_anomaly list."""
+    lo, hi = to_aware_utc(window_start), to_aware_utc(window_end)
     return any(
-        isinstance(s, datetime) and window_start <= _as_utc(s) <= window_end
+        isinstance(s, datetime) and lo <= to_aware_utc(s) <= hi
         for s in stamps
     )
 

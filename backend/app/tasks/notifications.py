@@ -105,8 +105,10 @@ async def _loop() -> None:
     while True:
         try:
             await _tick()
-        except Exception as e:
-            logger.error("Periodic report scheduler error: %r", e)
+        except Exception:
+            # exc_info (via logger.exception) so a bug is diagnosable, not just a
+            # repr; the loop keeps running so one bad tick never kills the schedule.
+            logger.exception("Periodic report scheduler error")
         await asyncio.sleep(settings.NOTIFY_REPORT_CHECK_INTERVAL_SECONDS)
 
 
@@ -191,8 +193,11 @@ async def _contract_anomaly_loop() -> None:
     while True:
         try:
             await _contract_anomaly_tick()
-        except Exception as e:
-            logger.error("contract_anomaly poller error: %r", e)
+        except Exception:
+            # exc_info so a fetch/logic failure is diagnosable (the sidecar reads
+            # RAISE up to here by design); the loop retries on the next tick so a
+            # transient sidecar outage self-heals without dropping the alert path.
+            logger.exception("contract_anomaly poller error")
         await asyncio.sleep(settings.NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS)
 
 
