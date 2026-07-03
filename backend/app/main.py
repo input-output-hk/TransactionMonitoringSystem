@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app.auth import verify_api_key
 
 from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
+from app.utils.datetime_utils import to_aware_utc
 
 # Configure logging before importing modules that emit log records at import time
 # (e.g. app.analysis.scorer_config which logs the config file it loaded).
@@ -437,16 +438,9 @@ async def _clustering_health() -> dict:
     if latest is None:
         return {"state": "absent", "last_scored_at": None}
     window = freshness_seconds()
-    age = (datetime.now(timezone.utc) - _as_aware_utc(latest)).total_seconds()
+    age = (datetime.now(timezone.utc) - to_aware_utc(latest)).total_seconds()
     state = "stale" if (window and age > window) else "ok"
     return {"state": state, "last_scored_at": str(latest), "age_seconds": round(age)}
-
-
-def _as_aware_utc(dt):
-    """Treat a naive ClickHouse DateTime as UTC (it stores UTC wall-clock)."""
-    from datetime import timezone
-
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 # SPA mount goes LAST so /api/*, /health, /ws, etc. still match their routes

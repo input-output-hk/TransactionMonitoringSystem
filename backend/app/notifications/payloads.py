@@ -8,12 +8,13 @@ The payload is the wire format delivered by every channel — the webhook posts
 so the field names and types are stable wire contracts.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.utils.datetime_utils import to_aware_utc
 
 # Decimal places for the normalised [0,1] feature values surfaced in a payload.
 # Shared by both alert builders so the two sources round contributing_features
@@ -24,13 +25,12 @@ _FEATURE_ROUND_DIGITS = 4
 
 def _utc_isoformat(dt: Any) -> str:
     """ISO 8601 with an explicit UTC offset. ClickHouse hands back naive-UTC
-    datetimes (the sidecar's scored_at), so stamp them as UTC before formatting;
-    an already-aware datetime passes through. Keeps the ``timestamp`` wire field
-    consistent across alert sources (the scorer path is already offset-aware), so
-    a consumer that treats a bare naive string as local time can't skew it."""
+    datetimes (the sidecar's scored_at); :func:`to_aware_utc` stamps them UTC
+    before formatting so the ``timestamp`` wire field stays consistent across
+    alert sources (the scorer path is already offset-aware) and a consumer can't
+    misread a bare naive string as local time. Non-datetimes stringify."""
     if isinstance(dt, datetime):
-        aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-        return aware.isoformat()
+        return to_aware_utc(dt).isoformat()
     return str(dt or "")
 
 
@@ -101,11 +101,10 @@ def build_immediate_alert(result: Dict, network: str) -> ImmediateAlert:
     """Map an engine result dict (engine._score_transaction) -> ImmediateAlert."""
     tx_hash = result["tx_hash"]
     attack_class = result.get("max_class") or ""
-    analyzed_at = result.get("analyzed_at")
-    timestamp = (
-        analyzed_at.isoformat() if hasattr(analyzed_at, "isoformat")
-        else str(analyzed_at or "")
-    )
+    # Same formatter as the contract_anomaly builder so BOTH alert sources emit an
+    # identical, tz-normalised ``timestamp`` by construction (finding: the two
+    # previously duplicated this logic and only coincidentally agreed).
+    timestamp = _utc_isoformat(result.get("analyzed_at"))
     base = settings.APP_BASE_URL.rstrip("/")
     return ImmediateAlert(
         timestamp=timestamp,
