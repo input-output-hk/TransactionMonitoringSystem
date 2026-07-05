@@ -364,3 +364,45 @@ class TestDefangedUrls:
     def test_plain_text_still_not_gated(self, scorer):
         meta = {"674": {"msg": ["thanks for the great meetup[no urls here]"]}}
         assert scorer.gate(_features(metadata=meta)) is False
+
+
+class TestDeepNestingResilience:
+    """A deeply nested (attacker-controlled) datum or metadata value must not
+    raise RecursionError. Unbounded recursion previously raised, the engine's
+    per-scorer try/except swallowed it, and phishing was silently scored -1 --
+    a recall-evasion primitive. The walks are now depth-bounded."""
+
+    def test_flatten_to_text_deep_metadata_does_not_raise(self, scorer):
+        deep = "leaf"
+        for _ in range(3000):  # far beyond CPython's default recursion limit
+            deep = {"m": deep}
+        # Must return a string without raising, regardless of what it finds.
+        assert isinstance(scorer._flatten_to_text(deep), str)
+
+    def test_gate_on_deeply_nested_metadata_does_not_raise(self, scorer):
+        deep = ["visit https://evil.example/claim"]
+        for _ in range(3000):
+            deep = [deep]
+        # Deeply nested under a relevant label: gate must terminate (True or
+        # False) rather than raising and being swallowed into a silent -1.
+        result = scorer.gate(_features(metadata={"674": deep}))
+        assert result in (True, False)
+
+    def test_decode_datum_strings_deep_json_does_not_raise(self):
+        from app.analysis.plutus_text import decode_datum_strings
+
+        deep = {"bytes": "68747470733a2f2f6576696c2e78797a"}  # 'https://evil.xyz'
+        for _ in range(3000):
+            deep = {"list": [deep]}
+        spans = decode_datum_strings(deep, min_len=4)
+        assert isinstance(spans, list)  # terminated, no RecursionError
+
+    def test_shallow_datum_url_still_decoded(self):
+        from app.analysis.plutus_text import decode_datum_strings
+
+        # 'https://cardano-airdrop.scam.example' as a hex byte-string leaf,
+        # nested a few levels: still within the cap, so it must be recovered.
+        clean = "https://cardano-airdrop.scam.example".encode().hex()
+        node = {"fields": [{"list": [{"bytes": clean}]}]}
+        spans = decode_datum_strings(node, min_len=4)
+        assert any("cardano-airdrop" in s for s in spans)

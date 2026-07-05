@@ -58,6 +58,14 @@ _ASSET_CARRIER_ENABLED = bool(_CFG["asset_name_carrier"]["enabled"])
 # scanning. Shorter spans are CBOR structural noise, not content.
 _MIN_DECODED_STR_LEN = int(_CFG["min_decoded_string_len"])
 
+# Maximum nesting depth when flattening a metadata value to text. Metadata is
+# attacker-controlled; an unbounded recursive flatten lets a deeply-nested
+# value raise RecursionError, which the engine's per-scorer try/except
+# swallows, silently scoring phishing -1 (a recall-evasion primitive). CIP-20
+# messages and CIP-25 metadata are shallow in practice, so 32 is far beyond any
+# legitimate shape while making the walk always terminate.
+_MAX_METADATA_FLATTEN_DEPTH = 32
+
 def _decode_datum_strings(datum: Any) -> List[str]:
     """Datum text spans for the URL / social-engineering scans.
 
@@ -400,7 +408,7 @@ class PhishingScorer(BaseScorer):
             hits.extend(_url_candidates(name))
         return hits
 
-    def _flatten_to_text(self, obj: Any) -> str:
+    def _flatten_to_text(self, obj: Any, depth: int = 0) -> str:
         """Recursively flatten a metadata value to a single string.
 
         CIP-20 stores long values as arrays of <=64-byte text chunks that the
@@ -409,17 +417,23 @@ class PhishingScorer(BaseScorer):
         purely strings, join with ``""`` so URLs split across chunks
         reconstitute correctly; otherwise fall back to space-joining so
         nested structures still render readably for the SE-tier regex pass.
+
+        ``depth`` bounds the descent (see _MAX_METADATA_FLATTEN_DEPTH) so an
+        adversarially deep metadata value cannot raise RecursionError.
         """
+        if depth > _MAX_METADATA_FLATTEN_DEPTH:
+            logger.debug("metadata flatten hit depth cap %d", _MAX_METADATA_FLATTEN_DEPTH)
+            return ""
         if isinstance(obj, str):
             return obj
         if isinstance(obj, list):
             if all(isinstance(item, str) for item in obj):
                 return "".join(obj)
-            return " ".join(self._flatten_to_text(item) for item in obj)
+            return " ".join(self._flatten_to_text(item, depth + 1) for item in obj)
         if isinstance(obj, dict):
             parts = []
             for v in obj.values():
-                parts.append(self._flatten_to_text(v))
+                parts.append(self._flatten_to_text(v, depth + 1))
             return " ".join(parts)
         return str(obj) if obj is not None else ""
 
