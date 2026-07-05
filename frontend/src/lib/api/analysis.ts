@@ -73,13 +73,42 @@ const ATTACK_CLASS_BY_SNAKE: Record<string, AttackType> = Object.fromEntries(
 	ATTACK_TYPES.map((t) => [toSnake(t), t]),
 ) as Record<string, AttackType>;
 
-const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntries(
+/** Canonical snake_case -> display AttackType. Single source of truth so
+ *  callers cannot re-derive it wrongly (a naive title-case turns
+ *  `multiple_sat` into "Multiple Sat", missing the icon and the real label).
+ *  Falls back to a title-cased display for a class the UI does not yet know
+ *  (e.g. a new backend class), so the alert stays visible rather than being
+ *  dropped -- recall-adjacent. */
+export function attackTypeFromSnake(snake: string): AttackType {
+	return (
+		ATTACK_CLASS_BY_SNAKE[snake] ??
+		(snake
+			.split("_")
+			.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+			.join(" ") as AttackType)
+	);
+}
+
+export const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntries(
 	ATTACK_TYPES.map((t) => [t, toSnake(t)]),
 ) as Record<AttackType, string>;
 
+/** {value: snake, label: display} options for the 9 SUPERVISED attack classes,
+ *  derived from ATTACK_TYPES so a rename/addition happens in one place. The
+ *  synthetic `contract_anomaly` class is excluded (callers add it conditionally
+ *  on the clustering sidecar being enabled). */
+export const SUPERVISED_ATTACK_CLASS_OPTIONS: { value: string; label: string }[] =
+	ATTACK_TYPES.filter((t) => t !== "Contract Anomaly").map((t) => ({
+		value: SNAKE_BY_ATTACK_TYPE[t],
+		label: t as string,
+	}));
+
 function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
-	const attackType = ATTACK_CLASS_BY_SNAKE[r.max_class];
-	if (!attackType) return null;
+	// A genuine no-finding row carries an empty max_class; drop it. A non-empty
+	// but unrecognized class still renders (via the fallback) so a new backend
+	// class is never silently dropped from the operator's view.
+	if (!r.max_class) return null;
+	const attackType = attackTypeFromSnake(r.max_class);
 	// Keep only numeric dimensions — backend mixes 0..1 normalized scores with
 	// raw counts and string IDs (e.g. sandwich.pool_id) under sub_scores.
 	const rawSub = r.sub_scores?.[r.max_class] ?? {};

@@ -6,6 +6,7 @@
  * no restart. Secrets (SMTP, webhook signing key) are env-managed and shown
  * read-only here.
  */
+import { SUPERVISED_ATTACK_CLASS_OPTIONS } from "@/lib/api/analysis";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,17 +39,9 @@ const BANDS = ["Critical", "High", "Moderate", "Informational"] as const;
 const BAND_LABEL: Record<string, string> = { Moderate: "Medium" };
 const bandLabel = (b: string) => BAND_LABEL[b] ?? b;
 const FREQUENCIES = ["daily", "weekly", "monthly"] as const;
-const ATTACK_CLASS_OPTIONS = [
-	{ value: "token_dust", label: "Token Dust" },
-	{ value: "large_value", label: "Large Value" },
-	{ value: "large_datum", label: "Large Datum" },
-	{ value: "multiple_sat", label: "Multiple Satisfaction" },
-	{ value: "front_running", label: "Front Running" },
-	{ value: "sandwich", label: "Sandwich" },
-	{ value: "circular", label: "Circular" },
-	{ value: "fake_token", label: "Fake Token" },
-	{ value: "phishing", label: "Phishing" },
-];
+// Single-sourced from the canonical attack-class map (analysis.ts) so this
+// picker cannot drift from the classes the engine actually scores.
+const ATTACK_CLASS_OPTIONS = SUPERVISED_ATTACK_CLASS_OPTIONS;
 // The clustering sidecar's read-time-only class. Offered for rule/report
 // authoring only when the sidecar is enabled (GET `clustering_enabled`); an
 // already-stored contract_anomaly value still renders because MultiSelect keeps
