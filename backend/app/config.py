@@ -202,6 +202,18 @@ class Settings(BaseSettings):
     # the recovery path for raw-data-deferred transactions.
     UNANALYZED_OVERLAP_SECONDS: int = 120
     UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS: int = 600
+    # Lookback bound for the periodic full rescan. The rescan is the never-skip
+    # net for txs that slipped the watermark (deferred raw-data / scorer /
+    # enrichment retries, same-second skew); those are always recent, so a
+    # generous window (e.g. 604800 = 7 days) recovers them while keeping the
+    # rescan's anti-join cost proportional to the window rather than the whole
+    # (keep-forever) table. Default 0 = unbounded (the legacy never-skip
+    # behaviour, recall-maximal). RECOMMENDED for mainnet: set a window, because
+    # at mainnet size the since=None rescan materialises an anti-join over all
+    # of tx_class_scores plus an unbounded inputs subquery (multiple GB) and can
+    # hit ClickHouse per-query memory limits. (Even unbounded, a rescan that
+    # fails no longer halts scoring: run_once falls back to the watermark poll.)
+    UNANALYZED_FULL_RESCAN_WINDOW_SECONDS: int = 0
     # Baseline lookup cache (0 disables). Baselines change once per daily
     # recompute but were point-SELECTed per feature per scored tx: the
     # engine's dominant N+1. insert_baselines() clears the cache; the 1 h

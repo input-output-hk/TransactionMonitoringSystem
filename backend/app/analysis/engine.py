@@ -235,6 +235,13 @@ def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
         last is None
         or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS
     ):
+        # Bound the rescan lookback so its anti-join cost tracks the window,
+        # not the whole keep-forever table (see the config knob). 0 = legacy
+        # unbounded (since=None). Slipped txs are always recent, so the window
+        # is the never-skip net in practice.
+        window = settings.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS
+        if window > 0:
+            return datetime.now(timezone.utc) - timedelta(seconds=window), True
         return None, True
     return _unanalyzed_watermark.get(network), False
 
@@ -441,9 +448,28 @@ def run_once(network: str) -> int:
         return 0
 
     since, full_rescan = _poll_since(network)
-    fetched = clickhouse.get_unanalyzed_transactions(
-        network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
-    )
+    try:
+        fetched = clickhouse.get_unanalyzed_transactions(
+            network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
+        )
+    except Exception:
+        # A failing full rescan must not block the cheap watermark path. Arm
+        # the rescan clock (so it retries after one interval, not every tick)
+        # and fall back to a watermark poll THIS tick, so steady-state scoring
+        # of new txs continues instead of a total, log-only outage. If there is
+        # no watermark yet (first poll) there is nothing to fall back to.
+        watermark = _unanalyzed_watermark.get(network)
+        if not full_rescan or watermark is None:
+            raise
+        logger.error(
+            "Full rescan poll failed for %s; arming backoff and falling back "
+            "to watermark poll this tick", network, exc_info=True,
+        )
+        _last_full_rescan[network] = time.monotonic()
+        full_rescan = False
+        fetched = clickhouse.get_unanalyzed_transactions(
+            network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=watermark,
+        )
     if not fetched:
         if full_rescan:
             # An empty fetch IS a successful rescan: nothing was skipped.
