@@ -232,3 +232,65 @@ class TestIncompleteScoring:
         assert len(kept) == 1
         assert "_failed_scorers" not in kept[0]
         assert "_enrichment_failed" not in kept[0]
+
+
+import app.analysis.engine as _engine_mod
+from datetime import datetime, timezone
+
+
+class TestRescanBoundAndFallback:
+    """The periodic full rescan must be cost-bounded and must never block the
+    cheap watermark path when it fails (which would halt all scoring)."""
+
+    def setup_method(self):
+        _engine_mod._last_full_rescan.clear()
+        _engine_mod._unanalyzed_watermark.clear()
+
+    def teardown_method(self):
+        _engine_mod._last_full_rescan.clear()
+        _engine_mod._unanalyzed_watermark.clear()
+
+    @patch("app.analysis.engine.settings")
+    def test_poll_since_bounds_rescan_window(self, ms):
+        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
+        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 604800  # 7 days
+        since, full = _engine_mod._poll_since("preprod")
+        assert full is True
+        assert since is not None  # bounded lookback, not the whole table
+        assert isinstance(since, datetime)
+
+    @patch("app.analysis.engine.settings")
+    def test_poll_since_unbounded_when_window_zero(self, ms):
+        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
+        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0  # legacy unbounded
+        since, full = _engine_mod._poll_since("preprod")
+        assert full is True
+        assert since is None
+
+    @patch("app.analysis.engine.clickhouse")
+    @patch("app.analysis.engine.settings")
+    def test_rescan_failure_falls_back_to_watermark(self, ms, mock_ch):
+        ms.ANALYSIS_ENABLED = True
+        ms.ANALYSIS_ENGINE_BATCH_SIZE = 100
+        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
+        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0  # since=None rescan
+        wm = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        _engine_mod._unanalyzed_watermark["preprod"] = wm
+        mock_ch.get_unanalyzed_transactions.side_effect = [RuntimeError("CH OOM"), []]
+        result = _engine_mod.run_once("preprod")
+        assert result == 0
+        assert mock_ch.get_unanalyzed_transactions.call_count == 2
+        assert mock_ch.get_unanalyzed_transactions.call_args_list[1].kwargs["since"] == wm
+        assert "preprod" in _engine_mod._last_full_rescan
+
+    @patch("app.analysis.engine.clickhouse")
+    @patch("app.analysis.engine.settings")
+    def test_rescan_failure_reraises_without_watermark(self, ms, mock_ch):
+        ms.ANALYSIS_ENABLED = True
+        ms.ANALYSIS_ENGINE_BATCH_SIZE = 100
+        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
+        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0
+        mock_ch.get_unanalyzed_transactions.side_effect = RuntimeError("CH OOM")
+        import pytest as _pytest
+        with _pytest.raises(RuntimeError):
+            _engine_mod.run_once("preprod")
