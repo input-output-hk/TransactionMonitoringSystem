@@ -107,6 +107,14 @@ class Settings(BaseSettings):
     CLICKHOUSE_USER: str = "default"
     CLICKHOUSE_PASSWORD: str = ""
     CLICKHOUSE_DB: str = "tms_analytics"
+    # Explicit socket timeouts for the clickhouse-driver client. Without these
+    # the driver's 300s send_receive default applies, so a network partition
+    # with no TCP RST can pin one of the 3 shared executor threads for 5 min
+    # (and the block-insert retry loop up to ~25 min). send_receive is the max
+    # idle between packets, not total query time, so a streaming heavy query is
+    # unaffected; 120s bounds a stuck socket well below the default.
+    CLICKHOUSE_CONNECT_TIMEOUT_SECONDS: float = 10.0
+    CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS: float = 120.0
 
     # Security - API Key Authentication
     API_KEYS: str = ""  # Comma-separated list of valid API keys
@@ -290,6 +298,14 @@ class Settings(BaseSettings):
     SUPERVISOR_BACKOFF_BASE_SECONDS: float = 5.0
     SUPERVISOR_BACKOFF_MAX_SECONDS: float = 300.0
     SUPERVISOR_STABLE_RESET_SECONDS: float = 600.0
+
+    # How long an Ogmios session must run before an error is treated as a
+    # transient blip (reset the circuit breaker/backoff) rather than a failure.
+    # Below this, repeated fast-dying sessions accumulate breaker failures so a
+    # persistent downstream (ClickHouse/Postgres) outage trips the breaker and
+    # backs off instead of busy-reconnecting. 0 = legacy (reset on handshake).
+    # Blocks arrive every ~20 s, so a session live for 60 s is clearly healthy.
+    OGMIOS_SESSION_STABLE_RESET_SECONDS: float = 60.0
 
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True

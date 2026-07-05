@@ -230,6 +230,7 @@ class OgmiosClient:
             on_connected=_set_connected,
             close=_close,
             poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+            stable_reset_seconds=settings.OGMIOS_SESSION_STABLE_RESET_SECONDS,
         )
 
     async def _chain_sync_loop(self, ws):

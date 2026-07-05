@@ -235,7 +235,11 @@ services:
     restart: unless-stopped
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)\""]
+      # Probe /health/ready, not the liveness-only /health: /health/ready 503s
+      # when the ingestion pipeline is DOWN, so a wedged-but-alive process
+      # (breaker open, stuck in recv) reads as unhealthy to orchestrators and
+      # monitors instead of "healthy while ingesting nothing" (prior audit).
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3).status == 200 else 1)\""]
       interval: 30s
       timeout: 5s
       retries: 3
