@@ -21,6 +21,19 @@ from app.db import clickhouse, postgres
 
 logger = logging.getLogger(__name__)
 
+# Transient per-row key: the names of enrichment steps that FAILED (raised) for
+# this row, as opposed to running and finding nothing. The engine reads it to
+# decide whether to defer the tx (retry) rather than score an affected class as
+# a silent no-signal. Consumed and popped by engine._handle_incomplete_scoring.
+_ENRICHMENT_FAILED_KEY = "_enrichment_failed"
+
+
+def _mark_enrichment_failed(row: Dict[str, Any], name: str) -> None:
+    """Record that enrichment ``name`` failed for ``row`` (idempotent)."""
+    failed = row.setdefault(_ENRICHMENT_FAILED_KEY, [])
+    if name not in failed:
+        failed.append(name)
+
 
 def enrich_inputs_with_resolved_addresses(
     rows: List[Dict[str, Any]],
@@ -54,6 +67,10 @@ def enrich_inputs_with_resolved_addresses(
         )
     except Exception:
         logger.warning("Failed to fetch resolved input addresses", exc_info=True)
+        # Recall-safe: mark every row so the engine defers rather than scoring
+        # multiple_sat (which groups by resolved input address) as no-signal.
+        for r in rows:
+            _mark_enrichment_failed(r, "input_addresses")
         return
 
     # Build lookup: tx_hash -> {input_index -> (address, amount)}
@@ -135,6 +152,7 @@ def enrich_sandwich_features(rows: List[Dict[str, Any]], network: str):
                 row["sandwich"] = sw
         except Exception as e:
             logger.debug(f"Sandwich detection failed for {row['tx_hash'][:16]}: {e}")
+            _mark_enrichment_failed(row, "sandwich")
 
 
 def enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
@@ -159,6 +177,7 @@ def enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
                 row["cycle"] = cycle
         except Exception as e:
             logger.debug(f"Cycle detection failed for {row['tx_hash'][:16]}: {e}")
+            _mark_enrichment_failed(row, "cycle")
 
 
 # Captured by engine.run_once_async() so that enrich_collision_features
@@ -198,6 +217,12 @@ def enrich_collision_features(rows: List[Dict[str, Any]], network: str):
         collisions = future.result(timeout=30)
     except Exception as e:
         logger.warning(f"Collision enrichment failed (non-fatal): {e}")
+        # Recall-safe: mark every row so the engine defers rather than scoring
+        # front_running (which reads mempool collisions) as no-signal. The
+        # loop-unavailable / feature-disabled early returns above are NOT
+        # failures and deliberately do not mark.
+        for r in rows:
+            _mark_enrichment_failed(r, "collision")
         return
 
     for row in rows:
