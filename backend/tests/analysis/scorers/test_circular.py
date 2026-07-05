@@ -131,3 +131,42 @@ class TestScore:
         assert result.score > 59.0, (
             f"corroborated cycle should exceed Moderate cap; got {result.score}"
         )
+
+
+class TestRecurringLayeringEscape:
+    """Recall-first: a cycle that closes to origin with strongly preserved
+    amounts AND repeated recurrence is deliberate layering even when it uses
+    many FRESH intermediary addresses (high recipient entropy -> s_entropy ~ 0,
+    which marks it structural-only). It must be surfaced at a capped Moderate
+    rather than suppressed to no-finding."""
+
+    def _fresh_address_cycle(self, recurrence_count):
+        # High amount similarity + given recurrence, but fresh addresses (max
+        # entropy), no round amounts, no temporal concentration, slow hops ->
+        # entropy + auxiliary + speed all ~0 (structural-only).
+        return {
+            "cycle_length": 3,
+            "addresses": ["fresh_a", "fresh_b", "fresh_c"],
+            "amount_similarity": 0.99,
+            "net_loss_ratio": 0.03,
+            "recurrence_count": recurrence_count,
+            "recipient_entropy": 1.0,          # all-distinct hops -> s_entropy ~ 0
+            "round_amount_flag": False,
+            "temporal_concentration": 0.0,
+            "mean_inter_hop_delta_slots": 100000.0,  # very slow -> s_speed ~ 0
+            "origin_cluster": "cluster_layer",
+        }
+
+    def test_recurring_fresh_address_cycle_capped_not_suppressed(self, scorer):
+        result = scorer.score(_features(cycle=self._fresh_address_cycle(recurrence_count=25)))
+        # A finding is surfaced (not the -1 no_finding sentinel)...
+        assert result.score >= 0
+        # ...and it is capped at Moderate, never escalated to High/Critical.
+        from app.analysis.scorers.circular import _MODERATE_CAP
+        assert result.score <= _MODERATE_CAP
+
+    def test_benign_structural_cycle_still_suppressed(self, scorer):
+        # Same shape but NO recurrence: a plain structural round-trip stays
+        # suppressed (no false-positive regression).
+        result = scorer.score(_features(cycle=self._fresh_address_cycle(recurrence_count=0)))
+        assert result.score == -1.0
