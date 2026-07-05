@@ -370,6 +370,28 @@ class Settings(BaseSettings):
     # every poll regardless).
     RAW_FALLBACK_RETRY_SECONDS: int = 30
 
+    # Analysis Engine incomplete-scoring deferral: when a scorer raises, or a
+    # cross-tx enrichment (collisions, cycles, sandwich, input-address
+    # resolution) fails for a tx, scoring that tx is INCOMPLETE. Writing its
+    # score row anyway would leave the affected class at the -1 "not
+    # applicable" sentinel and, because the unanalyzed anti-join treats any
+    # written row as scored, the tx would never be re-evaluated (only a
+    # rollback re-scores) -- a silent, permanent recall hole. Instead the tx is
+    # deferred (no row written) and retried on later engine runs, mirroring the
+    # RAW_FALLBACK_* raw-data deferral above.
+    ANALYSIS_DEFER_ENABLED: bool = True
+    # After this many failed attempts the tx is scored anyway, but with an
+    # evidence _meta marker (scorer_failed / enrichment_unavailable) so the
+    # degradation is queryable and filterable rather than a silent -1. This
+    # bounds how long a deterministically-crashing scorer (e.g. a crafted tx)
+    # or a persistent enrichment outage can park a tx in the unanalyzed queue.
+    ANALYSIS_DEFER_MAX_ATTEMPTS: int = 3
+    # Minimum monotonic-clock spacing between COUNTED defer attempts, matching
+    # the RAW_FALLBACK pacing rationale: the drain loop re-polls sub-second, so
+    # without pacing a busy loop would burn the whole budget in seconds and
+    # degrade-score exactly the txs the deferral protects.
+    ANALYSIS_DEFER_RETRY_SECONDS: int = 30
+
     # Mempool pending-tx bookkeeping. The TTL matches
     # LIFECYCLE_PENDING_TTL_SECONDS: both bound how long an unconfirmed tx
     # stays relevant (on-chain tx TTLs cover user submissions well inside 2 h).

@@ -1,7 +1,13 @@
 """Unit tests for the analysis engine orchestrator."""
 
 from unittest.mock import patch
-from app.analysis.engine import _score_transaction, _build_scorers, _CLASS_NAMES
+from app.analysis.engine import (
+    _score_transaction,
+    _build_scorers,
+    _CLASS_NAMES,
+    _handle_incomplete_scoring,
+    _analysis_defer_attempts,
+)
 from app.analysis.normalise import score_to_band
 from app.analysis.scorers.base import ScorerResult
 
@@ -130,3 +136,99 @@ class TestBuildScorers:
         names = {s.name for s in scorers}
         assert "phishing" not in names
         assert len(names) == 8
+
+
+class _RaisingScorer:
+    """Test double whose gate opens but whose score() raises, simulating a
+    crafted-input crash or a transient dependency error inside one scorer."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def gate(self, features):
+        return True
+
+    def score(self, features):
+        raise RuntimeError("boom")
+
+
+def _incomplete_result(tx_hash="txfail", failed_scorers=None, failed_enrichment=None):
+    return {
+        "tx_hash": tx_hash,
+        "network": "preprod",
+        "evidence": {},
+        "_failed_scorers": failed_scorers or [],
+        "_enrichment_failed": failed_enrichment or [],
+    }
+
+
+class TestIncompleteScoring:
+    """Recall-first: a scorer that raises, or an enrichment that fails, must
+    not silently persist a row with the affected class at the -1 sentinel
+    (which the unanalyzed anti-join would then treat as permanently scored).
+    The tx is deferred and retried, then degraded with a visible marker."""
+
+    def setup_method(self):
+        _analysis_defer_attempts.clear()
+
+    def teardown_method(self):
+        _analysis_defer_attempts.clear()
+
+    def test_raising_scorer_is_reported_not_swallowed(self):
+        row = _make_row()
+        result = _score_transaction(row, [_RaisingScorer("front_running")])
+        # The class stays at the -1 sentinel (it could not be scored)...
+        assert result["front_running"] == -1.0
+        # ...but the failure is surfaced so the engine can defer, not swallow.
+        assert result["_failed_scorers"] == ["front_running"]
+
+    @patch("app.analysis.engine.settings")
+    def test_incomplete_tx_is_deferred_then_degraded(self, ms):
+        ms.ANALYSIS_DEFER_ENABLED = True
+        ms.ANALYSIS_DEFER_MAX_ATTEMPTS = 2
+        ms.ANALYSIS_DEFER_RETRY_SECONDS = 0  # never pace-skip counting in test
+        # Attempt 1 (1 < 2): deferred, dropped from the batch, no row written.
+        kept = _handle_incomplete_scoring(
+            [_incomplete_result(failed_scorers=["phishing"])], "preprod"
+        )
+        assert kept == []
+        # Attempt 2 (2 < 2 is False): budget exhausted, kept WITH a marker.
+        kept = _handle_incomplete_scoring(
+            [_incomplete_result(failed_scorers=["phishing"])], "preprod"
+        )
+        assert len(kept) == 1
+        assert kept[0]["evidence"]["_meta"]["scorer_failed"] == ["phishing"]
+
+    @patch("app.analysis.engine.settings")
+    def test_enrichment_failure_deferred_like_scorer_failure(self, ms):
+        ms.ANALYSIS_DEFER_ENABLED = True
+        ms.ANALYSIS_DEFER_MAX_ATTEMPTS = 1  # degrade immediately
+        ms.ANALYSIS_DEFER_RETRY_SECONDS = 0
+        kept = _handle_incomplete_scoring(
+            [_incomplete_result(failed_enrichment=["collision"])], "preprod"
+        )
+        assert len(kept) == 1
+        assert kept[0]["evidence"]["_meta"]["enrichment_unavailable"] == ["collision"]
+
+    @patch("app.analysis.engine.settings")
+    def test_complete_tx_passes_through_and_clears_ledger(self, ms):
+        ms.ANALYSIS_DEFER_ENABLED = True
+        ms.ANALYSIS_DEFER_MAX_ATTEMPTS = 3
+        ms.ANALYSIS_DEFER_RETRY_SECONDS = 0
+        _analysis_defer_attempts[("preprod", "txok")] = (1, 0.0)  # stale entry
+        kept = _handle_incomplete_scoring([_incomplete_result(tx_hash="txok")], "preprod")
+        assert len(kept) == 1
+        assert ("preprod", "txok") not in _analysis_defer_attempts
+        # Transient bookkeeping keys are stripped before insert.
+        assert "_failed_scorers" not in kept[0]
+        assert "_enrichment_failed" not in kept[0]
+
+    @patch("app.analysis.engine.settings")
+    def test_defer_disabled_keeps_row_but_strips_transient_keys(self, ms):
+        ms.ANALYSIS_DEFER_ENABLED = False
+        kept = _handle_incomplete_scoring(
+            [_incomplete_result(failed_scorers=["phishing"])], "preprod"
+        )
+        assert len(kept) == 1
+        assert "_failed_scorers" not in kept[0]
+        assert "_enrichment_failed" not in kept[0]
