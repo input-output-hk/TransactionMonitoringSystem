@@ -1,0 +1,73 @@
+name: CI
+
+# Runs the verification gates from CONTRIBUTING.md on every PR and on pushes to
+# main. The backend recall gate (tests/analysis/) is a REQUIRED status check:
+# the project's top rule is "never miss a real attack", and it was previously
+# enforced only by convention (contributors running pytest by hand).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (pytest + recall gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Recall gate (attack-must-fire tests)
+        # Run first and on its own so a recall regression is unambiguous.
+        working-directory: backend
+        run: python -m pytest tests/analysis/ -q
+      - name: Full backend suite
+        working-directory: backend
+        run: python -m pytest tests/ -q
+
+  frontend:
+    name: Frontend (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+      - name: Type-check + build
+        working-directory: frontend
+        run: pnpm build
+
+  clustering-sidecar:
+    name: Clustering sidecar (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Sync dev dependencies
+        working-directory: services/clustering/backend
+        run: uv sync --extra dev
+      - name: Test
+        working-directory: services/clustering/backend
+        run: uv run pytest -q
