@@ -7,10 +7,23 @@ spans to its URL and social-engineering scans; any future datum-content
 consumer can reuse this without importing a scorer.
 """
 
+import logging
 from collections.abc import Mapping
 from typing import Any, List, Optional
 
 from app.analysis.features import get_cbor2
+
+logger = logging.getLogger(__name__)
+
+# Maximum nesting depth walked in an inline datum / decoded CBOR tree. The
+# datum is attacker-controlled on-chain data; an unbounded recursive walk lets
+# a maliciously deep structure (e.g. thousands of nested {"list": [...]})
+# raise RecursionError, which the engine's per-scorer try/except swallows,
+# silently scoring the phishing class -1 (a recall-evasion primitive). Bounding
+# the descent makes the walk always terminate and return the spans found so far
+# instead of crashing. 64 is far deeper than any legitimate Plutus datum yet
+# well under CPython's default recursion limit given the closures' own frames.
+_MAX_WALK_DEPTH = 64
 
 
 def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
@@ -65,13 +78,16 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
             except UnicodeDecodeError:
                 pass
 
-    def _walk_cbor(node: Any) -> None:
+    def _walk_cbor(node: Any, depth: int = 0) -> None:
         """Walk the cbor2-parsed structure. CBOR text strings come out
         as ``str``, byte strings as ``bytes``, maps as ``dict`` or (cbor2
         v6, for maps nested inside a tag) the hashable ``cbor2.frozendict``,
         arrays as ``list``/``tuple``, and Plutus-Data constructors as
         ``cbor2.CBORTag`` whose ``.value`` is the fields array. Match maps
         by ``Mapping`` so frozendict leaves are not silently skipped."""
+        if depth > _MAX_WALK_DEPTH:
+            logger.debug("datum CBOR walk hit depth cap %d", _MAX_WALK_DEPTH)
+            return
         if isinstance(node, bytes):
             _emit_bytes(node)
             return
@@ -81,18 +97,18 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
             return
         if isinstance(node, Mapping):
             for k, v in node.items():
-                _walk_cbor(k)
-                _walk_cbor(v)
+                _walk_cbor(k, depth + 1)
+                _walk_cbor(v, depth + 1)
             return
         if isinstance(node, (list, tuple)):
             for item in node:
-                _walk_cbor(item)
+                _walk_cbor(item, depth + 1)
             return
         # cbor2.CBORTag has ``.value``; duck-type to avoid an import
         # dependency at this module's top.
         inner = getattr(node, "value", None)
         if inner is not None and not isinstance(node, (int, float, bool)):
-            _walk_cbor(inner)
+            _walk_cbor(inner, depth + 1)
 
     def _try_cbor(blob: bytes) -> bool:
         """Best-effort CBOR parse + structural walk.
@@ -115,7 +131,10 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
         _walk_cbor(decoded)
         return True
 
-    def _walk(node: Any) -> None:
+    def _walk(node: Any, depth: int = 0) -> None:
+        if depth > _MAX_WALK_DEPTH:
+            logger.debug("datum walk hit depth cap %d", _MAX_WALK_DEPTH)
+            return
         if node is None:
             return
         if isinstance(node, bytes):
@@ -155,26 +174,26 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
                 return
             if "list" in node and isinstance(node["list"], list):
                 for item in node["list"]:
-                    _walk(item)
+                    _walk(item, depth + 1)
                 return
             if "map" in node and isinstance(node["map"], list):
                 for entry in node["map"]:
                     if isinstance(entry, dict):
-                        _walk(entry.get("k"))
-                        _walk(entry.get("v"))
+                        _walk(entry.get("k"), depth + 1)
+                        _walk(entry.get("v"), depth + 1)
                 return
             if "fields" in node and isinstance(node["fields"], list):
                 for field in node["fields"]:
-                    _walk(field)
+                    _walk(field, depth + 1)
                 return
             # Fallback for generic dicts
             for k, v in node.items():
-                _walk(k)
-                _walk(v)
+                _walk(k, depth + 1)
+                _walk(v, depth + 1)
             return
         if isinstance(node, list):
             for item in node:
-                _walk(item)
+                _walk(item, depth + 1)
             return
 
     _walk(datum)
