@@ -40,6 +40,21 @@ router = APIRouter(prefix="/api/archive", tags=["archive"])
 # Canonical CSV column order, used by both export and bulk import parsing.
 CSV_COLUMNS = ("network", "tx_hash", "note", "archived_by", "archived_at", "source")
 
+# CSV formula-injection neutralization. note / archived_by / source are
+# client-supplied free text; a value beginning with = + - @ (or a leading tab /
+# CR that shifts the first cell) is interpreted as a formula by Excel / Sheets
+# when the export is opened, enabling data exfiltration or command execution.
+# Prefix such values with a single quote so the spreadsheet treats them as text.
+# The export is designed to be re-imported to TMS, which ignores the prefix.
+_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value) -> str:
+    s = "" if value is None else str(value)
+    if s and s[0] in _CSV_DANGEROUS_PREFIXES:
+        return "'" + s
+    return s
+
 
 async def _audit_suppression_intent(
     action: str,
@@ -260,11 +275,11 @@ async def export_csv(
         writer.writerow({
             "network": row["network"],
             "tx_hash": row["tx_hash"],
-            "note": row["note"],
-            "archived_by": row["archived_by"],
+            "note": _csv_safe(row["note"]),
+            "archived_by": _csv_safe(row["archived_by"]),
             # ISO-8601 UTC; assume naive datetimes from ClickHouse are UTC.
             "archived_at": format_iso_utc(row["archived_at"]) or "",
-            "source": row["source"],
+            "source": _csv_safe(row["source"]),
         })
     buf.seek(0)
 

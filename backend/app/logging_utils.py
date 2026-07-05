@@ -17,11 +17,13 @@ from __future__ import annotations
 import logging
 import re
 
-# `token=<value>` up to the next `&`, whitespace, or closing quote (uvicorn's
-# access formatter wraps the request line in double quotes). `\b` keeps this
-# from matching an unrelated param that merely ends in "token" (e.g. a
-# hypothetical `csrf_token=`).
-_TOKEN_QS_RE = re.compile(r'(\btoken=)[^&\s"]+', re.IGNORECASE)
+# `token=<value>` / `api_key=<value>` up to the next `&`, whitespace, or
+# closing quote (uvicorn's access formatter wraps the request line in double
+# quotes). `\b` keeps this from matching an unrelated param that merely ends in
+# "token" (e.g. a hypothetical `csrf_token=`). api_key is included because the
+# WebSocket upgrade authenticates via `GET /ws?api_key=<key>`, so a live API
+# key would otherwise land in the access log verbatim.
+_TOKEN_QS_RE = re.compile(r'(\b(?:token|api_key)=)[^&\s"]+', re.IGNORECASE)
 
 
 class _RedactTokenFilter(logging.Filter):

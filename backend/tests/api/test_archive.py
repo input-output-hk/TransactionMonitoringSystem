@@ -597,3 +597,15 @@ def test_class_scores_stats_sql_skips_filter_when_include_archived():
     # The stats query (first) must omit the archive clause; the later
     # get_pending_count query is unrelated.
     assert "archived_alerts" not in captured["queries"][0]
+
+
+class TestCsvInjectionNeutralization:
+    def test_formula_prefixes_are_quoted(self):
+        from app.api.archive import _csv_safe
+        for payload in ("=HYPERLINK(\"//evil\")", "+1+1", "-2+3", "@SUM(A1)", "\ttab", "\rcr"):
+            out = _csv_safe(payload)
+            assert out.startswith("'"), payload
+        # Benign values are unchanged.
+        assert _csv_safe("just a note") == "just a note"
+        assert _csv_safe("addr_test1q...") == "addr_test1q..."
+        assert _csv_safe(None) == ""
