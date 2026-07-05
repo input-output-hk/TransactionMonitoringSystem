@@ -354,8 +354,13 @@ def _build_cycle_result(
         "hops": hops,
         "amount_similarity": round(amount_similarity, 4),
         "net_loss_ratio": round(net_loss_ratio, 4),
+        # Deterministic origin representative: set iteration order is unstable
+        # across processes (string hash randomization), so list(set)[0] made
+        # the recurrence query target and the origin_cluster key vary run-to-run
+        # (a cycle could score differently on re-score after a rollback). Use
+        # the same _first_sorted representative the hop machinery already uses.
         "recurrence_count": _count_origin_recurrence(
-            list(origin_addresses)[0] if origin_addresses else "",
+            _first_sorted(origin_addresses),
             network,
             tx_hash,
         ),
@@ -363,5 +368,5 @@ def _build_cycle_result(
         "round_amount_flag": round_amount_flag,
         "temporal_concentration": round(min(temporal_concentration, 1.0), 4),
         "mean_inter_hop_delta_slots": round(mean_delta, 2),
-        "origin_cluster": list(origin_addresses)[0] if origin_addresses else "__unknown__",
+        "origin_cluster": _first_sorted(origin_addresses) or "__unknown__",
     }

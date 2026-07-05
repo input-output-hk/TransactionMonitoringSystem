@@ -290,7 +290,16 @@ def get_active_script_addresses(network: str, limit: int = 500) -> List[str]:
 
 
 def recompute_all_baselines(network: str, max_scripts: int = 500) -> int:
-    """Recompute global + per-script baselines. Returns total rows written."""
+    """Recompute global + per-script baselines. Returns total rows written.
+
+    Note: the ``per_policy`` baseline tier (per minting-policy percentiles for
+    large_value.quantity_digits, fake_token.recipient_count /
+    mint_to_recipient_ratio, sandwich.price_impact / swap_profit) is NOT
+    computed here. Those features ``_resolve('per_policy', ...)`` and therefore
+    fall through to the conservative bootstrap anchors in detection.yaml. This
+    is deliberate and recall-safe (bootstrap anchors never de-sensitise); the
+    per-policy adaptation is deferred until there is enough per-policy volume to
+    fit stable percentiles. See docs/TMS_DETECTION_SPEC.md (baselines)."""
     total = 0
 
     # Global baselines
