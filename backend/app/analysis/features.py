@@ -333,11 +333,20 @@ def count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
     return len(policies), token_count
 
 
-def _extract_datum_info(output: Dict[str, Any]) -> Tuple[int, int]:
+def _extract_datum_info(
+    output: Dict[str, Any], datums: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, int]:
     """Extract datum presence flag and byte size from an Ogmios output.
 
     Returns (datum_present, datum_bytes).
     datum_present: 0=none, 1=datum_hash, 2=inline_datum
+
+    ``datums`` is the transaction's witness datum map (hash -> preimage), when
+    the ingested payload carries it. A datum-hash-only output whose preimage is
+    supplied in the same transaction can then be sized from that preimage
+    instead of being reported as 0 bytes (which let a bloat-by-hash attack
+    slip the byte gates). Absent the map, the size stays unknown (needs a
+    standalone datum indexer).
     """
     # Inline datum (Babbage era)
     datum = output.get("datum")
@@ -353,9 +362,55 @@ def _extract_datum_info(output: Dict[str, Any]) -> Tuple[int, int]:
     # Datum hash only
     datum_hash = output.get("datumHash")
     if datum_hash:
-        return 1, 0  # hash present but datum bytes unknown without indexer
+        if datums and datum_hash in datums:
+            preimage = datums[datum_hash]
+            if isinstance(preimage, str):
+                return 1, len(preimage) // 2
+            if isinstance(preimage, dict):
+                return 1, len(json.dumps(preimage).encode())
+        return 1, 0  # hash present but preimage not carried in this tx
 
     return 0, 0
+
+
+def _object_datum_byte_leaves(datum: Any) -> List[bytes]:
+    """Decoded byte-string leaves of an Ogmios Plutus-Data-JSON datum object.
+
+    Walks the ``{"bytes": hex}`` / ``{"list": [...]}`` / ``{"map": [...]}`` /
+    ``{"constructor": n, "fields": [...]}`` shape iteratively (no recursion, so
+    a maliciously deep object datum cannot blow the stack) and returns each
+    ByteArray leaf's raw bytes. Used so the entropy / leaf-concentration bloat
+    discriminators can also assess an OBJECT-shaped inline datum, not only the
+    hex-string form (an object datum otherwise scored as "not assessable" and
+    bypassed the content gate).
+    """
+    leaves: List[bytes] = []
+    stack: List[Any] = [datum]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            b = node.get("bytes")
+            if isinstance(b, str):
+                try:
+                    leaves.append(bytes.fromhex(b))
+                except ValueError:
+                    pass
+            for key in ("list", "fields"):
+                v = node.get(key)
+                if isinstance(v, list):
+                    stack.extend(v)
+            m = node.get("map")
+            if isinstance(m, list):
+                for entry in m:
+                    if isinstance(entry, dict):
+                        stack.append(entry.get("k"))
+                        stack.append(entry.get("v"))
+            # Generic (non-Plutus-JSON) dict: descend into all values.
+            if not any(k in node for k in ("bytes", "list", "fields", "map")):
+                stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return leaves
 
 
 # Maximum possible Shannon entropy for byte data (log2(256)); used as the
@@ -383,11 +438,19 @@ def datum_shannon_entropy_bits(output: Dict[str, Any]) -> float:
     defence (deferred, see large_datum recurrence stub).
     """
     datum = output.get("datum")
-    if not isinstance(datum, str) or len(datum) < 2:
-        return _MAX_BYTE_ENTROPY_BITS
-    try:
-        raw = bytes.fromhex(datum)
-    except ValueError:
+    if isinstance(datum, dict):
+        # Object-shaped inline datum: measure entropy over its decoded
+        # ByteArray leaves so object-form padding is assessable too. No byte
+        # leaves -> not assessable (return the not-padding default).
+        raw = b"".join(_object_datum_byte_leaves(datum))
+        if not raw:
+            return _MAX_BYTE_ENTROPY_BITS
+    elif isinstance(datum, str) and len(datum) >= 2:
+        try:
+            raw = bytes.fromhex(datum)
+        except ValueError:
+            return _MAX_BYTE_ENTROPY_BITS
+    else:
         return _MAX_BYTE_ENTROPY_BITS
     n = len(raw)
     if n == 0:
@@ -443,6 +506,15 @@ def datum_leaf_concentration(output: Dict[str, Any]) -> float:
     entropy gate and size backstop still apply) when cbor2 is unavailable.
     """
     datum = output.get("datum")
+    if isinstance(datum, dict):
+        # Object-shaped inline datum: concentration over its decoded ByteArray
+        # leaves (largest leaf / total leaf bytes), mirroring the hex path so
+        # single-leaf padding in object form is caught too.
+        leaves = _object_datum_byte_leaves(datum)
+        total = sum(len(b) for b in leaves)
+        if total == 0:
+            return 0.0
+        return max(len(b) for b in leaves) / total
     if not isinstance(datum, str) or len(datum) < 2:
         return 0.0
     try:
@@ -469,6 +541,7 @@ def extract_utxo_features(
     Returns a list of tuples ready for insert_utxo_features().
     """
     outputs = raw_data.get("outputs", [])
+    datums = raw_data.get("datums")  # tx witness datum map (hash -> preimage)
     rows = []
     for idx, out in enumerate(outputs):
         address = out.get("address", "")
@@ -483,7 +556,7 @@ def extract_utxo_features(
             ada_amount = value.get("lovelace", 0)
         value_cbor = _estimate_value_cbor_bytes(value)
         policy_count, token_count = count_assets(value)
-        datum_flag, datum_bytes = _extract_datum_info(out)
+        datum_flag, datum_bytes = _extract_datum_info(out, datums)
 
         utxo_total = estimate_utxo_total_bytes(
             address, value_cbor, datum_bytes, out.get("script")

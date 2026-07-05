@@ -64,15 +64,18 @@ _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
 _FLAG_DATUM_HASH_ONLY = bool(_CFG["gate"]["flag_datum_hash_only"])
 
 
-def _datum_hash_only_addresses(outputs) -> list:
-    """Script-output addresses whose datum is a hash reference (flag 1):
-    present but unsizable without an indexer."""
+def _datum_hash_only_addresses(outputs, datums=None) -> list:
+    """Script-output addresses whose datum is a hash reference (flag 1) that is
+    still unsizable, i.e. the preimage is NOT carried in this tx's witness
+    ``datums`` map. A hash whose preimage IS present is sized normally and
+    handled by the byte gates, so it is excluded here."""
     return [
         out.get("address", "")
         for out in outputs
         if isinstance(out, dict)
         and feat_mod.is_script_address(out.get("address", ""))
-        and feat_mod._extract_datum_info(out)[0] == 1
+        and feat_mod._extract_datum_info(out, datums)[0] == 1
+        and feat_mod._extract_datum_info(out, datums)[1] == 0
     ]
 
 
@@ -98,7 +101,7 @@ def _is_bloat_datum(output: Dict[str, Any], datum_bytes: int) -> bool:
     )
 
 
-def _per_script_datum_bytes(outputs):
+def _per_script_datum_bytes(outputs, datums=None):
     """Return ``{payment_credential: total_datum_bytes}`` across script
     outputs.
 
@@ -116,7 +119,7 @@ def _per_script_datum_bytes(outputs):
         addr = out.get("address", "")
         if not feat_mod.is_script_address(addr):
             continue
-        datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
+        datum_flag, datum_bytes = feat_mod._extract_datum_info(out, datums)
         if datum_flag == 0:
             continue
         key = _payment_credential(addr)
@@ -147,14 +150,15 @@ class LargeDatumScorer(BaseScorer):
         if not raw_data or not isinstance(raw_data, dict):
             return False
         outputs = raw_data.get("outputs", [])
+        datums = raw_data.get("datums")  # tx witness datum map (hash -> preimage)
         for out in outputs:
             addr = out.get("address", "")
             if not feat_mod.is_script_address(addr):
                 continue
-            _, datum_bytes = feat_mod._extract_datum_info(out)
+            _, datum_bytes = feat_mod._extract_datum_info(out, datums)
             if _is_bloat_datum(out, datum_bytes):
                 return True
-        per_script = _per_script_datum_bytes(outputs)
+        per_script = _per_script_datum_bytes(outputs, datums)
         if any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values()):
             return True
         # Observability path: a datum-hash-only output reports 0 bytes
@@ -162,7 +166,7 @@ class LargeDatumScorer(BaseScorer):
         # indexer), so a bloat-by-hash attack is invisible to the byte gates
         # above. Engage so score() records datum_hash_only_count; the result
         # stays a no-finding (-1) and never alerts.
-        if _FLAG_DATUM_HASH_ONLY and _datum_hash_only_addresses(outputs):
+        if _FLAG_DATUM_HASH_ONLY and _datum_hash_only_addresses(outputs, datums):
             return True
         return False
 
@@ -170,13 +174,14 @@ class LargeDatumScorer(BaseScorer):
         raw_data = features.get("raw_data", {})
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
+        datums = raw_data.get("datums")  # tx witness datum map (hash -> preimage)
 
         # Per-script aggregate datum bytes. The largest same-script
         # aggregate is the observability metric: it identifies a single
         # contract under bloat pressure, not a tx-wide sum across
         # unrelated scripts. The per-output predicate below still drives
         # scoring; this is for analyst queries only.
-        per_script = _per_script_datum_bytes(outputs)
+        per_script = _per_script_datum_bytes(outputs, datums)
         max_script_datum_bytes = max(per_script.values(), default=0)
 
         best_score = 0.0
@@ -189,7 +194,7 @@ class LargeDatumScorer(BaseScorer):
             addr = out.get("address", "")
             if not feat_mod.is_script_address(addr):
                 continue
-            datum_flag, datum_bytes = feat_mod._extract_datum_info(out)
+            datum_flag, datum_bytes = feat_mod._extract_datum_info(out, datums)
             if datum_flag == 0 or not _is_bloat_datum(out, datum_bytes):
                 continue
 
