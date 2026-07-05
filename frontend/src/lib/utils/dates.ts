@@ -5,7 +5,8 @@
  * to keep things deterministic; no locale-dependent parsing.
  */
 
-/** Today's date in `yyyy-mm-dd` form (local TZ). */
+/** Today's date in `yyyy-mm-dd` form (UTC, matching the UTC display + range
+ *  boundaries below so the Reports range is internally consistent). */
 export function todayISODate(): string {
 	return new Date().toISOString().slice(0, 10);
 }
@@ -27,33 +28,45 @@ export function defaultEnd(): string {
 	return todayISODate();
 }
 
-/** Convert a `yyyy-mm-dd` date to an ISO datetime at start of day (local TZ). */
+/** Convert a `yyyy-mm-dd` date to an ISO datetime at start of day (UTC).
+ *  UTC (the trailing Z) so the range boundary matches the UTC calendar date
+ *  the pickers show; parsing as local midnight shifted the boundary by the
+ *  client's offset for non-UTC operators. */
 export function startOfDayISO(date: string): string | undefined {
 	if (!date) return undefined;
-	return new Date(`${date}T00:00:00`).toISOString();
+	return new Date(`${date}T00:00:00Z`).toISOString();
 }
 
-/** Exclusive upper bound: 00:00 of the day after `date`. */
+/** Exclusive upper bound: 00:00 UTC of the day after `date`. */
 export function nextDayISO(date: string): string | undefined {
 	if (!date) return undefined;
-	const d = new Date(`${date}T00:00:00`);
-	d.setDate(d.getDate() + 1);
+	const d = new Date(`${date}T00:00:00Z`);
+	d.setUTCDate(d.getUTCDate() + 1);
 	return d.toISOString();
 }
 
 /**
  * Format a backend ISO datetime (e.g. `2026-05-19T15:37:38`) into the
- * `DD.MM.YYYY, HH:mm` style used in the alert tables.
+ * `DD.MM.YYYY, HH:mm UTC` style used in the alert tables.
+ *
+ * Backend datetimes from ClickHouse arrive as naive ISO (no `Z`) but are UTC.
+ * Plain `new Date("...")` parsed them as LOCAL, so the columns showed UTC
+ * wall-clock digits reinterpreted as local and unlabeled -- disagreeing with
+ * the relative "time ago" widget (which normalizes) by the client's offset,
+ * and misleading operators who correlate against UTC logs. Normalize the naive
+ * string to UTC, render with UTC getters, and label it `UTC`.
  */
 export function formatAnalyzedAt(iso: string): string {
-	const d = new Date(iso);
+	if (!iso) return iso;
+	const hasTz = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
+	const d = new Date(hasTz ? iso : `${iso}Z`);
 	if (Number.isNaN(d.getTime())) return iso;
-	const dd = String(d.getDate()).padStart(2, "0");
-	const mm = String(d.getMonth() + 1).padStart(2, "0");
-	const yyyy = d.getFullYear();
-	const hh = String(d.getHours()).padStart(2, "0");
-	const mi = String(d.getMinutes()).padStart(2, "0");
-	return `${dd}.${mm}.${yyyy}, ${hh}:${mi}`;
+	const dd = String(d.getUTCDate()).padStart(2, "0");
+	const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+	const yyyy = d.getUTCFullYear();
+	const hh = String(d.getUTCHours()).padStart(2, "0");
+	const mi = String(d.getUTCMinutes()).padStart(2, "0");
+	return `${dd}.${mm}.${yyyy}, ${hh}:${mi} UTC`;
 }
 
 /**
