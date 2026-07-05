@@ -406,3 +406,32 @@ class TestDeepNestingResilience:
         node = {"fields": [{"list": [{"bytes": clean}]}]}
         spans = decode_datum_strings(node, min_len=4)
         assert any("cardano-airdrop" in s for s in spans)
+
+
+class TestTextOnlyAndBytesCarriers:
+    """Recall-first gate/carrier fixes: a URL-less social-engineering message
+    and a URL delivered as a CBOR bytes metadatum must both be detected."""
+
+    def test_text_only_credential_request_gates_and_scores(self, scorer):
+        # No URL anywhere, just a Tier-1 credential-harvesting phrase.
+        meta = {"674": {"msg": ["Please send your seed phrase to restore rewards"]}}
+        feats = _features(metadata=meta)
+        assert scorer.gate(feats) is True  # previously False (URL-only gate)
+        result = scorer.score(feats)
+        assert result.score > 0.0
+        assert result.evidence["se_tier"].startswith("Tier 1")
+
+    def test_url_as_bytes_metadatum_is_detected(self, scorer):
+        # A phishing URL delivered as a CBOR bytes metadatum ({"bytes": hex}),
+        # which _flatten_to_text alone leaves as un-decoded hex.
+        url_hex = "https://cardano-airdrop.scam.example/claim".encode().hex()
+        meta = {"674": {"bytes": url_hex}}
+        feats = _features(metadata=meta)
+        assert scorer.gate(feats) is True
+        result = scorer.score(feats)
+        assert result.score > 0.0
+
+    def test_plain_benign_text_still_not_gated(self, scorer):
+        # No URL, no SE phrasing: must stay gated out (no false positive).
+        meta = {"674": {"msg": ["thanks for coming to the meetup, see you next time"]}}
+        assert scorer.gate(_features(metadata=meta)) is False

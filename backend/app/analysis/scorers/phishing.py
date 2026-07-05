@@ -161,14 +161,27 @@ class PhishingScorer(BaseScorer):
         if senders and external.is_sender_allowlisted(senders):
             return False
 
-        # Either source of URLs can trigger the scorer.
+        # A URL in any carrier triggers the scorer.
         urls = self._extract_urls(features)
-        return len(urls) > 0
+        if urls:
+            return True
+
+        # Recall-first: a URL-less social-engineering message must still be
+        # scored. A "send your seed phrase to ..." (Tier 1) or urgency/brand
+        # bait carries no link but is itself the phishing signal (Polimi
+        # 4.9.3); gating only on URL presence made the Tier-1 credential
+        # detector unreachable. Open the gate on any non-zero SE signal.
+        s_social, _ = self._classify_social_engineering(features)
+        return s_social > 0.0
 
     def score(self, features: Dict[str, Any]) -> ScorerResult:
         metadata = features.get("metadata") or {}
         urls = self._extract_urls(features)
-        if not urls:
+        # Sub-score 1c computed up front: it is also the gate's URL-less
+        # trigger, so a text-only social-engineering message (no URL) must
+        # still be scored rather than short-circuited to 0.
+        s_social, se_tier = self._classify_social_engineering(features)
+        if not urls and s_social <= 0.0:
             return ScorerResult(score=0.0)
 
         # URLs delivered inside asset names, tracked separately for the
@@ -186,8 +199,7 @@ class PhishingScorer(BaseScorer):
         # Sub-score 1b: domain suspicion composite (weight 0.35 of content)
         s_domain = self._score_domain_suspicion(urls)
 
-        # Sub-score 1c: social engineering score (weight 0.25 of content)
-        s_social, se_tier = self._classify_social_engineering(features)
+        # Sub-score 1c (s_social / se_tier) already computed above.
 
         content_score = (
             float(_W_CONTENT["blacklist"]) * s_blacklist
@@ -381,6 +393,12 @@ class PhishingScorer(BaseScorer):
                     continue
                 text = self._flatten_to_text(content)
                 candidates.extend(_url_candidates(text))
+                # A URL delivered as a CBOR bytes metadatum is hex, not text,
+                # so _flatten_to_text returns the hex and misses it. Decode
+                # bytes/CBOR-shaped values the same way inline datums are
+                # handled and scan the recovered spans.
+                for span in _decode_datum_strings(content):
+                    candidates.extend(_url_candidates(span))
 
         # --- Carrier 2: inline datums on outputs ------------------------
         raw_data = features.get("raw_data") or {}
@@ -518,6 +536,16 @@ class PhishingScorer(BaseScorer):
         """
         metadata = features.get("metadata") or {}
         text = self._flatten_to_text(metadata).lower()
+        # Also decode bytes/CBOR-shaped metadata values (same reason as the URL
+        # carrier: a bytes metadatum is hex, not text) so SE phrasing hidden in
+        # a bytes metadatum is scanned too.
+        if isinstance(metadata, dict):
+            for label_key in _RELEVANT_LABELS:
+                content = metadata.get(label_key) or metadata.get(int(label_key))
+                if content is None:
+                    continue
+                for span in _decode_datum_strings(content):
+                    text += " " + span.lower()
 
         raw_data = features.get("raw_data") or {}
         outputs = raw_data.get("outputs") if isinstance(raw_data, dict) else None
