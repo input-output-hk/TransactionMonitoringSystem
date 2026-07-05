@@ -79,6 +79,10 @@ def _get_client() -> Client:
             password=settings.CLICKHOUSE_PASSWORD,
             database=settings.CLICKHOUSE_DB,
             secure=False,
+            # Explicit timeouts so a partition without a TCP RST cannot pin a
+            # shared executor thread for the driver's 300s default (see config).
+            connect_timeout=settings.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS,
+            send_receive_timeout=settings.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS,
         )
         _thread_local.client = client
     return client

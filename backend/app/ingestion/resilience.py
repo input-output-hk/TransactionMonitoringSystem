@@ -92,6 +92,39 @@ class CircuitBreaker:
         self._failures.clear()
 
 
+def _reset_if_stable(
+    name: str,
+    breaker: "CircuitBreaker",
+    backoff: "ExponentialBackoff",
+    session_start: float,
+    stable_reset_seconds: float,
+) -> bool:
+    """Decide whether a just-ended session was healthy enough to self-heal.
+
+    When ``stable_reset_seconds > 0``, a session that ran at least that long
+    before erroring is a transient blip on an otherwise-healthy connection:
+    reset the breaker and backoff instead of counting it as a failure. A
+    session that dies FAST (a persistent downstream outage, e.g. ClickHouse or
+    Postgres failing on every block, that kills the session shortly after the
+    Ogmios handshake) is NOT reset, so the breaker accumulates failures and the
+    backoff grows -- otherwise record_success/backoff.reset firing on every
+    handshake meant the breaker never tripped and the loop busy-reconnected,
+    hammering the recovering dependency. Returns True if it self-healed.
+    """
+    if stable_reset_seconds <= 0:
+        return False
+    ran = time.monotonic() - session_start
+    if ran >= stable_reset_seconds:
+        logger.info(
+            "Ogmios [%s]: session ran %.0fs before error; treating as a "
+            "transient blip, resetting breaker/backoff", name, ran,
+        )
+        breaker.record_success()
+        backoff.reset()
+        return True
+    return False
+
+
 async def run_with_reconnect(
     *,
     name: str,
@@ -103,6 +136,7 @@ async def run_with_reconnect(
     on_connected: Callable[[bool], None],
     close: Callable[[], Awaitable[None]],
     poll_seconds: int,
+    stable_reset_seconds: float = 0.0,
 ) -> None:
     """Resilient connect -> run-session -> backoff-reconnect loop shared by the
     Ogmios chain-sync and mempool clients.
@@ -123,21 +157,32 @@ async def run_with_reconnect(
             logger.warning("Ogmios [%s]: circuit breaker OPEN, waiting for cooldown", name)
             await asyncio.sleep(poll_seconds)
             continue
+        session_start = time.monotonic()
         try:
             session = await connect()
             on_connected(True)
-            breaker.record_success()
-            backoff.reset()
+            if stable_reset_seconds <= 0:
+                # Legacy behaviour: treat a successful handshake as success.
+                breaker.record_success()
+                backoff.reset()
             await run_session(session)
         except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
             logger.warning("Ogmios [%s]: connection lost: %s", name, e)
             on_connected(False)
-            breaker.record_failure()
+            self_healed = _reset_if_stable(
+                name, breaker, backoff, session_start, stable_reset_seconds,
+            )
+            if not self_healed:
+                breaker.record_failure()
             await backoff.wait()
         except Exception as e:
             logger.error("Ogmios [%s]: unexpected error: %s", name, e)
             on_connected(False)
-            breaker.record_failure()
+            self_healed = _reset_if_stable(
+                name, breaker, backoff, session_start, stable_reset_seconds,
+            )
+            if not self_healed:
+                breaker.record_failure()
             await backoff.wait()
         finally:
             await close()
