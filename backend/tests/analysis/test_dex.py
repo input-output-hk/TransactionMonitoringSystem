@@ -170,3 +170,80 @@ def test_bracketing_legs_picks_closest_on_each_side():
 def test_bracketing_legs_no_straddle_returns_none():
     pos = {"a": (98, 0), "b": (99, 0), "v": (100, 0)}
     assert dex._bracketing_legs(["a", "b"], pos, (100, 0)) is None
+
+
+# ---- highest-profit selection across multiple bracketing clusters ----
+
+class _ProfitByAddrClient(FakeClient):
+    """FakeClient that returns attacker out/in keyed by the cluster address in
+    the query params, so distinct candidate clusters get distinct profits."""
+
+    def __init__(self, first_inputs, profit_by_addr, neighbors=None):
+        super().__init__(first_inputs, neighbors=neighbors)
+        self._profit_by_addr = profit_by_addr  # {addr: (out, in)}
+
+    def execute(self, query, params=None):
+        q = " ".join(query.split())
+        addr = (params or {}).get("addr")
+        if addr is not None and "SELECT sum(amount) FROM transaction_outputs" in q:
+            return [(self._profit_by_addr.get(addr, (0, 0))[0],)]
+        if addr is not None and "sum(coalesce(o.amount, ti.amount))" in q:
+            return [(self._profit_by_addr.get(addr, (0, 0))[1],)]
+        return super().execute(query, params)
+
+
+def test_highest_profit_cluster_wins_over_benign_bracket(_patch_client):
+    # Two wallet clusters both straddle the victim. BENIGN nets 0 and sorts
+    # FIRST alphabetically; PROFIT nets +4 ADA and sorts last. The old
+    # "return the first bracketing cluster" logic returned BENIGN (which the
+    # scorer's profit floor then suppresses), masking the real sandwich. The
+    # detector must now return the highest-profit candidate.
+    BENIGN = "addr_test1qaaabenign0000000000000000000000000000000000000000000"
+    PROFIT = "addr_test1qzzzprofit0000000000000000000000000000000000000000000"
+    neighbors = [
+        ("victim", 100, 0, 1),
+        ("benA", 99, 0, 1), ("benB", 101, 0, 1),
+        ("proA", 98, 0, 1), ("proB", 102, 0, 1),
+    ]
+    _patch_client["client"] = _ProfitByAddrClient(
+        first_inputs={
+            "victim": VICTIM,
+            "benA": BENIGN, "benB": BENIGN,
+            "proA": PROFIT, "proB": PROFIT,
+        },
+        profit_by_addr={
+            BENIGN: (1_000_000, 1_000_000),   # net 0
+            PROFIT: (5_000_000, 1_000_000),   # net +4 ADA
+        },
+        neighbors=neighbors,
+    )
+    sw = dex.detect_sandwich_pattern("victim", "preprod", 100)
+    assert sw is not None
+    assert sw["profit_b"] == 4_000_000.0  # PROFIT cluster, not the benign one
+    assert {sw["tx_a"], sw["tx_b"]} == {"proA", "proB"}
+
+
+def test_sandwich_selection_is_deterministic(_patch_client):
+    # Same input twice must yield the same candidate (sorted cluster scan).
+    BENIGN = "addr_test1qaaabenign0000000000000000000000000000000000000000000"
+    PROFIT = "addr_test1qzzzprofit0000000000000000000000000000000000000000000"
+    neighbors = [
+        ("victim", 100, 0, 1),
+        ("benA", 99, 0, 1), ("benB", 101, 0, 1),
+        ("proA", 98, 0, 1), ("proB", 102, 0, 1),
+    ]
+
+    def build():
+        return _ProfitByAddrClient(
+            first_inputs={"victim": VICTIM, "benA": BENIGN, "benB": BENIGN,
+                          "proA": PROFIT, "proB": PROFIT},
+            profit_by_addr={BENIGN: (1_000_000, 1_000_000),
+                            PROFIT: (5_000_000, 1_000_000)},
+            neighbors=neighbors,
+        )
+
+    _patch_client["client"] = build()
+    a = dex.detect_sandwich_pattern("victim", "preprod", 100)
+    _patch_client["client"] = build()
+    b = dex.detect_sandwich_pattern("victim", "preprod", 100)
+    assert a == b
