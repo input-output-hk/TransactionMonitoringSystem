@@ -40,7 +40,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          # Match the project's pnpm: frontend/pnpm-workspace.yaml uses the
+          # `allowBuilds` field (pnpm >= 10.4), which pnpm 9 rejects with
+          # "packages field missing or empty".
+          version: 11.8.0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
