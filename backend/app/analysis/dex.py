@@ -310,9 +310,26 @@ def detect_sandwich_pattern(
         if h != tx_hash:  # exclude the potential victim
             addr_to_txs.setdefault(addr, []).append(h)
 
-    # Look for an address cluster with 2+ txs (potential attacker front+back)
+    # Temporal bracketing reference: a sandwich front-runs BEFORE the victim
+    # and back-runs AFTER it, ordered by (slot, block_index) so the sequence is
+    # established even within a single block. Computed once (independent of the
+    # candidate cluster).
     victim_addr = first_input_addr.get(tx_hash, "")
-    for cluster_addr, cluster_txs in addr_to_txs.items():
+    pos = {r[0]: (r[1], r[2]) for r in neighbor_rows}
+    victim_pos = pos.get(tx_hash) or _tx_position(client, tx_hash, network)
+    if victim_pos is None:
+        return None
+
+    # Evaluate EVERY bracketing wallet cluster and keep the highest-profit one.
+    # Returning the first bracketing cluster (in arbitrary dict/query order)
+    # let a benign co-occurring bracket -- e.g. a zero-profit triple the scorer
+    # then suppresses via its profit floor -- mask a genuinely profitable
+    # attacker straddling the same victim in the same window (a missed attack).
+    # Scan in sorted order so the chosen candidate is reproducible across runs.
+    best: Optional[Dict] = None
+    best_profit: Optional[float] = None
+    for cluster_addr in sorted(addr_to_txs):
+        cluster_txs = addr_to_txs[cluster_addr]
         if len(cluster_txs) < 2 or cluster_addr == victim_addr:
             continue
         # A sandwich attacker controls a wallet (payment key). A script-address
@@ -323,15 +340,6 @@ def detect_sandwich_pattern(
         if _is_script_address(cluster_addr):
             continue
 
-        # Temporal bracketing: a sandwich front-runs BEFORE the victim and
-        # back-runs AFTER it, ordered by (slot, block_index) so the sequence is
-        # established even within a single block. Co-occurring legs that don't
-        # straddle the victim are not a sandwich (the dominant arbitrage/batcher
-        # false positive).
-        pos = {r[0]: (r[1], r[2]) for r in neighbor_rows}
-        victim_pos = pos.get(tx_hash) or _tx_position(client, tx_hash, network)
-        if victim_pos is None:
-            continue
         legs = _bracketing_legs(cluster_txs, pos, victim_pos)
         if legs is None:
             continue  # legs do not bracket the victim -> not a sandwich
@@ -346,18 +354,20 @@ def detect_sandwich_pattern(
         # configured profit floor (a zero-profit triple is not a sandwich).
         profit = _attacker_net_ada(client, cluster_addr, [tx_a, tx_b], network)
 
-        return {
-            "tx_a": tx_a,
-            "tx_b": tx_b,
-            "pool_id": addresses[0] if addresses else "",
-            "asset_pair": "unknown",
-            "attacker_linked": True,
-            "swap_rate_victim": 0.0,
-            "swap_rate_baseline": 0.0,
-            "price_impact_a": 0.0,
-            "profit_b": float(profit),
-            "attacker_sandwich_count": hist_count,
-            "slot_span": slot_span,
-        }
+        if best_profit is None or profit > best_profit:
+            best_profit = profit
+            best = {
+                "tx_a": tx_a,
+                "tx_b": tx_b,
+                "pool_id": addresses[0] if addresses else "",
+                "asset_pair": "unknown",
+                "attacker_linked": True,
+                "swap_rate_victim": 0.0,
+                "swap_rate_baseline": 0.0,
+                "price_impact_a": 0.0,
+                "profit_b": float(profit),
+                "attacker_sandwich_count": hist_count,
+                "slot_span": slot_span,
+            }
 
-    return None
+    return best

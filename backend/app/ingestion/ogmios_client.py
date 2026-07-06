@@ -42,6 +42,20 @@ class BlockPersistError(Exception):
     """
 
 
+class IntersectionNotFoundError(Exception):
+    """The saved sync checkpoint does not intersect the node's chain.
+
+    Raised when a resume `findIntersection` returns an error (Ogmios
+    IntersectionNotFound) instead of silently falling through to `nextBlock`,
+    which after a failed intersection streams from origin, i.e. a full
+    genesis re-sync (weeks of mainnet re-ingestion). This is an operator
+    condition: a rebuilt/replaced node, a wrong OGMIOS_WS_URL, or a checkpoint
+    stranded on a pruned fork. It propagates to the reconnect handler and trips
+    the chain circuit breaker so /health/ready reports DOWN, rather than
+    quietly replaying the chain from the beginning.
+    """
+
+
 class OgmiosClient:
     """Ogmios v6 WebSocket client with mempool monitoring and chain sync."""
 
@@ -216,6 +230,7 @@ class OgmiosClient:
             on_connected=_set_connected,
             close=_close,
             poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+            stable_reset_seconds=settings.OGMIOS_SESSION_STABLE_RESET_SECONDS,
         )
 
     async def _chain_sync_loop(self, ws):
@@ -233,6 +248,19 @@ class OgmiosClient:
             resp = await self._send_recv(ws, "findIntersection", {
                 "points": [{"slot": sync_point["slot"], "id": sync_point["id"]}]
             })
+            # Fail loudly if the checkpoint does not intersect the node's chain.
+            # Ogmios returns a JSON-RPC error (IntersectionNotFound) here; if we
+            # fell through to nextBlock the read pointer would sit at origin and
+            # we would silently re-sync from genesis.
+            if "error" in resp:
+                raise IntersectionNotFoundError(
+                    f"findIntersection failed for saved checkpoint "
+                    f"slot={sync_point['slot']} id={sync_point['id']}: "
+                    f"{resp['error']}. The node may have been rebuilt/replaced, "
+                    f"OGMIOS_WS_URL may point at the wrong network, or the "
+                    f"checkpoint may be stranded on a pruned fork. Refusing to "
+                    f"re-sync from genesis; resolve and restart."
+                )
         else:
             logger.info("Ogmios [chain]: first run, starting from current tip")
             resp = await self._send_recv(ws, "findIntersection", {"points": ["origin"]})
@@ -467,10 +495,15 @@ class OgmiosClient:
         else:
             logger.warning(f"Ogmios [chain]: rollback to slot {rollback_slot}")
 
-        try:
-            await postgres.mark_lifecycle_rolled_back(rollback_slot, self.network)
-        except Exception as e:
-            logger.error(f"Error marking rollback in PostgreSQL: {e}")
+        # Skip on rollback-to-origin, mirroring the warehouse guard below.
+        # rollback_slot is 0 there, so `WHERE slot > 0` would flip the ENTIRE
+        # network's CONFIRMED history to ROLLED_BACK over what is a node-resync
+        # artifact (checkpoint past the volatile chain), not a real reorg.
+        if not rolled_back_to_origin:
+            try:
+                await postgres.mark_lifecycle_rolled_back(rollback_slot, self.network)
+            except Exception as e:
+                logger.error(f"Error marking rollback in PostgreSQL: {e}")
 
         # Purge orphaned-fork rows from the analytics warehouse so they
         # cannot feed scorers, baselines, or API reads. Deliberately NOT

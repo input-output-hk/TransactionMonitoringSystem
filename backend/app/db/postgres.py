@@ -202,6 +202,22 @@ async def execute_schema():
             WHERE status = 'PENDING'
         """)
 
+        # Partial composite index that makes the rollback UPDATE fast.
+        # Covers mark_lifecycle_rolled_back:
+        #   WHERE network = $1 AND slot > $2 AND status = 'CONFIRMED'
+        # Without it, status = 'CONFIRMED' matches nearly the whole table
+        # (idx_tx_lifecycle_status is useless), so every rollback seq-scans
+        # tx_lifecycle. At mainnet size (tens of millions of rows) and mainnet
+        # rollback frequency (many short forks per day) that took seconds each,
+        # held a pool slot, and past POSTGRES_STATEMENT_TIMEOUT_SECONDS failed,
+        # leaving orphaned-fork txs stuck CONFIRMED. Rollbacks touch only the
+        # recent tip, so this partial index turns the UPDATE into a range scan.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tx_lifecycle_rollback
+            ON tx_lifecycle (network, slot)
+            WHERE status = 'CONFIRMED'
+        """)
+
         # Sync checkpoint — one row per network, upserted after each block
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS sync_checkpoint (

@@ -323,7 +323,7 @@ export function AttacksPage() {
 /**
  * Latest CRITICAL alert banner. Pulls the most recent risk_band=Critical
  * row from `/api/analysis/results` (sorted by date, page size 1) and shares
- * the table's 5s poll cadence — `useRiskAlerts` uses its `params` as the
+ * the table's 15s poll cadence — `useRiskAlerts` uses its `params` as the
  * query key, so a separate page=0/pageSize=1 request lives independently.
  *
  * Three visual states:

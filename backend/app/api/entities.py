@@ -81,7 +81,7 @@ async def set_entity_state(
     entity_id: str,
     state: Dict[str, Any],
     network: NetworkParam = None,
-    api_key: str = Security(verify_api_key),
+    principal: str = Security(verify_api_key),
 ):
     """Set or update entity state.
 
@@ -113,6 +113,7 @@ async def set_entity_state(
             entity_id=f"{query_network}:{entity_id}",
             details={"size_bytes": size},
             request=request,
+            actor=audit.actor_from_principal(principal),
         )
         return {
             "message": "Entity state updated",

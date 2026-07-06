@@ -64,6 +64,17 @@ import {
 } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 
+/** Cardanoscan transaction URL for the given network (the testnets use the
+ *  network subdomain). Used by the detail header's block-explorer button. */
+function txExplorerUrl(
+	txHash: string,
+	network: "mainnet" | "preprod" | "preview",
+): string {
+	const host =
+		network === "mainnet" ? "cardanoscan.io" : `${network}.cardanoscan.io`;
+	return `https://${host}/transaction/${txHash}`;
+}
+
 export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 	const navigate = useNavigate();
 	const { id } = useParams<{ id: string }>();
@@ -170,7 +181,16 @@ function DetailCard({
 							<Trash2 className="h-4 w-4" />
 						</IconButton>
 					)}
-					<IconButton title="Open externally">
+					<IconButton
+						title="Open in block explorer"
+						onClick={() =>
+							window.open(
+								txExplorerUrl(alert.fullHash, getNetwork()),
+								"_blank",
+								"noopener,noreferrer",
+							)
+						}
+					>
 						<ExternalLink className="h-4 w-4" />
 					</IconButton>
 					<IconButton title="Close" onClick={onClose}>
@@ -1432,8 +1452,8 @@ function DeleteDialog({
 				<DialogHeader>
 					<DialogTitle>Are you sure this is not an attack?</DialogTitle>
 					<DialogDescription>
-						You are deleting this transaction permanently. This action is
-						irreversible.
+						This moves the alert to the Archive and removes it from the
+						dashboard. You can restore it later from the Archive.
 					</DialogDescription>
 				</DialogHeader>
 

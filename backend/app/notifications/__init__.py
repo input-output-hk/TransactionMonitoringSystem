@@ -19,6 +19,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from app.config import settings
 from app.db import postgres
 from app.notifications import config, dispatcher, registry, triggers
 from app.notifications.payloads import build_immediate_alert
@@ -40,11 +41,25 @@ DELIVER_FAILED = "failed"
 # coroutines onto the running event loop. None => notifications are inert.
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# Bounds concurrent deliveries (see NOTIFY_MAX_CONCURRENT_DELIVERIES). Created
+# lazily on the main loop (asyncio.Semaphore binds to the running loop) and
+# reset with the loop so a fresh loop / test gets its own.
+_delivery_sema: Optional[asyncio.Semaphore] = None
+
 
 def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
     """Set/clear the captured main event loop (startup / shutdown / tests)."""
-    global _main_loop
+    global _main_loop, _delivery_sema
     _main_loop = loop
+    _delivery_sema = None  # recreated on the new loop on first delivery
+
+
+def _get_delivery_sema() -> asyncio.Semaphore:
+    """The shared delivery concurrency limiter, created lazily on the loop."""
+    global _delivery_sema
+    if _delivery_sema is None:
+        _delivery_sema = asyncio.Semaphore(settings.NOTIFY_MAX_CONCURRENT_DELIVERIES)
+    return _delivery_sema
 
 
 async def load_config() -> None:
@@ -130,7 +145,11 @@ async def _deliver_with_dedup(
             "notification dedup check failed for %s/%s; delivering anyway",
             network, tx_hash,
         )
-    delivered = await dispatcher.dispatch(payload, dispatches)
+    # Bound concurrent sends so a burst (backlog drain / spam wave) cannot open
+    # hundreds of simultaneous SMTP/webhook connections and trip the endpoint's
+    # rate limits. Recall-safe: every alert still delivers, just paced.
+    async with _get_delivery_sema():
+        delivered = await dispatcher.dispatch(payload, dispatches)
     if not delivered:
         return DELIVER_FAILED  # nothing sent: leave unclaimed so a re-score retries
     try:

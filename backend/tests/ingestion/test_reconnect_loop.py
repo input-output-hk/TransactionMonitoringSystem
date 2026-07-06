@@ -79,7 +79,7 @@ class _Harness:
     async def close(self) -> None:
         self.closes += 1
 
-    async def run(self, poll_seconds: int = 10) -> None:
+    async def run(self, poll_seconds: int = 10, stable_reset_seconds: float = 0.0) -> None:
         await run_with_reconnect(
             name="test",
             is_running=self.is_running,
@@ -90,6 +90,7 @@ class _Harness:
             on_connected=self.on_connected,
             close=self.close,
             poll_seconds=poll_seconds,
+            stable_reset_seconds=stable_reset_seconds,
         )
 
 
@@ -135,3 +136,40 @@ async def test_breaker_open_gate_sleeps_and_skips_connect(monkeypatch):
     assert h.connects == 1         # connect skipped on the gated iteration
     assert h.breaker.successes == 1
     assert h.closes == 1           # only the connected iteration reaches finally
+
+
+class _Clock:
+    """Deterministic monotonic clock for resilience only (patched onto
+    resilience.time so asyncio's own time.monotonic is untouched). Clamps to
+    the last value so incidental calls never raise StopIteration."""
+
+    def __init__(self, values):
+        self._v = list(values)
+        self._i = 0
+
+    def monotonic(self):
+        v = self._v[min(self._i, len(self._v) - 1)]
+        self._i += 1
+        return v
+
+
+async def test_stable_session_self_heals_not_counted_as_failure(monkeypatch):
+    # With stable_reset_seconds set, a session that ran long enough before
+    # erroring is a transient blip: reset breaker/backoff, do NOT record a
+    # failure. session_start=0 then 100 (ran=100s >= 60).
+    monkeypatch.setattr(resilience, "time", _Clock([0.0, 100.0]))
+    h = _Harness(max_iters=1, session_exc=OSError("blip"))
+    await h.run(stable_reset_seconds=60.0)
+    assert (h.breaker.successes, h.breaker.failures) == (1, 0)  # healed, not failed
+    assert h.backoff.resets == 1
+
+
+async def test_fast_dying_session_accumulates_failure(monkeypatch):
+    # A session that dies almost immediately (ran=1s < 60) is a real failure:
+    # record it and back off so a persistent downstream outage trips the
+    # breaker instead of busy-reconnecting.
+    monkeypatch.setattr(resilience, "time", _Clock([0.0, 1.0]))
+    h = _Harness(max_iters=1, session_exc=OSError("down"))
+    await h.run(stable_reset_seconds=60.0)
+    assert (h.breaker.successes, h.breaker.failures) == (0, 1)  # counted as failure
+    assert h.backoff.resets == 0 and h.backoff.waits == 1

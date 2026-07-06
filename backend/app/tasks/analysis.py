@@ -39,10 +39,19 @@ async def _loop():
         f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
     )
 
-    # Bootstrap baselines on first run if enabled and table is empty
+    # Bootstrap baselines on first run if enabled and table is empty. Runs on
+    # the ClickHouse executor, NOT inline: bootstrap_baselines is a synchronous
+    # warehouse scan, and awaiting it inline here would block the event loop
+    # (which also serves the API, WebSocket feed, and ingestion) for the whole
+    # scan on the first mainnet boot, where it is the slowest.
     if settings.BASELINE_BOOTSTRAP_ON_STARTUP:
         try:
-            count = baselines.bootstrap_baselines(settings.CARDANO_NETWORK)
+            loop = asyncio.get_running_loop()
+            count = await loop.run_in_executor(
+                clickhouse._ch_executor,
+                baselines.bootstrap_baselines,
+                settings.CARDANO_NETWORK,
+            )
             if count > 0:
                 logger.info(f"Baseline bootstrap: created {count} baseline rows")
         except Exception as e:

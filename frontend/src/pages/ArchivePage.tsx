@@ -24,7 +24,7 @@ import {
 	todayISODate,
 } from "@/lib/utils/dates";
 import { shortHash } from "@/lib/utils/strings";
-import type { AttackType } from "@/mocks/attacks";
+import { attackTypeFromSnake } from "@/lib/api/analysis";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AlertCircle, ArrowUp, Copy, ExternalLink } from "lucide-react";
 import { useState } from "react";
@@ -138,11 +138,11 @@ export function ArchivePage() {
 					<TableBody>
 						{rows.map((a) => {
 							const Icon =
-								(a.max_class && ATTACK_ICON[snakeToAttackType(a.max_class)]) ||
+								(a.max_class && ATTACK_ICON[attackTypeFromSnake(a.max_class)]) ||
 								AlertCircle;
 							const displayId = shortHash(a.tx_hash);
 							const displayClass = a.max_class
-								? snakeToAttackType(a.max_class)
+								? attackTypeFromSnake(a.max_class)
 								: "—";
 							return (
 								<TableRow
@@ -257,13 +257,3 @@ export function ArchivePage() {
 	);
 }
 
-/* ---------- helpers ---------- */
-
-/** Backend stores attack class in snake_case (`large_datum`); UI uses Title
- *  Case (`Large Datum`) for both display and the ATTACK_ICON map. */
-function snakeToAttackType(snake: string): AttackType {
-	return snake
-		.split("_")
-		.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-		.join(" ") as AttackType;
-}

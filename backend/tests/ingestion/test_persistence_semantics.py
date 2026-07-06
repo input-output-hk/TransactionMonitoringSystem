@@ -13,7 +13,11 @@ import pytest
 
 from app.config import settings
 from app.db.clickhouse import _serialize_raw_data
-from app.ingestion.ogmios_client import BlockPersistError, OgmiosClient
+from app.ingestion.ogmios_client import (
+    BlockPersistError,
+    IntersectionNotFoundError,
+    OgmiosClient,
+)
 
 
 def _run(coro):
@@ -335,15 +339,28 @@ class TestRollbackCleanup:
         _run(scenario())
         repurge.assert_not_awaited()
 
-    def test_rollback_to_origin_skips_purge(self, client, monkeypatch):
+    def test_rollback_to_origin_skips_purge_and_lifecycle(self, client, monkeypatch):
         """Rollback-to-origin is a node-resync artifact; purging the whole
-        network's history on it would destroy the warehouse."""
+        network's history on it would destroy the warehouse AND flipping every
+        CONFIRMED row to ROLLED_BACK (slot 0 matches all history) would corrupt
+        the lifecycle. Both must be skipped."""
         monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", True)
         delete = AsyncMock()
-        with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", AsyncMock()), \
+        mark = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", mark), \
              patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async", delete):
             _run(client._handle_roll_backward({"point": "origin", "tip": {"slot": 5}}))
         delete.assert_not_awaited()
+        mark.assert_not_awaited()  # the whole-history lifecycle wipe is skipped
+
+    def test_rollback_to_slot_still_marks_lifecycle(self, client, monkeypatch):
+        """A real (non-origin) rollback must still mark lifecycle rolled-back."""
+        monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", False)  # isolate the mark
+        mark = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.mark_lifecycle_rolled_back", mark), \
+             patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()):
+            _run(client._handle_roll_backward(self._result(slot=500)))
+        mark.assert_awaited_once_with(500, client.network)
 
     def test_kill_switch(self, client, monkeypatch):
         monkeypatch.setattr(settings, "ROLLBACK_CLEANUP_ENABLED", False)
@@ -353,6 +370,25 @@ class TestRollbackCleanup:
              patch("app.ingestion.ogmios_client.clickhouse.delete_rolled_back_txs_async", delete):
             _run(client._handle_roll_backward(self._result()))
         delete.assert_not_awaited()
+
+
+class TestFindIntersection:
+    """A resume checkpoint that does not intersect the node's chain must fail
+    loudly, not silently re-sync from genesis."""
+
+    def test_intersection_not_found_raises_and_halts(self, client):
+        client._replay_pending_score_repurges = AsyncMock()
+        next_block = AsyncMock()
+        client._handle_roll_forward = next_block  # would be hit if we fell through
+        with patch("app.ingestion.ogmios_client.postgres.get_sync_point",
+                   AsyncMock(return_value={"slot": 123, "id": "ab" * 32})), \
+             patch.object(client, "_send_recv",
+                          AsyncMock(return_value={"error": {"code": 1000,
+                                                            "message": "IntersectionNotFound"}})):
+            with pytest.raises(IntersectionNotFoundError):
+                _run(client._chain_sync_loop(object()))
+        # Must NOT have advanced to block processing (no genesis replay).
+        next_block.assert_not_awaited()
 
 
 class TestDurableScoreRepurge:

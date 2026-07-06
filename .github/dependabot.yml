@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Host backend (pinned requirements.txt)
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Clustering sidecar (uv / pyproject)
+  - package-ecosystem: pip
+    directory: /services/clustering/backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Frontend (pnpm)
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

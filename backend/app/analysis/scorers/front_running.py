@@ -94,7 +94,14 @@ class FrontRunningScorer(BaseScorer):
         p50_d, p99_d = _anchor(_FIXED, "mempool_delta_inv")
         s_delta = normalise(delta_inv, p50=p50_d, p99=p99_d)
 
-        # Sub-score 3: attacker recurrence
+        # Sub-score 3: attacker recurrence.
+        # Deliberately the ALL-TIME collision win count, not the 24h window the
+        # spec describes (attacker_win_count_24h is computed and surfaced in
+        # evidence). All-time is >= the 24h count, so it yields a HIGHER
+        # recurrence sub-score and makes the min-recurrence cap below fire LESS
+        # often: a dormant-then-returning attacker stays flagged. Under the
+        # recall-first rule this is the safer choice, so it is kept over strict
+        # spec conformance; the 24h value remains in evidence for analysts.
         win_count = collision.get("attacker_win_count", 0)
         p50_r, p99_r, bl1 = _resolve(
             "collision_win_count", "per_cluster", "__global__", network,

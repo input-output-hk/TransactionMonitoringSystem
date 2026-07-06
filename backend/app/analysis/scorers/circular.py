@@ -179,17 +179,39 @@ class CircularScorer(BaseScorer):
             s_entropy + s_auxiliary + s_speed
         ) < _STRUCTURAL_CORROBORATION_FLOOR
         if structural_only:
-            return ScorerResult.no_finding(
-                sub_scores={
-                    "amount_similarity": round(s_amount, 4),
-                    "cycle_recurrence": round(s_recurrence, 4),
-                    "recipient_entropy_inv": round(s_entropy, 4),
-                    "auxiliary": round(s_auxiliary, 4),
-                    "speed": round(s_speed, 4),
-                    "cycle_length": cycle.get("cycle_length", 0),
-                },
-                baseline_source=bl_source,
+            # Recall-first escape: recipient_entropy is INVERTED (low == recycled
+            # nodes), so AML layering that launders through many FRESH
+            # intermediary addresses scores high entropy -> s_entropy ~ 0 and
+            # looks structural-only. But a cycle that closes to origin with
+            # strongly preserved amounts AND repeated recurrence is deliberate
+            # layering regardless of address freshness. Suppressing it to
+            # no-finding would miss exactly that attack, so when both the amount
+            # and recurrence axes are high enough to earn their reason flags,
+            # surface the cycle at a capped Moderate instead of dropping it. A
+            # genuinely benign structural cycle (e.g. a plain pool swap) does not
+            # clear both bars and is still suppressed.
+            # Only genuine multi-hop rings (length >= _MIN_LEN, which the gate
+            # already enforces in production) qualify: a 2-hop A->script->A
+            # round-trip repeated many times is a bot/DeFi interaction, not
+            # layering, and stays suppressed.
+            recurring_layering = (
+                cycle.get("cycle_length", 0) >= _MIN_LEN
+                and s_amount > _REASON_T
+                and s_recurrence > _REASON_T
             )
+            if not recurring_layering:
+                return ScorerResult.no_finding(
+                    sub_scores={
+                        "amount_similarity": round(s_amount, 4),
+                        "cycle_recurrence": round(s_recurrence, 4),
+                        "recipient_entropy_inv": round(s_entropy, 4),
+                        "auxiliary": round(s_auxiliary, 4),
+                        "speed": round(s_speed, 4),
+                        "cycle_length": cycle.get("cycle_length", 0),
+                    },
+                    baseline_source=bl_source,
+                )
+            final = min(final, _MODERATE_CAP)
 
         # Fee-ratio cap: a corroborated cycle that still loses more than the
         # strict fee-only threshold may be incidental layering rather than a

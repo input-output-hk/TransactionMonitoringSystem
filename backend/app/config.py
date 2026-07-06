@@ -107,6 +107,14 @@ class Settings(BaseSettings):
     CLICKHOUSE_USER: str = "default"
     CLICKHOUSE_PASSWORD: str = ""
     CLICKHOUSE_DB: str = "tms_analytics"
+    # Explicit socket timeouts for the clickhouse-driver client. Without these
+    # the driver's 300s send_receive default applies, so a network partition
+    # with no TCP RST can pin one of the 3 shared executor threads for 5 min
+    # (and the block-insert retry loop up to ~25 min). send_receive is the max
+    # idle between packets, not total query time, so a streaming heavy query is
+    # unaffected; 120s bounds a stuck socket well below the default.
+    CLICKHOUSE_CONNECT_TIMEOUT_SECONDS: float = 10.0
+    CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS: float = 120.0
 
     # Security - API Key Authentication
     API_KEYS: str = ""  # Comma-separated list of valid API keys
@@ -202,6 +210,18 @@ class Settings(BaseSettings):
     # the recovery path for raw-data-deferred transactions.
     UNANALYZED_OVERLAP_SECONDS: int = 120
     UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS: int = 600
+    # Lookback bound for the periodic full rescan. The rescan is the never-skip
+    # net for txs that slipped the watermark (deferred raw-data / scorer /
+    # enrichment retries, same-second skew); those are always recent, so a
+    # generous window (e.g. 604800 = 7 days) recovers them while keeping the
+    # rescan's anti-join cost proportional to the window rather than the whole
+    # (keep-forever) table. Default 0 = unbounded (the legacy never-skip
+    # behaviour, recall-maximal). RECOMMENDED for mainnet: set a window, because
+    # at mainnet size the since=None rescan materialises an anti-join over all
+    # of tx_class_scores plus an unbounded inputs subquery (multiple GB) and can
+    # hit ClickHouse per-query memory limits. (Even unbounded, a rescan that
+    # fails no longer halts scoring: run_once falls back to the watermark poll.)
+    UNANALYZED_FULL_RESCAN_WINDOW_SECONDS: int = 0
     # Baseline lookup cache (0 disables). Baselines change once per daily
     # recompute but were point-SELECTed per feature per scored tx: the
     # engine's dominant N+1. insert_baselines() clears the cache; the 1 h
@@ -278,6 +298,14 @@ class Settings(BaseSettings):
     SUPERVISOR_BACKOFF_BASE_SECONDS: float = 5.0
     SUPERVISOR_BACKOFF_MAX_SECONDS: float = 300.0
     SUPERVISOR_STABLE_RESET_SECONDS: float = 600.0
+
+    # How long an Ogmios session must run before an error is treated as a
+    # transient blip (reset the circuit breaker/backoff) rather than a failure.
+    # Below this, repeated fast-dying sessions accumulate breaker failures so a
+    # persistent downstream (ClickHouse/Postgres) outage trips the breaker and
+    # backs off instead of busy-reconnecting. 0 = legacy (reset on handshake).
+    # Blocks arrive every ~20 s, so a session live for 60 s is clearly healthy.
+    OGMIOS_SESSION_STABLE_RESET_SECONDS: float = 60.0
 
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True
@@ -370,6 +398,28 @@ class Settings(BaseSettings):
     # every poll regardless).
     RAW_FALLBACK_RETRY_SECONDS: int = 30
 
+    # Analysis Engine incomplete-scoring deferral: when a scorer raises, or a
+    # cross-tx enrichment (collisions, cycles, sandwich, input-address
+    # resolution) fails for a tx, scoring that tx is INCOMPLETE. Writing its
+    # score row anyway would leave the affected class at the -1 "not
+    # applicable" sentinel and, because the unanalyzed anti-join treats any
+    # written row as scored, the tx would never be re-evaluated (only a
+    # rollback re-scores) -- a silent, permanent recall hole. Instead the tx is
+    # deferred (no row written) and retried on later engine runs, mirroring the
+    # RAW_FALLBACK_* raw-data deferral above.
+    ANALYSIS_DEFER_ENABLED: bool = True
+    # After this many failed attempts the tx is scored anyway, but with an
+    # evidence _meta marker (scorer_failed / enrichment_unavailable) so the
+    # degradation is queryable and filterable rather than a silent -1. This
+    # bounds how long a deterministically-crashing scorer (e.g. a crafted tx)
+    # or a persistent enrichment outage can park a tx in the unanalyzed queue.
+    ANALYSIS_DEFER_MAX_ATTEMPTS: int = 3
+    # Minimum monotonic-clock spacing between COUNTED defer attempts, matching
+    # the RAW_FALLBACK pacing rationale: the drain loop re-polls sub-second, so
+    # without pacing a busy loop would burn the whole budget in seconds and
+    # degrade-score exactly the txs the deferral protects.
+    ANALYSIS_DEFER_RETRY_SECONDS: int = 30
+
     # Mempool pending-tx bookkeeping. The TTL matches
     # LIFECYCLE_PENDING_TTL_SECONDS: both bound how long an unconfirmed tx
     # stays relevant (on-chain tx TTLs cover user submissions well inside 2 h).
@@ -460,6 +510,15 @@ class Settings(BaseSettings):
     WEBHOOK_NOTIFY_ENABLED: bool = True      # master switch for webhook posts
     NOTIFY_TOP_FEATURES: int = 5             # top-N contributing sub-scores in payload
     NOTIFY_SEND_TIMEOUT_SECONDS: int = 10    # per-channel hard ceiling at dispatch
+    # Max concurrent alert deliveries across BOTH the per-tx scorer path and the
+    # contract_anomaly poller. The scorer path (on_new_scores) schedules one
+    # fire-and-forget delivery per alerting tx with no bound, so a backlog drain
+    # or a mainnet spam wave / miscalibrated scorer could open hundreds of
+    # simultaneous SMTP/webhook connections in one tick and get the endpoint
+    # throttled or blocked -- degrading delivery of FUTURE real alerts. This
+    # semaphore paces sends without dropping any (recall-safe): every alert
+    # still delivers, at most N at a time.
+    NOTIFY_MAX_CONCURRENT_DELIVERIES: int = 8
     WEBHOOK_TIMEOUT_SECONDS: float = 8.0     # per-HTTP-attempt timeout
     WEBHOOK_MAX_RETRIES: int = 2             # extra attempts on 5xx / network error
     WEBHOOK_RETRY_BACKOFF_SECONDS: float = 1.0  # linear backoff between attempts

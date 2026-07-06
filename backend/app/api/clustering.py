@@ -16,9 +16,11 @@ the sidecar runs zero-config on the internal network and no credential is sent.
 import logging
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response, Security
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
 
+from app import audit
 from app.auth import verify_api_key
+from app.auth.deps import require_admin_or_api_key
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -33,12 +35,36 @@ _TIMEOUT = httpx.Timeout(30.0)
 _FORWARD_HEADERS = ("content-type", "accept")
 
 
-@router.api_route(
-    "/{path:path}",
-    methods=["GET", "POST", "PATCH", "DELETE"],
-    dependencies=[Security(verify_api_key)],
-)
-async def proxy(path: str, request: Request) -> Response:
+@router.api_route("/{path:path}", methods=["GET"], dependencies=[Security(verify_api_key)])
+async def proxy_read(path: str, request: Request) -> Response:
+    """Read-only proxy: any authenticated principal (API key or session)."""
+    return await _forward(path, request)
+
+
+@router.api_route("/{path:path}", methods=["POST", "PATCH", "DELETE"])
+async def proxy_mutate(
+    path: str,
+    request: Request,
+    principal: str = Depends(require_admin_or_api_key),
+) -> Response:
+    """State-changing / expensive proxy (onboard, delete contract, enqueue
+    jobs, relabel): requires an Admin session or an API key (a non-admin
+    Reviewer session is rejected), and records a host-side audit row so the
+    forwarded mutation is attributable -- neither of which the read path or the
+    old single verify_api_key gate provided."""
+    await audit.record(
+        event_type="clustering_proxy",
+        action=request.method.lower(),
+        entity_type="clustering",
+        entity_id=path,
+        details={"query": str(request.query_params)},
+        request=request,
+        actor=audit.actor_from_principal(principal),
+    )
+    return await _forward(path, request)
+
+
+async def _forward(path: str, request: Request) -> Response:
     if not settings.CLUSTERING_ENABLED:
         raise HTTPException(status_code=503, detail="Clustering module is not enabled")
     # Constrain the forwarded path to the /api/v1 namespace. FastAPI decodes

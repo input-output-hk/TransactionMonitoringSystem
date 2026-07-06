@@ -85,7 +85,7 @@ function Donut({ percent, size = 110 }: { percent: number; size?: number }) {
 				textAnchor="middle"
 				className="fill-foreground text-base font-semibold"
 			>
-				%{percent}
+				{percent}%
 			</text>
 		</svg>
 	);

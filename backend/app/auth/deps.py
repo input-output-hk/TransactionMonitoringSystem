@@ -85,3 +85,35 @@ async def require_admin(
             detail="Admin role required.",
         )
     return user
+
+
+async def require_admin_or_api_key(request: Request) -> str:
+    """Allow a valid API key (a trusted programmatic operator credential) or
+    dev-mode, otherwise require an Admin SESSION. Crucially, a non-admin
+    (Reviewer) session is REJECTED. Used to gate state-changing / expensive
+    operations that a Reviewer must not run (e.g. the clustering proxy's
+    DELETE-contract and heavy-job mutations, which ``verify_api_key`` alone
+    would let any session perform). Returns a principal string for auditing.
+    """
+    # Imported lazily to keep the auth import tree flat (api_key imports config
+    # only; deps must not create a cycle through it at module load).
+    from app.auth.api_key import _dev_mode, is_valid_api_key
+
+    if _dev_mode:
+        return "dev-mode"
+    key = request.headers.get(settings.API_KEY_HEADER)
+    if key and is_valid_api_key(key):
+        return key  # raw key; audit.actor_from_principal fingerprints it
+    user = await current_user(request)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+            headers={"WWW-Authenticate": "Cookie"},
+        )
+    if user.get("role") != "Admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required.",
+        )
+    return f"session:{user['id']}"

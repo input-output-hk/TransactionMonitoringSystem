@@ -328,6 +328,7 @@ class MempoolMonitor:
             on_connected=_set_connected,
             close=_close,
             poll_seconds=settings.OGMIOS_CIRCUIT_OPEN_POLL_SECONDS,
+            stable_reset_seconds=settings.OGMIOS_SESSION_STABLE_RESET_SECONDS,
         )
 
     async def _record_mempool_collisions(
@@ -358,6 +359,16 @@ class MempoolMonitor:
             # Check for collisions with existing pending txs
             # (ref-index lookup: O(refs), not O(pending entries))
             for other_id, shared in self._pending.sharing(input_refs).items():
+                # Skip self-matches. _seen_mempool_txs is cleared on reconnect,
+                # rollback (clear_on_rollback), and when the dedup cap trips,
+                # but _pending keeps its entries, so a re-observed tx finds
+                # ITSELF in the ref index. Without this guard it would insert a
+                # collision row with tx_a == tx_b (all inputs trivially
+                # "shared"), feeding junk to the front_running scorer -- and at
+                # mainnet rollback frequency, thousands of such rows. The
+                # chain-side displacement check has the equivalent guard.
+                if other_id == tx_id:
+                    continue
                 other_entry = self._pending.get(other_id)
                 if other_entry is None:
                     continue
