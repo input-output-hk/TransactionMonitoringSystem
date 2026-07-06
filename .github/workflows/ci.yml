@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           # Match the project's pnpm: frontend/pnpm-workspace.yaml uses the
           # `allowBuilds` field (pnpm >= 10.4), which pnpm 9 rejects with
