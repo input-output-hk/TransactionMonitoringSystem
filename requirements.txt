@@ -35,5 +35,5 @@ pytest-cov==7.1.0
 
 # Development Tools
 black==26.5.1
-ruff==0.15.18
+ruff==0.15.20
 mypy==2.1.0
