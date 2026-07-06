@@ -24,7 +24,7 @@
     "clsx": "^2.1.1",
     "cytoscape": "3.34.0",
     "cytoscape-fcose": "2.2.0",
-    "lucide-react": "^1.14.0",
+    "lucide-react": "^1.23.0",
     "papaparse": "^5.5.3",
     "plotly.js-dist-min": "^3.6.0",
     "react": "^19.2.6",
