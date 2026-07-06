@@ -33,6 +33,66 @@ jobs:
         working-directory: backend
         run: python -m pytest tests/ -q
 
+  live-db:
+    # The hermetic suite mocks every CH/PG call, which has let ClickHouse
+    # 26.x runtime regressions (alias shadowing, projection-gate DDL) ship
+    # with green tests. This job applies the real schema and runs the
+    # tests/live_db/ tier against service containers pinned to the SAME
+    # image versions as docker-compose.yml; bump both together. The tier
+    # is env-gated (TMS_LIVE_DB_TESTS=1), so plain `pytest tests/` stays
+    # hermetic for contributors without Docker.
+    name: Live-DB tier (ClickHouse 26.x + Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: tms_user
+          POSTGRES_PASSWORD: tms_password
+          POSTGRES_DB: tms_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tms_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.1.3
+        env:
+          CLICKHOUSE_DB: tms_analytics
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+          - 9000:9000
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:8123/ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Live-DB tests (migrations + representative queries)
+        working-directory: backend
+        env:
+          TMS_LIVE_DB_TESTS: "1"
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: tms_user
+          POSTGRES_PASSWORD: tms_password
+          POSTGRES_DB: tms_db
+          CLICKHOUSE_HOST: localhost
+          CLICKHOUSE_PORT: "9000"
+        run: python -m pytest tests/live_db/ -q
+
   frontend:
     name: Frontend (lint + build)
     runs-on: ubuntu-latest
