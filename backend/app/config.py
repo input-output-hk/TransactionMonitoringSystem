@@ -510,6 +510,15 @@ class Settings(BaseSettings):
     WEBHOOK_NOTIFY_ENABLED: bool = True      # master switch for webhook posts
     NOTIFY_TOP_FEATURES: int = 5             # top-N contributing sub-scores in payload
     NOTIFY_SEND_TIMEOUT_SECONDS: int = 10    # per-channel hard ceiling at dispatch
+    # Max concurrent alert deliveries across BOTH the per-tx scorer path and the
+    # contract_anomaly poller. The scorer path (on_new_scores) schedules one
+    # fire-and-forget delivery per alerting tx with no bound, so a backlog drain
+    # or a mainnet spam wave / miscalibrated scorer could open hundreds of
+    # simultaneous SMTP/webhook connections in one tick and get the endpoint
+    # throttled or blocked -- degrading delivery of FUTURE real alerts. This
+    # semaphore paces sends without dropping any (recall-safe): every alert
+    # still delivers, at most N at a time.
+    NOTIFY_MAX_CONCURRENT_DELIVERIES: int = 8
     WEBHOOK_TIMEOUT_SECONDS: float = 8.0     # per-HTTP-attempt timeout
     WEBHOOK_MAX_RETRIES: int = 2             # extra attempts on 5xx / network error
     WEBHOOK_RETRY_BACKOFF_SECONDS: float = 1.0  # linear backoff between attempts
