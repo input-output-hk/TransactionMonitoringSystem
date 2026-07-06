@@ -56,6 +56,11 @@ export default function Sparkline({
 							fontSize: "11px",
 							padding: "2px 6px",
 							borderRadius: "6px",
+							// Theme via CSS tokens so the tooltip isn't a white box
+							// in dark mode (recharts' default is light-only).
+							background: "var(--color-popover)",
+							border: "1px solid var(--color-border)",
+							color: "var(--color-popover-foreground)",
 						}}
 						labelFormatter={(label) => fmtDay(String(label))}
 						formatter={(value) => [`${value}`, "alerts"]}

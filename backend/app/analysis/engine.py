@@ -139,6 +139,11 @@ def _score_transaction(
         # evidence to make it visible and filterable rather than silent.
         evidence["_meta"] = {"raw_data_unavailable": True}
 
+    # Scorers that RAISED (not merely gated out). A raised scorer leaves its
+    # class at the -1 sentinel, indistinguishable from "not applicable"; the
+    # engine uses this list to defer the tx (retry) rather than persist a row
+    # that silently masks the unscored class. See _handle_incomplete_scoring.
+    failed_scorers: List[str] = []
     for scorer in scorers:
         try:
             if scorer.gate(features):
@@ -150,6 +155,7 @@ def _score_transaction(
                     evidence[scorer.name] = result.evidence
         except Exception:
             logger.exception(f"Scorer {scorer.name} failed on tx {tx_hash}")
+            failed_scorers.append(scorer.name)
 
     # Compute aggregate
     applicable = {k: v for k, v in scores.items() if v >= 0}
@@ -182,6 +188,11 @@ def _score_transaction(
         "evidence": evidence,
         "analysis_version": _VERSION,
         "analyzed_at": now,
+        # Transient keys (popped by _handle_incomplete_scoring before insert):
+        # which scorers raised and which enrichments failed for this tx, so an
+        # incompletely-scored tx is deferred/retried instead of silently kept.
+        "_failed_scorers": failed_scorers,
+        "_enrichment_failed": list(row.get("_enrichment_failed") or []),
     }
 
 
@@ -224,6 +235,13 @@ def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
         last is None
         or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS
     ):
+        # Bound the rescan lookback so its anti-join cost tracks the window,
+        # not the whole keep-forever table (see the config knob). 0 = legacy
+        # unbounded (since=None). Slipped txs are always recent, so the window
+        # is the never-skip net in practice.
+        window = settings.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS
+        if window > 0:
+            return datetime.now(timezone.utc) - timedelta(seconds=window), True
         return None, True
     return _unanalyzed_watermark.get(network), False
 
@@ -338,15 +356,120 @@ def _resolve_raw_data(
     return kept
 
 
+# Defer bookkeeping for transactions whose scoring was INCOMPLETE (a scorer
+# raised, or a cross-tx enrichment failed): (network, tx_hash) -> (counted
+# attempts, monotonic time of the last counted attempt). Same pacing/budget
+# discipline and in-process-only caveat as _raw_fallback_attempts above.
+_analysis_defer_attempts: Dict[tuple, Tuple[int, float]] = {}
+
+
+def _handle_incomplete_scoring(
+    results: List[Dict[str, Any]], network: str,
+) -> List[Dict[str, Any]]:
+    """Defer transactions whose scoring was incomplete; degrade after budget.
+
+    A result is "incomplete" when a scorer raised (``_failed_scorers``) or a
+    required enrichment failed (``_enrichment_failed``). Writing such a row
+    would leave the affected class at the -1 sentinel, and the unanalyzed
+    anti-join (clickhouse_scores.get_unanalyzed_transactions) treats ANY
+    written row as scored, so the tx would never be re-evaluated -- a silent,
+    permanent recall hole. Instead:
+
+      1. Defer the tx (drop it from this batch, no score row written) so the
+         next poll / periodic full rescan retries it, up to
+         ANALYSIS_DEFER_MAX_ATTEMPTS, paced by ANALYSIS_DEFER_RETRY_SECONDS.
+      2. After the budget, keep the tx but attach an evidence ``_meta`` marker
+         (``scorer_failed`` / ``enrichment_unavailable``) so a deterministic
+         crash or a persistent outage cannot park the tx forever and the
+         degradation is queryable/filterable instead of a silent -1.
+
+    Mirrors _resolve_raw_data's recover -> defer -> degrade-with-marker shape.
+    Always pops the two transient keys so the result is clean for insert.
+    """
+    if not settings.ANALYSIS_DEFER_ENABLED:
+        for r in results:
+            r.pop("_failed_scorers", None)
+            r.pop("_enrichment_failed", None)
+        return results
+
+    kept: List[Dict[str, Any]] = []
+    now_mono = time.monotonic()
+    for r in results:
+        failed_scorers = r.pop("_failed_scorers", None) or []
+        failed_enrichment = r.pop("_enrichment_failed", None) or []
+        key = (network, r["tx_hash"])
+        if not failed_scorers and not failed_enrichment:
+            # Complete: clear any stale defer bookkeeping and keep.
+            _analysis_defer_attempts.pop(key, None)
+            kept.append(r)
+            continue
+
+        entry = _analysis_defer_attempts.get(key)
+        if (
+            entry is not None
+            and now_mono - entry[1] < settings.ANALYSIS_DEFER_RETRY_SECONDS
+        ):
+            # Re-polled inside the pacing window: defer WITHOUT counting.
+            logger.debug(
+                "Deferring %s: incomplete scoring (attempt window)",
+                r["tx_hash"][:16],
+            )
+            continue
+        attempts = (entry[0] if entry else 0) + 1
+        if attempts < settings.ANALYSIS_DEFER_MAX_ATTEMPTS:
+            _analysis_defer_attempts[key] = (attempts, now_mono)
+            logger.warning(
+                "Deferring %s: incomplete scoring (scorers=%s enrichment=%s) "
+                "attempt %d/%d",
+                r["tx_hash"][:16], failed_scorers, failed_enrichment,
+                attempts, settings.ANALYSIS_DEFER_MAX_ATTEMPTS,
+            )
+            continue
+        # Budget exhausted: keep the row but mark the degradation so it is
+        # visible/filterable rather than a silent -1.
+        _analysis_defer_attempts.pop(key, None)
+        meta = r.setdefault("evidence", {}).setdefault("_meta", {})
+        if failed_scorers:
+            meta["scorer_failed"] = failed_scorers
+        if failed_enrichment:
+            meta["enrichment_unavailable"] = failed_enrichment
+        logger.error(
+            "Scoring %s degraded: incomplete after %d attempts "
+            "(scorers=%s enrichment=%s)",
+            r["tx_hash"][:16], attempts, failed_scorers, failed_enrichment,
+        )
+        kept.append(r)
+    return kept
+
+
 def run_once(network: str) -> int:
     """Score one batch of unanalyzed transactions.  Returns the count scored."""
     if not settings.ANALYSIS_ENABLED:
         return 0
 
     since, full_rescan = _poll_since(network)
-    fetched = clickhouse.get_unanalyzed_transactions(
-        network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
-    )
+    try:
+        fetched = clickhouse.get_unanalyzed_transactions(
+            network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
+        )
+    except Exception:
+        # A failing full rescan must not block the cheap watermark path. Arm
+        # the rescan clock (so it retries after one interval, not every tick)
+        # and fall back to a watermark poll THIS tick, so steady-state scoring
+        # of new txs continues instead of a total, log-only outage. If there is
+        # no watermark yet (first poll) there is nothing to fall back to.
+        watermark = _unanalyzed_watermark.get(network)
+        if not full_rescan or watermark is None:
+            raise
+        logger.error(
+            "Full rescan poll failed for %s; arming backoff and falling back "
+            "to watermark poll this tick", network, exc_info=True,
+        )
+        _last_full_rescan[network] = time.monotonic()
+        full_rescan = False
+        fetched = clickhouse.get_unanalyzed_transactions(
+            network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=watermark,
+        )
     if not fetched:
         if full_rescan:
             # An empty fetch IS a successful rescan: nothing was skipped.
@@ -392,6 +515,19 @@ def run_once(network: str) -> int:
     for row in rows:
         result = _score_transaction(row, scorers)
         results.append(result)
+
+    # Defer txs whose scoring was incomplete (a scorer raised, or an enrichment
+    # failed) so they are retried instead of persisted with a silent -1; after
+    # the retry budget they are kept with a visible degradation marker.
+    results = _handle_incomplete_scoring(results, network)
+    if not results:
+        # Every row deferred (e.g. a batch-wide enrichment outage). Advance the
+        # watermark over the fetched rows (the full rescan recovers deferred
+        # ones, same as raw-data deferrals) and treat a full rescan as done.
+        _advance_watermark(network, fetched)
+        if full_rescan:
+            _last_full_rescan[network] = time.monotonic()
+        return len(fetched)
 
     clickhouse.insert_class_scores(results)
     # Emit immediate alerts for the just-persisted scores

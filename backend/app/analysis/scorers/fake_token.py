@@ -44,6 +44,12 @@ _REASON_T = _CFG["reason_thresholds"]
 T_SIM_MIN = float(_CFG["similarity_threshold"])
 _ASCII_HOMOGLYPHS_ENABLED = bool(_CFG["ascii_homoglyphs_enabled"])
 
+# Maximum descent when flattening CIP-25 metadata (see _flatten_cip25). CIP-25
+# is shallow by spec (policy -> asset -> field map); this bounds the walk over
+# attacker-controlled metadata so a deeply nested value cannot raise
+# RecursionError (swallowed by the engine, silently scoring the class -1).
+_CIP25_MAX_FLATTEN_DEPTH = 5
+
 # Curated high-value tokens (stablecoins above all) whose impersonation is
 # escalated: see ``fake_token.critical_assets`` in detection.yaml for the
 # threat-model rationale. The multiplier is >= 1.0 and the amplified identity
@@ -244,7 +250,11 @@ def _compute_cip25_similarity(
 
 def _flatten_cip25(obj: Any, parts: List[str], depth: int = 0):
     """Recursively extract string values from CIP-25 metadata."""
-    if depth > 5:
+    # CIP-25 metadata (policy -> asset -> {name,image,...}) is shallow by spec;
+    # this bounds the descent over attacker-controlled metadata so a deeply
+    # nested value cannot raise RecursionError (which the engine's per-scorer
+    # try/except would swallow, silently scoring fake_token -1).
+    if depth > _CIP25_MAX_FLATTEN_DEPTH:
         return
     if isinstance(obj, str) and len(obj) > 1:
         parts.append(obj)

@@ -58,6 +58,14 @@ _ASSET_CARRIER_ENABLED = bool(_CFG["asset_name_carrier"]["enabled"])
 # scanning. Shorter spans are CBOR structural noise, not content.
 _MIN_DECODED_STR_LEN = int(_CFG["min_decoded_string_len"])
 
+# Maximum nesting depth when flattening a metadata value to text. Metadata is
+# attacker-controlled; an unbounded recursive flatten lets a deeply-nested
+# value raise RecursionError, which the engine's per-scorer try/except
+# swallows, silently scoring phishing -1 (a recall-evasion primitive). CIP-20
+# messages and CIP-25 metadata are shallow in practice, so 32 is far beyond any
+# legitimate shape while making the walk always terminate.
+_MAX_METADATA_FLATTEN_DEPTH = 32
+
 def _decode_datum_strings(datum: Any) -> List[str]:
     """Datum text spans for the URL / social-engineering scans.
 
@@ -153,14 +161,27 @@ class PhishingScorer(BaseScorer):
         if senders and external.is_sender_allowlisted(senders):
             return False
 
-        # Either source of URLs can trigger the scorer.
+        # A URL in any carrier triggers the scorer.
         urls = self._extract_urls(features)
-        return len(urls) > 0
+        if urls:
+            return True
+
+        # Recall-first: a URL-less social-engineering message must still be
+        # scored. A "send your seed phrase to ..." (Tier 1) or urgency/brand
+        # bait carries no link but is itself the phishing signal (Polimi
+        # 4.9.3); gating only on URL presence made the Tier-1 credential
+        # detector unreachable. Open the gate on any non-zero SE signal.
+        s_social, _ = self._classify_social_engineering(features)
+        return s_social > 0.0
 
     def score(self, features: Dict[str, Any]) -> ScorerResult:
         metadata = features.get("metadata") or {}
         urls = self._extract_urls(features)
-        if not urls:
+        # Sub-score 1c computed up front: it is also the gate's URL-less
+        # trigger, so a text-only social-engineering message (no URL) must
+        # still be scored rather than short-circuited to 0.
+        s_social, se_tier = self._classify_social_engineering(features)
+        if not urls and s_social <= 0.0:
             return ScorerResult(score=0.0)
 
         # URLs delivered inside asset names, tracked separately for the
@@ -178,8 +199,7 @@ class PhishingScorer(BaseScorer):
         # Sub-score 1b: domain suspicion composite (weight 0.35 of content)
         s_domain = self._score_domain_suspicion(urls)
 
-        # Sub-score 1c: social engineering score (weight 0.25 of content)
-        s_social, se_tier = self._classify_social_engineering(features)
+        # Sub-score 1c (s_social / se_tier) already computed above.
 
         content_score = (
             float(_W_CONTENT["blacklist"]) * s_blacklist
@@ -373,6 +393,12 @@ class PhishingScorer(BaseScorer):
                     continue
                 text = self._flatten_to_text(content)
                 candidates.extend(_url_candidates(text))
+                # A URL delivered as a CBOR bytes metadatum is hex, not text,
+                # so _flatten_to_text returns the hex and misses it. Decode
+                # bytes/CBOR-shaped values the same way inline datums are
+                # handled and scan the recovered spans.
+                for span in _decode_datum_strings(content):
+                    candidates.extend(_url_candidates(span))
 
         # --- Carrier 2: inline datums on outputs ------------------------
         raw_data = features.get("raw_data") or {}
@@ -400,7 +426,7 @@ class PhishingScorer(BaseScorer):
             hits.extend(_url_candidates(name))
         return hits
 
-    def _flatten_to_text(self, obj: Any) -> str:
+    def _flatten_to_text(self, obj: Any, depth: int = 0) -> str:
         """Recursively flatten a metadata value to a single string.
 
         CIP-20 stores long values as arrays of <=64-byte text chunks that the
@@ -409,17 +435,23 @@ class PhishingScorer(BaseScorer):
         purely strings, join with ``""`` so URLs split across chunks
         reconstitute correctly; otherwise fall back to space-joining so
         nested structures still render readably for the SE-tier regex pass.
+
+        ``depth`` bounds the descent (see _MAX_METADATA_FLATTEN_DEPTH) so an
+        adversarially deep metadata value cannot raise RecursionError.
         """
+        if depth > _MAX_METADATA_FLATTEN_DEPTH:
+            logger.debug("metadata flatten hit depth cap %d", _MAX_METADATA_FLATTEN_DEPTH)
+            return ""
         if isinstance(obj, str):
             return obj
         if isinstance(obj, list):
             if all(isinstance(item, str) for item in obj):
                 return "".join(obj)
-            return " ".join(self._flatten_to_text(item) for item in obj)
+            return " ".join(self._flatten_to_text(item, depth + 1) for item in obj)
         if isinstance(obj, dict):
             parts = []
             for v in obj.values():
-                parts.append(self._flatten_to_text(v))
+                parts.append(self._flatten_to_text(v, depth + 1))
             return " ".join(parts)
         return str(obj) if obj is not None else ""
 
@@ -504,6 +536,16 @@ class PhishingScorer(BaseScorer):
         """
         metadata = features.get("metadata") or {}
         text = self._flatten_to_text(metadata).lower()
+        # Also decode bytes/CBOR-shaped metadata values (same reason as the URL
+        # carrier: a bytes metadatum is hex, not text) so SE phrasing hidden in
+        # a bytes metadatum is scanned too.
+        if isinstance(metadata, dict):
+            for label_key in _RELEVANT_LABELS:
+                content = metadata.get(label_key) or metadata.get(int(label_key))
+                if content is None:
+                    continue
+                for span in _decode_datum_strings(content):
+                    text += " " + span.lower()
 
         raw_data = features.get("raw_data") or {}
         outputs = raw_data.get("outputs") if isinstance(raw_data, dict) else None
