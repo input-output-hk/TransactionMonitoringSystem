@@ -1,8 +1,17 @@
 """Unit tests for the Token Dust scorer (Class 1)."""
 
 import pytest
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorers.token_dust import TokenDustScorer, _DOS_VALUE_CBOR_MIN
 from app.analysis.features import _estimate_value_cbor_bytes
+
+from tests.analysis.scorers.conftest import features_for_outputs as _features
+
+# Recall pin for the symmetric many-policies DoS shape: it emits more
+# value-map CBOR than the single-policy shape, so it must land deep in the
+# High band, not just clear its lower edge. Pins the observed ~78 output
+# with headroom for weight jitter while still failing on real suppression.
+SYMMETRIC_DOS_MIN_SCORE = 75.0
 
 
 @pytest.fixture
@@ -17,14 +26,6 @@ def _make_output(address, lovelace=2_000_000, policies=None):
         for pid, assets in policies.items():
             value[pid] = assets
     return {"address": address, "value": value}
-
-
-def _features(outputs):
-    return {
-        "tx_hash": "dust01",
-        "network": "preprod",
-        "raw_data": {"outputs": outputs},
-    }
 
 
 SCRIPT_ADDR = "addr_test1wz5fxvalex"
@@ -235,7 +236,7 @@ class TestDosAssetThresholdDiscriminator:
         # many-policies symmetric shape (single policy header instead of
         # 80), so the bytes axis is partial; High band suffices to
         # prove the discriminator preserved the alert.
-        assert result.score >= 60.0  # High or Critical
+        assert result.score >= BAND_HIGH_THRESHOLD  # High or Critical
 
     def test_high_asset_count_many_policies_fires_composite_reason(self, scorer):
         # Symmetric DoS shape: 80 one-shot policies x 1 name each. Same
@@ -244,7 +245,7 @@ class TestDosAssetThresholdDiscriminator:
         out = _make_output(SCRIPT_ADDR, lovelace=1_200_000, policies=policies)
         result = scorer.score(_features([out]))
         assert "script_value_bloat_dos" in result.reasons
-        assert result.score >= 75.0
+        assert result.score >= SYMMETRIC_DOS_MIN_SCORE
 
     def test_low_asset_count_caps_at_moderate(self, scorer):
         # Lenfi-style shape: 4 pairs across 3 policies. No structural
@@ -262,4 +263,4 @@ class TestDosAssetThresholdDiscriminator:
         result = scorer.score(_features([out]))
         assert "script_value_bloat_dos" not in result.reasons
         assert result.sub_scores["max_assets_per_policy"] == 2.0
-        assert result.score < 60.0  # below High threshold
+        assert result.score < BAND_HIGH_THRESHOLD  # capped below High

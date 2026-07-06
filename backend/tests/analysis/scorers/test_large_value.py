@@ -3,6 +3,8 @@
 import pytest
 from app.analysis.scorers.large_value import LargeValueScorer
 
+from tests.analysis.scorers.conftest import features_for_outputs as _features
+
 
 @pytest.fixture
 def scorer():
@@ -18,11 +20,6 @@ def _out(address, lovelace=2_000_000, policies=None):
     if policies:
         value.update(policies)
     return {"address": address, "value": value}
-
-
-def _features(outputs):
-    return {"tx_hash": "lv01", "network": "preprod", "raw_data": {"outputs": outputs}}
-
 
 class TestGate:
     def test_wallet_rejected(self, scorer):
