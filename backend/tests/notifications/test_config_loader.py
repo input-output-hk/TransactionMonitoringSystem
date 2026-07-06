@@ -62,6 +62,54 @@ def test_validate_rejects_bad_docs(bad):
         config._validate("t", bad)
 
 
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:9000/hook",
+    "http://localhost/hook",
+    "http://169.254.169.254/latest/meta-data/",  # cloud metadata (link-local)
+    "http://10.0.0.5/hook",
+    "http://192.168.1.5/hook",
+])
+def test_validate_rejects_internal_webhook_url_by_default(url):
+    doc = {
+        "version": 1,
+        "channels": {"webhook": {"enabled": True, "default_url": url}},
+        "triggers": {"defaults": {}},
+    }
+    with pytest.raises(RuntimeError, match="SSRF"):
+        config._validate("t", doc)
+
+
+def test_validate_allows_internal_webhook_url_with_opt_in(monkeypatch):
+    monkeypatch.setattr(config.settings, "WEBHOOK_ALLOW_INTERNAL", True)
+    doc = {
+        "version": 1,
+        "channels": {"webhook": {"enabled": True, "default_url": "http://10.0.0.5/hook"}},
+        "triggers": {"defaults": {}},
+    }
+    config._validate("t", doc)  # no raise
+
+
+def test_validate_allows_public_webhook_url():
+    doc = {
+        "version": 1,
+        "channels": {"webhook": {"enabled": True, "default_url": "https://hooks.example.com/x"}},
+        "triggers": {"defaults": {}},
+    }
+    config._validate("t", doc)  # no raise
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("http://127.0.0.1/x", True),
+    ("http://localhost/x", True),
+    ("http://169.254.169.254/x", True),
+    ("http://10.1.2.3/x", True),
+    ("https://hooks.example.com/x", False),
+    ("", False),
+])
+def test_is_internal_webhook_target(url, expected):
+    assert config.is_internal_webhook_target(url) is expected
+
+
 @pytest.mark.asyncio
 async def test_refresh_seeds_default_on_empty_db(monkeypatch):
     import app.db.postgres as pg

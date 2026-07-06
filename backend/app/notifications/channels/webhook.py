@@ -17,9 +17,11 @@ Receivers MUST compare with a constant-time function (e.g.
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -35,6 +37,31 @@ logger = logging.getLogger(__name__)
 
 # Header carrying the HMAC-SHA256 signature of the raw request body.
 _SIGNATURE_HEADER = "X-TMS-Signature"
+
+
+async def _resolves_internal(host: str) -> bool:
+    """True if ``host`` resolves (right now) to a loopback/private/link-local/
+    reserved address.
+
+    ``config.is_internal_webhook_target`` only catches an IP literal or
+    ``localhost`` at config-write time; a hostname that resolves to an
+    internal address (DNS rebinding, or a domain re-pointed after the config
+    was saved) needs a fresh lookup right before the request leaves. A
+    lookup failure is not our call to make — return False and let the
+    connection attempt itself fail/succeed.
+    """
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+            return True
+    return False
 
 
 class WebhookChannel(NotificationChannel):
@@ -55,6 +82,19 @@ class WebhookChannel(NotificationChannel):
         if not url:
             return NotificationResult(
                 self.name, ok=False, skipped=True, detail="no endpoint URL configured"
+            )
+
+        host = urlparse(url).hostname or ""
+        if host and not settings.WEBHOOK_ALLOW_INTERNAL and await _resolves_internal(host):
+            logger.warning(
+                "Webhook egress blocked: %r resolves to an internal/loopback/"
+                "link-local/reserved address; set WEBHOOK_ALLOW_INTERNAL=true "
+                "if this is an intentional internal receiver.",
+                host,
+            )
+            return NotificationResult(
+                self.name, ok=False,
+                detail="blocked: target resolves to an internal address",
             )
 
         # Serialize ourselves and POST the exact bytes we sign (not httpx's
