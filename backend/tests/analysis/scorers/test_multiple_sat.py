@@ -2,6 +2,7 @@
 
 import pytest
 from app.analysis.normalise import (
+    BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
     BAND_MODERATE_THRESHOLD,
 )
@@ -350,7 +351,7 @@ class TestLazyValidatorBandFloor:
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["s_exunits_inv"] > 0.8
-        assert result.score >= 60.0
+        assert result.score >= BAND_HIGH_THRESHOLD
         assert "lazy_validator_band_floor" in result.reasons
 
     def test_floor_does_not_apply_when_validator_did_real_work(self, scorer):
@@ -377,7 +378,7 @@ class TestLazyValidatorBandFloor:
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["s_exunits_inv"] == 0.0
-        assert result.score < 60.0
+        assert result.score < BAND_HIGH_THRESHOLD
         assert "lazy_validator_band_floor" not in result.reasons
 
     def test_floor_does_not_apply_to_allowlisted_scripts(self, scorer):
@@ -401,7 +402,7 @@ class TestLazyValidatorBandFloor:
         result = scorer.score(_features(inputs, outputs, redeemers, network="mainnet"))
         assert "allowlisted_batch_script" in result.reasons
         assert "lazy_validator_band_floor" not in result.reasons
-        assert result.score < 60.0
+        assert result.score < BAND_HIGH_THRESHOLD
 
 
 class TestAssetHelpers:
@@ -647,7 +648,7 @@ class TestLazyValidatorExtractionGate:
         # Small but strictly positive lovelace extraction signal.
         assert result.sub_scores["s_extraction"] > 0.0
         assert "lazy_validator_band_floor" in result.reasons
-        assert result.score >= 60.0
+        assert result.score >= BAND_HIGH_THRESHOLD
 
 
 class TestUniformSweepGuardAndAllowlistInteraction:
@@ -861,7 +862,7 @@ class TestPerScriptExtractionHeadroom:
         _plant_baselines(monkeypatch, _EST_BASELINES)
         result = scorer.score(_extraction_features(3, cpu=1))
         assert "lazy_validator_band_floor" in result.reasons
-        assert result.score >= 60.0
+        assert result.score >= BAND_HIGH_THRESHOLD
 
 
 _NFT_POLICY = "c" * 56
@@ -1167,7 +1168,7 @@ class TestBaselinePoisoningResistance:
         # 12 distinct NFTs drained vs capped p99 (5 x bootstrap 2 = 10):
         # extraction saturates despite the poisoned baseline, and the
         # lazy-validator floor lands the score in High.
-        assert result.score >= 60.0
+        assert result.score >= BAND_HIGH_THRESHOLD
         assert "lazy_validator_band_floor" in result.reasons
 
     def test_median_poisoned_baseline_cannot_silence_drain(self, scorer, monkeypatch):
@@ -1208,5 +1209,5 @@ class TestBaselinePoisoningResistance:
             for i in range(n)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
-        assert result.score >= 60.0
+        assert result.score >= BAND_HIGH_THRESHOLD
         assert "lazy_validator_band_floor" in result.reasons
