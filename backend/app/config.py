@@ -523,6 +523,12 @@ class Settings(BaseSettings):
     WEBHOOK_MAX_RETRIES: int = 2             # extra attempts on 5xx / network error
     WEBHOOK_RETRY_BACKOFF_SECONDS: float = 1.0  # linear backoff between attempts
     WEBHOOK_SIGNING_SECRET: str = ""         # HMAC-SHA256 key for signing webhook request bodies
+    # A webhook URL is refused (config validation) or its send skipped (DNS
+    # resolves to an internal address at request time) unless this is set —
+    # otherwise the server would happily SSRF into its own network / a cloud
+    # metadata endpoint on an operator-supplied URL. Opt in for an intentional
+    # internal receiver (e.g. an in-VPC SIEM).
+    WEBHOOK_ALLOW_INTERNAL: bool = False
     # Periodic report. Frequency/window/recipients live in the notification
     # config document; these are operational knobs.
     NOTIFY_REPORT_CHECK_INTERVAL_SECONDS: int = 60   # how often the scheduler checks if due
