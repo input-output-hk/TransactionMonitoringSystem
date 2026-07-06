@@ -24,7 +24,7 @@ python-dotenv==1.2.2
 PyYAML==6.0.3
 
 # Analysis Engine (Milestone 2)
-cbor2==6.1.2
+cbor2==6.1.3
 rapidfuzz==3.14.5
 tldextract==5.3.1
 
