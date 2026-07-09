@@ -186,6 +186,24 @@ class Settings(BaseSettings):
     def cors_allow_origins_list(self) -> list:
         return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
 
+    # Single-instance leader guard (app.leader): ingestion's Ogmios sync
+    # checkpoint and the analysis engine's poll watermark both assume exactly
+    # one process is advancing them, so a second live instance would
+    # double-insert transactions and race the checkpoint update. Gated behind
+    # a Postgres session-level advisory lock; a non-leader instance still
+    # serves the read-only API/dashboard/WebSocket feed and retries to take
+    # over (standby, not refuse-to-boot).
+    LEADER_LOCK_ENABLED: bool = True
+    # Arbitrary fixed key identifying "the TMS ingestion+analysis leader"
+    # advisory lock. Must stay constant across deploys (a value that changes
+    # would let two processes both "win" a stale vs. new key) and must not
+    # collide with another advisory lock class this app takes (there are
+    # none today).
+    LEADER_LOCK_KEY: int = 8737367427
+    # How often a standby instance retries to acquire the lock (e.g. after
+    # the leader crashes or is redeployed).
+    LEADER_LOCK_RETRY_SECONDS: float = 15.0
+
     # Analysis Engine
     ANALYSIS_ENGINE_ENABLED: bool = True
     ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30   # how often the engine polls for new txs
