@@ -5,7 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from pathlib import Path
 
@@ -40,7 +40,7 @@ from app.rate_limit import (
     stop_all_cleanups,
 )
 from app.db import postgres, clickhouse, raw_store
-from app import notifications
+from app import notifications, leader
 from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
 from app.tasks import analysis as analysis_task
 from app.tasks import notifications as notifications_task
@@ -54,6 +54,13 @@ ogmios_client = None
 # (ingestion silently dies); keeping them here pins their lifetime and lets
 # shutdown await them. See lifespan().
 _ingestion_tasks: List[asyncio.Task] = []
+# The standby retry loop (app.leader guard), while this instance has not yet
+# become leader. None once promoted (or if it was never needed).
+_leader_standby_task: Optional[asyncio.Task] = None
+# Whether THIS process has started ingestion + the analysis engine — tracked
+# separately from leader.is_leader() so shutdown does the right thing whether
+# the guard is enabled or not (see _start_leader_duties / lifespan).
+_leader_duties_started = False
 
 
 async def _supervised(label: str, coro_fn):
@@ -187,10 +194,82 @@ def _validate_startup_settings() -> None:
             ) from exc
 
 
+async def _start_leader_duties() -> None:
+    """Start the analysis engine and Ogmios ingestion — the leader-only work.
+
+    Both advance state (the analysis poll watermark, the chain-sync
+    checkpoint) that exactly one live process may own; see app.leader.
+    """
+    global ogmios_client, _leader_duties_started
+
+    if settings.ANALYSIS_ENGINE_ENABLED:
+        analysis_task.start()
+        logger.info(
+            f"Analysis Engine started "
+            f"(interval={settings.ANALYSIS_ENGINE_INTERVAL_SECONDS}s, "
+            f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
+        )
+
+    from app.ingestion.ogmios_client import OgmiosClient
+
+    ogmios_client = OgmiosClient(on_lifecycle_event=broadcast_lifecycle_event)
+    websocket.set_active_connections(active_connections)
+
+    _ingestion_tasks.clear()
+    _ingestion_tasks.append(
+        asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
+    )
+    _ingestion_tasks.append(
+        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
+    )
+    logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
+    _leader_duties_started = True
+
+
+async def _stop_leader_duties() -> None:
+    """Undo _start_leader_duties(). No-op if it was never called."""
+    global ogmios_client, _leader_duties_started
+    if not _leader_duties_started:
+        return
+    if settings.ANALYSIS_ENGINE_ENABLED:
+        analysis_task.stop()
+    if ogmios_client:
+        await ogmios_client.disconnect()
+    # disconnect() signals the supervised coroutines to return; cancel-then-
+    # gather so the tasks are actually awaited (not left dangling / GC'd) and a
+    # wedged one is force-stopped. return_exceptions keeps one failure from
+    # masking the others during shutdown.
+    for task in _ingestion_tasks:
+        task.cancel()
+    if _ingestion_tasks:
+        await asyncio.gather(*_ingestion_tasks, return_exceptions=True)
+        _ingestion_tasks.clear()
+    _leader_duties_started = False
+
+
+async def _standby_promote() -> None:
+    """Retry the leader lock until acquired, then start leader duties.
+
+    Runs only while this instance is a standby (lock held elsewhere at
+    startup). Cancelled on shutdown if it never gets promoted.
+    """
+    try:
+        while True:
+            await asyncio.sleep(settings.LEADER_LOCK_RETRY_SECONDS)
+            if await leader.try_acquire():
+                logger.info(
+                    "Leader lock acquired — promoting from standby to leader"
+                )
+                await _start_leader_duties()
+                return
+    except asyncio.CancelledError:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown"""
-    global ogmios_client
+    global ogmios_client, _leader_standby_task
 
     # Emit dev-mode warnings here so logging is already configured.
     _validate_startup_settings()
@@ -234,29 +313,20 @@ async def lifespan(app: FastAPI):
         notifications_task.start()
         logger.info("Notification module ready")
 
-        # Start Analysis Engine background task
-        if settings.ANALYSIS_ENGINE_ENABLED:
-            analysis_task.start()
-            logger.info(
-                f"Analysis Engine started "
-                f"(interval={settings.ANALYSIS_ENGINE_INTERVAL_SECONDS}s, "
-                f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
-            )
-
-        # Start Ogmios ingestion
-        from app.ingestion.ogmios_client import OgmiosClient
-
-        ogmios_client = OgmiosClient(on_lifecycle_event=broadcast_lifecycle_event)
-        websocket.set_active_connections(active_connections)
-
-        _ingestion_tasks.clear()
-        _ingestion_tasks.append(
-            asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
-        )
-        _ingestion_tasks.append(
-            asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
-        )
-        logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
+        # Ingestion + analysis: leader-only (see app.leader). Disabled guard =
+        # legacy unconditional start (single-instance deploys, current default).
+        if settings.LEADER_LOCK_ENABLED:
+            if await leader.try_acquire():
+                await _start_leader_duties()
+            else:
+                logger.warning(
+                    "Leader lock held by another instance — standing by as a "
+                    "read-only replica (retrying every %ss)",
+                    settings.LEADER_LOCK_RETRY_SECONDS,
+                )
+                _leader_standby_task = asyncio.create_task(_standby_promote())
+        else:
+            await _start_leader_duties()
 
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
@@ -267,23 +337,15 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     stop_all_cleanups()
-    if settings.ANALYSIS_ENGINE_ENABLED:
-        analysis_task.stop()
+    if _leader_standby_task and not _leader_standby_task.done():
+        _leader_standby_task.cancel()
+        await asyncio.gather(_leader_standby_task, return_exceptions=True)
     notifications_task.stop()
     # Stop scheduling new notification deliveries (the scoring loop is stopped
     # above; in-flight dispatch tasks finish on their own).
     notifications.set_main_loop(None)
-    if ogmios_client:
-        await ogmios_client.disconnect()
-    # disconnect() signals the supervised coroutines to return; cancel-then-
-    # gather so the tasks are actually awaited (not left dangling / GC'd) and a
-    # wedged one is force-stopped. return_exceptions keeps one failure from
-    # masking the others during shutdown.
-    for task in _ingestion_tasks:
-        task.cancel()
-    if _ingestion_tasks:
-        await asyncio.gather(*_ingestion_tasks, return_exceptions=True)
-        _ingestion_tasks.clear()
+    await _stop_leader_duties()
+    await leader.release()
     await postgres.close_pool()
     clickhouse.close_client()
     clickhouse.shutdown_executor()

@@ -289,6 +289,9 @@ Variables are layered across files:
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background risk scoring |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | How often the engine polls for unscored transactions |
 | `ANALYSIS_ENGINE_BATCH_SIZE` | `100` | Transactions scored per run |
+| `LEADER_LOCK_ENABLED` | `true` | Gate ingestion + analysis behind a Postgres advisory lock; see "Running more than one instance" below |
+| `LEADER_LOCK_KEY` | `8737367427` | Advisory lock key; leave unchanged unless it collides with another lock class |
+| `LEADER_LOCK_RETRY_SECONDS` | `15` | How often a standby instance retries to become leader |
 | `ANALYSIS_ENABLED` | `true` | Enable multi-class detection engine |
 | `CYCLE_DETECTION_ENABLED` | `true` | Enable transfer graph cycle detection |
 | `CYCLE_MAX_HOPS` | `6` | Maximum BFS depth for cycle detection |
@@ -307,6 +310,12 @@ Variables are layered across files:
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by Docker Compose and rarely need changing.
+
+### Running more than one instance
+
+The app is built to run as a single instance: the Ogmios chain-sync checkpoint and the analysis engine's poll watermark are both in-process state that assumes exactly one writer. A second live process advancing the same state would double-insert transactions and race the checkpoint update.
+
+Ingestion and analysis are gated behind a Postgres session-level advisory lock (`LEADER_LOCK_ENABLED`, on by default) so this is safe to get wrong: only the instance that holds the lock runs ingestion + scoring; any other instance still serves the read-only API, dashboard, and WebSocket feed, and retries every `LEADER_LOCK_RETRY_SECONDS` to take over (for example after the leader is redeployed or crashes). There is no need to manually pick a leader or coordinate a rolling restart; whichever instance acquires the lock first wins, and a standby is promoted automatically once it frees up.
 
 ### Running behind Cloudflare Tunnel
 
