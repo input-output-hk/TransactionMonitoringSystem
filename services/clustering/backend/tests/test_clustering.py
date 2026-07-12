@@ -102,6 +102,31 @@ def test_silhouette_cap_zero_disables_sampling(monkeypatch: pytest.MonkeyPatch) 
     assert run_dbscan(ci, eps=1.0, min_samples=5).silhouette == exact
 
 
+def test_persist_run_records_graph_drop_in_notes() -> None:
+    # A down-sampled graph fit must carry the drop in the run row itself, not
+    # only in a warning log: readers of the run must see the partial population.
+    from app.clustering.dbscan import persist_run
+
+    saved: dict[str, object] = {}
+
+    class _Repo:
+        def save_cluster_labels(self, run_id: str, labels: object) -> None:
+            pass
+
+        def save_cluster_run(self, run: dict[str, object]) -> None:
+            saved.update(run)
+
+    ci = _two_blobs()
+    ci.dropped_txs = 40
+    result = run_dbscan(ci, eps=1.0, min_samples=5)
+    persist_run(
+        _Repo(), run_id="r1", target="t", ci=ci, eps=1.0, min_samples=5,
+        result=result, notes="auto: process_contract",
+    )
+    assert "auto: process_contract" in str(saved["notes"])
+    assert "dropped 40 older" in str(saved["notes"])
+
+
 def test_evaluate_recommends_parameters() -> None:
     report = evaluate(_two_blobs())
     assert report["n_points"] == 60

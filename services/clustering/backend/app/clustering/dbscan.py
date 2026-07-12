@@ -106,6 +106,15 @@ def persist_run(
     notes: str = "",
     origin: str = "custom",
 ) -> None:
+    if ci.dropped_txs:
+        # Surface the graph down-sample in the run's own metadata, not only in a
+        # log line: whoever reads this run must see it was fit on a partial
+        # (most-recent) slice of the window.
+        drop_note = (
+            f"graph sampling kept the {result.n_points} most recent txs, "
+            f"dropped {ci.dropped_txs} older"
+        )
+        notes = f"{notes}; {drop_note}" if notes else drop_note
     # Write the labels BEFORE the run row so that any reader which sees the run
     # (e.g. service.ensure_shape_model via latest_cluster_run) always finds its
     # membership fully present — avoids fitting a model on a half-written run.

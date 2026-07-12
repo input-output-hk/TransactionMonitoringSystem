@@ -26,6 +26,9 @@ class ClusteringInput:
     metric: str  # 'euclidean' | 'precomputed'
     feature_set: str
     feature_names: list[str]
+    # Transactions the graph down-sample dropped from the window (0 = full
+    # coverage); persisted into run notes so readers see a partial population.
+    dropped_txs: int = 0
 
 
 FEATURE_SETS = ("shape", "graph", "combined")
@@ -47,8 +50,10 @@ def build_features(
     if feature_set == "graph":
         if tx_addresses_df is None:
             raise ValueError("graph feature set requires tx_addresses_df")
-        tx_hashes, D = build_jaccard_distance(tx_addresses_df, max_txs=max_graph_txs)
-        return ClusteringInput(tx_hashes, D, "precomputed", "graph", ["jaccard"])
+        tx_hashes, D, dropped = build_jaccard_distance(tx_addresses_df, max_txs=max_graph_txs)
+        return ClusteringInput(
+            tx_hashes, D, "precomputed", "graph", ["jaccard"], dropped_txs=dropped
+        )
 
     if feature_set == "combined":
         if shape_df is None or tx_addresses_df is None:

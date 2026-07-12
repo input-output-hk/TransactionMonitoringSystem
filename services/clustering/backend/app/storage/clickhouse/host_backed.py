@@ -182,8 +182,16 @@ class HostBackedRepo(ClickHouseRepo):
         )
 
     def fetch_tx_addresses(self, target: str) -> pd.DataFrame:
+        # block_time rides along (joined from the windowed derived table) so the
+        # graph down-sample keeps the most recent transactions rather than a
+        # hash-ordered slice.
         return self.client.query_df(
-            self._addr_cooccurrence_sql(self._hashes_expr(), order_by="ORDER BY tx_hash"),
+            f"""
+            SELECT tx_hash, address, block_time
+            FROM ({self._addr_cooccurrence_sql(self._hashes_expr())}) a
+            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
+            ORDER BY tx_hash
+            """,
             parameters=self._scope_params(target),
         )
 

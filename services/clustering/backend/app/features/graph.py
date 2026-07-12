@@ -87,33 +87,53 @@ def _build_incidence(
     return tx_hashes, matrix
 
 
+def _recency_order(df: pd.DataFrame) -> list[str]:
+    """Unique tx hashes ordered newest ``block_time`` first, with an ascending
+    hash tiebreak so equal-timestamp cuts stay deterministic across runs."""
+    latest = df.groupby("tx_hash")["block_time"].max().reset_index()
+    latest = latest.sort_values(["block_time", "tx_hash"], ascending=[False, True])
+    return latest["tx_hash"].astype(str).tolist()
+
+
 def build_jaccard_distance(
     df: pd.DataFrame, max_txs: int | None = None
-) -> tuple[list[str], np.ndarray]:
-    """Return ``(tx_hashes, D)`` where ``D`` is an n-by-n Jaccard distance matrix.
+) -> tuple[list[str], np.ndarray, int]:
+    """Return ``(tx_hashes, D, n_dropped)`` where ``D`` is an n-by-n Jaccard
+    distance matrix.
 
     The distance matrix is dense (n*n), so when the transaction count exceeds
-    ``max_txs`` the set is deterministically sampled down (and the drop logged)
-    to bound memory.
+    ``max_txs`` the set is sampled down to bound memory. The sample keeps the
+    most RECENT transactions (by the ``block_time`` column when the frame
+    carries one): current activity is what an operator is investigating, so the
+    droppable part is the old history, not an arbitrary hash-ordered slice of
+    the window. Frames without ``block_time`` fall back to the deterministic
+    hash order. ``n_dropped`` is returned so callers can surface the drop in
+    run metadata rather than only in the log.
     """
-    if max_txs is not None:
+    n_dropped = 0
+    # The empty guard also covers the column-less frame ClickHouse's query_df
+    # returns for a zero-row result, which astype would reject with a KeyError.
+    if max_txs is not None and not df.empty:
         df = df.astype({"tx_hash": str})
         unique = sorted(df["tx_hash"].unique().tolist())
         if len(unique) > max_txs:
-            keep = set(unique[:max_txs])
+            n_dropped = len(unique) - max_txs
+            ordered = _recency_order(df) if "block_time" in df.columns else unique
+            keep = set(ordered[:max_txs])
             logger.warning(
-                "graph clustering capped at %d of %d transactions (%d dropped); "
-                "raise MAX_GRAPH_TXS or use the 'combined' feature set for full coverage.",
+                "graph clustering capped at %d of %d transactions (%d oldest "
+                "dropped; recorded in run notes); raise MAX_GRAPH_TXS or use "
+                "the 'combined' feature set for full coverage.",
                 max_txs,
                 len(unique),
-                len(unique) - max_txs,
+                n_dropped,
             )
             df = df[df["tx_hash"].isin(keep)]
 
     tx_hashes, matrix = _build_incidence(df)
     n = len(tx_hashes)
     if n == 0:
-        return [], np.empty((0, 0))
+        return [], np.empty((0, 0)), n_dropped
 
     sizes = np.asarray(matrix.sum(axis=1)).ravel()
     inter = (matrix @ matrix.T).toarray()
@@ -122,7 +142,7 @@ def build_jaccard_distance(
         sim = np.where(union > 0, inter / union, 0.0)
     distance = 1.0 - sim
     np.fill_diagonal(distance, 0.0)
-    return tx_hashes, np.clip(distance, 0.0, 1.0)
+    return tx_hashes, np.clip(distance, 0.0, 1.0), n_dropped
 
 
 def build_combined_features(
