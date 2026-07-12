@@ -18,8 +18,10 @@ import pytest
 from app.config import Settings
 from app.service.publish import (
     _COLUMNS,
+    _VERSION_EPSILON,
     _publish_labels,
     _publish_online,
+    _reconciliation_version,
     _retract_stale,
     publish_contract_anomaly,
 )
@@ -119,23 +121,31 @@ def test_publish_online_noop_when_nothing_flagged() -> None:
 def test_publish_reconciles_then_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     # End-to-end orchestration with the two source paths stubbed: published =
     # {txA} ∪ {txB}; current non-normal = {txA, txC}; so txC is retracted and the
-    # flagged-count query (verdict != normal) is returned.
+    # flagged-count query (verdict != normal) is returned. The canned table MAX
+    # is ahead of now() (a backward clock step), so the pass must stamp its rows
+    # just past the MAX rather than with the regressed wall clock.
     monkeypatch.setattr("app.service.publish._publish_online", lambda *a, **k: {"txB"})
     monkeypatch.setattr("app.service.publish._publish_batch", lambda *a, **k: {"txA"})
     # The manual-label path is exercised on its own below; stub it here so this
     # test stays focused on online+batch reconciliation.
     monkeypatch.setattr("app.service.publish._publish_labels", lambda *a, **k: set())
+    stale_max = datetime(2200, 1, 1)  # far enough ahead to outlive any real now()
     fake = FakeClient([
+        [(stale_max,)],        # _reconciliation_version: table MAX(published_at)
         [("txA",), ("txC",)],  # _retract_stale: current non-normal hashes
         [(2,)],                # final flagged count
     ])
     n = publish_contract_anomaly(_repo(fake), "addr1", network="preprod")
     assert n == 2
+    # The pass derives its version before touching any rows.
+    assert "max(published_at)" in fake.queries[0]
     # Exactly one tombstone insert, for the dropped txC only.
     assert len(fake.inserts) == 1
     _, rows, _ = fake.inserts[0]
     assert [r[_TX_HASH_COL] for r in rows] == ["txC"]
     assert rows[0][_VERDICT_COL] == "normal"
+    # The tombstone's version supersedes the pre-step MAX despite the old clock.
+    assert rows[0][_PUBLISHED_AT_COL] == stale_max + _VERSION_EPSILON
     # The final count query filters out tombstones.
     assert "verdict != {normal:String}" in fake.queries[-1]
 
@@ -200,3 +210,46 @@ def test_publish_labels_noop_when_all_already_published() -> None:
     )
     assert labeled == {"txKNOWN"}
     assert fake.inserts == []  # nothing fresh to insert
+
+
+def test_reconciliation_version_is_wall_clock_when_ahead_of_table_max() -> None:
+    # Normal operation: the table MAX is in the past, so the version is a fresh
+    # wall-clock stamp, not the stale MAX plus epsilon.
+    past_max = datetime(2020, 1, 1)
+    fake = FakeClient([[(past_max,)]])
+    version = _reconciliation_version(_repo(fake), "addr1", "preprod")
+    assert version > past_max
+    assert version != past_max + _VERSION_EPSILON
+
+
+def test_reconciliation_version_never_regresses_after_backward_clock_step() -> None:
+    # The table MAX is AHEAD of now() (NTP correction, VM migration): stamping
+    # the regressed wall clock would make every row this pass writes lose on
+    # FINAL, so the version must step strictly past the MAX instead.
+    future_max = datetime(2200, 1, 1)
+    fake = FakeClient([[(future_max,)]])
+    version = _reconciliation_version(_repo(fake), "addr1", "preprod")
+    assert version == future_max + _VERSION_EPSILON
+
+
+def test_reconciliation_version_handles_empty_table_and_string_timestamps() -> None:
+    # Never-published target: ClickHouse max() over zero rows returns the epoch
+    # zero value, which must resolve to now, never epoch + epsilon.
+    epoch = datetime(1970, 1, 1)
+    fake = FakeClient([[(epoch,)]])
+    version = _reconciliation_version(_repo(fake), "addr1", "preprod")
+    assert version > epoch
+    assert version != epoch + _VERSION_EPSILON
+    # Some driver paths surface DateTime64 as an ISO string; a string MAX ahead
+    # of now() must still be parsed and stepped past, microseconds preserved.
+    fake = FakeClient([[("2200-01-01 00:00:00.000005",)]])
+    version = _reconciliation_version(_repo(fake), "addr1", "preprod")
+    assert version == datetime(2200, 1, 1, 0, 0, 0, 5) + _VERSION_EPSILON
+
+
+def test_reconciliation_version_tolerates_null_max() -> None:
+    # A NULL MAX (driver returning None) must behave like a never-published
+    # target rather than raising.
+    fake = FakeClient([[(None,)]])
+    version = _reconciliation_version(_repo(fake), "addr1", "preprod")
+    assert version.year > 1970
