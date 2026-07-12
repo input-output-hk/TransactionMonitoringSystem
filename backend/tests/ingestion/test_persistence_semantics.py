@@ -718,6 +718,52 @@ class TestParseFailurePreservation:
 
         parse_failed.assert_not_awaited()
 
+    @pytest.mark.parametrize("bad_id", ["unknown", "", "zz" * 32, "AB" * 32])
+    def test_malformed_tx_id_falls_back_to_content_hash(self, bad_id):
+        """A tx that failed parsing is exactly the tx most likely to have a
+        mangled id; preservation must not depend on the broken field. The
+        fallback filename is a SHA-256 of the payload — 64 hex chars, so it
+        passes the same path validation as a real tx hash."""
+        from datetime import datetime, timezone
+
+        from app.db import raw_store
+
+        captured = {}
+
+        async def fake_write_async(prefix, network, tx_hash, data, ts):
+            captured.update(prefix=prefix, tx_hash=tx_hash, data=data)
+
+        payload = {"malformed": True, "id": bad_id}
+        with patch("app.db.raw_store._write_async", fake_write_async):
+            _run(raw_store.write_parse_failed(
+                "preprod", bad_id, payload, datetime.now(timezone.utc),
+            ))
+
+        assert captured["prefix"] == "parse_failed"
+        assert captured["data"] == payload
+        stored_hash = captured["tx_hash"]
+        assert len(stored_hash) == 64
+        assert all(c in "0123456789abcdef" for c in stored_hash)
+        assert stored_hash != bad_id
+
+    def test_valid_tx_id_is_kept_as_the_filename(self):
+        from datetime import datetime, timezone
+
+        from app.db import raw_store
+
+        captured = {}
+
+        async def fake_write_async(prefix, network, tx_hash, data, ts):
+            captured["tx_hash"] = tx_hash
+
+        good_id = "ab" * 32
+        with patch("app.db.raw_store._write_async", fake_write_async):
+            _run(raw_store.write_parse_failed(
+                "preprod", good_id, {"id": good_id}, datetime.now(timezone.utc),
+            ))
+
+        assert captured["tx_hash"] == good_id
+
 
 class TestSerializeRawData:
     def test_full_payload_stored_by_default(self, monkeypatch):

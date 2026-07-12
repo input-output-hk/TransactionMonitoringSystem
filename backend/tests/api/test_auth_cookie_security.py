@@ -6,12 +6,19 @@ double-submit companion cookie must be issued/cleared alongside the session
 cookie (see app.csrf).
 """
 
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+from uuid import UUID
+
 import pytest
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import Response
 
 from app.api.auth import _clear_session_cookie, _is_secure_request, _set_session_cookie
 from app.config import settings
+from app.csrf import CSRF_COOKIE_NAME
+from app.main import app
 
 
 def _request(scheme="http", headers=None, client=("203.0.113.9", 12345)):
@@ -96,11 +103,11 @@ class TestCSRFCookieIssuance:
         _set_session_cookie(_request(scheme="https"), response, "sess-id")
         cookies = "\n".join(response.headers.getlist("set-cookie"))
         assert f"{settings.SESSION_COOKIE_NAME}=sess-id" in cookies
-        assert f"{settings.CSRF_COOKIE_NAME}=" in cookies
+        assert f"{CSRF_COOKIE_NAME}=" in cookies
         # The CSRF cookie must NOT be HttpOnly — the SPA needs to read it.
         csrf_line = next(
             line for line in response.headers.getlist("set-cookie")
-            if line.startswith(f"{settings.CSRF_COOKIE_NAME}=")
+            if line.startswith(f"{CSRF_COOKIE_NAME}=")
         )
         assert "HttpOnly" not in csrf_line
 
@@ -109,11 +116,53 @@ class TestCSRFCookieIssuance:
         response = Response()
         _set_session_cookie(_request(scheme="https"), response, "sess-id")
         cookies = "\n".join(response.headers.getlist("set-cookie"))
-        assert f"{settings.CSRF_COOKIE_NAME}=" not in cookies
+        assert f"{CSRF_COOKIE_NAME}=" not in cookies
 
     def test_clear_session_cookie_also_clears_csrf_cookie(self):
         response = Response()
         _clear_session_cookie(_request(scheme="https"), response)
         cookies = "\n".join(response.headers.getlist("set-cookie"))
         assert settings.SESSION_COOKIE_NAME in cookies
-        assert settings.CSRF_COOKIE_NAME in cookies
+        assert CSRF_COOKIE_NAME in cookies
+
+
+class TestCSRFSelfHeal:
+    """GET /api/auth/me issues the CSRF cookie to a valid session that lacks
+    one — the healing path for sessions issued before the CSRF companion
+    existed. The SPA calls /me on boot, so pre-CSRF sessions recover on
+    their next page load instead of having every mutating request rejected."""
+
+    _USER_ROW = {
+        "id": UUID("00000000-0000-0000-0000-000000000001"),
+        "email": "ops@example.com",
+        "full_name": "Ops",
+        "role": "Admin",
+        "status": "active",
+        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "last_login_at": None,
+        "created_by_token_hash": None,
+        "session_id": "legacy-sess",
+    }
+
+    def _get_me(self, with_csrf_cookie: bool):
+        client = TestClient(app)
+        client.cookies.set(settings.SESSION_COOKIE_NAME, "legacy-sess")
+        if with_csrf_cookie:
+            client.cookies.set(CSRF_COOKIE_NAME, "existing-token")
+        with patch(
+            "app.auth.deps.lookup_session",
+            AsyncMock(return_value=dict(self._USER_ROW)),
+        ):
+            return client.get("/api/auth/me")
+
+    def test_me_issues_csrf_cookie_when_missing(self):
+        resp = self._get_me(with_csrf_cookie=False)
+        assert resp.status_code == 200
+        cookies = "\n".join(resp.headers.get_list("set-cookie"))
+        assert f"{CSRF_COOKIE_NAME}=" in cookies
+
+    def test_me_leaves_existing_csrf_cookie_alone(self):
+        resp = self._get_me(with_csrf_cookie=True)
+        assert resp.status_code == 200
+        cookies = "\n".join(resp.headers.get_list("set-cookie"))
+        assert f"{CSRF_COOKIE_NAME}=" not in cookies

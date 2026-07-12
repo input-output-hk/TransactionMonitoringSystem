@@ -44,11 +44,21 @@ async def _resolves_internal(host: str) -> bool:
     reserved address.
 
     ``config.is_internal_webhook_target`` only catches an IP literal or
-    ``localhost`` at config-write time; a hostname that resolves to an
-    internal address (DNS rebinding, or a domain re-pointed after the config
-    was saved) needs a fresh lookup right before the request leaves. A
-    lookup failure is not our call to make — return False and let the
-    connection attempt itself fail/succeed.
+    ``localhost`` at config-write time; this fresh lookup right before the
+    request leaves catches a domain re-pointed at an internal address after
+    the config was saved, and integer/encoded IP forms the static check
+    cannot parse. A lookup failure is not our call to make — return False
+    and let the connection attempt itself fail/succeed.
+
+    Residual risk (accepted): httpx re-resolves the hostname for the actual
+    connection, so an attacker running an ACTIVE rebinding server (TTL=0,
+    alternating answers) can pass this check and still connect internally.
+    Closing that window requires pinning the connection to the IP resolved
+    here (a custom httpx transport, with SNI/Host handling for TLS), which
+    is not worth the complexity for an admin-authored URL — the config is
+    written by operators, not end users; this check is defense-in-depth
+    against a compromised admin session or a stale config, not against a
+    hostile DNS authority.
     """
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)

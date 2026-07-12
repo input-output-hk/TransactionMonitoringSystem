@@ -316,7 +316,12 @@ Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by 
 
 The app is built to run as a single instance: the Ogmios chain-sync checkpoint and the analysis engine's poll watermark are both in-process state that assumes exactly one writer. A second live process advancing the same state would double-insert transactions and race the checkpoint update.
 
-Ingestion and analysis are gated behind a Postgres session-level advisory lock (`LEADER_LOCK_ENABLED`, on by default) so this is safe to get wrong: only the instance that holds the lock runs ingestion + scoring; any other instance still serves the read-only API, dashboard, and WebSocket feed, and retries every `LEADER_LOCK_RETRY_SECONDS` to take over (for example after the leader is redeployed or crashes). There is no need to manually pick a leader or coordinate a rolling restart; whichever instance acquires the lock first wins, and a standby is promoted automatically once it frees up.
+Ingestion, analysis, housekeeping, and the notification schedulers (periodic report, contract-anomaly poller) are gated behind a Postgres session-level advisory lock (`LEADER_LOCK_ENABLED`, on by default) so this is safe to get wrong: only the instance that holds the lock runs them; any other instance still serves the read-only API, dashboard, and WebSocket feed, and retries every `LEADER_LOCK_RETRY_SECONDS` to take over (for example after the leader is redeployed or crashes). There is no need to manually pick a leader or coordinate a rolling restart; whichever instance acquires the lock first wins, and a standby is promoted automatically once it frees up.
+
+Two caveats for multi-instance deployments:
+
+- The lock needs a direct Postgres session. A transaction-pooling proxy (PgBouncer in transaction mode) reassigns the server session between statements and silently breaks session-level advisory locks; point the app at the real server or use a session-mode pool.
+- The notification config is cached in-process and refreshed only by the instance that handles an admin edit. If a load balancer routes the admin UI to a standby, the leader keeps alerting with its previous config until it restarts or handles an edit itself. Make notification-config edits against the leader, or restart the leader after editing.
 
 ### Running behind Cloudflare Tunnel
 

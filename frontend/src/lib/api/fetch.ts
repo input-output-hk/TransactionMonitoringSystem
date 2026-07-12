@@ -27,8 +27,9 @@ export function getNetwork(): "mainnet" | "preprod" | "preview" {
 	return DEFAULT_NETWORK;
 }
 
-// Must match the backend's CSRF_COOKIE_NAME / CSRF_HEADER_NAME defaults
-// (app/config.py) — see app.csrf.CSRFMiddleware.
+// Must match the backend's frozen CSRF_COOKIE_NAME / CSRF_HEADER_NAME
+// constants (backend/app/csrf.py) — they are deliberately not configurable
+// there precisely so these strings cannot drift.
 const CSRF_COOKIE_NAME = "tms_csrf";
 const CSRF_HEADER_NAME = "X-CSRF-Token";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);

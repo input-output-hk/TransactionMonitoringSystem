@@ -13,6 +13,12 @@ transaction or a request, so it cannot be acquired through the shared
 callers between requests, which would silently drop the lock). Instead a
 single connection is opened here, dedicated to holding the lock for the
 process's whole lifetime, and closed only on release/shutdown.
+
+For the same reason this requires a DIRECT Postgres connection: a
+transaction-pooling proxy (e.g. PgBouncer in transaction mode) reassigns the
+server session between statements, which silently breaks session-level
+advisory locks. Point POSTGRES_HOST at the real server, or use a
+session-mode pool, for the guard to hold.
 """
 
 import logging
@@ -47,6 +53,9 @@ async def try_acquire() -> bool:
         user=settings.POSTGRES_USER,
         password=settings.POSTGRES_PASSWORD,
         database=settings.POSTGRES_DB,
+        # Bound the probe below the standby retry cadence so a black-holing
+        # Postgres cannot stack overlapping connection attempts.
+        timeout=settings.LEADER_LOCK_RETRY_SECONDS,
     )
     try:
         acquired = await probe.fetchval(
