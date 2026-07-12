@@ -40,10 +40,12 @@ class FakeClient:
         self.inserts: list[tuple[str, list[list[Any]], list[str]]] = []
         self.commands: list[str] = []
         self.queries: list[str] = []
+        self.query_params: list[dict[str, Any]] = []
         self._query_rows = list(query_rows or [])
 
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
         self.queries.append(sql)
+        self.query_params.append(parameters or {})
         rows = self._query_rows.pop(0) if self._query_rows else []
         return SimpleNamespace(result_rows=rows)
 
@@ -73,6 +75,18 @@ def test_retract_stale_tombstones_only_dropped_hashes() -> None:
     assert rows[0][_VERDICT_COL] == "normal"
     assert rows[0][_PUBLISHED_AT_COL] == _PUB  # carries the reconciliation version
     assert cols == _COLUMNS
+
+
+def test_retract_stale_is_scoped_to_its_feature_set() -> None:
+    # The currently-published scan must filter on feature_set: without it, a
+    # reconciliation for one feature set would see (and tombstone) live rows
+    # another feature set published for the same (network, target).
+    fake = FakeClient([[("txA",)]])
+    _retract_stale(
+        _repo(fake), "addr1", "preprod", "graph", keep=set(), published_at=_PUB,
+    )
+    assert "feature_set = {fs:String}" in fake.queries[0]
+    assert fake.query_params[0]["fs"] == "graph"
 
 
 def test_retract_stale_noop_when_nothing_dropped() -> None:
