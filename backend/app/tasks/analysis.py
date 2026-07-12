@@ -1,4 +1,9 @@
-"""Background task: runs the Analysis Engine and lifecycle cleanup on a configurable interval."""
+"""Background task: runs the Analysis Engine on a configurable interval.
+
+Cleanup work that must run independently of scoring (stale-PENDING sweep,
+retention, auth purge) lives in app.tasks.housekeeping instead — see its
+module docstring.
+"""
 
 import asyncio
 import logging
@@ -9,8 +14,6 @@ from app.analysis import engine
 from app.analysis import baselines
 from app.analysis import external
 from app.db import clickhouse
-from app.db import postgres
-from app.db import raw_store
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +27,10 @@ _last_baseline_recompute: float = 0.0
 # instead of the seed list.
 _last_registry_refresh: float = 0.0
 
-# Timestamp of last retention sweep (epoch seconds).
-_last_retention_sweep: float = 0.0
-
 
 async def _loop():
-    """Continuously score unanalyzed transactions and drop stale PENDING ones."""
-    global _last_baseline_recompute, _last_registry_refresh, _last_retention_sweep
+    """Continuously score unanalyzed transactions."""
+    global _last_baseline_recompute, _last_registry_refresh
 
     logger.info(
         f"Analysis Engine background task started "
@@ -76,23 +76,6 @@ async def _loop():
         except Exception as e:
             logger.error(f"Analysis Engine error: {e}")
 
-        # Lifecycle cleanup: mark stale PENDING transactions as DROPPED.
-        # Runs on every interval tick; the partial index ensures it is a fast
-        # scan even when tx_lifecycle is large.
-        try:
-            dropped = await postgres.mark_dropped_pending_txs(
-                settings.CARDANO_NETWORK,
-                settings.LIFECYCLE_PENDING_TTL_SECONDS,
-            )
-            if dropped > 0:
-                logger.info(
-                    f"Lifecycle cleanup [{settings.CARDANO_NETWORK}]: "
-                    f"marked {dropped} stale PENDING tx(s) as DROPPED "
-                    f"(TTL={settings.LIFECYCLE_PENDING_TTL_SECONDS}s)"
-                )
-        except Exception as e:
-            logger.error(f"Lifecycle cleanup error: {e}")
-
         # Periodic token-registry refresh. The fetch never runs on the
         # scoring path (external.get_legitimate_tokens serves the cache,
         # stale included); this is the only place it happens, on the default
@@ -130,75 +113,6 @@ async def _loop():
                     logger.info(f"Baseline recomputation: {total} rows updated")
             except Exception as e:
                 logger.error(f"Baseline recomputation failed: {e}")
-
-        # Opt-in retention sweep (all knobs default 0 = off), throttled to
-        # RETENTION_SWEEP_INTERVAL_HOURS. ClickHouse retention is TTL-based
-        # (applied at schema init), so only Postgres and the raw store need
-        # an active sweep.
-        sweep_interval = settings.RETENTION_SWEEP_INTERVAL_HOURS * 3600
-        if time.time() - _last_retention_sweep > sweep_interval:
-            _last_retention_sweep = time.time()
-            network = settings.CARDANO_NETWORK
-            if settings.LIFECYCLE_RETENTION_DAYS > 0:
-                try:
-                    n = await postgres.prune_terminal_lifecycle(
-                        network, settings.LIFECYCLE_RETENTION_DAYS,
-                    )
-                    if n:
-                        logger.info(f"Retention: pruned {n} terminal lifecycle rows")
-                except Exception as e:
-                    logger.error(f"Lifecycle retention sweep failed: {e}")
-            if settings.MEMPOOL_COLLISION_RETENTION_DAYS > 0:
-                try:
-                    n = await postgres.prune_mempool_collisions(
-                        network, settings.MEMPOOL_COLLISION_RETENTION_DAYS,
-                    )
-                    if n:
-                        logger.info(f"Retention: pruned {n} mempool collisions")
-                except Exception as e:
-                    logger.error(f"Collision retention sweep failed: {e}")
-            if settings.RAW_STORE_RETENTION_DAYS > 0:
-                try:
-                    await asyncio.to_thread(
-                        raw_store.prune_old_days, settings.RAW_STORE_RETENTION_DAYS,
-                    )
-                except Exception as e:
-                    logger.error(f"Raw-store retention sweep failed: {e}")
-            if settings.AUDIT_LOG_RETENTION_DAYS > 0:
-                try:
-                    n = await postgres.prune_audit_logs(
-                        settings.AUDIT_LOG_RETENTION_DAYS,
-                    )
-                    if n:
-                        logger.info(f"Retention: pruned {n} audit log rows")
-                except Exception as e:
-                    logger.error(f"Audit-log retention sweep failed: {e}")
-            # Auth housekeeping: expired/consumed magic-link tokens and expired
-            # sessions accumulate indefinitely otherwise (their purge helpers
-            # existed but were never scheduled — review finding). Always swept,
-            # NOT gated on a retention knob: these rows are already expired or
-            # consumed, so there is no data-retention choice to make.
-            try:
-                from app.auth.sessions import purge_expired_sessions
-                from app.auth.tokens import purge_expired_tokens
-                n_tok = await purge_expired_tokens()
-                n_sess = await purge_expired_sessions()
-                if n_tok or n_sess:
-                    logger.info(
-                        f"Auth purge: removed {n_tok} expired tokens, "
-                        f"{n_sess} expired sessions"
-                    )
-            except Exception as e:
-                logger.error(f"Auth purge sweep failed: {e}")
-            if settings.NOTIFY_DEDUP_RETENTION_DAYS > 0:
-                try:
-                    n = await postgres.prune_notified_alerts(
-                        settings.NOTIFY_DEDUP_RETENTION_DAYS,
-                    )
-                    if n:
-                        logger.info(f"Retention: pruned {n} notified-alert dedup rows")
-                except Exception as e:
-                    logger.error(f"Notified-alerts retention sweep failed: {e}")
 
         await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
 

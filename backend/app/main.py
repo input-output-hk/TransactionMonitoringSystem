@@ -43,6 +43,7 @@ from app.db import postgres, clickhouse, raw_store
 from app import notifications, leader
 from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
 from app.tasks import analysis as analysis_task
+from app.tasks import housekeeping as housekeeping_task
 from app.tasks import notifications as notifications_task
 from app.routers import ui, websocket
 
@@ -209,6 +210,10 @@ async def _start_leader_duties() -> None:
             f"(interval={settings.ANALYSIS_ENGINE_INTERVAL_SECONDS}s, "
             f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
         )
+    # Independent of ANALYSIS_ENGINE_ENABLED: disabling scoring must not also
+    # silently disable the stale-PENDING sweep, retention, and auth purge.
+    housekeeping_task.start()
+    logger.info("Housekeeping task started (interval=%ss)", settings.HOUSEKEEPING_INTERVAL_SECONDS)
 
     from app.ingestion.ogmios_client import OgmiosClient
 
@@ -233,6 +238,7 @@ async def _stop_leader_duties() -> None:
         return
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
+    housekeeping_task.stop()
     if ogmios_client:
         await ogmios_client.disconnect()
     # disconnect() signals the supervised coroutines to return; cancel-then-

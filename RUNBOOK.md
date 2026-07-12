@@ -307,6 +307,7 @@ Variables are layered across files:
 | `RAW_STORE_ENABLED` | `true` | Write raw Ogmios payloads to filesystem |
 | `RAW_STORE_PATH` | `./data/raw` | Root path for the Data Lake |
 | `LIFECYCLE_PENDING_TTL_SECONDS` | `7200` | After this time a PENDING tx is marked DROPPED |
+| `HOUSEKEEPING_INTERVAL_SECONDS` | `30` | Tick of the stale-PENDING sweep, retention, and auth purge; runs whether or not `ANALYSIS_ENGINE_ENABLED` is set |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by Docker Compose and rarely need changing.
