@@ -13,8 +13,10 @@ Authenticated routes (session cookie):
 - ``GET /api/auth/me`` — returns the current user.
 
 Cookie shape: opaque ``tms_session`` ID, HTTP-only, ``SameSite=Lax``,
-``Secure`` when the inbound request looks HTTPS (auto-detected via the
-URL scheme or ``X-Forwarded-Proto`` so dev http://localhost still works).
+``Secure`` when the inbound request looks HTTPS (auto-detected via the URL
+scheme, or ``X-Forwarded-Proto`` when a configured trusted proxy is the
+direct peer, so dev http://localhost still works and an untrusted direct
+caller cannot spoof the scheme).
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ from app.auth.sessions import create_session, delete_session
 from app.auth.tokens import consume_token, hash_token, issue_token
 from app.config import settings
 from app.db.postgres import get_connection
+from app.net import is_trusted_proxy_peer
 from app.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -64,11 +67,18 @@ def _is_secure_request(request: Request) -> bool:
     """Decide whether to mark the session cookie ``Secure``.
 
     Direct HTTPS request → yes. Behind Cloudflare Tunnel / a reverse proxy
-    terminating TLS → check ``X-Forwarded-Proto``. Plain http://localhost
-    in dev → no (browsers reject `Secure` cookies on insecure origins).
+    terminating TLS → check ``X-Forwarded-Proto``, but ONLY when the direct
+    TCP peer is a configured trusted proxy (the same gate app.net.client_ip
+    uses for forwarded client-IP headers) — otherwise anyone who can reach
+    the app directly could force ``X-Forwarded-Proto: https`` on a genuinely
+    plaintext connection (review finding, same class as the client-IP
+    spoofing issue). Plain http://localhost in dev → no (browsers reject
+    `Secure` cookies on insecure origins).
     """
     if request.url.scheme == "https":
         return True
+    if not is_trusted_proxy_peer(request):
+        return False
     fwd = request.headers.get("x-forwarded-proto", "").lower()
     return fwd == "https"
 
