@@ -308,6 +308,13 @@ class Settings(BaseSettings):
     # engine's raw_data fallback.
     RAW_STORE_RETENTION_DAYS: int = 0
     RETENTION_SWEEP_INTERVAL_HOURS: int = 24
+    # Tick of the housekeeping loop (app.tasks.housekeeping): the stale-PENDING
+    # DROPPED sweep, the retention sweep, and the auth-token/session purge.
+    # Runs independently of ANALYSIS_ENGINE_ENABLED — disabling scoring must
+    # not also silently disable cleanup (review finding). Defaults to the
+    # analysis engine's old tick so behaviour is unchanged for a deploy that
+    # doesn't touch either knob.
+    HOUSEKEEPING_INTERVAL_SECONDS: int = 30
 
     # Background-task supervisor restart backoff. Base doubles per crash up
     # to the ceiling; a run lasting longer than the stable-reset window
