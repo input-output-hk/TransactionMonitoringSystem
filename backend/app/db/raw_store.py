@@ -8,8 +8,11 @@ scale (3M txs/day ÷ 256 buckets).  It also distributes S3/MinIO PUTs across
 index partitions, avoiding hot-prefix throttling.
 
 prefix values:
-  confirmed/  — transactions confirmed on-chain (chain sync path)
-  mempool/    — transactions first seen in mempool (mempool monitor path)
+  confirmed/     — transactions confirmed on-chain (chain sync path)
+  mempool/       — transactions first seen in mempool (mempool monitor path)
+  parse_failed/  — confirmed txs OUR parser choked on (see write_parse_failed);
+                   the pristine pre-parse payload, kept apart from confirmed/
+                   so a parser fix can target exactly this set for replay
 
 Write-once: existing files are skipped (safe on ingestion replay after restart).
 Async via dedicated 2-worker thread pool — event loop is never blocked.
@@ -35,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 _PREFIX_CONFIRMED = "confirmed"
 _PREFIX_MEMPOOL = "mempool"
+_PREFIX_PARSE_FAILED = "parse_failed"
 
 _executor: Optional[ThreadPoolExecutor] = None
 
@@ -136,6 +140,19 @@ async def write_mempool(network: str, tx_hash: str,
                         tx_data: Dict[str, Any], ts: datetime):
     """Write a mempool-observed transaction's full Ogmios payload."""
     await _write_async(_PREFIX_MEMPOOL, network, tx_hash, tx_data, ts)
+
+
+async def write_parse_failed(network: str, tx_hash: str,
+                             tx_data: Dict[str, Any], ts: datetime):
+    """Write the pristine payload of a confirmed tx OUR parser raised on.
+
+    The tx really did confirm on-chain — parsing (not consensus) failed — so
+    without this the payload was previously dropped from every store,
+    including the data lake, and could never be replayed once the parser bug
+    was fixed. Kept in a separate prefix from confirmed/ so a fix-and-replay
+    script can target exactly this set.
+    """
+    await _write_async(_PREFIX_PARSE_FAILED, network, tx_hash, tx_data, ts)
 
 
 def prune_old_days(retention_days: int) -> int:

@@ -622,6 +622,103 @@ class TestDurableScoreRepurge:
         assert order and order[0] == "replay"
 
 
+class TestParseFailurePreservation:
+    """A tx that fails OUR parser still confirmed on-chain; its payload must
+    survive somewhere so it can be replayed after a parser fix, instead of
+    being silently dropped from every store (review finding)."""
+
+    def _patches(self, parse_side_effect, parse_failed=None):
+        return [
+            patch(
+                "app.ingestion.ogmios_client.parse_ogmios_transaction",
+                side_effect=parse_side_effect,
+            ),
+            patch(
+                "app.ingestion.ogmios_client.raw_store.write_parse_failed",
+                parse_failed or AsyncMock(),
+            ),
+            patch(
+                "app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
+                AsyncMock(),
+            ),
+            patch(
+                "app.ingestion.ogmios_client.postgres.save_sync_point",
+                AsyncMock(),
+            ),
+            patch(
+                "app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
+                AsyncMock(),
+            ),
+            patch(
+                "app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async",
+                AsyncMock(return_value={}),
+            ),
+        ]
+
+    def test_unparseable_tx_payload_written_to_parse_failed_store(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", True)
+        parse_failed = AsyncMock()
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(RuntimeError("bad shape"), parse_failed=parse_failed):
+                stack.enter_context(p)
+            _run(client._handle_roll_forward(_block()))
+
+        parse_failed.assert_awaited_once()
+        network, tx_hash, tx_data, ts = parse_failed.await_args.args
+        assert tx_hash == "00" * 32  # the block's tx "id", from _block()
+        assert tx_data["id"] == "00" * 32
+
+    def test_skipped_when_raw_store_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", False)
+        parse_failed = AsyncMock()
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(RuntimeError("bad shape"), parse_failed=parse_failed):
+                stack.enter_context(p)
+            _run(client._handle_roll_forward(_block()))
+
+        parse_failed.assert_not_awaited()
+
+    def test_raw_store_write_failure_does_not_crash_block_processing(
+        self, client, monkeypatch
+    ):
+        """Best-effort: a failure preserving the parse-failed payload must
+        not also take down processing of the rest of the (otherwise healthy)
+        block."""
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", True)
+        save_sync = AsyncMock()
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for p in self._patches(
+                RuntimeError("bad shape"),
+                parse_failed=AsyncMock(side_effect=OSError("disk full")),
+            ):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync)
+            )
+            _run(client._handle_roll_forward(_block()))  # must not raise
+        save_sync.assert_awaited_once()
+
+    def test_successfully_parsed_tx_does_not_touch_parse_failed_store(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", True)
+        parse_failed = AsyncMock()
+        with patch("app.ingestion.ogmios_client.raw_store.write_parse_failed", parse_failed), \
+             patch("app.ingestion.ogmios_client.raw_store.write_confirmed", AsyncMock()), \
+             patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async", AsyncMock()), \
+             patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()), \
+             patch("app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed", AsyncMock()), \
+             patch("app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async", AsyncMock(return_value={})):
+            _run(client._handle_roll_forward(_block()))
+
+        parse_failed.assert_not_awaited()
+
+
 class TestSerializeRawData:
     def test_full_payload_stored_by_default(self, monkeypatch):
         monkeypatch.setattr(settings, "RAW_DATA_MAX_BYTES", 0)
