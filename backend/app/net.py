@@ -86,12 +86,28 @@ def _peer_is_trusted_proxy(direct: Optional[str]) -> bool:
     return any(addr in net for net in networks)
 
 
+def is_trusted_proxy_peer(conn: Optional[HTTPConnection]) -> bool:
+    """True if ``conn``'s direct TCP peer is a configured trusted proxy
+    (``TRUSTED_PROXY_ENABLED`` and inside ``TRUSTED_PROXY_CIDRS``).
+
+    Shared by :func:`client_ip` (trusts forwarded client-IP headers) and
+    ``app.api.auth._is_secure_request`` (trusts the forwarded scheme for the
+    session cookie's ``Secure`` flag) so both honour the same "a reverse
+    proxy is provably in front of us" gate, rather than trusting a
+    client-writable header from anyone who can reach the app directly.
+    """
+    if conn is None:
+        return False
+    direct = parse_ip(conn.client.host if conn.client else None)
+    return settings.TRUSTED_PROXY_ENABLED and _peer_is_trusted_proxy(direct)
+
+
 def client_ip(conn: Optional[HTTPConnection]) -> Optional[str]:
     """Best-effort validated client IP for a Request or WebSocket."""
     if conn is None:
         return None
     direct = parse_ip(conn.client.host if conn.client else None)
-    if not settings.TRUSTED_PROXY_ENABLED or not _peer_is_trusted_proxy(direct):
+    if not is_trusted_proxy_peer(conn):
         return direct
 
     header = settings.TRUSTED_PROXY_CLIENT_IP_HEADER.strip()
