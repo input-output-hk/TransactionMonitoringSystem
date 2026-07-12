@@ -22,7 +22,8 @@ Only ``malicious`` / ``anomaly`` verdicts are published (``normal`` carries no
 signal; ``benign`` is a human "cleared" label that must not raise a host band).
 
 The projection is AUTHORITATIVE, not append-only: every publish reconciles the
-table for ``(network, target)`` to exactly the currently-flagged set. A tx that
+table for ``(network, target, feature_set)`` to exactly the currently-flagged
+set. A tx that
 was flagged before but is now benign/normal (re-fit reclassified it, a human
 labeled its cluster benign, or a label was applied/cleared) is RETRACTED by
 appending a superseding ``normal`` tombstone, so the host stops surfacing a
@@ -227,8 +228,14 @@ def _retract_stale(
     *, keep: set[str], published_at: datetime,
 ) -> int:
     """Append a ``normal`` tombstone for every currently-published (non-normal) tx
-    of this ``(network, target)`` that is NOT in ``keep`` (the freshly-published
-    flagged set), so the host stops surfacing a now-benign/normal transaction.
+    of this ``(network, target, feature_set)`` that is NOT in ``keep`` (the
+    freshly-published flagged set), so the host stops surfacing a now-benign/
+    normal transaction.
+
+    Scoped to ``feature_set``: a reconciliation only retracts rows its own
+    feature set published (the FINAL-winning row must carry it), so a second
+    publish path can never tombstone another feature set's live verdicts just
+    because its own pass did not re-flag them.
 
     Returns the number of rows retracted. The tombstone carries this
     reconciliation's ``published_at`` version, so it supersedes the stale row on
@@ -242,8 +249,9 @@ def _retract_stale(
         for r in repo.client.query(  # type: ignore[attr-defined]
             "SELECT DISTINCT toString(tx_hash) FROM " + db + ".tx_contract_anomaly "
             "FINAL WHERE network = {net:String} AND target = {tgt:String} "
-            "AND verdict != {normal:String}",
-            parameters={"net": network, "tgt": target, "normal": VERDICT_NORMAL},
+            "AND feature_set = {fs:String} AND verdict != {normal:String}",
+            parameters={"net": network, "tgt": target, "fs": feature_set,
+                        "normal": VERDICT_NORMAL},
         ).result_rows
     }
     stale = current - keep
