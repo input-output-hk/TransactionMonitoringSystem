@@ -482,6 +482,15 @@ class Settings(BaseSettings):
     # TTL are tunable; defaults match the design doc.
     SESSION_COOKIE_NAME: str = "tms_session"
     SESSION_TTL_DAYS: int = 7
+    # CSRF double-submit cookie: defense-in-depth on top of SameSite=Lax
+    # (which already blocks the common cross-site POST case). A mutating
+    # request that carries the session cookie must also echo a second,
+    # JS-readable cookie's value in a header — proof the request originated
+    # from a page that can read this origin's cookies, which a cross-site
+    # attacker cannot.
+    CSRF_PROTECTION_ENABLED: bool = True
+    CSRF_COOKIE_NAME: str = "tms_csrf"
+    CSRF_HEADER_NAME: str = "X-CSRF-Token"
     # Magic-link tokens are short-lived. 15 min keeps the interception
     # window narrow while leaving slack for slow mail delivery.
     MAGIC_LINK_TTL_MINUTES: int = 15
