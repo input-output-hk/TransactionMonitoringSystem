@@ -34,11 +34,15 @@ from app.auth.models import RequestLinkPayload, User
 from app.auth.sessions import create_session, delete_session
 from app.auth.tokens import consume_token, hash_token, issue_token
 from app.config import settings
+from app.csrf import CSRF_COOKIE_NAME
 from app.db.postgres import get_connection
 from app.net import is_trusted_proxy_peer
 from app.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Cookie max-age arithmetic: SESSION_TTL_DAYS is the tunable, this is the unit.
+_SECONDS_PER_DAY = 86_400
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -85,34 +89,40 @@ def _is_secure_request(request: Request) -> bool:
     return fwd == "https"
 
 
+def _set_csrf_cookie(request: Request, response: Response) -> None:
+    """Issue a fresh CSRF double-submit cookie.
+
+    NOT http-only: the SPA must be able to read this to echo it back in a
+    header (app.csrf.CSRFMiddleware); it carries no secret of its own, only
+    proof that the request came from a same-origin page.
+    """
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=secrets.token_urlsafe(32),
+        max_age=settings.SESSION_TTL_DAYS * _SECONDS_PER_DAY,
+        path="/",
+        httponly=False,
+        secure=_is_secure_request(request),
+        samesite="lax",
+    )
+
+
 def _set_session_cookie(
     request: Request, response: Response, session_id: str,
 ) -> None:
     """Apply the session cookie (and its CSRF double-submit companion) to
     ``response`` with the right flags."""
-    secure = _is_secure_request(request)
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
         value=session_id,
-        max_age=settings.SESSION_TTL_DAYS * 86_400,
+        max_age=settings.SESSION_TTL_DAYS * _SECONDS_PER_DAY,
         path="/",
         httponly=True,
-        secure=secure,
+        secure=_is_secure_request(request),
         samesite="lax",
     )
     if settings.CSRF_PROTECTION_ENABLED:
-        # NOT http-only: the SPA must be able to read this to echo it back
-        # in a header (app.csrf.CSRFMiddleware); it carries no secret of its
-        # own, only proof that the request came from a same-origin page.
-        response.set_cookie(
-            key=settings.CSRF_COOKIE_NAME,
-            value=secrets.token_urlsafe(32),
-            max_age=settings.SESSION_TTL_DAYS * 86_400,
-            path="/",
-            httponly=False,
-            secure=secure,
-            samesite="lax",
-        )
+        _set_csrf_cookie(request, response)
 
 
 def _clear_session_cookie(request: Request, response: Response) -> None:
@@ -126,7 +136,7 @@ def _clear_session_cookie(request: Request, response: Response) -> None:
         samesite="lax",
     )
     response.delete_cookie(
-        key=settings.CSRF_COOKIE_NAME,
+        key=CSRF_COOKIE_NAME,
         path="/",
         httponly=False,
         secure=secure,
@@ -293,6 +303,19 @@ async def logout(request: Request, response: Response):
 
 
 @router.get("/me", response_model=User)
-async def me(user: dict = Depends(require_user)):
-    """Return the currently authenticated user."""
+async def me(
+    request: Request,
+    response: Response,
+    user: dict = Depends(require_user),
+):
+    """Return the currently authenticated user.
+
+    Side effect: if the (valid) session arrived without a CSRF cookie — a
+    session issued before the CSRF companion existed, or one whose cookie
+    was lost — issue a fresh one. The SPA calls this endpoint on boot, so
+    pre-CSRF sessions self-heal on their next page load instead of having
+    every mutating request rejected until re-login.
+    """
+    if settings.CSRF_PROTECTION_ENABLED and not request.cookies.get(CSRF_COOKIE_NAME):
+        _set_csrf_cookie(request, response)
     return User(**user)

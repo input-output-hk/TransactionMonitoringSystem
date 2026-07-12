@@ -197,12 +197,23 @@ def _validate_startup_settings() -> None:
 
 
 async def _start_leader_duties() -> None:
-    """Start the analysis engine and Ogmios ingestion — the leader-only work.
+    """Start the analysis engine, housekeeping, notification schedulers, and
+    Ogmios ingestion — the leader-only work.
 
-    Both advance state (the analysis poll watermark, the chain-sync
-    checkpoint) that exactly one live process may own; see app.leader.
+    Ingestion and analysis advance state (the analysis poll watermark, the
+    chain-sync checkpoint) that exactly one live process may own; the
+    notification schedulers are here because the periodic-report path is
+    check-then-act with no atomic claim (get_report_state → dispatch →
+    mark_report_sent), so two live schedulers would double-send reports.
+    See app.leader.
     """
     global ogmios_client, _leader_duties_started
+
+    # Set FIRST, not last: if startup is cancelled or fails partway through
+    # (e.g. shutdown lands mid-promotion), _stop_leader_duties must still
+    # unwind whatever did start. Every stop below is idempotent, so stopping
+    # never-started duties is harmless; skipping started ones is not.
+    _leader_duties_started = True
 
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.start()
@@ -215,6 +226,11 @@ async def _start_leader_duties() -> None:
     # silently disable the stale-PENDING sweep, retention, and auth purge.
     housekeeping_task.start()
     logger.info("Housekeeping task started (interval=%ss)", settings.HOUSEKEEPING_INTERVAL_SECONDS)
+
+    # Periodic-report scheduler + contract_anomaly poller. Self-gates on the
+    # `periodic_report.enabled` flag each tick.
+    notifications_task.start()
+    logger.info("Notification schedulers started")
 
     from app.ingestion.ogmios_client import OgmiosClient
 
@@ -229,7 +245,6 @@ async def _start_leader_duties() -> None:
         asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
     )
     logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
-    _leader_duties_started = True
 
 
 async def _stop_leader_duties() -> None:
@@ -240,6 +255,7 @@ async def _stop_leader_duties() -> None:
     if settings.ANALYSIS_ENGINE_ENABLED:
         analysis_task.stop()
     housekeeping_task.stop()
+    notifications_task.stop()
     if ogmios_client:
         await ogmios_client.disconnect()
     # disconnect() signals the supervised coroutines to return; cancel-then-
@@ -259,16 +275,33 @@ async def _standby_promote() -> None:
 
     Runs only while this instance is a standby (lock held elsewhere at
     startup). Cancelled on shutdown if it never gets promoted.
+
+    Never gives up on an error: a transient Postgres blip during a probe, or
+    a failed duty startup after winning the lock, must not leave the fleet
+    with a silent permanent standby (probe task dead) or a do-nothing leader
+    (lock held, duties not running). On a failed promotion the partial start
+    is unwound and the lock released so another instance can win it.
     """
     try:
         while True:
             await asyncio.sleep(settings.LEADER_LOCK_RETRY_SECONDS)
-            if await leader.try_acquire():
-                logger.info(
-                    "Leader lock acquired — promoting from standby to leader"
-                )
+            try:
+                if not await leader.try_acquire():
+                    continue
+            except Exception as e:
+                logger.warning("Leader-lock probe failed (%s); retrying", e)
+                continue
+            logger.info("Leader lock acquired — promoting from standby to leader")
+            try:
                 await _start_leader_duties()
                 return
+            except Exception:
+                logger.exception(
+                    "Promotion failed after acquiring the leader lock; "
+                    "unwinding and releasing so another instance can lead"
+                )
+                await _stop_leader_duties()
+                await leader.release()
     except asyncio.CancelledError:
         pass
 
@@ -311,13 +344,12 @@ async def lifespan(app: FastAPI):
         # Notifications: load + validate the stored config at
         # boot (a malformed stored doc fails startup, not the first alert;
         # seeds safe defaults on a fresh DB), capture the event loop for the
-        # executor-thread hook, and build the channels.
+        # executor-thread hook, and build the channels. Runs on standbys too
+        # so a promotion needs no re-init; the SCHEDULERS (report + poller)
+        # are leader-only and start in _start_leader_duties.
         await notifications.load_config()
         notifications.set_main_loop(asyncio.get_running_loop())
         notifications.build_channels()
-        # Periodic-report scheduler. Self-gates on the `periodic_report.enabled`
-        # flag each tick.
-        notifications_task.start()
         logger.info("Notification module ready")
 
         # Ingestion + analysis: leader-only (see app.leader). Disabled guard =
@@ -347,9 +379,8 @@ async def lifespan(app: FastAPI):
     if _leader_standby_task and not _leader_standby_task.done():
         _leader_standby_task.cancel()
         await asyncio.gather(_leader_standby_task, return_exceptions=True)
-    notifications_task.stop()
-    # Stop scheduling new notification deliveries (the scoring loop is stopped
-    # above; in-flight dispatch tasks finish on their own).
+    # Stop scheduling new notification deliveries (the schedulers stop inside
+    # _stop_leader_duties; in-flight dispatch tasks finish on their own).
     notifications.set_main_loop(None)
     await _stop_leader_duties()
     await leader.release()

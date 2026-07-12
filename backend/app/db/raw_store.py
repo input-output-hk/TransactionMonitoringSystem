@@ -25,6 +25,7 @@ Upgrade path:
 
 import asyncio
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -59,6 +60,18 @@ def shutdown_executor():
         _executor = None
 
 
+def _is_valid_tx_hash(tx_hash: Any) -> bool:
+    """True if ``tx_hash`` is a well-formed Cardano tx id: exactly 64 lowercase
+    hex chars (Blake2b-256). The strict shape check prevents path traversal
+    (Ogmios data is untrusted) and blocks pathological all-hex strings
+    becoming huge filenames."""
+    return (
+        isinstance(tx_hash, str)
+        and len(tx_hash) == 64
+        and all(c in "0123456789abcdef" for c in tx_hash)
+    )
+
+
 def _build_path(prefix: str, network: str, tx_hash: str, date: datetime) -> str:
     """Return the full file path for a raw transaction blob.
 
@@ -70,15 +83,8 @@ def _build_path(prefix: str, network: str, tx_hash: str, date: datetime) -> str:
     shard prefix distributes PUTs across multiple index partitions, avoiding
     the hot-prefix throttling that occurs when millions of keys share a prefix.
     """
-    # Validate tx_hash to prevent path traversal (Ogmios data is untrusted).
-    # Cardano tx ids are exactly 64 hex chars (Blake2b-256); the length check
-    # also blocks pathological all-hex strings becoming huge filenames.
-    if (
-        not tx_hash
-        or len(tx_hash) != 64
-        or not all(c in "0123456789abcdef" for c in tx_hash)
-    ):
-        logger.warning(f"Invalid tx_hash for raw store: {tx_hash[:20]!r}")
+    if not _is_valid_tx_hash(tx_hash):
+        logger.warning(f"Invalid tx_hash for raw store: {str(tx_hash)[:20]!r}")
         return ""
     day_dir = date.strftime("%Y%m%d")
     shard = tx_hash[:2]  # 256 uniform buckets (tx_hash is SHA-256 derived)
@@ -151,7 +157,25 @@ async def write_parse_failed(network: str, tx_hash: str,
     including the data lake, and could never be replayed once the parser bug
     was fixed. Kept in a separate prefix from confirmed/ so a fix-and-replay
     script can target exactly this set.
+
+    A tx that failed parsing is exactly the tx most likely to have a mangled
+    or absent ``id``, so unlike the other writers this one must not depend on
+    it: when the id fails the 64-hex shape check, fall back to a SHA-256 of
+    the payload itself (also 64 hex chars, so it passes the same path
+    validation) — preservation here is total, never best-effort on a field
+    the parser already choked on.
     """
+    if not _is_valid_tx_hash(tx_hash):
+        # sort_keys + default=str: a stable digest for the same payload across
+        # replays, tolerant of non-JSON-native values in the malformed data.
+        digest = hashlib.sha256(
+            json.dumps(tx_data, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        logger.warning(
+            "parse_failed payload has invalid tx id %r; storing under content "
+            "hash %s", str(tx_hash)[:20], digest,
+        )
+        tx_hash = digest
     await _write_async(_PREFIX_PARSE_FAILED, network, tx_hash, tx_data, ts)
 
 

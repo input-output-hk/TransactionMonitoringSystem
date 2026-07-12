@@ -487,10 +487,9 @@ class Settings(BaseSettings):
     # request that carries the session cookie must also echo a second,
     # JS-readable cookie's value in a header — proof the request originated
     # from a page that can read this origin's cookies, which a cross-site
-    # attacker cannot.
+    # attacker cannot. The cookie/header NAMES are frozen constants in
+    # app.csrf (the SPA hardcodes them; a config override would break it).
     CSRF_PROTECTION_ENABLED: bool = True
-    CSRF_COOKIE_NAME: str = "tms_csrf"
-    CSRF_HEADER_NAME: str = "X-CSRF-Token"
     # Magic-link tokens are short-lived. 15 min keeps the interception
     # window narrow while leaving slack for slow mail delivery.
     MAGIC_LINK_TTL_MINUTES: int = 15
