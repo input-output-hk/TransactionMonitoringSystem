@@ -39,7 +39,7 @@ Re-publishing the same verdicts is therefore idempotent.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.service.verdicts import (
@@ -70,6 +70,43 @@ def _as_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value))
+
+
+# Smallest step the published_at column can represent: it is DateTime64(6),
+# microsecond precision (009_contract_anomaly.sql), so +1us is the minimal
+# strictly-greater version when now() has fallen behind the table MAX.
+_VERSION_EPSILON = timedelta(microseconds=1)
+
+
+def _reconciliation_version(repo: Repo, target: str, network: str) -> datetime:
+    """Monotonic ``published_at`` for one reconciliation pass.
+
+    Wall-clock ``now()`` alone is not monotonic: after a backward clock step
+    (NTP correction, VM migration, host reboot) a new pass would stamp a version
+    BELOW rows already published, so everything it writes, re-raised real
+    verdicts included, would lose to a stale ``normal`` tombstone on FINAL and
+    the host would keep suppressing a live alert. Guard by never stamping at or
+    below the table's current MAX for (network, target): when ``now()`` trails
+    it, step one epsilon past the MAX instead.
+
+    Scoped to (network, target), not feature_set: the table's replacing key is
+    (network, tx_hash, target), so versions must be comparable across every
+    feature set that can write rows for the same key.
+    """
+    db = repo._db  # type: ignore[attr-defined]
+    rows = repo.client.query(  # type: ignore[attr-defined]
+        "SELECT max(published_at) FROM " + db + ".tx_contract_anomaly "
+        "WHERE network = {net:String} AND target = {tgt:String}",
+        parameters={"net": network, "tgt": target},
+    ).result_rows
+    now = datetime.now(UTC).replace(tzinfo=None)
+    # max() over zero rows returns the column type's zero value (1970-01-01),
+    # which is always below now(), so a never-published target needs no special
+    # case beyond the None guard for drivers that surface NULL instead.
+    current = _as_datetime(rows[0][0]) if rows and rows[0][0] is not None else None
+    if current is not None and current >= now:
+        return current + _VERSION_EPSILON
+    return now
 
 
 def _publish_batch(
@@ -274,8 +311,9 @@ def publish_contract_anomaly(
     present for (network, target, feature_set) so callers can log coverage."""
     # One monotonic reconciliation version for every row written this pass: a
     # later publish (incl. a re-raise after a benign label is cleared) always
-    # gets a newer published_at and wins on FINAL, regardless of source times.
-    published_at = datetime.now(UTC).replace(tzinfo=None)
+    # gets a newer published_at and wins on FINAL, regardless of source times
+    # and even across a backward wall-clock step (see _reconciliation_version).
+    published_at = _reconciliation_version(repo, target, network)
     online_flagged = _publish_online(repo, target, network, feature_set, published_at)
     batch_flagged = _publish_batch(repo, target, network, feature_set, published_at)
     # Malicious manual labels the online/batch paths can't reach (never-scored,
