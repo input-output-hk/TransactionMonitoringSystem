@@ -308,7 +308,7 @@ class OgmiosClient:
             return
 
         now = datetime.now(timezone.utc)
-        normalized_txs, confirmed_records = self._parse_block_txs(
+        normalized_txs, confirmed_records = await self._parse_block_txs(
             transactions, block_id, block_slot, block_height, now,
         )
 
@@ -362,7 +362,7 @@ class OgmiosClient:
             f"{len(normalized_txs)} transactions confirmed"
         )
 
-    def _parse_block_txs(
+    async def _parse_block_txs(
         self,
         transactions: List[dict],
         block_id: str,
@@ -402,6 +402,22 @@ class OgmiosClient:
             except Exception as e:
                 tx_id = tx_data.get("id", "unknown")
                 logger.error(f"Error parsing transaction {tx_id}: {e}")
+                # The tx really did confirm on-chain — only OUR parser
+                # choked — so without this it was previously dropped from
+                # every store, including the data lake, and could never be
+                # replayed once the parser bug was fixed (review finding).
+                # Best-effort: a raw-store failure must not also lose the
+                # block itself.
+                if settings.RAW_STORE_ENABLED:
+                    try:
+                        await raw_store.write_parse_failed(
+                            self.network, tx_id, tx_data, now,
+                        )
+                    except Exception as store_e:
+                        logger.error(
+                            f"Failed to preserve raw payload for unparseable "
+                            f"tx {tx_id}: {store_e}"
+                        )
         return normalized_txs, confirmed_records
 
     async def _write_raw_payloads(
