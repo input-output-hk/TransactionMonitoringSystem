@@ -1,13 +1,16 @@
-"""The session cookie's Secure flag must not be spoofable by anyone who can
-reach the app directly (review finding, same class as the client-IP
-spoofing issue app.net guards against): X-Forwarded-Proto is honoured only
-when the direct TCP peer is a configured trusted proxy.
+"""Session-cookie security: the Secure flag must not be spoofable by anyone
+who can reach the app directly (review finding, same class as the client-IP
+spoofing issue app.net guards against) — X-Forwarded-Proto is honoured only
+when the direct TCP peer is a configured trusted proxy — and the CSRF
+double-submit companion cookie must be issued/cleared alongside the session
+cookie (see app.csrf).
 """
 
 import pytest
 from starlette.requests import Request
+from starlette.responses import Response
 
-from app.api.auth import _is_secure_request
+from app.api.auth import _clear_session_cookie, _is_secure_request, _set_session_cookie
 from app.config import settings
 
 
@@ -81,3 +84,36 @@ class TestForwardedProtoTrustGate:
             client=("10.0.0.5", 443),
         )
         assert _is_secure_request(req) is False
+
+
+class TestCSRFCookieIssuance:
+    """_set_session_cookie / _clear_session_cookie must (un)set the CSRF
+    double-submit companion alongside the session cookie — app.csrf relies
+    on both existing together."""
+
+    def test_set_session_cookie_also_sets_csrf_cookie(self):
+        response = Response()
+        _set_session_cookie(_request(scheme="https"), response, "sess-id")
+        cookies = "\n".join(response.headers.getlist("set-cookie"))
+        assert f"{settings.SESSION_COOKIE_NAME}=sess-id" in cookies
+        assert f"{settings.CSRF_COOKIE_NAME}=" in cookies
+        # The CSRF cookie must NOT be HttpOnly — the SPA needs to read it.
+        csrf_line = next(
+            line for line in response.headers.getlist("set-cookie")
+            if line.startswith(f"{settings.CSRF_COOKIE_NAME}=")
+        )
+        assert "HttpOnly" not in csrf_line
+
+    def test_set_session_cookie_skips_csrf_cookie_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(settings, "CSRF_PROTECTION_ENABLED", False)
+        response = Response()
+        _set_session_cookie(_request(scheme="https"), response, "sess-id")
+        cookies = "\n".join(response.headers.getlist("set-cookie"))
+        assert f"{settings.CSRF_COOKIE_NAME}=" not in cookies
+
+    def test_clear_session_cookie_also_clears_csrf_cookie(self):
+        response = Response()
+        _clear_session_cookie(_request(scheme="https"), response)
+        cookies = "\n".join(response.headers.getlist("set-cookie"))
+        assert settings.SESSION_COOKIE_NAME in cookies
+        assert settings.CSRF_COOKIE_NAME in cookies

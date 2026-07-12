@@ -16,11 +16,13 @@ Cookie shape: opaque ``tms_session`` ID, HTTP-only, ``SameSite=Lax``,
 ``Secure`` when the inbound request looks HTTPS (auto-detected via the URL
 scheme, or ``X-Forwarded-Proto`` when a configured trusted proxy is the
 direct peer, so dev http://localhost still works and an untrusted direct
-caller cannot spoof the scheme).
+caller cannot spoof the scheme). A second, JS-readable CSRF cookie rides
+alongside it (same lifetime, not HTTP-only) — see app.csrf.CSRFMiddleware.
 """
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Optional
 from uuid import UUID
 
@@ -86,25 +88,48 @@ def _is_secure_request(request: Request) -> bool:
 def _set_session_cookie(
     request: Request, response: Response, session_id: str,
 ) -> None:
-    """Apply the session cookie to ``response`` with the right flags."""
+    """Apply the session cookie (and its CSRF double-submit companion) to
+    ``response`` with the right flags."""
+    secure = _is_secure_request(request)
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
         value=session_id,
         max_age=settings.SESSION_TTL_DAYS * 86_400,
         path="/",
         httponly=True,
-        secure=_is_secure_request(request),
+        secure=secure,
         samesite="lax",
     )
+    if settings.CSRF_PROTECTION_ENABLED:
+        # NOT http-only: the SPA must be able to read this to echo it back
+        # in a header (app.csrf.CSRFMiddleware); it carries no secret of its
+        # own, only proof that the request came from a same-origin page.
+        response.set_cookie(
+            key=settings.CSRF_COOKIE_NAME,
+            value=secrets.token_urlsafe(32),
+            max_age=settings.SESSION_TTL_DAYS * 86_400,
+            path="/",
+            httponly=False,
+            secure=secure,
+            samesite="lax",
+        )
 
 
 def _clear_session_cookie(request: Request, response: Response) -> None:
-    """Tell the browser to drop the session cookie."""
+    """Tell the browser to drop the session cookie and its CSRF companion."""
+    secure = _is_secure_request(request)
     response.delete_cookie(
         key=settings.SESSION_COOKIE_NAME,
         path="/",
         httponly=True,
-        secure=_is_secure_request(request),
+        secure=secure,
+        samesite="lax",
+    )
+    response.delete_cookie(
+        key=settings.CSRF_COOKIE_NAME,
+        path="/",
+        httponly=False,
+        secure=secure,
         samesite="lax",
     )
 

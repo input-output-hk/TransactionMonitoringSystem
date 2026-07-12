@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
+from app.csrf import CSRFMiddleware
 
 from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
 from app.utils.datetime_utils import to_aware_utc
@@ -387,11 +388,12 @@ app = FastAPI(
 # so the last registered middleware is the outermost (executes first on request).
 #
 # Desired execution order (request → response):
-#   CORS → RateLimiter → Routes
+#   CORS → CSRF → RateLimiter → Routes
 #
-# This ensures CORS headers are present on ALL responses, including 429s.
+# This ensures CORS headers are present on ALL responses, including 429s and
+# 403s, and a CSRF-rejected request never consumes a rate-limit slot.
 
-# RateLimiter: registered first → innermost → executes second
+# RateLimiter: registered first → innermost → executes last (closest to routes)
 if settings.RATE_LIMIT_ENABLED:
     _limiter = RateLimiter(
         max_requests=settings.RATE_LIMIT_REQUESTS,
@@ -399,7 +401,11 @@ if settings.RATE_LIMIT_ENABLED:
     )
     app.add_middleware(RateLimitMiddleware, limiter=_limiter)
 
-# CORS: registered last → outermost → executes first, wraps rate limiter.
+# CSRF double-submit check: defense-in-depth on top of SameSite=Lax. See
+# app.csrf module docstring.
+app.add_middleware(CSRFMiddleware)
+
+# CORS: registered last → outermost → executes first, wraps everything below.
 # Origins are configurable (CORS_ALLOW_ORIGINS, comma-separated); the "*"
 # default keeps the demo SPA / local vite dev server working. Tighten to
 # the dashboard origin in production deployments.
