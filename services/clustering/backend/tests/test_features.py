@@ -55,8 +55,9 @@ def test_jaccard_distance() -> None:
             "address": ["a", "b", "b", "c", "x"],
         }
     )
-    tx_hashes, D = build_jaccard_distance(df)
+    tx_hashes, D, dropped = build_jaccard_distance(df)
     idx = {h: i for i, h in enumerate(tx_hashes)}
+    assert dropped == 0
     # t1={a,b}, t2={b,c} -> jaccard sim 1/3 -> distance 2/3
     assert D[idx["t1"], idx["t2"]] == pytest.approx(2 / 3)
     # t1 vs t3 share nothing -> distance 1
@@ -67,15 +68,55 @@ def test_jaccard_distance() -> None:
 
 
 def test_jaccard_distance_caps_txs() -> None:
+    # Without a block_time column the cap falls back to deterministic hash order.
     df = pd.DataFrame(
         {
             "tx_hash": ["t1", "t2", "t3", "t4"],
             "address": ["a", "b", "c", "d"],
         }
     )
-    tx_hashes, D = build_jaccard_distance(df, max_txs=2)
-    assert len(tx_hashes) == 2
+    tx_hashes, D, dropped = build_jaccard_distance(df, max_txs=2)
+    assert tx_hashes == ["t1", "t2"]
     assert D.shape == (2, 2)
+    assert dropped == 2
+
+
+def test_jaccard_distance_caps_by_recency_when_block_time_present() -> None:
+    # With block_time in the frame, the cap keeps the NEWEST transactions: the
+    # current activity an operator is investigating, not a hash-ordered slice.
+    df = pd.DataFrame(
+        {
+            "tx_hash": ["t1", "t2", "t3", "t4"],
+            "address": ["a", "b", "c", "d"],
+            "block_time": pd.to_datetime(
+                ["2026-01-01", "2026-01-04", "2026-01-02", "2026-01-03"]
+            ),
+        }
+    )
+    tx_hashes, _D, dropped = build_jaccard_distance(df, max_txs=2)
+    assert set(tx_hashes) == {"t2", "t4"}  # the two newest
+    assert dropped == 2
+
+
+def test_jaccard_distance_recency_tiebreak_is_deterministic() -> None:
+    # Equal timestamps: the hash tiebreak must make the cut reproducible.
+    df = pd.DataFrame(
+        {
+            "tx_hash": ["t3", "t1", "t2"],
+            "address": ["a", "b", "c"],
+            "block_time": pd.to_datetime(["2026-01-01"] * 3),
+        }
+    )
+    first, _, _ = build_jaccard_distance(df, max_txs=2)
+    second, _, _ = build_jaccard_distance(df, max_txs=2)
+    assert first == second == ["t1", "t2"]
+
+
+def test_jaccard_distance_empty_frame_with_cap() -> None:
+    # The column-less zero-row frame ClickHouse's query_df returns must not
+    # crash the cap's astype (production always passes max_txs).
+    tx_hashes, D, dropped = build_jaccard_distance(pd.DataFrame(), max_txs=5)
+    assert tx_hashes == [] and D.shape == (0, 0) and dropped == 0
 
 
 def test_combined_single_address_falls_back_to_shape() -> None:
@@ -110,5 +151,5 @@ def test_graph_edges_empty_address_frame() -> None:
 
 def test_jaccard_distance_empty_address_frame() -> None:
     """Same column-less empty frame on the clustering path: no rows, no crash."""
-    tx_hashes, D = build_jaccard_distance(pd.DataFrame())
+    tx_hashes, D, _dropped = build_jaccard_distance(pd.DataFrame())
     assert tx_hashes == [] and D.shape == (0, 0)
