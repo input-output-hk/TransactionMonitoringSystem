@@ -11,12 +11,21 @@ export default defineConfig([
     files: ['**/*.{ts,tsx}'],
     extends: [
       js.configs.recommended,
-      tseslint.configs.recommended,
+      // Type-aware ruleset: catches misused promises, unsafe `any` flows and
+      // wrong await targets that the syntax-only preset cannot see.
+      tseslint.configs.recommendedTypeChecked,
       reactHooks.configs.flat.recommended,
       reactRefresh.configs.vite,
     ],
     languageOptions: {
       globals: globals.browser,
+      parserOptions: {
+        // projectService resolves each file against the solution-style
+        // tsconfig (tsconfig.app.json for src/, tsconfig.node.json for
+        // vite.config.ts) without pinning a single project path here.
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     rules: {
       // Debug console.log/.debug/.info must not ship to production; intentional

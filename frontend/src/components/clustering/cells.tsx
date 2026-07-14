@@ -18,7 +18,7 @@ export function CopyHash({ hash }: { hash: string }) {
 			type="button"
 			className="text-foreground hover:text-brand font-mono text-xs"
 			title={`${hash} — click to copy`}
-			onClick={() => copyToClipboard(hash)}
+			onClick={() => void copyToClipboard(hash)}
 		>
 			{shortHash(hash)}
 		</button>

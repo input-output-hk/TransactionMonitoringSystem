@@ -112,7 +112,7 @@ export function ImportAttackPage() {
 				.join(" · ");
 			toast.success(`Import complete. ${summary || "no changes"}.`);
 			reset();
-			navigate("/archive");
+			void navigate("/archive");
 		} catch (e) {
 			console.error(e);
 			toast.error("Import failed. Please try again.");
@@ -130,7 +130,7 @@ export function ImportAttackPage() {
 		<div className="border-border bg-card relative rounded-lg border-2 p-8 md:p-12">
 			<button
 				type="button"
-				onClick={close}
+				onClick={() => void close()}
 				className="text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-ring absolute top-4 right-4 rounded-md p-2 transition-colors focus-visible:ring-2 focus-visible:outline-none"
 				title="Close"
 			>
@@ -250,7 +250,7 @@ export function ImportAttackPage() {
 						</Button>
 						<Button
 							variant="outline"
-							onClick={onConfirm}
+							onClick={() => void onConfirm()}
 							className="bg-card flex-1"
 						>
 							Confirm

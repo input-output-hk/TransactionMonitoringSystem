@@ -124,7 +124,7 @@ export function TuningPanel({
 					<Button
 						variant="outline"
 						disabled={evaluation.isFetching}
-						onClick={() => evaluation.refetch()}
+						onClick={() => void evaluation.refetch()}
 					>
 						{evaluation.isFetching ? "Evaluating…" : "Evaluate parameters"}
 					</Button>

@@ -45,12 +45,12 @@ export function VerifyPage() {
 		if (fired.current) return;
 		fired.current = true;
 
-		(async () => {
+		void (async () => {
 			try {
 				await verifyToken(token);
 				await refetchUser();
 				setPhase("success");
-				navigate("/dashboard", { replace: true });
+				void navigate("/dashboard", { replace: true });
 			} catch (err) {
 				setPhase("error");
 				setError(

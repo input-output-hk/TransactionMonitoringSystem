@@ -291,7 +291,7 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 					type="button"
 					className="text-muted-foreground hover:text-foreground block w-full text-left font-mono text-xs break-all"
 					title="Click to copy"
-					onClick={() => copyToClipboard(c.target)}
+					onClick={() => void copyToClipboard(c.target)}
 				>
 					{c.target}
 				</button>
@@ -318,10 +318,10 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 				<JobProgress job={job} />
 			</CardContent>
 			<CardFooter className="gap-2">
-				<Button size="sm" onClick={() => open()}>
+				<Button size="sm" onClick={() => void open()}>
 					Explore
 				</Button>
-				<Button size="sm" variant="outline" onClick={() => open("anomalies")}>
+				<Button size="sm" variant="outline" onClick={() => void open("anomalies")}>
 					Outliers
 				</Button>
 				<DropdownMenu>
