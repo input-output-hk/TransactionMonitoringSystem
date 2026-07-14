@@ -9,6 +9,8 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import RepoDep, analysis_slot, run_or_404
 from app.api.schemas import (
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     ClusterRequest,
     ClusterRunAck,
     ClusterSummaryOut,
@@ -16,6 +18,7 @@ from app.api.schemas import (
     EvaluationOut,
     FeatureSet,
     GraphOut,
+    ListPage,
     ProjectionOut,
     RunOut,
 )
@@ -33,11 +36,15 @@ from app.storage.protocol import Repo
 router = APIRouter(tags=["runs"])
 
 
-@router.get("/runs", response_model=list[RunOut])
+@router.get("/runs", response_model=ListPage[RunOut])
 def list_runs(
-    target: str | None = Query(default=None), repo: Repo = RepoDep
-) -> list[dict[str, Any]]:
-    return repo.list_runs(target)
+    target: str | None = Query(default=None),
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_runs(target, limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_runs(target), "data": rows}
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)

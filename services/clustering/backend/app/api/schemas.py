@@ -9,6 +9,22 @@ from pydantic import BaseModel, Field, computed_field
 from app.anomaly.detect import DEFAULT_TOP_QUANTILE
 from app.config import get_settings
 
+
+class ListPage[ItemT](BaseModel):
+    """Shared list envelope matching the host API's ListResponse contract."""
+
+    count: int
+    total: int
+    data: list[ItemT]
+
+
+# Pagination bounds shared by every collection endpoint; they mirror the host
+# API's ListResponse contract (default page of 100, hard cap of 1000 per
+# request) so the two surfaces page identically.
+LIST_LIMIT_DEFAULT = 100
+LIST_LIMIT_MAX = 1000
+
+
 FeatureSet = Literal["shape", "graph", "combined"]
 
 # Effective per-tx verdict surfaced on cluster/graph views.

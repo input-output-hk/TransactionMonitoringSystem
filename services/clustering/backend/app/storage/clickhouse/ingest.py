@@ -119,13 +119,22 @@ class _IngestMixin(_RepoBase):
 
     # --- Targets ---------------------------------------------------------------
 
-    def list_targets(self) -> list[dict[str, Any]]:
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         rows = self.client.query(
             f"SELECT target, any(target_type) AS target_type, "
             f"count(DISTINCT tx_hash) AS tx_count "
-            f"FROM {self._db}.transactions GROUP BY target ORDER BY tx_count DESC"
+            f"FROM {self._db}.transactions GROUP BY target ORDER BY tx_count DESC "
+            f"LIMIT {{lim:UInt32}} OFFSET {{off:UInt32}}",
+            parameters={"lim": limit, "off": offset},
         ).result_rows
         return [{"target": t, "target_type": tt, "tx_count": int(c)} for (t, tt, c) in rows]
+
+    def count_targets(self) -> int:
+        """Distinct ingested targets: the full ``total`` for the paginated list."""
+        rows = self.client.query(
+            f"SELECT uniqExact(target) FROM {self._db}.transactions"
+        ).result_rows
+        return int(rows[0][0]) if rows else 0
 
     # --- Feature extraction ----------------------------------------------------
 

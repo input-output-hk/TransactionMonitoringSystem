@@ -2,9 +2,9 @@
 // stopping once terminal). Public surface (re-exported by the barrel).
 import { useQuery } from "@tanstack/react-query";
 
-import type { Job, JobStatus } from "../types";
-import { arrayOf, jobItem } from "../validation";
-import { get } from "../transport";
+import type { Job, JobStatus, ListPage } from "../types";
+import { jobItem, listPage } from "../validation";
+import { get, MAX_PAGE_LIMIT } from "../transport";
 
 /** Terminal job statuses — a job in either state is finished and its actions can
  *  safely re-run. Shared by the poll-stop logic and the stage presentation. */
@@ -31,11 +31,19 @@ export function useJob(jobId: string | undefined, pollMs = 2500) {
 	});
 }
 
-/** All known jobs (newest first), polled so card status badges stay live. */
+/** All known jobs (newest first), polled so card status badges stay live. The
+ *  endpoint returns a {count,total,data} envelope; fetch one max-size page and
+ *  unwrap so consumers keep seeing a plain array. */
 export function useJobs(pollMs = 2500, enabled = true) {
 	return useQuery({
 		queryKey: ["clustering", "jobs"],
-		queryFn: () => get<Job[]>("/jobs", arrayOf("/jobs", jobItem)),
+		queryFn: async () =>
+			(
+				await get<ListPage<Job>>(
+					`/jobs?limit=${MAX_PAGE_LIMIT}`,
+					listPage("/jobs", jobItem),
+				)
+			).data,
 		refetchInterval: pollMs,
 		enabled,
 	});

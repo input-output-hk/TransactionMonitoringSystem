@@ -10,6 +10,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.deps import RepoDep, reject_if_target_busy
 from app.api.schemas import (
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     ClassifyJobAck,
     ContractDeleteAck,
     ContractOut,
@@ -17,6 +19,7 @@ from app.api.schemas import (
     IdentifyOut,
     JobAck,
     LatestInteractionsPage,
+    ListPage,
     RenameRequest,
     TargetOut,
 )
@@ -31,9 +34,14 @@ from app.storage.protocol import Repo
 router = APIRouter(tags=["contracts"])
 
 
-@router.get("/targets", response_model=list[TargetOut])
-def list_targets(repo: Repo = RepoDep) -> list[dict[str, Any]]:
-    return repo.list_targets()
+@router.get("/targets", response_model=ListPage[TargetOut])
+def list_targets(
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_targets(limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_targets(), "data": rows}
 
 
 @router.get("/registry/identify", response_model=IdentifyOut)
@@ -105,9 +113,14 @@ def create_contract(req: ContractRequest, request: Request, repo: Repo = RepoDep
     return {"job_id": job_id, "target": target, "target_type": target_type}
 
 
-@router.get("/contracts", response_model=list[ContractOut])
-def list_contracts(repo: Repo = RepoDep) -> list[dict[str, Any]]:
-    return repo.list_contracts()
+@router.get("/contracts", response_model=ListPage[ContractOut])
+def list_contracts(
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_contracts(limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_contracts(), "data": rows}
 
 
 @router.get("/contracts/{target}", response_model=ContractOut)

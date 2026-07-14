@@ -25,6 +25,7 @@ import type {
 	Job,
 	LatestInteraction,
 	LatestInteractionsResponse,
+	ListPage,
 	ProjectionData,
 	ProjectionNode,
 	Run,
@@ -81,9 +82,35 @@ export function arrayOf<T>(path: string, item: Validator<T>): Validator<T[]> {
 	};
 }
 
+/** Wrap an item validator for a paginated list envelope `{count, total, data}`:
+ *  `count`/`total` must be finite numbers and every `data` element must pass
+ *  the item validator. */
+export function listPage<T>(
+	path: string,
+	item: Validator<T>,
+): Validator<ListPage<T>> {
+	return (raw) => {
+		if (!isObject(raw))
+			throw new ResponseShapeError(path, "expected an object");
+		for (const f of ["count", "total"] as const) {
+			if (typeof raw[f] !== "number" || !Number.isFinite(raw[f])) {
+				throw new ResponseShapeError(
+					path,
+					`field "${f}" is not a finite number`,
+				);
+			}
+		}
+		return {
+			count: raw.count as number,
+			total: raw.total as number,
+			data: arrayOf(path, item)(raw.data),
+		};
+	};
+}
+
 // Only the fields actually read with throwing methods are required; the rest of
 // each type is structural and tolerated as optional to stay forgiving.
-export const validateContracts = arrayOf<Contract>(
+export const validateContracts = listPage<Contract>(
 	"/contracts",
 	shapeValidator(
 		"/contracts",

@@ -131,10 +131,21 @@ class _ContractMixin(_RepoBase):
         "FROM {db}.contracts FINAL {where}"
     )
 
-    def list_contracts(self) -> list[dict[str, Any]]:
-        sql = self._CONTRACT_SELECT.format(db=self._db, where="") + " ORDER BY updated_at DESC"
-        rows = self.client.query(sql).result_rows
+    def list_contracts(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        sql = self._CONTRACT_SELECT.format(db=self._db, where="") + (
+            " ORDER BY updated_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}"
+        )
+        rows = self.client.query(sql, parameters={"lim": limit, "off": offset}).result_rows
         return [self._contract_row_to_dict(r) for r in rows]
+
+    def count_contracts(self) -> int:
+        """Full (unpaginated) registry size backing the list envelope's ``total``.
+        ``count() AS total`` is safe under the 26.x alias rule: single aggregate,
+        and ``contracts`` has no ``total`` source column."""
+        rows = self.client.query(
+            f"SELECT count() AS total FROM {self._db}.contracts FINAL"
+        ).result_rows
+        return int(rows[0][0]) if rows else 0
 
     def get_contract(self, target: str) -> dict[str, Any] | None:
         sql = (
