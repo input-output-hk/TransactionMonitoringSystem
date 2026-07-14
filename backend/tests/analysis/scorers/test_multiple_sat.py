@@ -44,12 +44,13 @@ def _features(inputs, outputs=None, redeemers=None, sender_recurrence=0.0, netwo
 
 
 class TestSpendRedeemerPayloads:
-    """Ogmios v6 carries the redeemer purpose in the key ("spend:N"), not on
-    the value. A prior bug looked for purpose on the value, so v6 returned []
-    — disabling the uniform-sweep guard (active on v5) and zeroing redeemer
-    evidence. These pin v5/v6 parity."""
+    """Ogmios v5 carries the redeemer purpose in the key ("spend:N"), not on
+    the value; live v6 (v6.14) emits a list with validator.purpose on each
+    entry. A prior bug looked for purpose on the value only, so the keyed
+    shape returned [], disabling the uniform-sweep guard and zeroing
+    redeemer evidence. These pin v5/v6 parity."""
 
-    def test_v6_dict_extracts_spend_payloads_by_key(self):
+    def test_v5_dict_extracts_spend_payloads_by_key(self):
         redeemers = {
             "spend:0": {"redeemer": "d8799f00ff", "executionUnits": {"memory": 1, "cpu": 1}},
             "spend:1": {"redeemer": "d8799f01ff", "executionUnits": {"memory": 1, "cpu": 1}},
@@ -59,7 +60,7 @@ class TestSpendRedeemerPayloads:
             "d8799f00ff", "d8799f01ff",
         ]
 
-    def test_v6_uniform_payloads_collapse_to_one(self):
+    def test_v5_uniform_payloads_collapse_to_one(self):
         redeemers = {
             "spend:0": {"redeemer": "aa"},
             "spend:1": {"redeemer": "aa"},
@@ -67,7 +68,7 @@ class TestSpendRedeemerPayloads:
         payloads = _spend_redeemer_payloads({"redeemers": redeemers})
         assert len(payloads) == 2 and len(set(payloads)) == 1
 
-    def test_v5_list_still_extracts_spend(self):
+    def test_v6_list_extracts_spend(self):
         redeemers = [
             {"validator": {"purpose": "spend"}, "redeemer": "aa"},
             {"validator": {"purpose": "mint"}, "redeemer": "bb"},
