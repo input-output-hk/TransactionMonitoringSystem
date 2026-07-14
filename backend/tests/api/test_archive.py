@@ -347,7 +347,8 @@ def test_archive_requires_api_key_when_keys_configured(client, monkeypatch):
         "network": "preprod", "tx_hash": VALID_HASH,
         "note": "n", "archived_by": "me",
     })
-    assert r.status_code == 403
+    # 401: unauthenticated (no key, no session), per verify_api_key.
+    assert r.status_code == 401
 
 
 def test_archive_accepts_valid_api_key(client, monkeypatch):

@@ -73,8 +73,11 @@ async def verify_api_key(
       - the raw API key string when ``TMS-API-Key`` matched
       - ``"session:<user_id>"`` when a session cookie resolved to a user
 
-    Raises 403 only if neither credential is present/valid. Importing
-    ``lookup_session`` lazily here avoids a circular dependency:
+    Raises 401 only if neither credential is present/valid: the caller is
+    unauthenticated (RFC 9110 semantics), which is what lets the SPA's
+    global UnauthorizedError handler distinguish "session expired, go to
+    login" from a true 403 "authenticated but not allowed" (require_admin).
+    Importing ``lookup_session`` lazily here avoids a circular dependency:
     ``app.auth.sessions`` already imports from ``app.db.postgres`` which
     doesn't touch this module.
     """
@@ -106,10 +109,16 @@ async def verify_api_key(
                 )
             return f"session:{user['id']}"
 
-    # No credential matched. The 403 message intentionally stays neutral
-    # so an attacker probing different surfaces can't tell whether the
-    # endpoint expected a key vs a session.
+    # No credential matched: 401 (unauthenticated), matching require_user,
+    # so an expired browser session triggers the SPA's login redirect on
+    # every protected endpoint, not only the session-specific routes. The
+    # message intentionally stays neutral so an attacker probing different
+    # surfaces can't tell whether the endpoint expected a key vs a session.
     raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
+        status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required.",
+        # RFC 9110: a 401 carries WWW-Authenticate naming the scheme. The
+        # custom scheme name doubles as documentation and never triggers a
+        # browser basic-auth prompt.
+        headers={"WWW-Authenticate": settings.API_KEY_HEADER},
     )
