@@ -11,9 +11,11 @@ unchanged.
 
 from __future__ import annotations
 
+# The DBSCAN fallbacks are canonical in app.clustering.evaluate (backed by
+# config/clustering.yaml); re-exported here because the pipeline (and its
+# tests) treat them as part of the service surface.
+from app.clustering.evaluate import FALLBACK_EPS, MIN_SAMPLES_FLOOR
 from app.service._common import (
-    _FALLBACK_EPS,
-    _FALLBACK_MIN_SAMPLES,
     _recommended_params,
     load_clustering_input,
 )
@@ -51,12 +53,12 @@ from app.service.verdicts import (
 
 __all__ = [
     "CLUSTER_VERDICTS",
+    "FALLBACK_EPS",
+    "MIN_SAMPLES_FLOOR",
     "VERDICT_ANOMALY",
     "VERDICT_BENIGN",
     "VERDICT_MALICIOUS",
     "VERDICT_NORMAL",
-    "_FALLBACK_EPS",
-    "_FALLBACK_MIN_SAMPLES",
     "_recommended_params",
     "build_graph",
     "build_projection",
