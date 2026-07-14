@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import logging
 
-from app.analysis.features import extract_fee, extract_lovelace, flatten_assets
+from app.analysis.features import (
+    extract_fee,
+    extract_lovelace,
+    flatten_assets,
+    total_withdrawal_lovelace,
+)
 from app.models.transaction import (
     NormalizedTransaction,
     TransactionInput,
@@ -71,7 +76,6 @@ def parse_ogmios_transaction(
     # attempts invisible to contention queries (review finding). Flow and
     # displacement readers exclude the flag.
     inputs = []
-    spending_input_count = 0
     for inp in tx_data.get("inputs", []):
         inp_tx_hash, inp_index = ogmios_input_ref(inp)
         # Ogmios inputs don't include resolved address/value in the transaction body;
@@ -83,8 +87,6 @@ def parse_ogmios_transaction(
             amount=0,
             is_unspent_attempt=not script_valid,
         ))
-        if script_valid:
-            spending_input_count += 1
 
     # Parse reference inputs
     for inp in tx_data.get("references", []):
@@ -100,7 +102,6 @@ def parse_ogmios_transaction(
     # Parse collateral inputs. For a validated tx these were NOT consumed
     # (recorded with the is_collateral flag so analytics can exclude them);
     # for a failed tx they are exactly what the ledger consumed.
-    collateral_count = 0
     for inp in tx_data.get("collaterals", []):
         inp_tx_hash, inp_index = ogmios_input_ref(inp)
         inputs.append(TransactionInput(
@@ -110,7 +111,6 @@ def parse_ogmios_transaction(
             amount=0,
             is_collateral=True,
         ))
-        collateral_count += 1
 
     # Parse outputs. A failed tx's regular outputs never exist on-chain, so
     # they are skipped (raw_data retains them); only the collateralReturn is
@@ -144,11 +144,17 @@ def parse_ogmios_transaction(
             # v5/v6 shape handling lives in features.extract_lovelace (this
             # was the last hand-rolled copy of the dual-shape branch — the
             # duplication class that caused the v6 mempool fee bug).
-            lv = extract_lovelace(collateral_return.get("value", {}))
+            cr_value = collateral_return.get("value", {})
+            lv = extract_lovelace(cr_value)
+            # Native assets returned with the collateral: for a failed tx
+            # this is the ONLY output, so dropping them hid every asset a
+            # failed attack posted as collateral (Ticket F).
+            cr_assets = flatten_assets(cr_value)
             addresses.add(addr)
             outputs.append(TransactionOutput(
                 address=addr,
                 amount=int(lv),
+                assets=cr_assets if cr_assets else None,
                 is_collateral=True,
                 # Babbage rule: the collateral return's on-chain index is
                 # the count of regular outputs (which never materialise for
@@ -163,6 +169,20 @@ def parse_ogmios_transaction(
     for inp in inputs:
         if inp.address:
             addresses.add(inp.address)
+
+    # Reward-account withdrawals: the stake addresses are involved parties
+    # (a drained reward account is prime attack signal). Recorded for a
+    # failed tx too: the ledger never applied its withdrawal, but what a
+    # failed attack TRIED to withdraw is signal, mirroring the
+    # is_unspent_attempt treatment of its regular inputs. The withdrawn
+    # value is stamped as withdrawal_total (raw, ungated); the enrichment
+    # folds it into total_input_value for validated txs only.
+    withdrawals_raw = tx_data.get("withdrawals")
+    if isinstance(withdrawals_raw, dict):
+        for reward_addr in withdrawals_raw:
+            if reward_addr:
+                addresses.add(str(reward_addr))
+    withdrawal_total = total_withdrawal_lovelace(tx_data)
 
     # Metadata
     metadata = None
@@ -188,7 +208,10 @@ def parse_ogmios_transaction(
     # collateralReturn for a failed one. Reference inputs and (for valid
     # txs) collateral inputs are recorded in `inputs` with their flags but
     # never counted; previously they inflated input_count on every Plutus tx.
-    input_count = spending_input_count if script_valid else collateral_count
+    # Derived from the model's consumed_by_ledger predicate, the same rule
+    # the enrichment uses for total_input_value, so count and value can
+    # never disagree on what the ledger consumed.
+    input_count = sum(1 for i in inputs if i.consumed_by_ledger(script_valid))
 
     return NormalizedTransaction(
         tx_hash=tx_hash,
@@ -205,6 +228,7 @@ def parse_ogmios_transaction(
         output_count=len(outputs),
         total_input_value=None,
         total_output_value=total_output_value,
+        withdrawal_total=withdrawal_total,
         addresses=list(addresses),
         metadata=metadata,
         script_valid=script_valid,

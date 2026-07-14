@@ -5,10 +5,45 @@ from app.analysis.features import (
     SCRIPT_ADDRESS_PREFIXES,
     extract_fee,
     extract_ttl,
+    extract_tx_script_features,
     flatten_assets,
     is_script_address,
     iter_assets,
 )
+
+
+class TestScriptFeaturesHostileRedeemers:
+    """One malformed redeemer entry must cost only its own units, never
+    abort extraction: this runs inside batch ingestion, where a raise
+    used to drop the whole block's feature rows (review finding)."""
+
+    def test_non_dict_list_entries_degrade_to_zero_units(self):
+        raw = {
+            "inputs": [],
+            "redeemers": [
+                "junk",
+                {"executionUnits": {"memory": 2, "cpu": 3}},
+                {"executionUnits": {"cpu": "abc"}},
+            ],
+        }
+        row = extract_tx_script_features("ab" * 32, "preprod", raw)
+        # (tx_hash, network, redeemers_count, spending_inputs,
+        #  exunits_mem, exunits_cpu, mint_policy_count, mint_entries_json)
+        assert row is not None
+        assert row[2] == 3  # count still reflects every entry
+        assert row[4] == 2 and row[5] == 3  # units only from the valid one
+
+    def test_non_dict_dict_values_degrade_to_zero_units(self):
+        raw = {
+            "inputs": [],
+            "redeemers": {
+                "spend:0": {"executionUnits": {"memory": 4, "cpu": 6}},
+                "spend:1": "garbage",
+            },
+        }
+        row = extract_tx_script_features("ab" * 32, "preprod", raw)
+        assert row is not None
+        assert row[4] == 4 and row[5] == 6
 
 
 class TestIsScriptAddress:

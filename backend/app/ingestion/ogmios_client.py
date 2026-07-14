@@ -18,6 +18,7 @@ import websockets
 
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
+from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.input_enrichment import (
     apply_resolved_inputs,
     resolve_input_amounts,
@@ -28,6 +29,12 @@ from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_wit
 from app.models.transaction import NormalizedTransaction
 
 logger = logging.getLogger(__name__)
+
+# Minimum spacing between era-summary refetches triggered by blocks beyond
+# the converter's forecast horizon. A node syncing through an era boundary
+# leaves the horizon behind for many consecutive blocks; one refetch per
+# interval catches up without turning every block into two extra queries.
+SLOT_TIME_REFETCH_MIN_SECONDS = 60
 
 
 class BlockPersistError(Exception):
@@ -78,6 +85,16 @@ class OgmiosClient:
         # LocalStateQuery connection for UTxO input resolution (on-demand)
         self._query_ws = None
         self._query_lock = asyncio.Lock()
+
+        # Slot-to-UTC converter for chain-time block timestamps; fetched
+        # once per chain-sync session, None until then (wall-clock fallback).
+        # The refetch flag is set when a block's slot falls beyond the
+        # converter's forecast horizon (e.g. the node crossed an era
+        # boundary since the last fetch); the chain loop then refetches,
+        # throttled by SLOT_TIME_REFETCH_MIN_SECONDS.
+        self._slot_time: Optional[SlotTimeConverter] = None
+        self._slot_time_refetch_needed = False
+        self._slot_time_fetched_at: Optional[datetime] = None
 
         # Telemetry — used by /health and pipeline_state
         self._started_at: datetime = datetime.now(timezone.utc)
@@ -241,6 +258,10 @@ class OgmiosClient:
         # blocking re-scoring of a re-confirmed tx.
         await self._replay_pending_score_repurges()
 
+        # Chain-time source for transactions.timestamp; per-session so a
+        # hard fork's new era summary is picked up on the next reconnect.
+        await self._fetch_slot_time_converter(ws)
+
         sync_point = await postgres.get_sync_point(self.network)
 
         if sync_point:
@@ -272,6 +293,11 @@ class OgmiosClient:
                 logger.info(f"Ogmios [chain]: intersected at tip slot {tip['slot']}")
 
         while self._running:
+            # A block beyond the converter's forecast horizon requested
+            # fresh era summaries (the node crossed an era boundary or a
+            # long-lived session outgrew the horizon); refetch, throttled.
+            if self._slot_time_refetch_needed and self._slot_time_refetch_due():
+                await self._fetch_slot_time_converter(ws)
             resp = await self._send_recv(ws, "nextBlock")
             result = resp.get("result", {})
             direction = result.get("direction")
@@ -280,6 +306,49 @@ class OgmiosClient:
                 await self._handle_roll_forward(result)
             elif direction == "backward":
                 await self._handle_roll_backward(result)
+
+    async def _fetch_slot_time_converter(self, ws) -> None:
+        """Fetch systemStart and era summaries to build the slot-to-UTC
+        converter for block timestamps.
+
+        Best-effort, but NEVER destructive: on failure a previously built
+        converter is kept (era summaries only change at a hard fork, so a
+        stale converter beats reverting a whole session's replay to wall
+        clock: the exact skew the converter exists to prevent). Only when
+        no converter has ever been built do block timestamps fall back to
+        ingestion wall clock. A degraded timestamp must never block sync.
+        """
+        converter = None
+        try:
+            start_resp = await self._send_recv(ws, "queryNetwork/startTime")
+            eras_resp = await self._send_recv(ws, "queryLedgerState/eraSummaries")
+            converter = SlotTimeConverter.from_ogmios(
+                start_resp.get("result"), eras_resp.get("result"),
+            )
+        except Exception as e:
+            logger.warning(f"Ogmios [chain]: slot-time queries failed: {e}")
+        self._slot_time_fetched_at = datetime.now(timezone.utc)
+        self._slot_time_refetch_needed = False
+        if converter is not None:
+            self._slot_time = converter
+        elif self._slot_time is not None:
+            logger.warning(
+                "Ogmios [chain]: slot-time refetch failed; keeping the "
+                "previous era summaries (they only change at a hard fork)"
+            )
+        else:
+            logger.warning(
+                "Ogmios [chain]: no slot-time converter available; block "
+                "timestamps fall back to ingestion wall clock (chain-time "
+                "baselines will skew during catch-up replay)"
+            )
+
+    def _slot_time_refetch_due(self) -> bool:
+        """Throttle horizon-triggered era-summary refetches."""
+        if self._slot_time_fetched_at is None:
+            return True
+        age = datetime.now(timezone.utc) - self._slot_time_fetched_at
+        return age.total_seconds() >= SLOT_TIME_REFETCH_MIN_SECONDS
 
     async def _handle_roll_forward(self, result: dict):
         """Process a new block (rollForward).
@@ -291,9 +360,36 @@ class OgmiosClient:
         """
         block = result.get("block", {})
         block_id = block.get("id", "")
-        block_slot = block.get("slot", 0)
+        block_slot = block.get("slot")
         block_height = block.get("height", 0)
         transactions = block.get("transactions", [])
+
+        # Byron epoch-boundary blocks (Ogmios type "ebb") carry no slot and
+        # no transactions. Falling through with a slot-0 default would call
+        # save_sync_point(slot=0), resetting the checkpoint to genesis and
+        # forcing a full re-sync on restart. Skip them without
+        # checkpointing; the next real block checkpoints past this point.
+        if block_slot is None:
+            if transactions:
+                # Not a known block shape: every slotted-era block carries
+                # a slot and EBBs are transaction-free. Refusing to guess a
+                # slot must NOT be a quiet skip: the next block's
+                # save_sync_point would advance past this one and its
+                # transactions would be lost forever (recall-first).
+                # Raising trips the chain breaker so /health reports DOWN
+                # and the block genuinely replays from the unadvanced
+                # checkpoint, like every other persistence failure.
+                raise BlockPersistError(
+                    f"Block {block_id} has {len(transactions)} transactions "
+                    f"but no slot; refusing to ingest under an invented "
+                    f"slot or checkpoint past it. Checkpoint NOT advanced, "
+                    f"block will replay after reconnect."
+                )
+            logger.info(
+                f"Ogmios [chain]: slotless boundary block {block_id} "
+                f"skipped (Byron EBB)"
+            )
+            return
 
         # Update telemetry: tip comes from the nextBlock result envelope
         tip = result.get("tip", {})
@@ -328,7 +424,7 @@ class OgmiosClient:
             # an in-flight write. Both steps are checkpoint-blocking and
             # idempotent on replay (write-once files, RMT upsert), so the
             # ordering is crash-safe in either direction.
-            await self._write_raw_payloads(normalized_txs, block_slot, now)
+            await self._write_raw_payloads(normalized_txs, block_slot)
 
             # Batch persist to ClickHouse. Checkpoint-BLOCKING: retried with
             # backoff, then raises BlockPersistError so save_sync_point below
@@ -375,6 +471,29 @@ class OgmiosClient:
         a tx that fails to parse is logged and skipped, never fatal."""
         normalized_txs: List[NormalizedTransaction] = []
         confirmed_records: List[tuple] = []
+        # transactions.timestamp is CHAIN time: the baselines window on it
+        # (see baselines.py). At tip the slot-derived time agrees with wall
+        # clock within seconds; during catch-up replay it lands history at
+        # its true position instead of collapsing it into "now". Wall clock
+        # only when the converter is unavailable. Lifecycle records below
+        # keep `now`: confirmed_at is operational observation time.
+        block_time = (
+            self._slot_time.slot_to_utc(block_slot) if self._slot_time else None
+        )
+        if block_time is None and self._slot_time is not None:
+            # The slot is beyond the summaries' forecast horizon: the node
+            # crossed an era boundary since the fetch, or a long-lived
+            # session outgrew the horizon. Extrapolating could be days
+            # wrong, so this block gets wall clock and the chain loop is
+            # asked to refetch fresh summaries.
+            if not self._slot_time_refetch_needed:
+                logger.warning(
+                    f"Ogmios [chain]: slot {block_slot} is beyond the era "
+                    f"summaries' forecast horizon; using wall-clock "
+                    f"timestamps until the summaries refresh"
+                )
+            self._slot_time_refetch_needed = True
+        tx_timestamp = block_time or now
         for block_index, tx_data in enumerate(transactions):
             try:
                 tx = parse_ogmios_transaction(
@@ -382,7 +501,7 @@ class OgmiosClient:
                     block_slot=block_slot,
                     block_hash=block_id,
                     block_height=block_height,
-                    timestamp=now,
+                    timestamp=tx_timestamp,
                     block_index=block_index,
                 )
                 tx.network = self.network
@@ -424,7 +543,6 @@ class OgmiosClient:
         self,
         normalized_txs: List[NormalizedTransaction],
         block_slot: int,
-        now: datetime,
     ) -> None:
         """Write full raw payloads to the local filesystem store.
 
@@ -435,12 +553,22 @@ class OgmiosClient:
         attack-shaped txs it protects (review finding). Uncapped, the
         ClickHouse copy is complete and a failure only costs redundancy.
         Replay-safe: the write-once guard in _write_sync skips
-        already-written files."""
+        already-written files.
+
+        Keyed by each tx's OWN row timestamp (chain time), never wall
+        clock: raw_store.read_confirmed derives the blob's day directory
+        from the ClickHouse row's timestamp, so the two must match or the
+        engine's raw fallback misses the blob for any block replayed more
+        than a day after its chain time (review finding). Using the row
+        timestamp also makes the write-once path deterministic across
+        replays that straddle midnight."""
         if not settings.RAW_STORE_ENABLED:
             return
         try:
             await asyncio.gather(*[
-                raw_store.write_confirmed(self.network, tx.tx_hash, tx.raw_data, now)
+                raw_store.write_confirmed(
+                    self.network, tx.tx_hash, tx.raw_data, tx.timestamp,
+                )
                 for tx in normalized_txs
                 if tx.raw_data
             ])

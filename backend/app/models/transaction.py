@@ -131,6 +131,22 @@ class TransactionInput(BaseModel):
         ),
     )
 
+    def consumed_by_ledger(self, script_valid: bool) -> bool:
+        """Whether the ledger actually consumed this input's value:
+        regular inputs for a validated tx, collateral inputs for a failed
+        one. Reference inputs are read-only, and a failed tx's regular
+        inputs (is_unspent_attempt) stayed live.
+
+        Single source of the consumption rule: the parser's input_count
+        and the enrichment's total_input_value both derive from this
+        predicate so the two can never silently disagree.
+        """
+        if self.is_reference:
+            return False
+        if script_valid:
+            return not self.is_collateral and not self.is_unspent_attempt
+        return self.is_collateral
+
 
 class TransactionOutput(BaseModel):
     """Transaction output (new UTxO)"""
@@ -232,7 +248,25 @@ class NormalizedTransaction(BaseModel):
     outputs: List[TransactionOutput] = Field(default_factory=list)
     input_count: int = Field(0, description="Number of inputs")
     output_count: int = Field(0, description="Number of outputs")
-    total_input_value: Optional[int] = Field(None, description="Total input value in lovelace; NULL when input amounts are unresolved (UTxO cache not available)")
+    total_input_value: Optional[int] = Field(
+        None,
+        description=(
+            "Consumed value in lovelace resolved so far: regular inputs "
+            "(validated txs) or collateral inputs (failed txs), plus "
+            "reward-account withdrawals. NULL when nothing is resolved "
+            "and no withdrawal applies; a partial LOWER BOUND when only "
+            "some inputs (or only the withdrawal) resolved."
+        ),
+    )
+    withdrawal_total: int = Field(
+        0,
+        description=(
+            "Sum of the tx's reward-account withdrawals in lovelace, "
+            "stamped by the parser from the raw payload. Transient (no "
+            "ClickHouse column): the enrichment folds it into "
+            "total_input_value for validated txs."
+        ),
+    )
     total_output_value: int = Field(0, description="Total output value in lovelace")
     addresses: List[str] = Field(default_factory=list, description="All addresses involved")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Transaction metadata")
