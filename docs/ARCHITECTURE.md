@@ -97,6 +97,9 @@ backend/app/
 ├── net.py                   Network/address helpers (CIP-19 prefixes, bech32)
 ├── audit.py                 Structured audit-log writer (PostgreSQL audit_logs)
 ├── rate_limit.py            Sliding-window rate limiter middleware
+├── csrf.py                  CSRF double-submit middleware for cookie-authed mutating routes
+├── leader.py                PostgreSQL advisory-lock leader guard (single ingestion/analysis instance, standby promotion)
+├── logging_utils.py         Access-log redaction (strips magic-link tokens from uvicorn request lines)
 ├── auth/                    Authentication package
 │   ├── api_key.py           TMS-API-Key dependency (constant-time compare)
 │   ├── deps.py              require_user / require_admin session dependencies
@@ -123,10 +126,13 @@ backend/app/
 │   ├── archive_queries.py   Archive list/count/export queries
 │   └── raw_store.py         Data Lake: async gzip writes, atomic rename, read-back
 ├── api/
+│   ├── _params.py           Shared query-parameter declarations (the optional ?network selector)
 │   ├── transactions.py      GET /api/transactions/*
 │   ├── lifecycle.py         GET /api/lifecycle/*
 │   ├── analysis.py          GET /api/analysis/* (merges the contract_anomaly verdict + reconciles stats/timeseries when the clustering module is enabled)
+│   ├── contract_anomaly_read.py  Read-time projection of the sidecar's verdicts into results/stats/timeseries (no stored scores)
 │   ├── clustering.py        /api/clustering/* reverse-proxy to the optional clustering sidecar (session-authed, host-fixed)
+│   ├── notifications_config.py   GET/PUT /api/notifications/config (Admin; channels, trigger matrix, recipients)
 │   ├── entities.py          GET/PUT /api/entities/*
 │   ├── archive.py           GET/POST/DELETE /api/archive/* (false-positive curation)
 │   ├── auth.py              POST/GET /api/auth/* (magic-link login, session, /me)
@@ -155,8 +161,20 @@ backend/app/
 │       ├── circular.py      Class 7: Circular Transfers (wash trading / layering)
 │       ├── fake_token.py    Class 8: Fake Token Distribution (homoglyph impersonation)
 │       └── phishing.py      Class 9: Phishing via Metadata (malicious URLs / social engineering)
+├── notifications/           Alerting package: band/class-triggered alerts + periodic reports
+│   ├── config.py            Loader + validator for the notification config document
+│   ├── triggers.py          resolve_dispatch: which channels/recipients fire for one alert
+│   ├── dispatcher.py        Isolated fan-out to channels (timeouts, bounded concurrency)
+│   ├── payloads.py          ImmediateAlert / PeriodicReport payload models
+│   ├── reports.py           Periodic-report assembly from windowed stats
+│   ├── registry.py          Channel registry (the hot-swap point for new channels)
+│   └── channels/            NotificationChannel implementations (email, webhook)
 ├── tasks/
-│   └── analysis.py          Background task: runs engine on interval
+│   ├── analysis.py          Background task: runs engine on interval
+│   ├── housekeeping.py      Always-on maintenance loop (DROPPED sweep, retention + auth purges), independent of scoring
+│   └── notifications.py     Periodic-report scheduler + clustering contract_anomaly poller
+├── utils/
+│   └── datetime_utils.py    Naive-UTC ClickHouse datetime helpers shared across the API layer
 └── routers/
     ├── websocket.py         WS /ws: lifecycle event broadcast
     └── ui.py                GET /: operator dashboard (HTML)

@@ -7,7 +7,7 @@ assembling a 9-element score vector per transaction.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 @dataclass
@@ -64,6 +64,30 @@ class ScorerResult:
             baseline_source=baseline_source,
             evidence=evidence or {},
         )
+
+
+# rapidfuzz library contract: ``fuzz.ratio`` returns a percentage in [0, 100].
+# Scorers divide by this to bring similarity onto the [0, 1] scale the
+# normalisation layer and weights expect.
+FUZZ_RATIO_SCALE = 100.0
+
+
+def reduce_to_best(results: Iterable[ScorerResult]) -> ScorerResult:
+    """Max-reduction across per-candidate results (typically per-UTxO).
+
+    The transaction-level verdict is the single highest-scoring candidate:
+    per-UTxO scorers score every qualifying output, and recall-first means
+    the worst output wins; a benign sibling output can never dilute it.
+    Strictly-greater comparison keeps the first of equal-scoring candidates,
+    matching the loops this replaces. When nothing qualified (or nothing
+    scored above zero) the empty default (score 0, baseline "missing") is
+    returned unchanged.
+    """
+    best = ScorerResult()
+    for result in results:
+        if result.score > best.score:
+            best = result
+    return best
 
 
 def finalise_score(raw: float, scale: int = 100, ndigits: int = 2) -> float:

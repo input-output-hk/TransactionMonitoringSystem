@@ -17,13 +17,14 @@
  *    Detail page composes its "reason" + free notes into this one string.
  *  - Bulk import is **skip-existing**: existing rows are never overwritten
  *    (response shape has `inserted`/`skipped`, no `updated`).
- *  - Export CSV is **server-side**: callers get a URL via {@link ArchiveApi.exportUrl}
- *    and let the browser download it — there's no client paginated fetch.
+ *  - Export CSV is **server-side**: callers fetch it via {@link ArchiveApi.download}
+ *    and hand the Blob to a programmatic anchor click — there's no client
+ *    paginated fetch.
  */
 import { archiveApiClient } from "./archive.client";
 import { archiveApiMock } from "./archive.mock";
 
-import type { Severity } from "@/mocks/attacks";
+import type { Severity } from "@/lib/attacks";
 
 /* ---------- Wire format ---------- */
 
@@ -121,10 +122,12 @@ export interface ArchiveApi {
 	 * Download the CSV for the current params and return it as a Blob plus
 	 * the suggested filename (parsed from the server's Content-Disposition).
 	 *
-	 * MUST go through `fetchWithAuth` so the `TMS-API-Key` header is sent —
-	 * a plain `<a download href>` would issue a header-less GET and 403
-	 * against a backend with `API_KEYS` configured. The page wires this
-	 * blob to a programmatic anchor click to trigger the browser download.
+	 * Goes through `fetchWithAuth` (session cookie) rather than a plain
+	 * `<a download href>` so an expired session surfaces as a typed 401
+	 * (UnauthorizedError → login redirect) instead of a silently failed
+	 * navigation, and so the server's Content-Disposition filename can be
+	 * parsed. The page wires this blob to a programmatic anchor click to
+	 * trigger the browser download.
 	 */
 	download(params: ArchiveExportParams): Promise<{
 		blob: Blob;

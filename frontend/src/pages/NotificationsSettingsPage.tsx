@@ -202,7 +202,7 @@ export function NotificationsSettingsPage() {
 	const save = useMutation({
 		mutationFn: (c: NotificationConfig) => updateNotificationConfig(c),
 		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: QK });
+			void qc.invalidateQueries({ queryKey: QK });
 			toast.success("Notification settings saved");
 		},
 		onError: (e) => toast.error(e instanceof Error ? e.message : "Save failed"),
@@ -416,6 +416,7 @@ export function NotificationsSettingsPage() {
 												<input
 													type="checkbox"
 													className="border-border h-4 w-4 rounded-sm border"
+													aria-label={`Send ${bandLabel(band)} alerts via ${c}`}
 													checked={chans.includes(c)}
 													onChange={() =>
 														patch((d) => {

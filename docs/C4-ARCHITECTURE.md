@@ -116,6 +116,12 @@ C4Component
         Component(raw_store, "Raw Store Adapter", "gzip + ThreadPoolExecutor", "Data Lake. Async atomic writes of gzip JSON blobs to local filesystem (confirmed/ and mempool/ prefixes). Upgrade path: swap for boto3 S3 calls.")
 
         Component(config, "Config", "Pydantic Settings", "Loads .env, validates settings, provides typed access.")
+
+        Component(notifications, "Notifications Module", "Python package (app/notifications)", "Band/class-triggered alerting: trigger-rule resolution (triggers.py), isolated channel fan-out (dispatcher.py), email + signed-webhook channels, periodic reports (reports.py). Config document managed via the Notifications Config API.")
+
+        Component(notifications_api, "Notifications Config API", "FastAPI Router", "GET/PUT /api/notifications/config. Admin-gated management of channels, the band x attack-class trigger matrix, and recipient lists.")
+
+        Component(notifications_task, "Notification Tasks", "asyncio background task", "Periodic-report scheduler and the clustering contract_anomaly poller (tasks/notifications.py).")
     }
 
     System_Ext(ogmios, "Ogmios v6")
@@ -146,6 +152,14 @@ C4Component
     Rel(mempool_monitor, ws_router, "Broadcast TX_PENDING")
 
     Rel(analysis_engine, ch_adapter, "Read unscored txs, write results")
+    Rel(analysis_engine, notifications, "on_new_scores: dispatch immediate alerts")
+
+    Rel(lifespan, notifications_task, "Starts")
+    Rel(notifications_task, notifications, "Assemble + dispatch periodic reports")
+    Rel(notifications, mail, "Alert / report emails", "SMTP")
+
+    Rel(notifications_api, auth, "require_admin session")
+    Rel(notifications_api, notifications, "Load/save the notification config document")
 
     Rel(tx_api, auth, "Validate API key")
     Rel(tx_api, rate_limiter, "Check rate limit")

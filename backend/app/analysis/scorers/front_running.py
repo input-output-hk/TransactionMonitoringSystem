@@ -44,6 +44,8 @@ _OUTCOME_SCORES: Dict[str, float] = {
 _UNKNOWN_OUTCOME_SCORE = float(_CFG["unknown_outcome_score"])
 _REASON_T = _CFG["reason_thresholds"]
 _MIN_RECURRENCE_WINS = int(_CFG["min_recurrence_wins"])
+# Band contract (cap must sit inside the High band) is enforced at config
+# load: scorer_config._BAND_INVARIANTS.
 _HIGH_BAND_CAP = float(_CFG["high_band_cap"])
 _DELTA_MS_DEFAULT = float(_CFG["delta_ms_default"])
 

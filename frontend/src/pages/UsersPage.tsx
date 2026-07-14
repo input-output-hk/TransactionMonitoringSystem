@@ -79,7 +79,7 @@ export function UsersPage() {
 	const removeMutation = useMutation({
 		mutationFn: (id: string) => deleteUser(id),
 		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+			void qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
 			toast.success("User removed");
 		},
 		onError: (err) =>
@@ -266,7 +266,7 @@ function AddUserFlow({
 				role: draft.role,
 			}),
 		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+			void qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
 			setStep("sent");
 		},
 		onError: (err) =>

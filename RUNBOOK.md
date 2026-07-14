@@ -44,8 +44,8 @@ cp .env.example .env
 
 Config is layered:
 
-- `.env` — shared across every network (DB ports, log level, API keys).
-- `.env.preprod`, `.env.preview`, `.env.<name>` — per-network overrides. Each one sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT` for that network.
+- `.env`: shared across every network (DB ports, log level, API keys).
+- `.env.preprod`, `.env.preview`, `.env.<name>`: per-network overrides. Each one sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT` for that network.
 
 Edit `.env` for anything shared, and create a per-network file for each Cardano network you want to point at:
 
@@ -69,7 +69,7 @@ If you want API key authentication, set `API_KEYS` in `.env`:
 API_KEYS=your-key-1,your-key-2
 ```
 
-For open-API local testing, leave `API_KEYS` empty **and** export `TMS_ALLOW_DEV_MODE=1`. The app refuses to start with empty keys and no dev-mode flag — this guard prevents an accidental production deploy from silently running unauthenticated.
+For open-API local testing, leave `API_KEYS` empty **and** export `TMS_ALLOW_DEV_MODE=1`. The app refuses to start with empty keys and no dev-mode flag; this guard prevents an accidental production deploy from silently running unauthenticated.
 
 
 ## Starting the system
@@ -262,8 +262,8 @@ python run.py                     # preprod (default)
 
 Variables are layered across files:
 
-- `.env` — shared across all networks.
-- `.env.<TMS_ENV>` (e.g. `.env.preprod`, `.env.preview`) — per-network overrides; applied on top of `.env`. Defaults to `.env.preprod` when `TMS_ENV` is unset.
+- `.env`: shared across all networks.
+- `.env.<TMS_ENV>` (e.g. `.env.preprod`, `.env.preview`): per-network overrides; applied on top of `.env`. Defaults to `.env.preprod` when `TMS_ENV` is unset.
 - Shell environment variables override both files.
 
 | Variable | Default | Description |
@@ -300,7 +300,7 @@ Variables are layered across files:
 | `BASELINE_MIN_SAMPLES` | `200` | Minimum samples before per-entity baseline is valid |
 | `SMTP_ENABLED` | `true` | Send magic-link emails over SMTP; `false` logs the link instead |
 | `SMTP_HOST` / `SMTP_PORT` | `mailpit` / `1025` (compose) | SMTP relay. The compose default is the bundled Mailpit catch-all, see "Magic-link email in production" below |
-| `SMTP_FROM_EMAIL` | `noreply@example.com` | Sender address. Not validated, but avoid `.local`/`.test` idioms: user addresses with special-use domains are rejected everywhere |
+| `SMTP_FROM_EMAIL` | `noreply@tms.local` | Sender address (code default; `.env.example` ships `noreply@example.com`). Not validated, but set a real domain in production: special-use domains like `.local`/`.test` are rejected by many receivers |
 | `APP_BASE_URL` | `http://localhost:8000` | Base URL baked into emailed magic links. Must be the public dashboard URL in production or links will not resolve |
 | `MAGIC_LINK_TTL_MINUTES` | `15` | Magic-link token lifetime |
 | `MAGIC_LINK_PER_EMAIL_LIMIT` | `5` | Link requests per address per window (silent throttle, always on) |
@@ -338,6 +338,44 @@ For production deployments:
 1. Point `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (plus `SMTP_USE_TLS` or `SMTP_USE_STARTTLS`) at the customer's SMTP provider.
 2. Set `APP_BASE_URL` to the public dashboard URL so emailed links resolve.
 3. Stop the Mailpit container once the stack is up: `docker compose stop mailpit`. The app only requires it at startup ordering time; SMTP failures at runtime are tolerated (logged, silent 200 to the caller).
+
+### Webhook notifications: payload and signature verification
+
+The webhook channel POSTs each notification as JSON. The body is the payload record verbatim, discriminated by `notification_type`. An `immediate_alert` (one high-risk transaction, sent as it is scored):
+
+```json
+{
+  "notification_type": "immediate_alert",
+  "timestamp": "2026-07-14T09:15:02+00:00",
+  "attack_class": "token_dust",
+  "risk_score": 91.0,
+  "risk_band": "Critical",
+  "tx_hash": "3f2a...",
+  "network": "preprod",
+  "contributing_features": {"unique_assetclass_count": 0.97, "value_cbor_bytes": 0.88},
+  "baseline_source": "per_script",
+  "dashboard_url": "https://<your-dashboard>/attacks/3f2a..."
+}
+```
+
+A `periodic_report` (scheduled digest) carries `report_window` (`{"from", "to"}` ISO timestamps), a `summary` block (`total_transactions_scored`, `alerts_by_band`, `alerts_by_class`, `false_positives_archived`), a `top_alerts` list, and `dashboard_url`.
+
+Delivery semantics: transient failures (5xx, network) are retried a bounded number of times; a 4xx is treated as permanent and not retried. Answer with any 2xx quickly, then process asynchronously.
+
+When a signing secret is configured (`WEBHOOK_SIGNING_SECRET`), every request carries an `X-TMS-Signature: sha256=<hexdigest>` header, the HMAC-SHA256 of the exact raw request body. Verify it before trusting the payload:
+
+```python
+import hashlib, hmac
+
+def verify(secret: str, raw_body: bytes, header: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    # compare_digest, not ==, to avoid a timing oracle
+    return hmac.compare_digest(expected, header)
+```
+
+Sign-then-verify works on the raw bytes: do not re-serialize the JSON before verifying, or key ordering and whitespace differences will produce a different digest. `backend/scripts/webhook_testing/` ships a reference receiver implementing exactly this check.
+
+Egress guard: targets that resolve to loopback, private, link-local, or cloud-metadata addresses are refused at config time and re-checked at send time. Set `WEBHOOK_ALLOW_INTERNAL=true` only for local development against a receiver on your own machine.
 
 ### First admin: user bootstrap
 

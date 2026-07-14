@@ -27,7 +27,12 @@ from app.analysis.scorer_config import (
     anchor as _anchor,
     resolved_or_bootstrap as _resolve,
 )
-from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
+from app.analysis.scorers.base import (
+    BaseScorer,
+    FUZZ_RATIO_SCALE,
+    ScorerResult,
+    finalise_score,
+)
 from app.analysis import external
 from app.analysis.features import decode_hex_asset_name as _decode_hex_asset_name
 
@@ -134,8 +139,8 @@ _ASCII_CONFUSABLES_LC = str.maketrans({
 })
 
 
-def _normalize_token_name(name: str) -> str:
-    """NFKC normalize, strip zero-width characters, and fold visual
+def _normalise_token_name(name: str) -> str:
+    """NFKC normalise, strip zero-width characters, and fold visual
     confusables to Latin equivalents.
 
     The confusables fold runs AFTER NFKC because NFKC may decompose
@@ -158,8 +163,8 @@ def _ascii_fold_increases_similarity(name: str, legit_name: str) -> bool:
     axis: presence of a lookalike glyph alone is not evidence, the glyph
     standing in for the legitimate name's letter is.
     """
-    n1 = _normalize_token_name(name).lower()
-    n2 = _normalize_token_name(legit_name).lower()
+    n1 = _normalise_token_name(name).lower()
+    n2 = _normalise_token_name(legit_name).lower()
     if not n1 or not n2:
         return False
     sim_without = fuzz.ratio(n1, n2)
@@ -170,21 +175,21 @@ def _ascii_fold_increases_similarity(name: str, legit_name: str) -> bool:
 
 
 def _compute_tokenname_similarity(name: str, legit_name: str) -> float:
-    """Levenshtein similarity after Unicode normalization.
+    """Levenshtein similarity after Unicode normalisation.
 
     With the ASCII fold enabled, both sides additionally collapse the
     O/0 and I/l/1 lookalike groups so digit-for-letter forgeries match
     the legitimate name at full similarity (recall); both sides fold
     identically, so legitimately numeric names gain nothing.
     """
-    n1 = _normalize_token_name(name).lower()
-    n2 = _normalize_token_name(legit_name).lower()
+    n1 = _normalise_token_name(name).lower()
+    n2 = _normalise_token_name(legit_name).lower()
     if not n1 or not n2:
         return 0.0
     if _ASCII_HOMOGLYPHS_ENABLED:
         n1 = n1.translate(_ASCII_CONFUSABLES_LC)
         n2 = n2.translate(_ASCII_CONFUSABLES_LC)
-    return fuzz.ratio(n1, n2) / 100.0
+    return fuzz.ratio(n1, n2) / FUZZ_RATIO_SCALE
 
 
 def _compute_unicode_suspicion(name: str) -> float:
@@ -209,7 +214,7 @@ def _compute_unicode_suspicion(name: str) -> float:
         score += float(_UNI_SCORES["mixed_scripts"])
 
     # Homoglyph detection. Single source of truth is the keys of
-    # _CONFUSABLES (the same table used by _normalize_token_name to fold
+    # _CONFUSABLES (the same table used by _normalise_token_name to fold
     # confusables before similarity comparison), so the gate and this
     # sub-score cannot drift. Any non-Latin character that has a Latin
     # confusable in the table contributes the configured homoglyph
@@ -242,7 +247,7 @@ def _compute_cip25_similarity(
     max_sim = 0.0
     legit_lower = legit_name.lower()
     for part in text_parts:
-        sim = fuzz.ratio(part.lower(), legit_lower) / 100.0
+        sim = fuzz.ratio(part.lower(), legit_lower) / FUZZ_RATIO_SCALE
         max_sim = max(max_sim, sim)
 
     return max_sim

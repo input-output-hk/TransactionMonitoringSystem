@@ -108,7 +108,24 @@ def _minimal_config():
                 for name in sc._SCORER_FIXED_ANCHOR_NAMES[scorer]
             }
         cfg["scorers"][scorer] = section
+    # Band-constrained values (caps/floors that must land in a specific band)
+    # are pinned to each invariant's inclusive lower bound, driven by the
+    # loader's own _BAND_INVARIANTS table so the fixture stays valid by
+    # construction when a new invariant row is added.
+    for dotted, lower, _upper, _why in sc._BAND_INVARIANTS:
+        _set_dotted(cfg, dotted, lower)
     return cfg
+
+
+def _set_dotted(cfg, dotted, value):
+    """Set a dotted path in nested dicts, creating intermediate mappings."""
+    cur = cfg
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        if not isinstance(cur.get(part), dict):
+            cur[part] = {}
+        cur = cur[part]
+    cur[parts[-1]] = value
 
 
 class TestLoader:
@@ -189,6 +206,28 @@ class TestValidation:
         del cfg["contract_anomaly"]["verdict_floors"]["malicious"]
         with pytest.raises(
             RuntimeError, match=r"contract_anomaly\.verdict_floors\.malicious",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_band_invariant_violation_raises(self, tmp_path, monkeypatch):
+        # A cap that escapes its band contract must fail at load, not surface
+        # as a silently wrong band at scoring time. Exercises the centralized
+        # _BAND_INVARIANTS check that replaced the per-scorer import guards.
+        cfg = _minimal_config()
+        cfg["scorers"]["front_running"]["high_band_cap"] = 10.0
+        with pytest.raises(
+            RuntimeError, match=r"high_band_cap.*violates its band contract",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_band_floor_below_threshold_raises(self, tmp_path, monkeypatch):
+        # Same contract for floors: a malicious verdict floor below the
+        # Critical threshold would demote curated-malicious verdicts.
+        cfg = _minimal_config()
+        cfg["contract_anomaly"]["verdict_floors"]["malicious"] = 50.0
+        with pytest.raises(
+            RuntimeError,
+            match=r"verdict_floors\.malicious.*violates its band contract",
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 

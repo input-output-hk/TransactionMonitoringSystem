@@ -11,6 +11,7 @@ import statistics
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
+from app.analysis.features import LOVELACE_PER_ADA
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
 from app.db import clickhouse
@@ -329,7 +330,7 @@ def _build_cycle_result(
         entropy = 0.0
 
     # Round amount flag: origin amount is a round number (divisible by 1 ADA)
-    round_amount_flag = origin_amount > 0 and origin_amount % 1_000_000 == 0
+    round_amount_flag = origin_amount > 0 and origin_amount % LOVELACE_PER_ADA == 0
 
     # Temporal concentration: fraction of hops within a tight slot window
     if len(hop_slots) >= 2:

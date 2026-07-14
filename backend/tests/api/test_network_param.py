@@ -30,7 +30,7 @@ def _dev_mode_auth(monkeypatch):
     for unauthenticated callers), so exercising the 422 contract requires
     passing auth first; dev mode is how the suite does that regardless of
     the local .env's API_KEYS. The auth-before-validation ordering itself
-    is locked in by test_unauthenticated_gets_403_before_validation.
+    is locked in by test_unauthenticated_gets_401_before_validation.
     """
     from app.auth import api_key
     monkeypatch.setattr(api_key, "_dev_mode", True)
@@ -73,11 +73,11 @@ def test_omitted_network_accepted(client, endpoint):
     assert r.status_code != 422
 
 
-def test_unauthenticated_gets_403_before_validation(client, monkeypatch):
+def test_unauthenticated_gets_401_before_validation(client, monkeypatch):
     """Auth runs before query validation: an unauthenticated caller learns
-    nothing about parameter shapes (403, not 422)."""
+    nothing about parameter shapes (401, not 422)."""
     from app.auth import api_key
     monkeypatch.setattr(api_key, "_dev_mode", False)
     monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
     r = client.get("/api/analysis/results?network=testnet")
-    assert r.status_code == 403
+    assert r.status_code == 401

@@ -186,6 +186,18 @@ First-admin bootstrap is done from the CLI, not the API: `python -m app.cli crea
 | GET | `/api/archive/{tx_hash}` | Single archive entry |
 | DELETE | `/api/archive/{tx_hash}` | Restore (un-archive) an entry |
 
+### Notifications config
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/notifications/config` | Current notification config (channels, band x attack-class trigger matrix, recipients, periodic report); Admin session required |
+| PUT | `/api/notifications/config` | Replace the notification config; validated, applied without restart, audit-logged |
+
+### Clustering (optional sidecar proxy)
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/clustering/{path}` | Same-origin reverse proxy to the clustering sidecar's read API (contracts, clusters, runs); active only when `CLUSTERING_ENABLED=true` |
+| POST/PATCH/DELETE | `/api/clustering/{path}` | Proxied sidecar mutations (watch a contract, label, tune); requires an Admin session or API key (Reviewer sessions rejected) and is audit-logged |
+
 ### Other
 | Method | Path | Description |
 |---|---|---|

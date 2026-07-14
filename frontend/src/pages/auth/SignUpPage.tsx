@@ -33,7 +33,7 @@ export function SignUpPage() {
 			await requestLink(email.trim());
 			// Pass the email forward so the next page can offer "resend" and
 			// echo the address back to the user.
-			navigate("/verify-email", { state: { email: email.trim() } });
+			void navigate("/verify-email", { state: { email: email.trim() } });
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Unable to send link.");
 		} finally {
@@ -48,7 +48,7 @@ export function SignUpPage() {
 					TMS
 				</h1>
 
-				<form onSubmit={onSubmit} className="flex flex-col gap-5">
+				<form onSubmit={(e) => void onSubmit(e)} className="flex flex-col gap-5">
 					<div className="flex flex-col gap-2">
 						<Label htmlFor="email">Email</Label>
 						<Input

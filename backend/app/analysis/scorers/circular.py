@@ -40,6 +40,8 @@ _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
 _CYCLE = _CFG["cycle"]
 _REASON_T = float(_CFG["reason_threshold"])
+# Band contract (cap must sit inside the Moderate band) is enforced at
+# config load: scorer_config._BAND_INVARIANTS.
 _MODERATE_CAP = float(_CFG["moderate_cap"])
 _STRUCTURAL_CORROBORATION_FLOOR = float(_CFG["structural_corroboration_floor"])
 

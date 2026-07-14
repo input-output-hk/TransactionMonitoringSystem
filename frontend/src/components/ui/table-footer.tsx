@@ -15,6 +15,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { PAGE_SIZE_OPTIONS } from "@/lib/constants";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 /** Hollow triangle pointing LEFT — first-page slot. */
@@ -64,8 +65,8 @@ function TriangleRightIcon({ className }: { className?: string }) {
 export type TableFooterProps = {
 	pageSize: number;
 	onPageSizeChange: (size: number) => void;
-	/** Picker values. Default `[10, 25, 50]`. */
-	pageSizeOptions?: number[];
+	/** Picker values. Defaults to the shared PAGE_SIZE_OPTIONS. */
+	pageSizeOptions?: readonly number[];
 	/** Middle content, e.g. `"Total Risk Alerts Shown: 10"`. */
 	centerLabel: React.ReactNode;
 	/** Zero-based current page index. */
@@ -77,7 +78,7 @@ export type TableFooterProps = {
 export function TableFooter({
 	pageSize,
 	onPageSizeChange,
-	pageSizeOptions = [10, 25, 50],
+	pageSizeOptions = PAGE_SIZE_OPTIONS,
 	centerLabel,
 	page,
 	pageCount,

@@ -87,9 +87,11 @@ export function ClusterGraph({ data, onNodeTap, className }: Props) {
 			maxZoom: 3,
 		});
 		cyRef.current = cy;
-		cy.on("tap", "node", (evt) => {
+		cy.on("tap", "node", (evt: cytoscape.EventObjectNode) => {
 			const n = evt.target;
-			onNodeTapRef.current?.(n.id(), n.data("cluster"));
+			// data() is untyped (any) in cytoscape's defs; `cluster` is set as a
+			// number in the elements memo above.
+			onNodeTapRef.current?.(n.id(), n.data("cluster") as number);
 		});
 		return () => {
 			cy.destroy();
