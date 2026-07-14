@@ -61,6 +61,21 @@ describe("deriveModules", () => {
 		},
 	);
 
+	it("survives a payload without ogmios (standby instance) instead of crashing", () => {
+		// A non-leader standby never starts the ogmios client, so the backend
+		// omits the whole block; the ingestion modules render offline there.
+		const noOgmios = { ...healthFixture(), ogmios: undefined };
+		const modules = deriveModules(noOgmios);
+		expect(modules.map((m) => m.name)).toEqual([
+			"Pipeline",
+			"Chain Sync",
+			"Mempool Monitor",
+			"Breakers",
+		]);
+		expect(modules.find((m) => m.name === "Chain Sync")?.online).toBe(false);
+		expect(modules.find((m) => m.name === "Breakers")?.online).toBe(false);
+	});
+
 	it("shows Clustering offline when enabled but the payload is missing", () => {
 		// clustering_enabled without a clustering block means the host could
 		// not reach the sidecar at all; that must read as offline, not as

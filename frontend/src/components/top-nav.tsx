@@ -297,8 +297,10 @@ export function TopNav() {
 										disabled
 										className="text-muted-foreground gap-3 text-[11px]"
 									>
-										Network: {health.network} · Lag{" "}
-										{health.ogmios.sync_lag_seconds}s
+										Network: {health.network}
+										{health.ogmios && (
+											<> · Lag {health.ogmios.sync_lag_seconds}s</>
+										)}
 									</DropdownMenuItem>
 								</>
 							)}
