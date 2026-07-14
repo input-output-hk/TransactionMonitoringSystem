@@ -70,7 +70,6 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.analysis.normalise import (
-    BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
     BAND_MODERATE_THRESHOLD,
     EPSILON,
@@ -184,17 +183,8 @@ _SUPP_ESCAPE = _CFG["suppression_escape"]
 _SUPP_ESCAPE_ENABLED: bool = bool(_SUPP_ESCAPE["enabled"])
 _SUPP_ESCAPE_FLOOR_MIN: float = float(_SUPP_ESCAPE["extraction_floor_min"])
 
-# The floor's purpose is to guarantee the band lands at High; if config
-# drifts below the High threshold the docstring's promise breaks. Fail
-# loud at import. Use an explicit raise rather than ``assert`` so the
-# check survives ``python -O`` / ``PYTHONOPTIMIZE``.
-if _LAZY_VALIDATOR_FLOOR < BAND_HIGH_THRESHOLD:
-    raise RuntimeError(
-        f"multiple_sat.lazy_validator_floor={_LAZY_VALIDATOR_FLOOR} is below "
-        f"normalise.BAND_HIGH_THRESHOLD={BAND_HIGH_THRESHOLD}; floor would not "
-        f"reach the High band. Either raise the floor in detection.yaml or "
-        f"adjust the band threshold in normalise.py."
-    )
+# The floor's band contract (must reach High) is enforced at config load:
+# scorer_config._BAND_INVARIANTS.
 
 
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
