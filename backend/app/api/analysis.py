@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
+from app.api._params import NetworkParam
 from app.analysis.engine import _CLASS_NAMES
 from app.api.contract_anomaly_read import (
     _CONTRACT_ANOMALY,
@@ -20,7 +21,7 @@ from app.api.contract_anomaly_read import (
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import archive_queries, clickhouse, clustering_queries
-from app.models.transaction import ClassScoreResult, NetworkType, RiskBand
+from app.models.transaction import ClassScoreResult, RiskBand
 from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ _VALID_ATTACK_CLASSES = (*_CLASS_NAMES, _CONTRACT_ANOMALY)
 @router.get("/results/{tx_hash}", dependencies=[Security(verify_api_key)])
 async def get_analysis_result(
     tx_hash: str,
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
 ) -> ClassScoreResult:
     """Full 9-class score vector with sub-score drill-down for a single transaction.
 
@@ -90,7 +91,7 @@ async def get_analysis_result(
 
 @router.get("/results", dependencies=[Security(verify_api_key)])
 async def list_analysis_results(
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
     risk_band: List[RiskBand] = Query(
         default_factory=list,
         description=(
@@ -211,7 +212,7 @@ async def list_analysis_results(
 
 @router.get("/stats", dependencies=[Security(verify_api_key)])
 async def analysis_stats(
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
 ):
     """Per-class score distributions, band counts, and aggregate stats."""
     query_network = network or settings.CARDANO_NETWORK
@@ -233,7 +234,7 @@ async def analysis_stats(
 
 @router.get("/stats/timeseries", dependencies=[Security(verify_api_key)])
 async def analysis_stats_timeseries(
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
     days: int = Query(14, ge=1, le=90, description="Trailing window in days"),
 ):
     """Daily High+Critical alert counts over a trailing window, bucketed on
@@ -262,7 +263,7 @@ async def analysis_stats_timeseries(
 async def get_baselines(
     scope_type: str,
     scope_id: str,
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
 ):
     """Inspect baseline percentiles for a given scope (e.g. per_script, global)."""
     query_network = network or settings.CARDANO_NETWORK
