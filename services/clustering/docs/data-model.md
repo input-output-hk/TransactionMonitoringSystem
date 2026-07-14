@@ -73,7 +73,7 @@ time and surfaces them as the `contract_anomaly` attack class through
 
 | Table | Engine | ORDER BY | Purpose |
 |---|---|---|---|
-| `tx_contract_anomaly` | `ReplacingMergeTree(scored_at)` | `(network, tx_hash, target)` | Per-(watched-contract, transaction) anomaly verdict the host reads back as `contract_anomaly`. |
+| `tx_contract_anomaly` | `ReplacingMergeTree(published_at)` | `(network, tx_hash, target)` | Per-(watched-contract, transaction) anomaly verdict the host reads back as `contract_anomaly`. |
 
 Columns:
 
@@ -91,7 +91,8 @@ Columns:
 | `model_id` | `String` | The frozen `ShapeModel` that scored it. |
 | `feature_set` | `String` | `shape` \| `graph` \| `combined`. |
 | `evidence` | `String` (JSON, default `{}`) | Top deviating features, etc. |
-| `scored_at` | `DateTime` (default `now()`) | Version column for the `ReplacingMergeTree`. |
+| `scored_at` | `DateTime` (default `now()`) | SOURCE time: when the run/classify that produced the verdict happened. |
+| `published_at` | `DateTime64(6)` (default `now64(6)`) | RECONCILIATION version: the `ReplacingMergeTree` version column, stamped monotonically on every publish, relabel, clear, and delete. |
 
 `tx_contract_anomaly` notes:
 
@@ -103,8 +104,13 @@ Columns:
 - **Keyed by `(network, tx_hash, target)`** because one transaction can be touched
   by several watched contracts; the host read-merge collapses to the
   highest-severity verdict for a given tx.
-- `ReplacingMergeTree(scored_at)` keeps the latest verdict per key, so a
-  re-classification (after a re-cluster) supersedes the stale row on the next merge.
+- `ReplacingMergeTree(published_at)`, not `(scored_at)`, keeps the latest
+  *reconciliation* per key: versioning on `scored_at` would let an older
+  tombstone keep beating a re-published positive after a benign label is
+  cleared, hiding the re-raised alert until a future fit produced a newer
+  `scored_at` (see `clickhouse/init/009_contract_anomaly.sql`). A
+  re-classification (after a re-cluster) still supersedes the stale row on the
+  next merge.
 
 ### Manual verdict labels (`004_tx_labels.sql`)
 
