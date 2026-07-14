@@ -63,7 +63,12 @@ export default function Sparkline({
 							color: "var(--color-popover-foreground)",
 						}}
 						labelFormatter={(label) => fmtDay(String(label))}
-						formatter={(value) => [`${value}`, "alerts"]}
+						formatter={(value) => [
+							typeof value === "number"
+								? value.toLocaleString()
+								: String(value ?? ""),
+							"alerts",
+						]}
 					/>
 					<Area
 						type="monotone"

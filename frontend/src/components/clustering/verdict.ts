@@ -53,7 +53,7 @@ export function clusterColor(cluster: number): string {
 }
 
 export function nodeColor(cluster: number, verdict: Verdict): string {
-	if (VERDICT_COLOR[verdict]) return VERDICT_COLOR[verdict] as string;
+	if (VERDICT_COLOR[verdict]) return VERDICT_COLOR[verdict];
 	return clusterColor(cluster);
 }
 

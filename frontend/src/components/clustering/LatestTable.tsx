@@ -54,7 +54,7 @@ export function LatestTable({ target }: { target: string }) {
 		const j = job.data;
 		if (j && isTerminalJob(j.status) && handledJob.current !== j.job_id) {
 			handledJob.current = j.job_id;
-			qc.invalidateQueries({ queryKey: ["clustering"] });
+			void qc.invalidateQueries({ queryKey: ["clustering"] });
 		}
 	}, [job.data, qc]);
 
