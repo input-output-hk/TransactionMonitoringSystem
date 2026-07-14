@@ -61,7 +61,7 @@ def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
     if not redeemers:
         return False
     if isinstance(redeemers, dict):
-        # Ogmios v6 keys are "spend:N" / "mint:N" / "publish:N" / "withdraw:N".
+        # Ogmios v5 keys are "spend:N" / "mint:N" / "publish:N" / "withdraw:N".
         return any(str(k).startswith("spend") for k in redeemers.keys())
     if isinstance(redeemers, list):
         for r in redeemers:
@@ -614,7 +614,7 @@ def extract_tx_script_features(
                 exunits_mem += int(budget.get("memory", 0))
                 exunits_cpu += int(budget.get("cpu", budget.get("steps", 0)))
         elif isinstance(redeemers, dict):
-            # Ogmios v6 may use dict keyed by "spend:N", "mint:N", etc.
+            # Ogmios v5 uses a dict keyed by "spend:N", "mint:N", etc.
             redeemers_count = len(redeemers)
             for key, r in redeemers.items():
                 budget = r.get("executionUnits", r.get("budget", {}))

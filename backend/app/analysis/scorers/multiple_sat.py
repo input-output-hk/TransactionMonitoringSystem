@@ -320,7 +320,7 @@ def _compute_n_assets_out(
 
 
 def _total_exunits_cpu(raw_data: Dict) -> int:
-    """Sum CPU execution units across all redeemers (v5 list or v6 dict/list)."""
+    """Sum CPU execution units across all redeemers (v5 dict or v6 list)."""
     redeemers = raw_data.get("redeemers")
     if not redeemers:
         return 0
@@ -358,8 +358,9 @@ def _is_decoded_payment_credential(script_key: str) -> bool:
 def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
     """Return the list of spend-purpose redeemer payloads in the tx.
 
-    Both Ogmios v5 (list) and v6 (dict-or-list) shapes are handled. Entries
-    without a recognisable spend purpose are skipped, matching the way
+    Both Ogmios v5 (dict keyed by "purpose:index") and v6 (list with the
+    purpose on each entry) shapes are handled. Entries without a
+    recognisable spend purpose are skipped, matching the way
     multiple-satisfaction can only be evaluated against script spends.
     """
     redeemers = raw_data.get("redeemers")
@@ -367,13 +368,13 @@ def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
         return []
     payloads: List[str] = []
     if isinstance(redeemers, dict):
-        # Ogmios v6: the PURPOSE lives in the key ("spend:N" / "mint:N" / ...),
+        # Ogmios v5: the PURPOSE lives in the key ("spend:N" / "mint:N" / ...),
         # not in the value. The previous code looked for validator.purpose /
-        # purpose on the value, so on v6 every entry was skipped and this
-        # returned [] — silently disabling the uniform-sweep guard (it was
-        # active on v5) and zeroing the redeemer_count evidence. Reading by key
-        # restores v5/v6 parity; the spend-purpose detection mirrors
-        # features.has_spend_redeemer.
+        # purpose on the value, so for the keyed shape every entry was skipped
+        # and this returned [] — silently disabling the uniform-sweep guard
+        # (it was active on the list shape) and zeroing the redeemer_count
+        # evidence. Reading by key restores v5/v6 parity; the spend-purpose
+        # detection mirrors features.has_spend_redeemer.
         for key, r in redeemers.items():
             if not str(key).startswith("spend"):
                 continue
@@ -381,7 +382,8 @@ def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
             if isinstance(payload, str):
                 payloads.append(payload)
         return payloads
-    # Ogmios v5: a list of redeemer dicts carrying an explicit purpose.
+    # Ogmios v6 (live v6.14 shape): a list of redeemer dicts carrying an
+    # explicit purpose under "validator" (or, in older payloads, inline).
     for r in redeemers:
         if not isinstance(r, dict):
             continue
