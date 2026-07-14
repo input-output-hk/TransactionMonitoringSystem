@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .base import _RepoBase, _row_to_dict
-from .ingest import TX_CONTEXT_KEYS, TX_CONTEXT_SELECT
+from .ingest import TX_CONTEXT_KEYS, _tx_context_aliased
 
 # Columns for a persisted cluster model and a per-tx online classification
 # (``created_at``/``scored_at`` default to now64 on insert; newest wins).
@@ -120,23 +120,27 @@ class _ModelMixin(_RepoBase):
         ``online_cluster_id is None`` to mean "not online-scored" and layers batch
         membership on top. Batch-classified txs (no online row) come back with NULL online
         signals; the service still resolves their verdict from the cluster run."""
+        # `rlim`/`off` page the RESULT; the host-backed tx relation reserves
+        # `lim` for its window subquery, so the two never clobber each other.
+        params = self._tx_scope_params(target)
+        params.update({"f": feature_set, "rlim": limit, "off": offset})
         rows = self.client.query(
             f"""
             SELECT
                 toString(t.tx_hash) AS tx_hash,
-                {TX_CONTEXT_SELECT},
+                {_tx_context_aliased("t")},
                 c.cluster_id AS online_cluster_id,
                 c.votes AS online_votes
-            FROM (SELECT * FROM {self._db}.transactions FINAL WHERE target = {{t:String}}) t
+            FROM {self._tx_relation()} t
             LEFT JOIN (
                 SELECT tx_hash, cluster_id, votes FROM {self._db}.tx_classifications FINAL
-                WHERE target = {{t:String}} AND feature_set = {{f:String}}
+                WHERE target = {{tgt:String}} AND feature_set = {{f:String}}
             ) c ON t.tx_hash = c.tx_hash
             ORDER BY t.block_time DESC, t.tx_hash
-            LIMIT {{lim:UInt32}} OFFSET {{off:UInt32}}
+            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             SETTINGS join_use_nulls = 1
             """,
-            parameters={"t": target, "f": feature_set, "lim": limit, "off": offset},
+            parameters=params,
         ).result_rows
         keys = ["tx_hash", *TX_CONTEXT_KEYS, "online_cluster_id", "online_votes"]
         return self._rows_to_dicts(keys, rows)
@@ -162,7 +166,8 @@ class _ModelMixin(_RepoBase):
         the full per-target tables each call (O(history)); fine for the manual
         button, but the streaming phase should bound it with a scored-watermark
         (see docs/online-classification-design.md)."""
-        params: dict[str, Any] = {"t": target, "f": feature_set}
+        params = self._tx_scope_params(target)
+        params["f"] = feature_set
         model_clause = ""
         if model_id:
             model_clause = " AND model_id = {m:String}"
@@ -175,10 +180,9 @@ class _ModelMixin(_RepoBase):
             )
             params["r"] = run_id
         sql = (
-            f"SELECT toString(tx_hash) FROM {self._db}.transactions FINAL "
-            "WHERE target = {t:String} "
-            f"AND tx_hash NOT IN (SELECT tx_hash FROM {self._db}.tx_classifications FINAL "
-            "WHERE target = {t:String} AND feature_set = {f:String}" + model_clause + ")"
+            f"SELECT toString(tx_hash) FROM {self._tx_hashes_relation()} "
+            f"WHERE tx_hash NOT IN (SELECT tx_hash FROM {self._db}.tx_classifications FINAL "
+            "WHERE target = {tgt:String} AND feature_set = {f:String}" + model_clause + ")"
             f"{run_clause} ORDER BY tx_hash"
         )
         return [str(r[0]) for r in self.client.query(sql, parameters=params).result_rows]

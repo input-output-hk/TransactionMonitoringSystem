@@ -17,20 +17,12 @@ TX_COLUMNS = [f.name for f in fields(TxRecord)]
 UTXO_COLUMNS = [f.name for f in fields(UtxoRecord)]
 ASSET_COLUMNS = [f.name for f in fields(AssetRecord)]
 
-# The canonical transaction shape-context projection, shared by the tx-joined reads
-# that surface the full context (latest interactions, top anomalies). It assumes the
-# transactions subquery is aliased ``t`` (every such read uses that alias). Keep
-# ``TX_CONTEXT_SELECT`` and ``TX_CONTEXT_KEYS`` in lockstep — the select aliases ARE
-# the dict keys, in this order — so a column can't drift between the two callers.
-TX_CONTEXT_SELECT = (
-    "toString(t.block_time) AS block_time, t.fees AS fees, t.size AS size, "
-    "t.total_input_lovelace AS total_input_lovelace, "
-    "t.total_output_lovelace AS total_output_lovelace, "
-    "CAST(t.total_output_lovelace AS Int64) - CAST(t.total_input_lovelace AS Int64) "
-    "AS net_lovelace, "
-    "t.input_count AS input_count, t.output_count AS output_count, "
-    "t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count"
-)
+# The canonical transaction shape-context columns, shared by the tx-joined reads
+# that surface the full context (latest interactions, top anomalies). Those reads
+# join the ``_tx_relation`` derived table (see base.py), which already projects
+# every engine-named column including the derived ``net_lovelace``; the keys ARE
+# the result-dict keys, in this order, and ``_tx_context_aliased`` renders the
+# matching SELECT so a column can't drift between the projection and the mapping.
 TX_CONTEXT_KEYS = [
     "block_time",
     "fees",
@@ -43,6 +35,19 @@ TX_CONTEXT_KEYS = [
     "distinct_assets",
     "redeemer_count",
 ]
+
+
+def _tx_context_aliased(alias: str) -> str:
+    """The ``TX_CONTEXT_KEYS`` projection over an already-shaped derived table
+    (columns carry the engine names), aliased ``{alias}`` and with block_time
+    stringified so the mapped value is a plain string, not a driver datetime."""
+    parts = []
+    for k in TX_CONTEXT_KEYS:
+        if k == "block_time":
+            parts.append(f"toString({alias}.block_time) AS block_time")
+        else:
+            parts.append(f"{alias}.{k} AS {k}")
+    return ", ".join(parts)
 
 
 class _IngestMixin(_RepoBase):

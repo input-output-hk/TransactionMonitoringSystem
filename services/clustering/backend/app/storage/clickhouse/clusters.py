@@ -153,9 +153,12 @@ class _ClusterMixin(_RepoBase):
         return self._run_row_to_dict(rows[0]) if rows else None
 
     def cluster_summary(self, run_id: str, target: str) -> list[dict[str, Any]]:
-        # The count() alias is cluster_size, NOT size: transactions has a `size`
-        # source column, and ClickHouse 26.x rejects an aggregate alias that
-        # shadows a source column referenced by sibling aggregates (Code 184).
+        params = self._tx_scope_params(target)
+        params["r"] = run_id
+        # The count() alias is cluster_size, NOT size: the tx relation projects
+        # a `size` source column into the join input, and ClickHouse 26.x
+        # rejects an aggregate alias that shadows a source column referenced by
+        # sibling aggregates (Code 184).
         rows = self.client.query(
             f"""
             SELECT
@@ -170,15 +173,11 @@ class _ClusterMixin(_RepoBase):
                 SELECT tx_hash, cluster_id FROM {self._db}.cluster_labels FINAL
                 WHERE run_id = {{r:String}}
             ) l
-            INNER JOIN (
-                SELECT tx_hash, fees, total_output_lovelace, input_count,
-                       output_count, distinct_assets
-                FROM {self._db}.transactions FINAL WHERE target = {{t:String}}
-            ) t USING (tx_hash)
+            INNER JOIN {self._tx_relation()} t USING (tx_hash)
             GROUP BY cluster_id
             ORDER BY (cluster_id = -1), cluster_size DESC
             """,
-            parameters={"r": run_id, "t": target},
+            parameters=params,
         ).result_rows
         keys = [
             "cluster_id",
@@ -194,6 +193,10 @@ class _ClusterMixin(_RepoBase):
     def cluster_transactions(
         self, run_id: str, target: str, cluster_id: int, *, limit: int, offset: int
     ) -> list[dict[str, Any]]:
+        # `rlim`/`off` page the RESULT; the host-backed tx relation reserves
+        # `lim` for its window subquery, so the two never clobber each other.
+        params = self._tx_scope_params(target)
+        params.update({"r": run_id, "c": cluster_id, "rlim": limit, "off": offset})
         rows = self.client.query(
             f"""
             SELECT
@@ -209,19 +212,11 @@ class _ClusterMixin(_RepoBase):
                 SELECT tx_hash FROM {self._db}.cluster_labels FINAL
                 WHERE run_id = {{r:String}} AND cluster_id = {{c:Int32}}
             ) l
-            INNER JOIN (
-                SELECT * FROM {self._db}.transactions FINAL WHERE target = {{t:String}}
-            ) t USING (tx_hash)
+            INNER JOIN {self._tx_relation()} t USING (tx_hash)
             ORDER BY t.block_time DESC
-            LIMIT {{lim:UInt32}} OFFSET {{off:UInt32}}
+            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,
-            parameters={
-                "r": run_id,
-                "c": cluster_id,
-                "t": target,
-                "lim": limit,
-                "off": offset,
-            },
+            parameters=params,
         ).result_rows
         keys = [
             "tx_hash",
