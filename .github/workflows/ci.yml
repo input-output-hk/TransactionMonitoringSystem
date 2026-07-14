@@ -9,6 +9,11 @@ on:
   push:
     branches: [main]
 
+# Every job here only checks out code and runs tests, so the GITHUB_TOKEN
+# never needs more than read access (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

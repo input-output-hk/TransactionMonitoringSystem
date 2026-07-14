@@ -17,9 +17,11 @@ Receivers MUST compare with a constant-time function (e.g.
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -35,6 +37,41 @@ logger = logging.getLogger(__name__)
 
 # Header carrying the HMAC-SHA256 signature of the raw request body.
 _SIGNATURE_HEADER = "X-TMS-Signature"
+
+
+async def _resolves_internal(host: str) -> bool:
+    """True if ``host`` resolves (right now) to a loopback/private/link-local/
+    reserved address.
+
+    ``config.is_internal_webhook_target`` only catches an IP literal or
+    ``localhost`` at config-write time; this fresh lookup right before the
+    request leaves catches a domain re-pointed at an internal address after
+    the config was saved, and integer/encoded IP forms the static check
+    cannot parse. A lookup failure is not our call to make — return False
+    and let the connection attempt itself fail/succeed.
+
+    Residual risk (accepted): httpx re-resolves the hostname for the actual
+    connection, so an attacker running an ACTIVE rebinding server (TTL=0,
+    alternating answers) can pass this check and still connect internally.
+    Closing that window requires pinning the connection to the IP resolved
+    here (a custom httpx transport, with SNI/Host handling for TLS), which
+    is not worth the complexity for an admin-authored URL — the config is
+    written by operators, not end users; this check is defense-in-depth
+    against a compromised admin session or a stale config, not against a
+    hostile DNS authority.
+    """
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+            return True
+    return False
 
 
 class WebhookChannel(NotificationChannel):
@@ -55,6 +92,19 @@ class WebhookChannel(NotificationChannel):
         if not url:
             return NotificationResult(
                 self.name, ok=False, skipped=True, detail="no endpoint URL configured"
+            )
+
+        host = urlparse(url).hostname or ""
+        if host and not settings.WEBHOOK_ALLOW_INTERNAL and await _resolves_internal(host):
+            logger.warning(
+                "Webhook egress blocked: %r resolves to an internal/loopback/"
+                "link-local/reserved address; set WEBHOOK_ALLOW_INTERNAL=true "
+                "if this is an intentional internal receiver.",
+                host,
+            )
+            return NotificationResult(
+                self.name, ok=False,
+                detail="blocked: target resolves to an internal address",
             )
 
         # Serialize ourselves and POST the exact bytes we sign (not httpx's

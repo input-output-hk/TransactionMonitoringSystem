@@ -5,7 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
+from app.csrf import CSRFMiddleware
 
 from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
 from app.utils.datetime_utils import to_aware_utc
@@ -40,9 +41,10 @@ from app.rate_limit import (
     stop_all_cleanups,
 )
 from app.db import postgres, clickhouse, raw_store
-from app import notifications
+from app import notifications, leader
 from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
 from app.tasks import analysis as analysis_task
+from app.tasks import housekeeping as housekeeping_task
 from app.tasks import notifications as notifications_task
 from app.routers import ui, websocket
 
@@ -54,6 +56,13 @@ ogmios_client = None
 # (ingestion silently dies); keeping them here pins their lifetime and lets
 # shutdown await them. See lifespan().
 _ingestion_tasks: List[asyncio.Task] = []
+# The standby retry loop (app.leader guard), while this instance has not yet
+# become leader. None once promoted (or if it was never needed).
+_leader_standby_task: Optional[asyncio.Task] = None
+# Whether THIS process has started ingestion + the analysis engine — tracked
+# separately from leader.is_leader() so shutdown does the right thing whether
+# the guard is enabled or not (see _start_leader_duties / lifespan).
+_leader_duties_started = False
 
 
 async def _supervised(label: str, coro_fn):
@@ -187,10 +196,120 @@ def _validate_startup_settings() -> None:
             ) from exc
 
 
+async def _start_leader_duties() -> None:
+    """Start the analysis engine, housekeeping, notification schedulers, and
+    Ogmios ingestion — the leader-only work.
+
+    Ingestion and analysis advance state (the analysis poll watermark, the
+    chain-sync checkpoint) that exactly one live process may own; the
+    notification schedulers are here because the periodic-report path is
+    check-then-act with no atomic claim (get_report_state → dispatch →
+    mark_report_sent), so two live schedulers would double-send reports.
+    See app.leader.
+    """
+    global ogmios_client, _leader_duties_started
+
+    # Set FIRST, not last: if startup is cancelled or fails partway through
+    # (e.g. shutdown lands mid-promotion), _stop_leader_duties must still
+    # unwind whatever did start. Every stop below is idempotent, so stopping
+    # never-started duties is harmless; skipping started ones is not.
+    _leader_duties_started = True
+
+    if settings.ANALYSIS_ENGINE_ENABLED:
+        analysis_task.start()
+        logger.info(
+            f"Analysis Engine started "
+            f"(interval={settings.ANALYSIS_ENGINE_INTERVAL_SECONDS}s, "
+            f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
+        )
+    # Independent of ANALYSIS_ENGINE_ENABLED: disabling scoring must not also
+    # silently disable the stale-PENDING sweep, retention, and auth purge.
+    housekeeping_task.start()
+    logger.info("Housekeeping task started (interval=%ss)", settings.HOUSEKEEPING_INTERVAL_SECONDS)
+
+    # Periodic-report scheduler + contract_anomaly poller. Self-gates on the
+    # `periodic_report.enabled` flag each tick.
+    notifications_task.start()
+    logger.info("Notification schedulers started")
+
+    from app.ingestion.ogmios_client import OgmiosClient
+
+    ogmios_client = OgmiosClient(on_lifecycle_event=broadcast_lifecycle_event)
+    websocket.set_active_connections(active_connections)
+
+    _ingestion_tasks.clear()
+    _ingestion_tasks.append(
+        asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
+    )
+    _ingestion_tasks.append(
+        asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
+    )
+    logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
+
+
+async def _stop_leader_duties() -> None:
+    """Undo _start_leader_duties(). No-op if it was never called."""
+    global ogmios_client, _leader_duties_started
+    if not _leader_duties_started:
+        return
+    if settings.ANALYSIS_ENGINE_ENABLED:
+        analysis_task.stop()
+    housekeeping_task.stop()
+    notifications_task.stop()
+    if ogmios_client:
+        await ogmios_client.disconnect()
+    # disconnect() signals the supervised coroutines to return; cancel-then-
+    # gather so the tasks are actually awaited (not left dangling / GC'd) and a
+    # wedged one is force-stopped. return_exceptions keeps one failure from
+    # masking the others during shutdown.
+    for task in _ingestion_tasks:
+        task.cancel()
+    if _ingestion_tasks:
+        await asyncio.gather(*_ingestion_tasks, return_exceptions=True)
+        _ingestion_tasks.clear()
+    _leader_duties_started = False
+
+
+async def _standby_promote() -> None:
+    """Retry the leader lock until acquired, then start leader duties.
+
+    Runs only while this instance is a standby (lock held elsewhere at
+    startup). Cancelled on shutdown if it never gets promoted.
+
+    Never gives up on an error: a transient Postgres blip during a probe, or
+    a failed duty startup after winning the lock, must not leave the fleet
+    with a silent permanent standby (probe task dead) or a do-nothing leader
+    (lock held, duties not running). On a failed promotion the partial start
+    is unwound and the lock released so another instance can win it.
+    """
+    try:
+        while True:
+            await asyncio.sleep(settings.LEADER_LOCK_RETRY_SECONDS)
+            try:
+                if not await leader.try_acquire():
+                    continue
+            except Exception as e:
+                logger.warning("Leader-lock probe failed (%s); retrying", e)
+                continue
+            logger.info("Leader lock acquired — promoting from standby to leader")
+            try:
+                await _start_leader_duties()
+                return
+            except Exception:
+                logger.exception(
+                    "Promotion failed after acquiring the leader lock; "
+                    "unwinding and releasing so another instance can lead"
+                )
+                await _stop_leader_duties()
+                await leader.release()
+    except asyncio.CancelledError:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown"""
-    global ogmios_client
+    global ogmios_client, _leader_standby_task
 
     # Emit dev-mode warnings here so logging is already configured.
     _validate_startup_settings()
@@ -225,38 +344,28 @@ async def lifespan(app: FastAPI):
         # Notifications: load + validate the stored config at
         # boot (a malformed stored doc fails startup, not the first alert;
         # seeds safe defaults on a fresh DB), capture the event loop for the
-        # executor-thread hook, and build the channels.
+        # executor-thread hook, and build the channels. Runs on standbys too
+        # so a promotion needs no re-init; the SCHEDULERS (report + poller)
+        # are leader-only and start in _start_leader_duties.
         await notifications.load_config()
         notifications.set_main_loop(asyncio.get_running_loop())
         notifications.build_channels()
-        # Periodic-report scheduler. Self-gates on the `periodic_report.enabled`
-        # flag each tick.
-        notifications_task.start()
         logger.info("Notification module ready")
 
-        # Start Analysis Engine background task
-        if settings.ANALYSIS_ENGINE_ENABLED:
-            analysis_task.start()
-            logger.info(
-                f"Analysis Engine started "
-                f"(interval={settings.ANALYSIS_ENGINE_INTERVAL_SECONDS}s, "
-                f"batch={settings.ANALYSIS_ENGINE_BATCH_SIZE})"
-            )
-
-        # Start Ogmios ingestion
-        from app.ingestion.ogmios_client import OgmiosClient
-
-        ogmios_client = OgmiosClient(on_lifecycle_event=broadcast_lifecycle_event)
-        websocket.set_active_connections(active_connections)
-
-        _ingestion_tasks.clear()
-        _ingestion_tasks.append(
-            asyncio.create_task(_supervised("chain_sync", ogmios_client.run_chain_sync))
-        )
-        _ingestion_tasks.append(
-            asyncio.create_task(_supervised("mempool_monitor", ogmios_client.mempool.run))
-        )
-        logger.info(f"Ogmios client started for {settings.CARDANO_NETWORK} at {settings.OGMIOS_WS_URL}")
+        # Ingestion + analysis: leader-only (see app.leader). Disabled guard =
+        # legacy unconditional start (single-instance deploys, current default).
+        if settings.LEADER_LOCK_ENABLED:
+            if await leader.try_acquire():
+                await _start_leader_duties()
+            else:
+                logger.warning(
+                    "Leader lock held by another instance — standing by as a "
+                    "read-only replica (retrying every %ss)",
+                    settings.LEADER_LOCK_RETRY_SECONDS,
+                )
+                _leader_standby_task = asyncio.create_task(_standby_promote())
+        else:
+            await _start_leader_duties()
 
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
@@ -267,23 +376,14 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     stop_all_cleanups()
-    if settings.ANALYSIS_ENGINE_ENABLED:
-        analysis_task.stop()
-    notifications_task.stop()
-    # Stop scheduling new notification deliveries (the scoring loop is stopped
-    # above; in-flight dispatch tasks finish on their own).
+    if _leader_standby_task and not _leader_standby_task.done():
+        _leader_standby_task.cancel()
+        await asyncio.gather(_leader_standby_task, return_exceptions=True)
+    # Stop scheduling new notification deliveries (the schedulers stop inside
+    # _stop_leader_duties; in-flight dispatch tasks finish on their own).
     notifications.set_main_loop(None)
-    if ogmios_client:
-        await ogmios_client.disconnect()
-    # disconnect() signals the supervised coroutines to return; cancel-then-
-    # gather so the tasks are actually awaited (not left dangling / GC'd) and a
-    # wedged one is force-stopped. return_exceptions keeps one failure from
-    # masking the others during shutdown.
-    for task in _ingestion_tasks:
-        task.cancel()
-    if _ingestion_tasks:
-        await asyncio.gather(*_ingestion_tasks, return_exceptions=True)
-        _ingestion_tasks.clear()
+    await _stop_leader_duties()
+    await leader.release()
     await postgres.close_pool()
     clickhouse.close_client()
     clickhouse.shutdown_executor()
@@ -319,11 +419,12 @@ app = FastAPI(
 # so the last registered middleware is the outermost (executes first on request).
 #
 # Desired execution order (request → response):
-#   CORS → RateLimiter → Routes
+#   CORS → CSRF → RateLimiter → Routes
 #
-# This ensures CORS headers are present on ALL responses, including 429s.
+# This ensures CORS headers are present on ALL responses, including 429s and
+# 403s, and a CSRF-rejected request never consumes a rate-limit slot.
 
-# RateLimiter: registered first → innermost → executes second
+# RateLimiter: registered first → innermost → executes last (closest to routes)
 if settings.RATE_LIMIT_ENABLED:
     _limiter = RateLimiter(
         max_requests=settings.RATE_LIMIT_REQUESTS,
@@ -331,7 +432,11 @@ if settings.RATE_LIMIT_ENABLED:
     )
     app.add_middleware(RateLimitMiddleware, limiter=_limiter)
 
-# CORS: registered last → outermost → executes first, wraps rate limiter.
+# CSRF double-submit check: defense-in-depth on top of SameSite=Lax. See
+# app.csrf module docstring.
+app.add_middleware(CSRFMiddleware)
+
+# CORS: registered last → outermost → executes first, wraps everything below.
 # Origins are configurable (CORS_ALLOW_ORIGINS, comma-separated); the "*"
 # default keeps the demo SPA / local vite dev server working. Tighten to
 # the dashboard origin in production deployments.

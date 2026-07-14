@@ -213,6 +213,13 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
             raise RuntimeError(
                 f"{source}: {ref} must be an http(s) URL (got {url!r})."
             )
+        if url and is_internal_webhook_target(url) and not settings.WEBHOOK_ALLOW_INTERNAL:
+            raise RuntimeError(
+                f"{source}: {ref} points at a loopback/private/link-local "
+                f"address ({urlparse(url).hostname!r}) — refused as a likely "
+                "SSRF target. Set WEBHOOK_ALLOW_INTERNAL=true if this is an "
+                "intentional internal receiver."
+            )
 
     for name, spec in channels.items():
         if "recipients" in spec:
@@ -387,12 +394,30 @@ _PUBLIC_INSPECTOR_HOSTS = (
 )
 
 
+def is_internal_webhook_target(url: str) -> bool:
+    """True if ``url``'s host is a loopback/private/link-local/reserved IP
+    literal, or ``localhost`` — the static, DNS-free check usable at
+    config-validation time (no network I/O). A hostname that only RESOLVES to
+    an internal address (DNS rebinding) is NOT caught here; that is checked at
+    send time, right before the request leaves, in the webhook channel."""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a hostname, not an IP literal
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+
+
 def warn_if_webhook_egress_public() -> None:
     """Log a loud warning if the webhook channel is enabled and its default URL
     points somewhere risky — a public inspector (plaintext egress to a third
-    party) or an internal/metadata address (the server will call into its own
-    network). Called at startup + after each edit. Never blocks: an internal
-    webhook is a legitimate destination, the operator just gets told."""
+    party), or an internal/metadata address that was allowed in only because
+    ``WEBHOOK_ALLOW_INTERNAL`` is set (validation already refuses this target
+    otherwise). Called at startup + after each edit. Never blocks."""
     spec = channels_config().get("webhook") or {}
     if not spec.get("enabled"):
         return
@@ -405,19 +430,12 @@ def warn_if_webhook_egress_public() -> None:
             "egress in plaintext to a third party. Replace it before production.",
             url,
         )
-    host = (urlparse(raw).hostname or "").lower()
-    if host:
-        internal = host == "localhost"
-        try:
-            ip = ipaddress.ip_address(host)
-            internal = internal or ip.is_loopback or ip.is_private or ip.is_link_local
-        except ValueError:
-            pass  # a hostname, not an IP literal — only the localhost check applies
-        if internal:
-            logger.warning(
-                "Webhook channel is ENABLED with default_url pointing at an "
-                "internal/loopback/link-local address (%s) — the server will "
-                "issue requests inside its own network. Intended for an internal "
-                "receiver? Fine. Otherwise this is a potential SSRF target.",
-                host,
-            )
+    if raw and is_internal_webhook_target(raw):
+        logger.warning(
+            "Webhook channel is ENABLED with default_url pointing at an "
+            "internal/loopback/link-local address (%s), allowed in via "
+            "WEBHOOK_ALLOW_INTERNAL — the server will issue requests inside "
+            "its own network. Intended for an internal receiver? Fine. "
+            "Otherwise this is a potential SSRF target.",
+            urlparse(raw).hostname,
+        )
