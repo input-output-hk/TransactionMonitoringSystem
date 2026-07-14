@@ -53,9 +53,9 @@ async def _loop():
                 settings.CARDANO_NETWORK,
             )
             if count > 0:
-                logger.info(f"Baseline bootstrap: created {count} baseline rows")
+                logger.info("Baseline bootstrap: created %s baseline rows", count)
         except Exception as e:
-            logger.error(f"Baseline bootstrap failed (non-fatal): {e}")
+            logger.error("Baseline bootstrap failed (non-fatal): %s", e)
 
     while True:
         try:
@@ -74,7 +74,7 @@ async def _loop():
             if batches == 1 and processed == 0:
                 logger.debug("Analysis Engine: no new transactions to score")
         except Exception as e:
-            logger.error(f"Analysis Engine error: {e}")
+            logger.error("Analysis Engine error: %s", e)
 
         # Periodic token-registry refresh. The fetch never runs on the
         # scoring path (external.get_legitimate_tokens serves the cache,
@@ -90,9 +90,9 @@ async def _loop():
             try:
                 count = await asyncio.to_thread(external.refresh_token_registry)
                 _last_registry_refresh = time.time()
-                logger.info(f"Token registry refreshed: {count} names")
+                logger.info("Token registry refreshed: %s names", count)
             except Exception as e:
-                logger.error(f"Token registry refresh failed (serving cache/seeds): {e}")
+                logger.error("Token registry refresh failed (serving cache/seeds): %s", e)
                 # Back off a full interval on failure too; the scorer keeps
                 # serving the previous cache or the seed list meanwhile.
                 _last_registry_refresh = time.time()
@@ -110,9 +110,9 @@ async def _loop():
                 )
                 _last_baseline_recompute = time.time()
                 if total > 0:
-                    logger.info(f"Baseline recomputation: {total} rows updated")
+                    logger.info("Baseline recomputation: %s rows updated", total)
             except Exception as e:
-                logger.error(f"Baseline recomputation failed: {e}")
+                logger.error("Baseline recomputation failed: %s", e)
 
         await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
 
