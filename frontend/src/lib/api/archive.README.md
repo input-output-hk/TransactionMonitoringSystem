@@ -1,4 +1,4 @@
-# Archive API — frontend wiring
+# Archive API: frontend wiring
 
 Real backend implementation lives in `backend/app/api/archive.py` +
 `backend/app/db/archive_queries.py`. This frontend module is a typed client
@@ -6,14 +6,14 @@ against that contract, plus a localStorage mock shim for offline dev.
 
 ## Files
 
-- `archive.ts` — types, `ArchiveApi` interface, switch between real client
+- `archive.ts`: types, `ArchiveApi` interface, switch between real client
   and mock. Consumers always import `archiveApi` from here.
-- `archive.client.ts` — real HTTP client. Sends `TMS-API-Key` via
-  `fetchWithAuth` and the active network from `getNetwork()`.
-- `archive.mock.ts` — localStorage shim under `tms-archive-mock`. Mirrors
+- `archive.client.ts`: real HTTP client. Rides the magic-link session cookie
+  via `fetchWithAuth` and passes the active network from `getNetwork()`.
+- `archive.mock.ts`: localStorage shim under `tms-archive-mock`. Mirrors
   backend semantics: `(network, tx_hash)` identity, skip-existing bulk,
   `archived_by` from the request.
-- `fetch.ts` — shared `fetchWithAuth` + `getNetwork`.
+- `fetch.ts`: shared `fetchWithAuth` + `getNetwork`.
 
 ## Dev / prod switch
 
@@ -21,14 +21,20 @@ against that contract, plus a localStorage mock shim for offline dev.
 |---------|--------|
 | `VITE_USE_MOCK_ARCHIVE_API=true` | Opt-in to the localStorage mock in dev (offline work). Default: real backend. Ignored in production builds. |
 | `VITE_NETWORK=mainnet\|preprod\|preview` | Cardano network. Default: `preprod`. |
-| `VITE_TMS_API_KEY=…` | Sent as `TMS-API-Key` header on every request. Required against a backend with `API_KEYS` configured. Leave empty against dev-mode backends. |
 
 Production builds always use the real client regardless of the mock flag.
 
+Authentication note: the SPA authenticates with the HTTP-only session cookie
+(`tms_session`) that `fetchWithAuth` sends on every request; no API key is
+baked into the bundle. The backend's `verify_api_key` guard also accepts a
+`TMS-API-Key` header for server-to-server callers (CLI, integrations), but
+the frontend never sends one. Mutating requests additionally echo the CSRF
+double-submit cookie as a header (handled inside `fetchWithAuth`).
+
 ## Endpoint contract
 
-All routes are guarded by `verify_api_key` (`TMS-API-Key` header). Identity
-is the composite `(network, tx_hash)`.
+All routes are guarded by `verify_api_key` (session cookie or `TMS-API-Key`
+header). Identity is the composite `(network, tx_hash)`.
 
 ### `POST /api/archive`
 
@@ -50,7 +56,7 @@ expected to be rare.
 
 Returns `{ count, total, data: ArchiveEntry[] }`. Date range is **inclusive
 on both ends**. `data[i]` includes nullable joined fields (`max_score`,
-`max_class`, `risk_band`, `analyzed_at`) — null when the entry came from a
+`max_class`, `risk_band`, `analyzed_at`): null when the entry came from a
 CSV import for a tx this instance never observed.
 
 ### `POST /api/archive/bulk`
@@ -67,10 +73,11 @@ The frontend uses `source_label = "frontend-csv"` (constant).
 
 ### `GET /api/archive/export?network=&from=&to=`
 
-Streaming CSV download — server-side generation. The frontend just builds
-the URL via `archiveApi.exportUrl(...)` and either sets it on an
-`<a download>` or `window.location.href` to trigger the browser download.
-The output is a valid input to `POST /api/archive/bulk` on a peer instance.
+Streaming CSV download, generated server-side. The frontend fetches it
+through `archiveApi.download(...)` (a `fetchWithAuth` GET that returns the
+Blob plus the filename parsed from `Content-Disposition`) and triggers the
+browser download from a programmatic anchor click. The output is a valid
+input to `POST /api/archive/bulk` on a peer instance.
 
 CSV columns: `network, tx_hash, note, archived_by, archived_at, source`.
 
@@ -93,10 +100,13 @@ CREATE TABLE archived_alerts (
   note         String,
   archived_by  String,
   archived_at  DateTime DEFAULT now(),
-  source       String DEFAULT 'local'
+  source       String DEFAULT 'local',
+  INDEX idx_tx_hash    tx_hash     TYPE bloom_filter GRANULARITY 1,
+  INDEX idx_network    network     TYPE bloom_filter GRANULARITY 1,
+  INDEX idx_archived   archived_at TYPE minmax       GRANULARITY 1
 ) ENGINE = ReplacingMergeTree(archived_at)
-ORDER BY (network, tx_hash)
-PARTITION BY toYYYYMM(archived_at);
+ORDER BY (network, tx_hash);
 ```
 
-Reads use `FINAL` for consistency.
+No `PARTITION BY`, matching the deliberately unpartitioned schema everywhere
+else (see `clickhouse_schema.py`). Reads use `FINAL` for consistency.
