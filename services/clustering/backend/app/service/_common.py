@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app.clustering.evaluate import MIN_POINTS
+from app.clustering.evaluate import FALLBACK_EPS, MIN_POINTS, MIN_SAMPLES_FLOOR
 from app.config import get_settings
 from app.features import build_features
 from app.ingest.ingester import IngestResult, ProgressFn
@@ -65,12 +65,12 @@ def _safe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}; see server logs"
 
 
-# process_contract tunables.
+# process_contract tunables. The DBSCAN fallbacks are the evaluator's own
+# canonical values (imported above from app.clustering.evaluate, which reads
+# config/clustering.yaml): FALLBACK_EPS when neither the grid recommendation
+# nor the k-distance knee is available, MIN_SAMPLES_FLOOR when the grid has no
+# recommendation.
 _MIN_TXS_FOR_ANALYSIS = MIN_POINTS  # evaluate()'s own floor; below it we skip cluster/anomaly
-_FALLBACK_EPS = (
-    0.5  # used when neither the grid recommendation nor the k-distance knee is available
-)
-_FALLBACK_MIN_SAMPLES = 4  # heuristic floor when the grid has no recommendation
 _MAX_ERROR_DETAIL = 500  # cap the error string persisted to the jobs table
 _CLASSIFY_BATCH = 1000  # online-score chunk size (bounds the IN(...) array + matrix)
 
@@ -86,8 +86,8 @@ def _recommended_params(ev: dict[str, Any]) -> tuple[float, int]:
     """Pick DBSCAN ``(eps, min_samples)`` from an evaluation report, preferring the
     grid recommendation, then the k-distance knee, then heuristic fallbacks."""
     rec = ev.get("recommended") or {}
-    eps = rec.get("eps") or (ev["k_distance"]["knee_eps"] or _FALLBACK_EPS)
-    min_samples = rec.get("min_samples") or _FALLBACK_MIN_SAMPLES
+    eps = rec.get("eps") or (ev["k_distance"]["knee_eps"] or FALLBACK_EPS)
+    min_samples = rec.get("min_samples") or MIN_SAMPLES_FLOOR
     return float(eps), int(min_samples)
 
 

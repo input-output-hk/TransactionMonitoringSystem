@@ -18,12 +18,15 @@ from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import StandardScaler
 
+from app import tunables
 from app.features.shape import build_shape_features
 from app.registry.bech32 import stake_credential_hex
 
 logger = logging.getLogger(__name__)
 
-_SVD_COMPONENTS = 8
+# Value lives in config/clustering.yaml (section `graph`), validated at import
+# by app.tunables; the constant name is unchanged.
+_SVD_COMPONENTS: int = int(tunables.get("graph")["svd_components"])
 
 
 @lru_cache(maxsize=200_000)

@@ -20,31 +20,41 @@ import numpy as np
 from kneed import KneeLocator
 from sklearn.neighbors import NearestNeighbors
 
+from app import tunables
 from app.clustering.dbscan import run_dbscan
 from app.features import ClusteringInput
 
+# Values live in config/clustering.yaml (section `evaluation`), validated at
+# import by app.tunables; the constant names below are unchanged so call sites
+# and cross-module imports read exactly as before.
+_EVALUATION = tunables.get("evaluation")
+
 # Minimum points before a parameter search is meaningful (DBSCAN needs a few).
-MIN_POINTS = 3
+MIN_POINTS: int = int(_EVALUATION["min_points"])
 # Plotting cap: the k-distance curve is downsampled to this many points.
-_MAX_CURVE_POINTS = 1500
+_MAX_CURVE_POINTS: int = int(_EVALUATION["max_curve_points"])
 # Fallback eps when the k-distance knee is undefined, and the percentile of the
 # k-distance curve used to derive it when KneeLocator finds no knee.
-_FALLBACK_EPS = 0.5
-_KNEE_FALLBACK_PERCENTILE = 90
+# FALLBACK_EPS is public: the service pipeline imports it as its own
+# last-resort eps when neither the grid nor the knee produced one.
+FALLBACK_EPS: float = float(_EVALUATION["fallback_eps"])
+_KNEE_FALLBACK_PERCENTILE: int = int(_EVALUATION["knee_fallback_percentile"])
 # eps grid for the precomputed-Jaccard metric (distances live in [0, 1]).
-_PRECOMPUTED_EPS_GRID = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+_PRECOMPUTED_EPS_GRID: list[float] = [float(v) for v in _EVALUATION["precomputed_eps_grid"]]
 # Multipliers applied to the k-distance knee to build the Euclidean eps grid.
-_EPS_MULTIPLIERS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+_EPS_MULTIPLIERS: list[float] = [float(v) for v in _EVALUATION["eps_multipliers"]]
 # min_samples heuristics: precomputed default, and the 2*n_features rule clamped
 # to [floor, ceil]; the grid also probes the floor and a capped 2*base.
-_PRECOMPUTED_MIN_SAMPLES = 4
-_MIN_SAMPLES_FLOOR = 4
-_MIN_SAMPLES_CEIL = 24
-_MIN_SAMPLES_GRID_CAP = 32
+# MIN_SAMPLES_FLOOR is public: the service pipeline imports it as its heuristic
+# min_samples fallback when the grid has no recommendation.
+_PRECOMPUTED_MIN_SAMPLES: int = int(_EVALUATION["precomputed_min_samples"])
+MIN_SAMPLES_FLOOR: int = int(_EVALUATION["min_samples_floor"])
+_MIN_SAMPLES_CEIL: int = int(_EVALUATION["min_samples_ceil"])
+_MIN_SAMPLES_GRID_CAP: int = int(_EVALUATION["min_samples_grid_cap"])
 # A recommended config needs at least this many clusters and below this noise
 # fraction to be considered viable.
-_MIN_CLUSTERS = 2
-_MAX_NOISE_RATIO = 0.9
+_MIN_CLUSTERS: int = int(_EVALUATION["min_clusters"])
+_MAX_NOISE_RATIO: float = float(_EVALUATION["max_noise_ratio"])
 
 
 def _knn_kth_distances(ci: ClusteringInput, k: int) -> np.ndarray:
@@ -112,21 +122,21 @@ def _eps_grid(ci: ClusteringInput, knee_eps: float) -> list[float]:
 
 def default_min_samples(ci: ClusteringInput) -> int:
     """Heuristic DBSCAN ``min_samples``: a fixed default for the precomputed-Jaccard
-    metric, else ``2 * n_features`` clamped to ``[_MIN_SAMPLES_FLOOR, _MIN_SAMPLES_CEIL]``.
+    metric, else ``2 * n_features`` clamped to ``[MIN_SAMPLES_FLOOR, _MIN_SAMPLES_CEIL]``.
     Shared by grid search and the anomaly detector so both agree on the default
     neighbourhood size."""
     if ci.metric == "precomputed":
         return _PRECOMPUTED_MIN_SAMPLES
     n_features = ci.data.shape[1] if ci.data.ndim == 2 else 1
-    return int(min(max(2 * n_features, _MIN_SAMPLES_FLOOR), _MIN_SAMPLES_CEIL))
+    return int(min(max(2 * n_features, MIN_SAMPLES_FLOOR), _MIN_SAMPLES_CEIL))
 
 
 def _min_samples_grid(ci: ClusteringInput) -> tuple[int, list[int]]:
     n = len(ci.tx_hashes)
     base = default_min_samples(ci)
-    candidates = sorted({_MIN_SAMPLES_FLOOR, base, min(base * 2, _MIN_SAMPLES_GRID_CAP)})
+    candidates = sorted({MIN_SAMPLES_FLOOR, base, min(base * 2, _MIN_SAMPLES_GRID_CAP)})
     candidates = [c for c in candidates if 2 <= c <= max(2, n - 1)]
-    return base, (candidates or [min(_MIN_SAMPLES_FLOOR, max(2, n - 1))])
+    return base, (candidates or [min(MIN_SAMPLES_FLOOR, max(2, n - 1))])
 
 
 def _recommend(grid: list[dict[str, Any]], knee_eps: float, base_ms: int) -> dict[str, Any]:
@@ -175,7 +185,7 @@ def evaluate(ci: ClusteringInput) -> dict[str, Any]:
 
     base_ms, ms_grid = _min_samples_grid(ci)
     kd = k_distance(ci, base_ms)
-    knee_eps = kd["knee_eps"] or _FALLBACK_EPS
+    knee_eps = kd["knee_eps"] or FALLBACK_EPS
     eps_grid = _eps_grid(ci, knee_eps)
     grid = grid_search(ci, eps_grid, ms_grid)
     recommended = _recommend(grid, knee_eps, base_ms)

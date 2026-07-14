@@ -12,8 +12,8 @@ import pytest
 
 from app.ingest.ingester import IngestResult
 from app.service import (
-    _FALLBACK_EPS,
-    _FALLBACK_MIN_SAMPLES,
+    FALLBACK_EPS,
+    MIN_SAMPLES_FLOOR,
     _recommended_params,
     process_contract,
 )
@@ -37,12 +37,12 @@ def test_recommended_params_prefers_grid_recommendation() -> None:
 
 def test_recommended_params_falls_back_to_knee_for_eps() -> None:
     ev = {"recommended": None, "k_distance": {"knee_eps": 0.42}}
-    assert _recommended_params(ev) == (0.42, _FALLBACK_MIN_SAMPLES)
+    assert _recommended_params(ev) == (0.42, MIN_SAMPLES_FLOOR)
 
 
 def test_recommended_params_uses_heuristic_when_nothing_available() -> None:
     ev = {"recommended": {}, "k_distance": {"knee_eps": None}}
-    assert _recommended_params(ev) == (_FALLBACK_EPS, _FALLBACK_MIN_SAMPLES)
+    assert _recommended_params(ev) == (FALLBACK_EPS, MIN_SAMPLES_FLOOR)
 
 
 def test_recommended_params_returns_float_and_int() -> None:

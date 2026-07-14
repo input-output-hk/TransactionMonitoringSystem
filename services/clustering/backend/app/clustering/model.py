@@ -27,6 +27,7 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
 
+from app import tunables
 from app.anomaly.detect import (
     DEFAULT_TOP_QUANTILE,
     fit_iso,
@@ -51,8 +52,9 @@ _VERDICT_ANOMALY = "anomaly"
 _VERDICT_NORMAL = "normal"
 
 # Generous assignment radius: a new point joins the nearest cluster if it falls
-# within this quantile of that cluster's member-to-centroid distances.
-_RADIUS_QUANTILE = 0.95
+# within this quantile of that cluster's member-to-centroid distances. The value
+# lives in config/clustering.yaml (section `model`), validated at import.
+_RADIUS_QUANTILE: float = float(tunables.get("model")["radius_quantile"])
 
 
 @dataclass(slots=True)

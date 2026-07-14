@@ -1,0 +1,80 @@
+# Algorithm tunables for the clustering engine, loaded and validated at import
+# time by app/tunables.py (required-key check, unknown-key rejection, invariant
+# checks). Tracked in git so threshold edits are versioned and reviewable,
+# mirroring the host's config/detection.yaml.
+#
+# RECALL FIRST: these values shape which transactions surface for review. Any
+# edit that narrows a gate (a higher vote threshold, a tighter quantile) must
+# be shown to preserve the real-attack cases before shipping (see CLAUDE.md);
+# tests/test_tunables.py locks the shipped values and a seeded golden run.
+
+# DBSCAN parameter evaluation (app/clustering/evaluate.py).
+evaluation:
+  # Minimum points before a parameter search is meaningful (DBSCAN needs a few).
+  min_points: 3
+  # Plotting cap: the k-distance curve is downsampled to this many points.
+  max_curve_points: 1500
+  # Fallback eps when the k-distance knee is undefined, and the percentile of
+  # the k-distance curve used to derive it when KneeLocator finds no knee.
+  fallback_eps: 0.5
+  knee_fallback_percentile: 90
+  # eps grid for the precomputed-Jaccard metric (distances live in [0, 1]).
+  precomputed_eps_grid: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  # Multipliers applied to the k-distance knee to build the Euclidean eps grid.
+  eps_multipliers: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+  # min_samples heuristics: precomputed default, and the 2*n_features rule
+  # clamped to [floor, ceil]; the grid also probes the floor and a capped
+  # 2*base bounded by min_samples_grid_cap.
+  precomputed_min_samples: 4
+  min_samples_floor: 4
+  min_samples_ceil: 24
+  min_samples_grid_cap: 32
+  # A recommended config needs at least this many clusters and below this noise
+  # fraction to be considered viable.
+  min_clusters: 2
+  max_noise_ratio: 0.9
+
+# Ensemble anomaly detection (app/anomaly/detect.py).
+anomaly:
+  # Per-detector "flag" quantile: a detector votes for a point that lands in
+  # its top 5% of anomaly scores.
+  top_quantile: 0.05
+  # Shared detector hyperparameters (also reused by the persisted online model
+  # in app/clustering/model.py, so the batch and online detectors stay aligned).
+  lof_neighbors: 20
+  iso_estimators: 300
+  # A transaction is "flagged" once at least this many of the three detectors
+  # (Isolation Forest, LOF, DBSCAN noise) independently vote for it: a
+  # consensus signal far stronger than any single detector's top pick.
+  flag_vote_threshold: 2
+  # Fallback eps when no k-distance knee is found, chosen by metric: Jaccard
+  # distances live in [0, 1] while Euclidean is unbounded, so they warrant
+  # different defaults.
+  fallback_eps_precomputed: 0.5
+  fallback_eps_euclidean: 1.0
+
+# Human-readable anomaly-reason attribution (app/features/explain.py).
+explain:
+  # Below this robust-z (IQR units) a feature is not "standing out".
+  # RobustScaler scales by the IQR, so |z| >= 2 sits well outside the central
+  # 50% of the training distribution.
+  z_threshold: 2.0
+  # Magnitude (robust z-units) at which a deviation is described as "far" vs
+  # "well" above/below typical in the explanation text.
+  band_far_z: 4.0
+  band_well_z: 2.75
+  # Reasons shown per transaction: the strongest deviating concepts, capped so
+  # the UI stays scannable.
+  top_k: 3
+
+# Address co-occurrence features (app/features/graph.py).
+graph:
+  # Dimensionality of the TruncatedSVD embedding of the tx-by-address incidence
+  # matrix that the "combined" feature set concatenates onto the shape features.
+  svd_components: 8
+
+# Online classification model (app/clustering/model.py).
+model:
+  # Generous assignment radius: a new point joins the nearest cluster if it
+  # falls within this quantile of that cluster's member-to-centroid distances.
+  radius_quantile: 0.95
