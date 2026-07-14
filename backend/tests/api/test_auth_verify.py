@@ -1,5 +1,5 @@
 """TestClient coverage for the magic-link redemption route
-GET /api/auth/verify (app/api/auth.py).
+GET /api/v1/auth/verify (app/api/v1/auth.py).
 
 Pins the route contract:
 
@@ -69,7 +69,7 @@ class TestVerifySuccess:
             AsyncMock(return_value=_user_row(user_id=user_id)),
         )
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 200, r.text
         set_cookie = r.headers["set-cookie"].lower()
@@ -92,7 +92,7 @@ class TestVerifySuccess:
             AsyncMock(return_value=_user_row(user_id=user_id)),
         )
 
-        client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert session_stub.await_args.kwargs["token_hash"] == hash_token(VALID_TOKEN)
         assert session_stub.await_args.kwargs["user_id"] == user_id
@@ -111,7 +111,7 @@ class TestVerifySuccess:
         )
         monkeypatch.setattr(auth_api, "_get_user", get_user)
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "active"
@@ -124,7 +124,7 @@ class TestVerifyRejection:
         # None; the route must not re-differentiate them.
         monkeypatch.setattr(auth_api, "consume_token", AsyncMock(return_value=None))
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 400
         assert r.json()["detail"] == GENERIC_DETAIL
@@ -142,7 +142,7 @@ class TestVerifyRejection:
         row = None if user_state == "vanished" else _user_row(status="disabled")
         monkeypatch.setattr(auth_api, "_get_user", AsyncMock(return_value=row))
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 400
         assert r.json()["detail"] == GENERIC_DETAIL
@@ -160,7 +160,7 @@ class TestVerifyQueryValidation:
         consume = AsyncMock()
         monkeypatch.setattr(auth_api, "consume_token", consume)
 
-        r = client.get("/api/auth/verify", params=params)
+        r = client.get("/api/v1/auth/verify", params=params)
 
         assert r.status_code == 422
         consume.assert_not_awaited()

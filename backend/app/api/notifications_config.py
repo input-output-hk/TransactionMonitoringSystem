@@ -27,7 +27,7 @@ from app.notifications import config as notif_config
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/notifications", tags=["notifications-config"])
+router = APIRouter(prefix="/notifications", tags=["notifications-config"])
 
 
 class NotificationConfigUpdate(BaseModel):

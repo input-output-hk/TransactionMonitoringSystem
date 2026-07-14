@@ -10,7 +10,7 @@ cannot produce a matching header even if it can make the browser send the
 session cookie.
 
 The CSRF cookie is issued alongside the session cookie at login and
-self-healed on ``GET /api/auth/me`` for sessions that predate it — see
+self-healed on ``GET /api/v1/auth/me`` for sessions that predate it — see
 app.api.auth.
 """
 
@@ -39,7 +39,7 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # session issued before the CSRF cookie existed (or whose CSRF cookie was
 # lost) can always escape via logout and re-login to obtain one, instead of
 # being stuck authenticated with every mutating request rejected.
-_CSRF_EXEMPT_PATHS = frozenset({"/api/auth/logout"})
+_CSRF_EXEMPT_PATHS = frozenset({"/api/v1/auth/logout"})
 
 
 class CSRFMiddleware(BaseHTTPMiddleware):
@@ -49,7 +49,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     Gated on the SESSION cookie being present, not on whether the route
     actually requires auth: a request with no session cookie is not
     cookie-authed (e.g. an API-key caller, or the pre-login
-    ``/api/auth/request-link``), so it is out of scope for this check —
+    ``/api/v1/auth/request-link``), so it is out of scope for this check —
     downstream auth dependencies still apply as normal.
     """
 

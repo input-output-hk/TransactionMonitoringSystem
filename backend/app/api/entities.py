@@ -16,7 +16,7 @@ from app.db import postgres
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/entities", tags=["entities"])
+router = APIRouter(prefix="/entities", tags=["entities"])
 
 # Entity identifiers are short slugs and Cardano address / policy strings.
 # Reject anything that could contain SQL-metadata or path characters; this is

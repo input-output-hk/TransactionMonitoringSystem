@@ -76,7 +76,7 @@ export function AttacksPage() {
 	});
 
 	const total = data?.total ?? 0;
-	// Backend already anti-joins `archived_alerts` from `/api/analysis/results`,
+	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`,
 	// so the rows we get are guaranteed not archived. No client filter needed.
 	const visibleRows = data?.rows ?? [];
 
@@ -322,7 +322,7 @@ export function AttacksPage() {
 
 /**
  * Latest CRITICAL alert banner. Pulls the most recent risk_band=Critical
- * row from `/api/analysis/results` (sorted by date, page size 1) and shares
+ * row from `/api/v1/analysis/results` (sorted by date, page size 1) and shares
  * the table's 15s poll cadence — `useRiskAlerts` uses its `params` as the
  * query key, so a separate page=0/pageSize=1 request lives independently.
  *

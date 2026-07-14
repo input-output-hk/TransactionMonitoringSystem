@@ -3,7 +3,7 @@
 This module unifies two parallel auth mechanisms behind a single
 ``verify_api_key`` dependency so existing endpoints don't need to change:
 
-- **API key** via the ``TMS-API-Key`` header — for server-to-server
+- **API key** via the ``X-API-Key`` header (name configurable via API_KEY_HEADER) — for server-to-server
   callers (CLI, integrations, the analysis engine talking to itself).
 - **Session cookie** via ``settings.SESSION_COOKIE_NAME`` (default
   ``tms_session``) — for browser users authenticated through the
@@ -67,7 +67,7 @@ async def verify_api_key(
 
     Returns a short string identifying the credential used:
       - ``"dev-mode"`` when no API_KEYS are configured (dev fallback)
-      - the raw API key string when ``TMS-API-Key`` matched
+      - the raw API key string when the API-key header matched
       - ``"session:<user_id>"`` when a session cookie resolved to a user
 
     Raises 401 only if neither credential is present/valid: the caller is

@@ -25,7 +25,7 @@ from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/analysis", tags=["analysis"])
+router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 # _CLASS_NAMES is imported from app.analysis.engine (the canonical scorer-order
 # source) so the API's class validation can't drift from the engine's order.

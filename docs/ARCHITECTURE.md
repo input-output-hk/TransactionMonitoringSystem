@@ -81,8 +81,8 @@ All state is stored in `tx_lifecycle` (PostgreSQL). Raw payloads are written asy
 
 The API supports two authentication paths, both implemented under `app/auth/`:
 
-- **Programmatic: `TMS-API-Key` header** (`auth/api_key.py`, constant-time compare). `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys).
-- **Interactive: magic-link sessions** (`auth/tokens.py`, `auth/sessions.py`, `auth/email.py`). A user requests a login email (`POST /api/auth/request-link`), the link mints a session cookie on verify, and `auth/deps.py` exposes `require_user` / `require_admin` dependencies. Accounts (`users` table) carry an `Admin` or `Reviewer` role; the first Admin is bootstrapped via `python -m app.cli create-admin`. Magic-link delivery goes through SMTP (`SMTP_*` settings; `mailpit` in the dev compose stack).
+- **Programmatic: `X-API-Key` header** (`auth/api_key.py`, constant-time compare). `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys).
+- **Interactive: magic-link sessions** (`auth/tokens.py`, `auth/sessions.py`, `auth/email.py`). A user requests a login email (`POST /api/v1/auth/request-link`), the link mints a session cookie on verify, and `auth/deps.py` exposes `require_user` / `require_admin` dependencies. Accounts (`users` table) carry an `Admin` or `Reviewer` role; the first Admin is bootstrapped via `python -m app.cli create-admin`. Magic-link delivery goes through SMTP (`SMTP_*` settings; `mailpit` in the dev compose stack).
 - Rate limiting: in-memory sliding window keyed per API key / IP (`RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`)
 - Audit logging: privileged actions are written to the PostgreSQL `audit_logs` table (`app/audit.py`)
 - CORS: configurable via `CORS_ALLOW_ORIGINS`, intended for reverse-proxy TLS termination in production
@@ -101,7 +101,7 @@ backend/app/
 ├── leader.py                PostgreSQL advisory-lock leader guard (single ingestion/analysis instance, standby promotion)
 ├── logging_utils.py         Access-log redaction (strips magic-link tokens from uvicorn request lines)
 ├── auth/                    Authentication package
-│   ├── api_key.py           TMS-API-Key dependency (constant-time compare)
+│   ├── api_key.py           X-API-Key dependency (constant-time compare)
 │   ├── deps.py              require_user / require_admin session dependencies
 │   ├── tokens.py            Magic-link token mint/verify
 │   ├── sessions.py          Session-cookie issue/lookup/revoke
@@ -127,16 +127,16 @@ backend/app/
 │   └── raw_store.py         Data Lake: async gzip writes, atomic rename, read-back
 ├── api/
 │   ├── _params.py           Shared query-parameter declarations (the optional ?network selector)
-│   ├── transactions.py      GET /api/transactions/*
-│   ├── lifecycle.py         GET /api/lifecycle/*
-│   ├── analysis.py          GET /api/analysis/* (merges the contract_anomaly verdict + reconciles stats/timeseries when the clustering module is enabled)
+│   ├── transactions.py      GET /api/v1/transactions/*
+│   ├── lifecycle.py         GET /api/v1/lifecycle/*
+│   ├── analysis.py          GET /api/v1/analysis/* (merges the contract_anomaly verdict + reconciles stats/timeseries when the clustering module is enabled)
 │   ├── contract_anomaly_read.py  Read-time projection of the sidecar's verdicts into results/stats/timeseries (no stored scores)
-│   ├── clustering.py        /api/clustering/* reverse-proxy to the optional clustering sidecar (session-authed, host-fixed)
-│   ├── notifications_config.py   GET/PUT /api/notifications/config (Admin; channels, trigger matrix, recipients)
-│   ├── entities.py          GET/PUT /api/entities/*
-│   ├── archive.py           GET/POST/DELETE /api/archive/* (false-positive curation)
-│   ├── auth.py              POST/GET /api/auth/* (magic-link login, session, /me)
-│   └── users.py             GET/POST/DELETE /api/users/* (Admin user management)
+│   ├── clustering.py        /api/v1/clustering/* reverse-proxy to the optional clustering sidecar (session-authed, host-fixed)
+│   ├── notifications_config.py   GET/PUT /api/v1/notifications/config (Admin; channels, trigger matrix, recipients)
+│   ├── entities.py          GET/PUT /api/v1/entities/*
+│   ├── archive.py           GET/POST/DELETE /api/v1/archive/* (false-positive curation)
+│   ├── auth.py              POST/GET /api/v1/auth/* (magic-link login, session, /me)
+│   └── users.py             GET/POST/DELETE /api/v1/users/* (Admin user management)
 ├── analysis/
 │   ├── engine.py            Multi-class orchestrator (9 attack classes, enrichment, scoring)
 │   ├── scorer_config.py     Validated loader for config/detection.yaml

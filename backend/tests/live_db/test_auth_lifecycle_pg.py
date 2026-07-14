@@ -4,7 +4,7 @@ The fresh / expired / exhausted / already-consumed distinctions of
 consume_token live in one SQL WHERE clause, and the TOCTOU sibling
 cleanup of claim_session_token lives in FOR UPDATE + DELETE semantics.
 Mocks cannot regress-test either, so this is the authoritative coverage;
-tests/api/test_auth_tokens_sessions.py only pins the call contract.
+tests/api/v1/test_auth_tokens_sessions.py only pins the call contract.
 
 Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """

@@ -43,7 +43,7 @@ class TestEntitiesGet:
             AsyncMock(return_value={"flagged": True}),
         )
 
-        r = client.get("/api/entities/wallet/addr_test1qq")
+        r = client.get("/api/v1/entities/wallet/addr_test1qq")
 
         assert r.status_code == 200, r.text
         assert r.json() == {
@@ -58,7 +58,7 @@ class TestEntitiesGet:
             "get_entity_state",
             AsyncMock(return_value=None),
         )
-        assert client.get("/api/entities/wallet/unknown").status_code == 404
+        assert client.get("/api/v1/entities/wallet/unknown").status_code == 404
 
     @pytest.mark.parametrize(
         "entity_type,entity_id",
@@ -66,7 +66,7 @@ class TestEntitiesGet:
         ids=["uppercase-type", "symbol-type", "spaced-id"],
     )
     def test_invalid_identifiers_rejected(self, client, auth_open, entity_type, entity_id):
-        r = client.get(f"/api/entities/{entity_type}/{entity_id}")
+        r = client.get(f"/api/v1/entities/{entity_type}/{entity_id}")
         assert r.status_code == 400
 
 
@@ -82,7 +82,7 @@ class TestEntitiesPut:
     def test_update_persists_and_audits(self, client, auth_open, seams):
         setter, auditor = seams
 
-        r = client.put("/api/entities/wallet/addr_test1qq", json={"flagged": True})
+        r = client.put("/api/v1/entities/wallet/addr_test1qq", json={"flagged": True})
 
         assert r.status_code == 200, r.text
         assert r.json()["message"] == "Entity state updated"
@@ -94,7 +94,7 @@ class TestEntitiesPut:
         # _MAX_STATE_BYTES caps the serialized payload; one long string
         # is the simplest way over it.
         r = client.put(
-            "/api/entities/wallet/addr_test1qq",
+            "/api/v1/entities/wallet/addr_test1qq",
             json={"blob": "x" * (entities_api._MAX_STATE_BYTES + 1)},
         )
         assert r.status_code == 413
@@ -102,7 +102,7 @@ class TestEntitiesPut:
 
     def test_invalid_identifiers_rejected(self, client, auth_open, seams):
         setter, _ = seams
-        r = client.put("/api/entities/WALLET/ok", json={})
+        r = client.put("/api/v1/entities/WALLET/ok", json={})
         assert r.status_code == 400
         setter.assert_not_awaited()
 
@@ -125,7 +125,7 @@ class TestLifecycle:
             ),
         )
 
-        r = client.get("/api/lifecycle/stats/summary")
+        r = client.get("/api/v1/lifecycle/stats/summary")
 
         assert r.status_code == 200, r.text
         body = r.json()
@@ -146,7 +146,7 @@ class TestLifecycle:
             ),
         )
 
-        r = client.get(f"/api/lifecycle/{VALID_HASH}")
+        r = client.get(f"/api/v1/lifecycle/{VALID_HASH}")
 
         assert r.status_code == 200, r.text
         assert r.json()["tx_id"] == VALID_HASH
@@ -158,7 +158,7 @@ class TestLifecycle:
             "get_lifecycle_by_tx_id",
             AsyncMock(return_value=None),
         )
-        assert client.get(f"/api/lifecycle/{VALID_HASH}").status_code == 404
+        assert client.get(f"/api/v1/lifecycle/{VALID_HASH}").status_code == 404
 
     def test_list_with_status_filter(self, client, auth_open, monkeypatch):
         by_status = AsyncMock(return_value=[{"tx_id": VALID_HASH, "status": "PENDING"}])
@@ -166,7 +166,7 @@ class TestLifecycle:
         monkeypatch.setattr(lifecycle_api.postgres, "get_lifecycles_by_status", by_status)
         monkeypatch.setattr(lifecycle_api.postgres, "get_all_lifecycles", all_rows)
 
-        r = client.get("/api/lifecycle?status=PENDING")
+        r = client.get("/api/v1/lifecycle?status=PENDING")
 
         assert r.status_code == 200, r.text
         assert r.json()["count"] == 1
@@ -177,14 +177,14 @@ class TestLifecycle:
         all_rows = AsyncMock(return_value=[])
         monkeypatch.setattr(lifecycle_api.postgres, "get_all_lifecycles", all_rows)
 
-        r = client.get("/api/lifecycle")
+        r = client.get("/api/v1/lifecycle")
 
         assert r.status_code == 200
         assert r.json() == {"count": 0, "data": []}
         all_rows.assert_awaited_once()
 
     def test_invalid_status_rejected(self, client, auth_open):
-        assert client.get("/api/lifecycle?status=EXPLODED").status_code == 422
+        assert client.get("/api/v1/lifecycle?status=EXPLODED").status_code == 422
 
 
 def _score_db_row(tx_hash=VALID_HASH, max_class="token_dust", max_score=72.0):
@@ -229,7 +229,7 @@ class TestAnalysisResults:
             AsyncMock(return_value=None),
         )
 
-        r = client.get(f"/api/analysis/results/{VALID_HASH}")
+        r = client.get(f"/api/v1/analysis/results/{VALID_HASH}")
 
         assert r.status_code == 200, r.text
         body = r.json()
@@ -248,7 +248,7 @@ class TestAnalysisResults:
             "get_class_scores_async",
             AsyncMock(return_value=None),
         )
-        r = client.get(f"/api/analysis/results/{VALID_HASH}")
+        r = client.get(f"/api/v1/analysis/results/{VALID_HASH}")
         assert r.status_code == 404
 
     def test_list_shape(self, client, auth_open, monkeypatch):
@@ -263,7 +263,7 @@ class TestAnalysisResults:
             AsyncMock(return_value=41),
         )
 
-        r = client.get("/api/analysis/results?risk_band=High&min_score=50")
+        r = client.get("/api/v1/analysis/results?risk_band=High&min_score=50")
 
         assert r.status_code == 200, r.text
         body = r.json()
@@ -272,11 +272,11 @@ class TestAnalysisResults:
         assert body["data"][0]["tx_hash"] == VALID_HASH
 
     def test_unknown_attack_class_rejected(self, client, auth_open):
-        r = client.get("/api/analysis/results?attack_class=nonsense")
+        r = client.get("/api/v1/analysis/results?attack_class=nonsense")
         assert r.status_code == 400
 
     def test_unknown_sort_rejected(self, client, auth_open):
-        r = client.get("/api/analysis/results?sort=alphabetical")
+        r = client.get("/api/v1/analysis/results?sort=alphabetical")
         assert r.status_code == 400
 
     def test_stats_passthrough(self, client, auth_open, monkeypatch):
@@ -286,7 +286,7 @@ class TestAnalysisResults:
             AsyncMock(return_value={"total_analyzed": 3, "per_class": {}}),
         )
 
-        r = client.get("/api/analysis/stats")
+        r = client.get("/api/v1/analysis/stats")
 
         assert r.status_code == 200, r.text
         assert r.json()["total_analyzed"] == 3

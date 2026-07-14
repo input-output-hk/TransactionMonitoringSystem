@@ -1,5 +1,5 @@
 /**
- * Auth API client. Talks to `/api/auth/*` and `/api/users` on the backend.
+ * Auth API client. Talks to `/api/v1/auth/*` and `/api/v1/users` on the backend.
  *
  * Session cookies (`tms_session`, HTTP-only) ride along automatically via
  * `fetchWithAuth({ credentials: "include" })` — the SPA never reads or
@@ -12,7 +12,7 @@
 import { fetchWithAuth } from "./fetch";
 
 /**
- * Cache key for the resolved `/api/auth/me` user. Shared between the
+ * Cache key for the resolved `/api/v1/auth/me` user. Shared between the
  * AuthProvider (which owns the query) and the QueryClient's global 401
  * handler in `main.tsx` (which resets it to anonymous).
  */
@@ -59,7 +59,7 @@ function toUser(u: ApiUser): User {
 	};
 }
 
-/* ---------- /api/auth/* ---------- */
+/* ---------- /api/v1/auth/* ---------- */
 
 /**
  * Ask the backend to email a magic-link login to `email`. Returns void
@@ -67,7 +67,7 @@ function toUser(u: ApiUser): User {
  * that signal. Throws only on network / 5xx errors.
  */
 export async function requestLink(email: string): Promise<void> {
-	const res = await fetchWithAuth("/api/auth/request-link", {
+	const res = await fetchWithAuth("/api/v1/auth/request-link", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ email }),
@@ -84,7 +84,7 @@ export async function requestLink(email: string): Promise<void> {
  */
 export async function verifyToken(token: string): Promise<User> {
 	const res = await fetchWithAuth(
-		`/api/auth/verify?token=${encodeURIComponent(token)}`,
+		`/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
 	);
 	if (!res.ok) {
 		const err = (await res.json().catch(() => null)) as
@@ -97,7 +97,7 @@ export async function verifyToken(token: string): Promise<User> {
 
 /** Drops the current session server-side and clears the cookie. */
 export async function logout(): Promise<void> {
-	await fetchWithAuth("/api/auth/logout", { method: "POST" });
+	await fetchWithAuth("/api/v1/auth/logout", { method: "POST" });
 }
 
 /**
@@ -109,7 +109,7 @@ export async function fetchMe(): Promise<User | null> {
 	// allow401: anonymous is a normal outcome here, not a session expiry —
 	// mapping it to null (instead of UnauthorizedError) keeps the login
 	// page reachable.
-	const res = await fetchWithAuth("/api/auth/me", undefined, {
+	const res = await fetchWithAuth("/api/v1/auth/me", undefined, {
 		allow401: true,
 	});
 	if (res.status === 401) return null;
@@ -119,7 +119,7 @@ export async function fetchMe(): Promise<User | null> {
 	return toUser((await res.json()) as ApiUser);
 }
 
-/* ---------- /api/users (admin) ---------- */
+/* ---------- /api/v1/users (admin) ---------- */
 
 export async function listUsers(
 	params: { limit?: number; offset?: number } = {},
@@ -127,7 +127,7 @@ export async function listUsers(
 	const qs = new URLSearchParams();
 	if (params.limit != null) qs.set("limit", String(params.limit));
 	if (params.offset != null) qs.set("offset", String(params.offset));
-	const url = `/api/users${qs.toString() ? `?${qs.toString()}` : ""}`;
+	const url = `/api/v1/users${qs.toString() ? `?${qs.toString()}` : ""}`;
 	const res = await fetchWithAuth(url);
 	if (!res.ok) {
 		throw new Error(`list users failed (${res.status})`);
@@ -151,7 +151,7 @@ export type CreateUserPayload = {
 };
 
 export async function createUser(payload: CreateUserPayload): Promise<User> {
-	const res = await fetchWithAuth("/api/users", {
+	const res = await fetchWithAuth("/api/v1/users", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
@@ -170,7 +170,7 @@ export async function createUser(payload: CreateUserPayload): Promise<User> {
 }
 
 export async function deleteUser(id: string): Promise<void> {
-	const res = await fetchWithAuth(`/api/users/${encodeURIComponent(id)}`, {
+	const res = await fetchWithAuth(`/api/v1/users/${encodeURIComponent(id)}`, {
 		method: "DELETE",
 	});
 	// 204 No Content is the happy path (`res.ok` already covers it). Other
@@ -186,7 +186,7 @@ export async function deleteUser(id: string): Promise<void> {
 
 export async function resendInvite(id: string): Promise<void> {
 	const res = await fetchWithAuth(
-		`/api/users/${encodeURIComponent(id)}/resend-invite`,
+		`/api/v1/users/${encodeURIComponent(id)}/resend-invite`,
 		{ method: "POST" },
 	);
 	if (!res.ok) {

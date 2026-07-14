@@ -1,5 +1,5 @@
 /**
- * Real HTTP client for the archive API. Hits `/api/archive/*` on the backend.
+ * Real HTTP client for the archive API. Hits `/api/v1/archive/*` on the backend.
  *
  * Backend contract: `backend/app/api/archive.py`. Identity is
  * `(network, tx_hash)` — every call carries the active network from
@@ -49,7 +49,7 @@ function buildArchiveQuery(params: {
 export const archiveApiClient: ArchiveApi = {
 	async list(params: ArchiveListParams): Promise<ArchiveListResponse> {
 		const qs = buildArchiveQuery(params);
-		const res = await fetchWithAuth(`/api/archive?${qs.toString()}`);
+		const res = await fetchWithAuth(`/api/v1/archive?${qs.toString()}`);
 		return json<ArchiveListResponse>(res);
 	},
 
@@ -57,14 +57,14 @@ export const archiveApiClient: ArchiveApi = {
 		const qs = new URLSearchParams();
 		qs.set("network", network ?? getNetwork());
 		const res = await fetchWithAuth(
-			`/api/archive/${encodeURIComponent(txHash)}?${qs.toString()}`,
+			`/api/v1/archive/${encodeURIComponent(txHash)}?${qs.toString()}`,
 		);
 		if (res.status === 404) return null;
 		return json<ArchiveEntry>(res);
 	},
 
 	async create(entry: ArchiveCreateRequest): Promise<void> {
-		const res = await fetchWithAuth("/api/archive", {
+		const res = await fetchWithAuth("/api/v1/archive", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(entry),
@@ -83,7 +83,7 @@ export const archiveApiClient: ArchiveApi = {
 		const qs = new URLSearchParams();
 		qs.set("network", network ?? getNetwork());
 		const res = await fetchWithAuth(
-			`/api/archive/${encodeURIComponent(txHash)}?${qs.toString()}`,
+			`/api/v1/archive/${encodeURIComponent(txHash)}?${qs.toString()}`,
 			{ method: "DELETE" },
 		);
 		// 204 ok, 404 means it wasn't archived — both acceptable on restore.
@@ -97,7 +97,7 @@ export const archiveApiClient: ArchiveApi = {
 		entries: ArchiveBulkEntry[],
 		sourceLabel: string,
 	): Promise<ArchiveBulkResponse> {
-		const res = await fetchWithAuth("/api/archive/bulk", {
+		const res = await fetchWithAuth("/api/v1/archive/bulk", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ entries, source_label: sourceLabel }),
@@ -112,7 +112,7 @@ export const archiveApiClient: ArchiveApi = {
 		qs.set("network", params.network ?? getNetwork());
 		if (params.from) qs.set("from", params.from);
 		if (params.to) qs.set("to", params.to);
-		const res = await fetchWithAuth(`/api/archive/export?${qs.toString()}`);
+		const res = await fetchWithAuth(`/api/v1/archive/export?${qs.toString()}`);
 		if (!res.ok) {
 			const body = await res.text().catch(() => "");
 			throw new Error(

@@ -34,7 +34,7 @@ from app.utils.datetime_utils import format_iso_utc, to_naive_utc
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/archive", tags=["archive"])
+router = APIRouter(prefix="/archive", tags=["archive"])
 
 # Canonical CSV column order, used by both export and bulk import parsing.
 CSV_COLUMNS = ("network", "tx_hash", "note", "archived_by", "archived_at", "source")

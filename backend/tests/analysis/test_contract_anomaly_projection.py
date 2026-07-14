@@ -286,7 +286,7 @@ def test_merge_skipped_when_flag_off(client, monkeypatch):
         return [_row("malicious")]
 
     monkeypatch.setattr(clustering_queries, "get_contract_anomaly_async", _should_not_run)
-    r = client.get("/api/analysis/results/tx")
+    r = client.get("/api/v1/analysis/results/tx")
     assert r.status_code == 200
     body = r.json()
     assert called is False
@@ -304,7 +304,7 @@ def test_merge_applied_when_flag_on(client, monkeypatch):
         return [_row("malicious")]
 
     monkeypatch.setattr(clustering_queries, "get_contract_anomaly_async", _verdict)
-    r = client.get("/api/analysis/results/tx")
+    r = client.get("/api/v1/analysis/results/tx")
     assert r.status_code == 200
     body = r.json()
     assert body["scores"]["contract_anomaly"] == _floors()["malicious"]
@@ -324,7 +324,7 @@ def test_merge_best_effort_when_sidecar_errors(client, monkeypatch):
         raise RuntimeError("sidecar db unreachable")
 
     monkeypatch.setattr(clustering_queries, "get_contract_anomaly_async", _boom)
-    r = client.get("/api/analysis/results/tx")
+    r = client.get("/api/v1/analysis/results/tx")
     assert r.status_code == 200
     body = r.json()
     assert body["max_class"] == "phishing"  # falls back to the stored vector
@@ -388,7 +388,7 @@ def test_list_rescues_high_anomaly_below_score_filter(client, monkeypatch):
         flagged={"lowtx": [_row("malicious", target="addrZ")]},
         by_hashes=[_full_score_row("lowtx", 30.0)],
     )
-    r = client.get("/api/analysis/results?network=preprod&min_score=70")
+    r = client.get("/api/v1/analysis/results?network=preprod&min_score=70")
     assert r.status_code == 200
     body = r.json()
     hashes = [d["tx_hash"] for d in body["data"]]
@@ -412,7 +412,7 @@ def test_list_rescue_skips_rows_still_below_filter(client, monkeypatch):
         flagged={"lowtx": [_row("benign", consensus=0.10, target="addrZ")]},
         by_hashes=[_full_score_row("lowtx", 30.0)],
     )
-    r = client.get("/api/analysis/results?network=preprod&min_score=70")
+    r = client.get("/api/v1/analysis/results?network=preprod&min_score=70")
     assert r.status_code == 200
     body = r.json()
     assert body["data"] == []
@@ -438,7 +438,7 @@ def test_list_rescue_inactive_when_unfiltered(client, monkeypatch):
 
     _bind_list_stubs(monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[])
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
-    r = client.get("/api/analysis/results?network=preprod")  # no score/band filter
+    r = client.get("/api/v1/analysis/results?network=preprod")  # no score/band filter
     assert r.status_code == 200
     assert flagged_called is False  # gated off when unfiltered
 
@@ -458,7 +458,7 @@ def test_list_rescue_caps_page_to_limit(client, monkeypatch):
         flagged={"c": [_row("malicious")], "d": [_row("malicious")]},
         by_hashes=[_full_score_row("c", 10.0), _full_score_row("d", 10.0)],
     )
-    r = client.get("/api/analysis/results?network=preprod&min_score=70&limit=2")
+    r = client.get("/api/v1/analysis/results?network=preprod&min_score=70&limit=2")
     assert r.status_code == 200
     body = r.json()
     assert len(body["data"]) == 2  # capped to limit
@@ -488,7 +488,7 @@ def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
         by_hashes=[],
     )
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
-    r = client.get("/api/analysis/results?network=preprod&attack_class=phishing")
+    r = client.get("/api/v1/analysis/results?network=preprod&attack_class=phishing")
     assert r.status_code == 200
     assert flagged_called is False  # gated off under a 9-class filter
 
@@ -514,7 +514,7 @@ def test_list_filter_contract_anomaly_accepts_and_returns_flagged(client, monkey
         flagged={"catx": [_row("malicious", target="addrZ")]},
         by_hashes=[_full_score_row("catx", 30.0)],
     )
-    r = client.get("/api/analysis/results?network=preprod&attack_class=contract_anomaly")
+    r = client.get("/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly")
     assert r.status_code == 200
     body = r.json()
     assert [d["tx_hash"] for d in body["data"]] == ["catx"]
@@ -538,7 +538,7 @@ def test_list_filter_contract_anomaly_excludes_stored_dominant(client, monkeypat
         flagged={"domtx": [_row("anomaly", consensus=0.65, target="addrZ")]},
         by_hashes=[_full_score_row("domtx", 95.0)],
     )
-    r = client.get("/api/analysis/results?network=preprod&attack_class=contract_anomaly")
+    r = client.get("/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly")
     assert r.status_code == 200
     body = r.json()
     assert body["data"] == []
@@ -562,7 +562,7 @@ def test_list_filter_contract_anomaly_applies_band_filter(client, monkeypatch):
         by_hashes=[_full_score_row("crit", 10.0), _full_score_row("high", 10.0)],
     )
     r = client.get(
-        "/api/analysis/results?network=preprod&attack_class=contract_anomaly&risk_band=Critical"
+        "/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly&risk_band=Critical"
     )
     assert r.status_code == 200
     body = r.json()
@@ -585,7 +585,7 @@ def test_list_filter_contract_anomaly_empty_when_clustering_disabled(client, mon
         return {"catx": [_row("malicious")]}
 
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
-    r = client.get("/api/analysis/results?network=preprod&attack_class=contract_anomaly")
+    r = client.get("/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly")
     assert r.status_code == 200
     body = r.json()
     assert body == {"count": 0, "total": 0, "data": []}
@@ -606,7 +606,7 @@ def test_list_filter_contract_anomaly_paginates(client, monkeypatch):
         by_hashes=[_full_score_row(t, 10.0) for t in ("t1", "t2", "t3")],
     )
     r = client.get(
-        "/api/analysis/results?network=preprod&attack_class=contract_anomaly&limit=2&offset=0"
+        "/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly&limit=2&offset=0"
     )
     assert r.status_code == 200
     body = r.json()
@@ -635,7 +635,9 @@ def test_list_filter_contract_anomaly_date_sort_orders_newest_first(client, monk
         },
         by_hashes=[older, newer],
     )
-    r = client.get("/api/analysis/results?network=preprod&attack_class=contract_anomaly&sort=date")
+    r = client.get(
+        "/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly&sort=date"
+    )
     assert r.status_code == 200
     body = r.json()
     assert [d["tx_hash"] for d in body["data"]] == ["newer", "older"]
@@ -648,7 +650,7 @@ def test_list_filter_rejects_unknown_attack_class(client, monkeypatch):
 
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     _bind_list_stubs(monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[])
-    r = client.get("/api/analysis/results?network=preprod&attack_class=not_a_class")
+    r = client.get("/api/v1/analysis/results?network=preprod&attack_class=not_a_class")
     assert r.status_code == 400
 
 
@@ -686,7 +688,7 @@ def test_stats_reclassifies_flagged_tx_to_effective_band(client, monkeypatch):
     monkeypatch.setattr(clickhouse, "get_class_scores_stats_async", _stats)
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
     monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
-    r = client.get("/api/analysis/stats?network=preprod")
+    r = client.get("/api/v1/analysis/stats?network=preprod")
     assert r.status_code == 200
     body = r.json()
     assert body["critical_count"] == 1
@@ -723,7 +725,7 @@ def test_timeseries_adds_contract_anomaly_only_alerts(client, monkeypatch):
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
     monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
     monkeypatch.setattr(clickhouse, "get_tx_block_dates_async", _dates)
-    r = client.get("/api/analysis/stats/timeseries?network=preprod&days=14")
+    r = client.get("/api/v1/analysis/stats/timeseries?network=preprod&days=14")
     assert r.status_code == 200
     by_date = {d["date"]: d["count"] for d in r.json()["data"]}
     assert by_date["2026-06-22"] == 1  # was 0, +1 from the contract_anomaly alert

@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # Cookie max-age arithmetic: SESSION_TTL_DAYS is the tunable, this is the unit.
 _SECONDS_PER_DAY = 86_400
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 # Per-email throttle on /api/auth/request-link.
 #

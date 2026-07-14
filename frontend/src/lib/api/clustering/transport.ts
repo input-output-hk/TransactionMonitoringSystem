@@ -3,7 +3,7 @@
 import { fetchWithAuth } from "../fetch";
 import type { Validator } from "./validation";
 
-export const BASE = "/api/clustering";
+export const BASE = "/api/v1/clustering";
 
 export async function get<T>(
 	path: string,

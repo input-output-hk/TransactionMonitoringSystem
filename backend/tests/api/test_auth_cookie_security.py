@@ -128,7 +128,7 @@ class TestCSRFCookieIssuance:
 
 
 class TestCSRFSelfHeal:
-    """GET /api/auth/me issues the CSRF cookie to a valid session that lacks
+    """GET /api/v1/auth/me issues the CSRF cookie to a valid session that lacks
     one — the healing path for sessions issued before the CSRF companion
     existed. The SPA calls /me on boot, so pre-CSRF sessions recover on
     their next page load instead of having every mutating request rejected."""
@@ -154,7 +154,7 @@ class TestCSRFSelfHeal:
             "app.auth.deps.lookup_session",
             AsyncMock(return_value=dict(self._USER_ROW)),
         ):
-            return client.get("/api/auth/me")
+            return client.get("/api/v1/auth/me")
 
     def test_me_issues_csrf_cookie_when_missing(self):
         resp = self._get_me(with_csrf_cookie=False)

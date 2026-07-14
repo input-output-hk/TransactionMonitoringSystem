@@ -41,7 +41,7 @@ export type TransactionThroughput = {
 
 async function fetchAnalysisStats(): Promise<AnalysisStats> {
 	const res = await fetchWithAuth(
-		`/api/analysis/stats?network=${getNetwork()}`,
+		`/api/v1/analysis/stats?network=${getNetwork()}`,
 	);
 	if (!res.ok) throw new Error(`Analysis stats failed: ${res.status}`);
 	return (await res.json()) as AnalysisStats;
@@ -49,7 +49,7 @@ async function fetchAnalysisStats(): Promise<AnalysisStats> {
 
 async function fetchTransactionStats(): Promise<TransactionStats> {
 	const res = await fetchWithAuth(
-		`/api/transactions/stats/summary?network=${getNetwork()}`,
+		`/api/v1/transactions/stats/summary?network=${getNetwork()}`,
 	);
 	if (!res.ok) throw new Error(`Transaction stats failed: ${res.status}`);
 	return (await res.json()) as TransactionStats;
@@ -65,7 +65,7 @@ export type AlertTimeseries = {
 
 async function fetchAlertTimeseries(days: number): Promise<AlertTimeseries> {
 	const res = await fetchWithAuth(
-		`/api/analysis/stats/timeseries?network=${getNetwork()}&days=${days}`,
+		`/api/v1/analysis/stats/timeseries?network=${getNetwork()}&days=${days}`,
 	);
 	if (!res.ok) throw new Error(`Alert timeseries failed: ${res.status}`);
 	return (await res.json()) as AlertTimeseries;
@@ -75,7 +75,7 @@ async function fetchTransactionThroughput(
 	windowMinutes: number,
 ): Promise<TransactionThroughput> {
 	const res = await fetchWithAuth(
-		`/api/transactions/stats/throughput?network=${getNetwork()}&window_minutes=${windowMinutes}`,
+		`/api/v1/transactions/stats/throughput?network=${getNetwork()}&window_minutes=${windowMinutes}`,
 	);
 	if (!res.ok) throw new Error(`Transaction throughput failed: ${res.status}`);
 	return (await res.json()) as TransactionThroughput;

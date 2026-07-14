@@ -22,7 +22,7 @@ _TX_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # Only alphanumeric + underscore; no SQL metacharacters possible.
 _ADDRESS_RE = re.compile(r"^[A-Za-z0-9_]{10,200}$")
 
-router = APIRouter(prefix="/api/transactions", tags=["transactions"])
+router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
 class TransactionResponse(BaseModel):
@@ -76,7 +76,7 @@ def _row_to_transaction(row: Any) -> TransactionResponse:
     )
 
 
-@router.get("/", response_model=list[TransactionResponse])
+@router.get("", response_model=list[TransactionResponse])
 async def get_transactions(
     network: NetworkParam = None,
     limit: int = Query(100, ge=1, le=200, description="Maximum number of transactions to return"),

@@ -2,7 +2,7 @@
  * Admin-only page to manage the notification config (channels, groups, the
  * band×attack-class trigger matrix + per-rule overrides, and periodic-report
  * settings) — the runtime replacement for the former notifications.yaml.
- * Loads from / saves to `/api/notifications/config`; a save takes effect with
+ * Loads from / saves to `/api/v1/notifications/config`; a save takes effect with
  * no restart. Secrets (SMTP, webhook signing key) are env-managed and shown
  * read-only here.
  */

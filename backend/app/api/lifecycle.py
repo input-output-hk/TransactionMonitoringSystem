@@ -16,7 +16,7 @@ from app.models.transaction import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/lifecycle", tags=["lifecycle"])
+router = APIRouter(prefix="/lifecycle", tags=["lifecycle"])
 
 
 @router.get("/stats/summary", dependencies=[Security(verify_api_key)])

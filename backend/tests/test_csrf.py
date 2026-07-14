@@ -17,7 +17,7 @@ from app.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
 from app.main import app
 
 # Deliberately unrouted: 404 = the middleware let the request through.
-_PROBE_PATH = "/api/csrf-middleware-probe"
+_PROBE_PATH = "/api/v1/csrf-middleware-probe"
 _PASSED_THROUGH = 404
 
 
@@ -96,5 +96,5 @@ class TestLogoutExemption:
         with all mutating requests rejected (review finding)."""
         _set_cookies(client, **{settings.SESSION_COOKIE_NAME: "legacy-sess"})
         with patch("app.api.auth.delete_session", AsyncMock()):
-            resp = client.post("/api/auth/logout")
+            resp = client.post("/api/v1/auth/logout")
         assert resp.status_code == 200

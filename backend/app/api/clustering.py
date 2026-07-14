@@ -25,7 +25,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/clustering", tags=["clustering"])
+router = APIRouter(prefix="/clustering", tags=["clustering"])
 
 # Generous timeout: cluster-graph / projection reads can be a few seconds on a
 # large run, but bounded so a wedged sidecar can't hang an API worker forever.
