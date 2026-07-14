@@ -34,7 +34,10 @@ export type HealthDetail = {
 	network: string;
 	connections: number;
 	pipeline_state: HealthState;
-	ogmios: OgmiosHealth;
+	// Absent when the ogmios client is not running: a standby (non-leader)
+	// instance under the leader lock, or the startup window before the
+	// client is created. Consumers must not assume it is present.
+	ogmios?: OgmiosHealth;
 	// Present only when the clustering sidecar module is enabled; gates the
 	// Validators UI surfaces.
 	clustering_enabled?: boolean;
@@ -66,16 +69,19 @@ export type SystemModule = { name: string; online: boolean };
 
 export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 	if (!h) return [];
+	// A standby instance (or one still starting) reports no ogmios block at
+	// all; its ingestion modules genuinely aren't running there, so they
+	// render offline rather than crashing the dropdown.
 	const o = h.ogmios;
 	const modules: SystemModule[] = [
 		{ name: "Pipeline", online: h.pipeline_state === "OK" },
-		{ name: "Chain Sync", online: o.chain_sync === "connected" },
-		{ name: "Mempool Monitor", online: o.mempool_monitor === "connected" },
+		{ name: "Chain Sync", online: o?.chain_sync === "connected" },
+		{ name: "Mempool Monitor", online: o?.mempool_monitor === "connected" },
 		{
 			name: "Breakers",
 			online:
-				o.circuit_breaker_chain === "CLOSED" &&
-				o.circuit_breaker_mempool === "CLOSED",
+				o?.circuit_breaker_chain === "CLOSED" &&
+				o?.circuit_breaker_mempool === "CLOSED",
 		},
 	];
 	// The row appears only when the sidecar module is enabled, so a plain
