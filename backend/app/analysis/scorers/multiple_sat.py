@@ -66,7 +66,6 @@ All tunable constants live in ``config/detection.yaml`` under the
 
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 from app.analysis import features as feat_mod
@@ -92,6 +91,8 @@ from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
+from app.utils.bech32 import PAYMENT_CRED_BYTES as _PAYMENT_CRED_BYTES
+from app.utils.bech32 import payment_credential_or_raw as _payment_credential
 
 logger = logging.getLogger(__name__)
 
@@ -198,65 +199,11 @@ _SUPP_ESCAPE_FLOOR_MIN: float = float(_SUPP_ESCAPE["extraction_floor_min"])
 # scorer_config._BAND_INVARIANTS.
 
 
-_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-_BECH32_INVERSE = {c: i for i, c in enumerate(_BECH32_CHARSET)}
-_BECH32_CHECKSUM_LEN = 6
-_BECH32_BITS_PER_CHAR = 5
-_PAYMENT_CRED_BYTES = 28  # CIP-19: Blake2b-224 hash size, payment + stake creds
-
-
-@lru_cache(maxsize=4096)
-def _payment_credential(addr: str) -> str:
-    """Return a stable per-script-hash key for a Shelley script address.
-
-    Two addresses sharing the same payment credential (script hash) but
-    differing in stake credential must group together: a validator
-    vulnerability can be exploited by spending multiple UTxOs at the same
-    script with distinct stake credentials, putting them at distinct
-    ``address`` strings but the same script. Grouping by raw address
-    misses the attack (canonical purchase-offer double-satisfaction shape).
-
-    Decodes the bech32 data, drops the network header byte, and returns the
-    first 28 bytes (= payment credential hash) as hex. The 6-char bech32
-    checksum at the tail is *stripped without validation*: callers must not
-    rely on a successful decode meaning the address is well-formed. On any
-    structural failure falls back to the raw address so legacy code paths
-    keep working.
-
-    Cached because each tx triggers up to 3·(N_inputs + N_outputs) calls
-    (grouping + lovelace flow + asset flow) across the same address set.
-    """
-    if not addr or "1" not in addr:
-        return addr
-    try:
-        data_part = addr.rsplit("1", 1)[1].lower()
-        if len(data_part) <= _BECH32_CHECKSUM_LEN:
-            return addr
-        # Strip the trailing checksum without validating it; callers must
-        # not rely on a successful decode meaning the address is well-formed.
-        data_part = data_part[:-_BECH32_CHECKSUM_LEN]
-        bits: list[int] = []
-        for c in data_part:
-            v = _BECH32_INVERSE.get(c)
-            if v is None:
-                return addr
-            # Unpack 5-bit bech32 group MSB-first.
-            for shift in range(_BECH32_BITS_PER_CHAR - 1, -1, -1):
-                bits.append((v >> shift) & 1)
-        # Layout: 1 header byte + 28-byte payment cred + (optional stake cred).
-        header_bits = 8
-        payment_cred_bits = _PAYMENT_CRED_BYTES * 8
-        if len(bits) < header_bits + payment_cred_bits:
-            return addr
-        out = bytearray()
-        for i in range(header_bits, header_bits + payment_cred_bits, 8):
-            byte = 0
-            for b in bits[i : i + 8]:
-                byte = (byte << 1) | b
-            out.append(byte)
-        return out.hex()
-    except Exception:
-        return addr
+# Grouping key decode lives in app.utils.bech32 (paired copy of the sidecar's
+# validating decoder). The scorers use the LENIENT wrapper: checksum stripped
+# without validation, raw-address fallback. Its contract is locked by
+# tests/analysis/scorers/test_payment_credential.py; switching to the strict
+# decoder is a recall decision, not a refactor.
 
 
 def _group_inputs_by_script(raw_data: dict) -> dict[str, list[dict]]:
