@@ -604,6 +604,27 @@ def extract_utxo_features(
 # Transaction-level script feature extraction
 # ---------------------------------------------------------------------------
 
+def _redeemer_exunits(entry: Any) -> Tuple[int, int]:
+    """(memory, cpu) execution units of one redeemer entry.
+
+    Tolerates malformed shapes: a non-dict entry, non-dict budget, or
+    garbage unit value degrades to (0, 0). raw_data is untrusted chain
+    data and this runs inside batch ingestion, so a raise here would cost
+    the whole block's feature rows, not just this tx's (recall-first).
+    """
+    if not isinstance(entry, dict):
+        return 0, 0
+    budget = entry.get("executionUnits", entry.get("budget", {}))
+    if not isinstance(budget, dict):
+        return 0, 0
+    try:
+        mem = int(budget.get("memory", 0) or 0)
+        cpu = int(budget.get("cpu", budget.get("steps", 0)) or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    return mem, cpu
+
+
 def extract_tx_script_features(
     tx_hash: str,
     network: str,
@@ -626,19 +647,22 @@ def extract_tx_script_features(
     exunits_cpu = 0
 
     if redeemers:
+        # Non-dict entries and garbage units are skipped, not raised:
+        # this runs inside batch ingestion, and one hostile tx must not
+        # cost the block's feature rows (recall-first degradation).
         if isinstance(redeemers, list):
             redeemers_count = len(redeemers)
             for r in redeemers:
-                budget = r.get("executionUnits", r.get("budget", {}))
-                exunits_mem += int(budget.get("memory", 0))
-                exunits_cpu += int(budget.get("cpu", budget.get("steps", 0)))
+                mem, cpu = _redeemer_exunits(r)
+                exunits_mem += mem
+                exunits_cpu += cpu
         elif isinstance(redeemers, dict):
             # Ogmios v5 uses a dict keyed by "spend:N", "mint:N", etc.
             redeemers_count = len(redeemers)
             for key, r in redeemers.items():
-                budget = r.get("executionUnits", r.get("budget", {}))
-                exunits_mem += int(budget.get("memory", 0))
-                exunits_cpu += int(budget.get("cpu", budget.get("steps", 0)))
+                mem, cpu = _redeemer_exunits(r)
+                exunits_mem += mem
+                exunits_cpu += cpu
 
     mint_policy_count = 0
     mint_entries_json = ""

@@ -320,15 +320,28 @@ def _compute_n_assets_out(
 
 
 def _total_exunits_cpu(raw_data: Dict) -> int:
-    """Sum CPU execution units across all redeemers (v5 dict or v6 list)."""
+    """Sum CPU execution units across all redeemers (v5 dict or v6 list).
+
+    Tolerates non-dict entries and garbage units: raw_data is untrusted
+    chain data, and a raise here kills the whole multiple_sat score for
+    the tx (the engine defers then permanently skips the class), so
+    malformed entries must degrade to 0, never abort (recall-first).
+    """
     redeemers = raw_data.get("redeemers")
     if not redeemers:
         return 0
     items = redeemers.values() if isinstance(redeemers, dict) else redeemers
     total = 0
     for r in items:
+        if not isinstance(r, dict):
+            continue
         budget = r.get("executionUnits", r.get("budget", {}))
-        total += int(budget.get("cpu", budget.get("steps", 0)))
+        if not isinstance(budget, dict):
+            continue
+        try:
+            total += int(budget.get("cpu", budget.get("steps", 0)) or 0)
+        except (TypeError, ValueError):
+            continue
     return total
 
 
