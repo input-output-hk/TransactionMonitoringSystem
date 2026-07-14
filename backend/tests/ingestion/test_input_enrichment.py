@@ -12,7 +12,6 @@ attack actually moved never resolved). These pin the rules:
   exclude.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 from app.analysis.features import total_withdrawal_lovelace
@@ -21,15 +20,12 @@ from app.ingestion.input_enrichment import (
     resolve_input_amounts,
 )
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
+from tests.ingestion.conftest import run_async as _run
 
 SOURCE_TX = "11" * 32
 COLLATERAL_TX = "44" * 32
 REFERENCE_TX = "33" * 32
 STAKE = "stake1qqrewards"
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 def _tx(spends="inputs", **overrides):

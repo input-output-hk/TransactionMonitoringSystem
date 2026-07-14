@@ -9,7 +9,6 @@ races the legitimate buyer for the same script UTxO, loses, and confirms
 on-chain as a failed tx that consumed only its collateral.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -17,15 +16,12 @@ import pytest
 
 from app.ingestion.mempool_monitor import MempoolMonitor
 from app.models.transaction import NormalizedTransaction, TransactionInput
+from tests.ingestion.conftest import run_async as _run
 
 ATTEMPT_HASH = "a7" * 32      # the failed double-sat attempt
 WINNER_HASH = "b8" * 32       # the legitimate tx that won the contested UTxO
 CONTESTED_REF = ("c9" * 32, 1)   # the script UTxO both txs raced for
 COLLATERAL_REF = ("d0" * 32, 0)  # the attempt's collateral input
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 @pytest.fixture
