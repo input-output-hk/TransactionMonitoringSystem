@@ -57,7 +57,7 @@ from app.rate_limit import (
     start_all_cleanups,
     stop_all_cleanups,
 )
-from app.routers import ui, websocket
+from app.routers import websocket
 from app.tasks import analysis as analysis_task
 from app.tasks import housekeeping as housekeeping_task
 from app.tasks import notifications as notifications_task
@@ -469,14 +469,11 @@ app.add_middleware(
 )
 
 # Register routers. When the built SPA is available at /app/frontend-dist
-# (produced by the Dockerfile's frontend-build stage), it owns "/" and the
-# legacy embedded UI router is skipped. Local dev without a build still
-# falls back to the embedded UI.
+# (produced by the Dockerfile's frontend-build stage), it owns "/"; local
+# dev runs the vite dev server (or a one-time `pnpm build`) instead.
 FRONTEND_DIST = Path("/app/frontend-dist")
 _spa_present = FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file()
 
-if not _spa_present:
-    app.include_router(ui.router)
 app.include_router(websocket.router)
 app.include_router(transactions.router)
 app.include_router(entities.router)
