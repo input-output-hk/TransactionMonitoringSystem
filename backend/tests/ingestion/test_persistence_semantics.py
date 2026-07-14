@@ -116,9 +116,12 @@ class TestSlotlessBlocks:
             ))
         save_sync.assert_not_awaited()
 
-    def test_slotless_block_with_txs_skips_without_checkpoint(self, client):
+    def test_slotless_block_with_txs_raises_for_replay(self, client):
         # Protocol-impossible shape (EBBs are transaction-free): the guard
-        # must neither invent a slot nor checkpoint past unprocessed txs.
+        # must neither invent a slot nor quietly continue. A quiet skip
+        # would let the NEXT block's save_sync_point advance past the
+        # unprocessed transactions, losing them forever; raising trips the
+        # breaker so the block replays from the unadvanced checkpoint.
         blk = _block(slot=100)
         del blk["block"]["slot"]
         save_sync = AsyncMock()
@@ -126,7 +129,8 @@ class TestSlotlessBlocks:
         with patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync), \
              patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
                    insert):
-            _run(client._handle_roll_forward(blk))
+            with pytest.raises(BlockPersistError):
+                _run(client._handle_roll_forward(blk))
         save_sync.assert_not_awaited()
         insert.assert_not_awaited()
 

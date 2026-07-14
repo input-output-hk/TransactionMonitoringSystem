@@ -14,11 +14,13 @@ crash/restart or checkpoint-driven re-sync therefore collapse to one row per
 key instead of accumulating duplicates that inflate sums and counts.
 
 Deliberately NO PARTITION BY anywhere: ReplacingMergeTree only deduplicates
-within a partition, and every available time column is unstable across
-replays (`timestamp` is wall-clock at ingestion; `ingestion_timestamp` and
-`analyzed_at` move on every replay/re-score). A time-based partition would
-scatter versions of the same logical row across partitions where neither
-background merges nor FINAL can ever collapse them.
+within a partition, and no time column is GUARANTEED stable across replays
+(`timestamp` is chain time derived from the block slot, but falls back to
+ingestion wall clock when the era summaries are unavailable, so a replay
+can re-stamp it; `ingestion_timestamp` and `analyzed_at` move on every
+replay/re-score). A time-based partition would scatter versions of the
+same logical row across partitions where neither background merges nor
+FINAL can ever collapse them.
 
 The templates are shared with backend/scripts/migrate_dedup_schema.py (which
 instantiates them as `<table>__mig` before swapping), so the migrated layout

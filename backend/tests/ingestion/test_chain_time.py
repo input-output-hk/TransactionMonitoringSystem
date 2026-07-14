@@ -88,14 +88,29 @@ class TestSlotToUtc:
         expected = SYSTEM_START_DT + timedelta(seconds=SHELLEY_START_SECONDS + 7)
         assert _converter().slot_to_utc(SHELLEY_START_SLOT + 7) == expected
 
-    def test_slot_beyond_forecast_horizon_extrapolates(self):
-        # A block existing past the last summary's `end` is still in the
-        # current era; the converter must extrapolate, not go dark.
+    def test_slot_beyond_forecast_horizon_is_none(self):
+        # Past the last summary's `end` the era parameters are unknown: a
+        # node still syncing an earlier era reports only that era, and
+        # extrapolating with its slot length (Byron 20s vs Shelley 1s)
+        # would drift days into the future. Refuse; the caller falls back
+        # to wall clock and refetches.
+        horizon = SHELLEY_START_SLOT + 432_000  # the fixture's last `end`
+        conv = _converter()
+        assert conv.slot_to_utc(horizon) is None
+        assert conv.slot_to_utc(horizon + 100_000_000) is None
+        assert conv.slot_to_utc(horizon - 1) is not None
+
+    def test_last_era_without_end_converts_unbounded(self):
+        # A summary with no `end` (node reports the era as open) keeps
+        # converting: there is no horizon to respect.
+        open_ended = [dict(ERA_SUMMARIES[0]), dict(ERA_SUMMARIES[1])]
+        del open_ended[1]["end"]
+        conv = SlotTimeConverter.from_ogmios(SYSTEM_START, open_ended)
         far = SHELLEY_START_SLOT + 100_000_000
         expected = SYSTEM_START_DT + timedelta(
             seconds=SHELLEY_START_SECONDS + 100_000_000
         )
-        assert _converter().slot_to_utc(far) == expected
+        assert conv.slot_to_utc(far) == expected
 
     def test_slot_before_first_known_era_is_none(self):
         conv = SlotTimeConverter.from_ogmios(
@@ -226,6 +241,33 @@ class TestChainSyncWiring:
             seconds=SHELLEY_START_SECONDS + 30
         )
 
+    def test_raw_store_blob_keyed_by_row_timestamp(self, monkeypatch):
+        # read_confirmed derives the blob's day directory from the row's
+        # timestamp; writing under the wall-clock day would strand every
+        # blob of history replayed more than a day after its chain time,
+        # silently killing the engine's raw fallback (review finding).
+        from contextlib import ExitStack
+
+        client = OgmiosClient()
+        client._slot_time = _converter()
+        monkeypatch.setattr(settings, "RAW_STORE_ENABLED", True)
+        captured = {}
+
+        async def capture_write(network, tx_hash, data, ts):
+            captured["ts"] = ts
+
+        with ExitStack() as stack:
+            for p in _persistence_patches():
+                stack.enter_context(p)
+            stack.enter_context(patch(
+                "app.ingestion.ogmios_client.raw_store.write_confirmed",
+                capture_write,
+            ))
+            _run(client._handle_roll_forward(_block(SHELLEY_START_SLOT + 30)))
+        assert captured["ts"] == SYSTEM_START_DT + timedelta(
+            seconds=SHELLEY_START_SECONDS + 30
+        )
+
     def test_block_timestamp_falls_back_to_wall_clock(self, monkeypatch):
         client = OgmiosClient()
         assert client._slot_time is None
@@ -255,6 +297,54 @@ class TestChainSyncWiring:
         ):
             _run(client._fetch_slot_time_converter(object()))  # must not raise
         assert client._slot_time is None
+
+    def test_refetch_failure_keeps_previous_converter(self):
+        # A transient query failure at reconnect (node re-acquiring state)
+        # must not discard a working converter: era summaries only change
+        # at hard forks, and reverting a whole session's replay to wall
+        # clock reintroduces the skew the converter exists to prevent.
+        client = OgmiosClient()
+        client._slot_time = _converter()
+        previous = client._slot_time
+        with patch.object(
+            client, "_send_recv", AsyncMock(side_effect=RuntimeError("closed"))
+        ):
+            _run(client._fetch_slot_time_converter(object()))
+        assert client._slot_time is previous
+
+    def test_horizon_miss_uses_wall_clock_and_requests_refetch(self, monkeypatch):
+        client = OgmiosClient()
+        client._slot_time = _converter()
+        beyond_horizon = SHELLEY_START_SLOT + 432_000 + 5
+        before = datetime.now(timezone.utc)
+        txs = self._roll_forward(client, beyond_horizon, monkeypatch)
+        assert txs[0].timestamp >= before  # wall clock, not extrapolated
+        assert client._slot_time_refetch_needed is True
+
+    def test_chain_sync_loop_refetches_when_flagged(self):
+        client = OgmiosClient()
+        client._slot_time_refetch_needed = True
+        fetches = []
+
+        async def fetch(ws):
+            fetches.append(1)
+
+        async def send_recv(ws, method, params=None):
+            if method == "nextBlock":
+                client._running = False  # one loop iteration
+            return {"result": {}}
+
+        client._running = True
+        client._replay_pending_score_repurges = AsyncMock()
+        with patch.object(client, "_fetch_slot_time_converter", fetch), \
+             patch.object(client, "_send_recv", send_recv), \
+             patch("app.ingestion.ogmios_client.postgres.get_sync_point",
+                   AsyncMock(return_value=None)):
+            _run(client._chain_sync_loop(ws=object()))
+        # Once at session start, once inside the loop for the flag
+        # (_slot_time_fetched_at stays None because fetch is stubbed,
+        # so the throttle reads "due").
+        assert len(fetches) == 2
 
     def test_error_response_leaves_wall_clock_fallback(self):
         client = OgmiosClient()
