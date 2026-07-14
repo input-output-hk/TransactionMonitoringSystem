@@ -4,11 +4,11 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Query, HTTPException, Security
 
+from app.api._params import NetworkParam
 from app.config import settings
 from app.db import postgres
 from app.auth import verify_api_key
 from app.models.transaction import (
-    NetworkType,
     TransactionLifecycleEvent,
     LifecycleSummaryStats,
     LifecycleStatus,
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/lifecycle", tags=["lifecycle"])
 
 @router.get("/stats/summary", dependencies=[Security(verify_api_key)])
 async def lifecycle_stats(
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
 ) -> LifecycleSummaryStats:
     """Aggregate lifecycle statistics: pending count, avg latency, rollback rate."""
     query_network = network or settings.CARDANO_NETWORK
@@ -60,7 +60,7 @@ async def list_lifecycles(
             "LIFECYCLE_PENDING_TTL_SECONDS window. Returns all statuses if omitted."
         ),
     ),
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):

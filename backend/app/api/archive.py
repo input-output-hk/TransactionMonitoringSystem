@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, Se
 from fastapi.responses import StreamingResponse
 
 from app import audit
+from app.api._params import NetworkParam
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import archive_queries
@@ -30,7 +31,6 @@ from app.models.archive import (
     BulkArchiveRequest,
     BulkArchiveResult,
 )
-from app.models.transaction import NetworkType
 from app.utils.datetime_utils import format_iso_utc, to_naive_utc
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ async def archive_alert(
 
 @router.get("", dependencies=[Security(verify_api_key)])
 async def list_archived(
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
     date_from: Optional[datetime] = Query(
         None, alias="from",
         description="ISO timestamp; lower bound on archived_at (inclusive)",
@@ -251,7 +251,7 @@ async def bulk_import(
 
 @router.get("/export", dependencies=[Security(verify_api_key)])
 async def export_csv(
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
     date_from: Optional[datetime] = Query(None, alias="from"),
     date_to: Optional[datetime] = Query(None, alias="to"),
 ) -> StreamingResponse:
@@ -309,7 +309,7 @@ async def export_csv(
 async def restore_alert(
     request: Request,
     tx_hash: str = Path(pattern=TX_HASH_PATTERN),
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
     principal: str = Security(verify_api_key),
 ) -> Response:
     """Restore a transaction by hard-deleting its archive row."""
@@ -371,7 +371,7 @@ async def restore_alert(
 )
 async def get_archived(
     tx_hash: str = Path(pattern=TX_HASH_PATTERN),
-    network: Optional[NetworkType] = Query(None),
+    network: NetworkParam = None,
 ) -> ArchiveEntryEnriched:
     """Single archive entry enriched with the original detection record.
 
