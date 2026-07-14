@@ -13,6 +13,7 @@ from app.analysis.scorers.multiple_sat import (
     _iter_assets,
     _reweight_without_extraction,
     _spend_redeemer_payloads,
+    _total_exunits_cpu,
 )
 
 _W_EXTRACTION = float(_WEIGHTS["extraction"])
@@ -79,6 +80,46 @@ class TestSpendRedeemerPayloads:
     def test_empty_and_missing(self):
         assert _spend_redeemer_payloads({}) == []
         assert _spend_redeemer_payloads({"redeemers": None}) == []
+
+
+class TestHostileRedeemerShapes:
+    """raw_data is untrusted chain data: a malformed redeemer entry must
+    degrade to zero units, never raise. A raise here kills the whole
+    multiple_sat score for the tx (the engine defers, then permanently
+    persists the class as -1), silently skipping a possible real attack."""
+
+    def test_exunits_skip_non_dict_entries_and_garbage_units(self):
+        redeemers = [
+            "garbage",
+            {"executionUnits": {"memory": 1, "cpu": 5}},
+            {"executionUnits": "junk"},
+            {"executionUnits": {"cpu": "abc"}},
+            {"executionUnits": {"cpu": None}},
+        ]
+        assert _total_exunits_cpu({"redeemers": redeemers}) == 5
+
+    def test_exunits_dict_shape_with_garbage_value(self):
+        redeemers = {
+            "spend:0": {"executionUnits": {"memory": 1, "cpu": 7}},
+            "spend:1": "garbage",
+        }
+        assert _total_exunits_cpu({"redeemers": redeemers}) == 7
+
+    def test_score_survives_non_dict_redeemer_value(self, scorer):
+        # The gate passes on the "spend:N" KEY alone, so a hostile value
+        # reaches score(); it must not raise.
+        inputs = [
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
+        ]
+        redeemers = {
+            "spend:0": {"executionUnits": {"memory": 1, "cpu": 1}},
+            "spend:1": "garbage",
+        }
+        features = _features(inputs, redeemers=redeemers)
+        assert scorer.gate(features) is True
+        result = scorer.score(features)
+        assert result.score >= 0.0
 
 
 class TestGate:

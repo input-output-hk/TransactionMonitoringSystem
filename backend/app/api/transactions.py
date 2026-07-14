@@ -377,6 +377,11 @@ async def get_transaction_throughput(
     instead of a lifetime average so the value reflects current pipeline
     activity, not a denominator that grows forever.
 
+    Windows on ``ingestion_timestamp``, NOT ``timestamp``: the latter is
+    chain time, so during a catch-up replay every row lands hours-to-months
+    in the past and a chain-time window would read 0 while the pipeline
+    ingests at full speed (a false dead-pipeline alarm).
+
     ``subtractMinutes(now(), N)`` lets clickhouse-driver substitute the
     window safely as a numeric parameter.
     """
@@ -387,7 +392,7 @@ async def get_transaction_throughput(
             SELECT count() AS recent_count
             FROM transactions
             WHERE network = %(network)s
-              AND timestamp >= subtractMinutes(now(), %(window_minutes)s)
+              AND ingestion_timestamp >= subtractMinutes(now(), %(window_minutes)s)
             """,
             {"network": query_network, "window_minutes": window_minutes},
         )

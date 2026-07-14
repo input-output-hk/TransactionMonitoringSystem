@@ -285,9 +285,20 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 if not tx.raw_data:
                     continue
                 net = tx.network or settings.CARDANO_NETWORK
-                utxo_rows = extract_utxo_features(tx.tx_hash, net, tx.raw_data)
+                # Per-tx containment: one malformed (possibly hostile)
+                # payload must cost only ITS feature rows, not the whole
+                # block's — dropping every tx's script features degraded
+                # the baselines batch-wide (review finding).
+                try:
+                    utxo_rows = extract_utxo_features(tx.tx_hash, net, tx.raw_data)
+                    script_row = extract_tx_script_features(tx.tx_hash, net, tx.raw_data)
+                except Exception as e:
+                    logger.warning(
+                        "Feature extraction failed for tx %s (non-fatal): %s",
+                        tx.tx_hash, e,
+                    )
+                    continue
                 all_utxo_features.extend(utxo_rows)
-                script_row = extract_tx_script_features(tx.tx_hash, net, tx.raw_data)
                 if script_row:
                     all_script_features.append(script_row)
 
@@ -296,7 +307,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
             if all_script_features:
                 insert_tx_script_features(all_script_features)
         except Exception as e:
-            # Feature extraction is non-critical; log and continue
+            # Feature INSERTS are still non-critical; log and continue
             logger.warning(f"Feature extraction failed (non-fatal): {e}")
 
         logger.debug(f"Inserted {len(transactions)} transactions into ClickHouse")
