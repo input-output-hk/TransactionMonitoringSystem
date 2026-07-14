@@ -20,19 +20,15 @@ if [ ! -f .env ]; then
     echo ""
 fi
 
-# Check if virtual environment exists
-if [ ! -d venv ]; then
-    echo "⚠️  Virtual environment not found!"
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-    echo "Installing dependencies..."
-    source venv/bin/activate
-    pip install -r requirements.txt
-    echo ""
+# Ensure the uv-managed environment exists and is current
+if ! command -v uv >/dev/null 2>&1; then
+    echo "❌ uv is required (https://docs.astral.sh/uv/). Install it, e.g.:"
+    echo "   brew install uv   # or: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
 fi
-
-# Activate virtual environment
-source venv/bin/activate
+echo "Syncing dependencies (uv sync)..."
+uv sync
+source .venv/bin/activate
 
 # Start databases
 echo "📦 Starting database containers..."
