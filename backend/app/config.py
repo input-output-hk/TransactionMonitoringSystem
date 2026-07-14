@@ -186,6 +186,24 @@ class Settings(BaseSettings):
     def cors_allow_origins_list(self) -> list:
         return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
 
+    # Single-instance leader guard (app.leader): ingestion's Ogmios sync
+    # checkpoint and the analysis engine's poll watermark both assume exactly
+    # one process is advancing them, so a second live instance would
+    # double-insert transactions and race the checkpoint update. Gated behind
+    # a Postgres session-level advisory lock; a non-leader instance still
+    # serves the read-only API/dashboard/WebSocket feed and retries to take
+    # over (standby, not refuse-to-boot).
+    LEADER_LOCK_ENABLED: bool = True
+    # Arbitrary fixed key identifying "the TMS ingestion+analysis leader"
+    # advisory lock. Must stay constant across deploys (a value that changes
+    # would let two processes both "win" a stale vs. new key) and must not
+    # collide with another advisory lock class this app takes (there are
+    # none today).
+    LEADER_LOCK_KEY: int = 8737367427
+    # How often a standby instance retries to acquire the lock (e.g. after
+    # the leader crashes or is redeployed).
+    LEADER_LOCK_RETRY_SECONDS: float = 15.0
+
     # Analysis Engine
     ANALYSIS_ENGINE_ENABLED: bool = True
     ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30   # how often the engine polls for new txs
@@ -290,6 +308,13 @@ class Settings(BaseSettings):
     # engine's raw_data fallback.
     RAW_STORE_RETENTION_DAYS: int = 0
     RETENTION_SWEEP_INTERVAL_HOURS: int = 24
+    # Tick of the housekeeping loop (app.tasks.housekeeping): the stale-PENDING
+    # DROPPED sweep, the retention sweep, and the auth-token/session purge.
+    # Runs independently of ANALYSIS_ENGINE_ENABLED — disabling scoring must
+    # not also silently disable cleanup (review finding). Defaults to the
+    # analysis engine's old tick so behaviour is unchanged for a deploy that
+    # doesn't touch either knob.
+    HOUSEKEEPING_INTERVAL_SECONDS: int = 30
 
     # Background-task supervisor restart backoff. Base doubles per crash up
     # to the ceiling; a run lasting longer than the stable-reset window
@@ -457,6 +482,14 @@ class Settings(BaseSettings):
     # TTL are tunable; defaults match the design doc.
     SESSION_COOKIE_NAME: str = "tms_session"
     SESSION_TTL_DAYS: int = 7
+    # CSRF double-submit cookie: defense-in-depth on top of SameSite=Lax
+    # (which already blocks the common cross-site POST case). A mutating
+    # request that carries the session cookie must also echo a second,
+    # JS-readable cookie's value in a header — proof the request originated
+    # from a page that can read this origin's cookies, which a cross-site
+    # attacker cannot. The cookie/header NAMES are frozen constants in
+    # app.csrf (the SPA hardcodes them; a config override would break it).
+    CSRF_PROTECTION_ENABLED: bool = True
     # Magic-link tokens are short-lived. 15 min keeps the interception
     # window narrow while leaving slack for slow mail delivery.
     MAGIC_LINK_TTL_MINUTES: int = 15
@@ -523,6 +556,12 @@ class Settings(BaseSettings):
     WEBHOOK_MAX_RETRIES: int = 2             # extra attempts on 5xx / network error
     WEBHOOK_RETRY_BACKOFF_SECONDS: float = 1.0  # linear backoff between attempts
     WEBHOOK_SIGNING_SECRET: str = ""         # HMAC-SHA256 key for signing webhook request bodies
+    # A webhook URL is refused (config validation) or its send skipped (DNS
+    # resolves to an internal address at request time) unless this is set —
+    # otherwise the server would happily SSRF into its own network / a cloud
+    # metadata endpoint on an operator-supplied URL. Opt in for an intentional
+    # internal receiver (e.g. an in-VPC SIEM).
+    WEBHOOK_ALLOW_INTERNAL: bool = False
     # Periodic report. Frequency/window/recipients live in the notification
     # config document; these are operational knobs.
     NOTIFY_REPORT_CHECK_INTERVAL_SECONDS: int = 60   # how often the scheduler checks if due
