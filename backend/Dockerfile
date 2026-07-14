@@ -23,9 +23,12 @@ RUN groupadd --system --gid 1001 appgroup \
 
 WORKDIR /app
 
-# Copy requirements first for better layer caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements first for better layer caching. The image installs the
+# hashed transitive lock (runtime deps only, no pytest/black/ruff/mypy):
+# builds are reproducible, and a tampered or substituted package fails the
+# hash check instead of shipping.
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copy config files (e.g., detection.yaml). The compose build context is the
 # repo root (see docker-compose.yml: build.context = .), so config/ is reached
