@@ -134,6 +134,25 @@ def extract_lovelace(value: Any) -> int:
     return 0
 
 
+def total_withdrawal_lovelace(raw_data: Any) -> int:
+    """Sum of the tx's reward-account withdrawals, in lovelace.
+
+    Ogmios emits ``withdrawals`` as ``{reward_address: value}`` where the
+    value is a v5 bare int / ``{"lovelace": N}`` or a v6
+    ``{"ada": {"lovelace": N}}`` dict; all three are absorbed by
+    :func:`extract_lovelace`. Withdrawn rewards are consumed value that
+    funds outputs exactly like spent inputs, so the input enrichment folds
+    this into ``total_input_value``. Absent or malformed shapes return 0
+    (recall-first: never abort ingestion over untrusted chain data).
+    """
+    if not isinstance(raw_data, dict):
+        return 0
+    withdrawals = raw_data.get("withdrawals")
+    if not isinstance(withdrawals, dict):
+        return 0
+    return sum(extract_lovelace(v) for v in withdrawals.values())
+
+
 def estimate_utxo_total_bytes(
     address: str, value_cbor: int, datum_bytes: int, script_ref: Any
 ) -> int:

@@ -142,6 +142,24 @@ class TestFailedV6Transaction:
         assert tx.total_output_value == 4_800_000
         assert tx.addresses == ["addr_test1qqcollateralreturn"]
 
+    def test_failed_tx_collateral_return_keeps_native_assets(self):
+        # The collateralReturn is a failed tx's ONLY output; dropping its
+        # native assets hid every asset a failed attack posted as
+        # collateral (Ticket F).
+        body = _v6_tx(
+            spends="collaterals",
+            collateralReturn={
+                "address": "addr_test1qqcollateralreturn",
+                "value": {
+                    "ada": {"lovelace": 4_800_000},
+                    POLICY: {"544f4b454e": 7},
+                },
+            },
+        )
+        tx = parse_ogmios_transaction(body)
+        assert tx.outputs[0].amount == 4_800_000
+        assert tx.outputs[0].assets == {f"{POLICY}.544f4b454e": 7}
+
     def test_failed_tx_without_collateral_return(self):
         body = _v6_tx(spends="collaterals")
         del body["collateralReturn"]
@@ -287,12 +305,49 @@ class TestMalformedPayloads:
         assert tx.inputs[0].index == 1
 
 
+class TestWithdrawals:
+    """Reward-account withdrawals: the stake addresses are involved
+    parties and must reach the address list (Ticket F); the withdrawn
+    value feeds total_input_value in the enrichment step, not here."""
+
+    def test_v6_reward_address_recorded(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
+        )
+        assert "stake1xyz" in tx.addresses
+        # Withdrawals are input-side value: outputs are untouched.
+        assert tx.total_output_value == 4_500_000
+
+    def test_v5_bare_int_shape_recorded(self):
+        tx = parse_ogmios_transaction(_v6_tx(withdrawals={"stake1abc": 5_000}))
+        assert "stake1abc" in tx.addresses
+
+    def test_failed_tx_attempted_withdrawal_recorded(self):
+        # The ledger never applied it, but what a failed attack TRIED to
+        # withdraw is signal, like its is_unspent_attempt inputs.
+        tx = parse_ogmios_transaction(
+            _v6_tx(spends="collaterals",
+                   withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
+        )
+        assert tx.script_valid is False
+        assert "stake1xyz" in tx.addresses
+
+    @pytest.mark.parametrize(
+        "bad", ["nope", 12, ["stake1x"], None],
+        ids=["string", "int", "list", "none"],
+    )
+    def test_malformed_withdrawals_tolerated(self, bad):
+        tx = parse_ogmios_transaction(_v6_tx(withdrawals=bad))
+        assert tx.tx_hash == "ab" * 32
+        assert not any(a.startswith("stake") for a in tx.addresses)
+
+
 class TestIgnoredFields:
     """Fields the parser deliberately does not read must never break it.
 
     Mint/burn is consumed downstream from raw_data by the feature
-    extractor; withdrawals and certificates are unparsed today (tracked
-    as Ticket F). These pin that their presence is harmless.
+    extractor; certificates are unparsed today. These pin that their
+    presence is harmless.
     """
 
     def test_mint_and_burn_ignored(self):
@@ -305,13 +360,6 @@ class TestIgnoredFields:
         # Preserved verbatim in raw_data for the feature extractor.
         assert minted.raw_data["mint"] == {POLICY: {"544f4b454e": 5}}
         assert burned.raw_data["mint"] == {POLICY: {"544f4b454e": -5}}
-
-    def test_withdrawals_ignored(self):
-        tx = parse_ogmios_transaction(
-            _v6_tx(withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
-        )
-        assert tx.tx_hash == "ab" * 32
-        assert tx.total_output_value == 4_500_000
 
     def test_certificates_ignored(self):
         tx = parse_ogmios_transaction(

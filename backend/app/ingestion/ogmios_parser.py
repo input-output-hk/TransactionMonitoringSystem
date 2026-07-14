@@ -144,11 +144,17 @@ def parse_ogmios_transaction(
             # v5/v6 shape handling lives in features.extract_lovelace (this
             # was the last hand-rolled copy of the dual-shape branch — the
             # duplication class that caused the v6 mempool fee bug).
-            lv = extract_lovelace(collateral_return.get("value", {}))
+            cr_value = collateral_return.get("value", {})
+            lv = extract_lovelace(cr_value)
+            # Native assets returned with the collateral: for a failed tx
+            # this is the ONLY output, so dropping them hid every asset a
+            # failed attack posted as collateral (Ticket F).
+            cr_assets = flatten_assets(cr_value)
             addresses.add(addr)
             outputs.append(TransactionOutput(
                 address=addr,
                 amount=int(lv),
+                assets=cr_assets if cr_assets else None,
                 is_collateral=True,
                 # Babbage rule: the collateral return's on-chain index is
                 # the count of regular outputs (which never materialise for
@@ -163,6 +169,19 @@ def parse_ogmios_transaction(
     for inp in inputs:
         if inp.address:
             addresses.add(inp.address)
+
+    # Reward-account withdrawals: the stake addresses are involved parties
+    # (a drained reward account is prime attack signal). Recorded for a
+    # failed tx too: the ledger never applied its withdrawal, but what a
+    # failed attack TRIED to withdraw is signal, mirroring the
+    # is_unspent_attempt treatment of its regular inputs. The withdrawn
+    # value feeds total_input_value in the enrichment step (validated txs
+    # only), via features.total_withdrawal_lovelace over raw_data.
+    withdrawals_raw = tx_data.get("withdrawals")
+    if isinstance(withdrawals_raw, dict):
+        for reward_addr in withdrawals_raw:
+            if reward_addr:
+                addresses.add(str(reward_addr))
 
     # Metadata
     metadata = None

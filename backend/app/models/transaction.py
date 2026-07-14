@@ -232,7 +232,16 @@ class NormalizedTransaction(BaseModel):
     outputs: List[TransactionOutput] = Field(default_factory=list)
     input_count: int = Field(0, description="Number of inputs")
     output_count: int = Field(0, description="Number of outputs")
-    total_input_value: Optional[int] = Field(None, description="Total input value in lovelace; NULL when input amounts are unresolved (UTxO cache not available)")
+    total_input_value: Optional[int] = Field(
+        None,
+        description=(
+            "Consumed value in lovelace resolved so far: regular inputs "
+            "(validated txs) or collateral inputs (failed txs), plus "
+            "reward-account withdrawals. NULL when nothing is resolved "
+            "(UTxO cache not available); partial when only some inputs "
+            "resolved."
+        ),
+    )
     total_output_value: int = Field(0, description="Total output value in lovelace")
     addresses: List[str] = Field(default_factory=list, description="All addresses involved")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Transaction metadata")
