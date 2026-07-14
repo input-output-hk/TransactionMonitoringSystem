@@ -78,17 +78,14 @@ export async function fetchWithAuth(
 	opts?: { allow401?: boolean },
 ): Promise<Response> {
 	const method = (init?.method ?? "GET").toUpperCase();
-	let res: Response;
-	if (!MUTATING_METHODS.has(method)) {
-		res = await fetch(input, { ...init, credentials: "include" });
-	} else {
+	const headers = new Headers(init?.headers);
+	if (MUTATING_METHODS.has(method)) {
 		const csrfToken = readCookie(CSRF_COOKIE_NAME);
-		const headers = new Headers(init?.headers);
 		if (csrfToken) {
 			headers.set(CSRF_HEADER_NAME, csrfToken);
 		}
-		res = await fetch(input, { ...init, headers, credentials: "include" });
 	}
+	const res = await fetch(input, { ...init, headers, credentials: "include" });
 	if (res.status === 401 && !opts?.allow401) {
 		const url =
 			typeof input === "string"

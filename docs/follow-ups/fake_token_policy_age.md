@@ -96,7 +96,7 @@ helper in `clickhouse.py` (point query, < 1ms with the bloom filter).
   [frontend/src/pages/AttackDetailPage.tsx](../../frontend/src/pages/AttackDetailPage.tsx)
   (revert the hide done in the same commit that introduced this doc).
 - Re-add the "New Policy" donut to
-  [frontend/src/mocks/attacks.ts](../../frontend/src/mocks/attacks.ts) `SUB_SCORE_LABELS["Fake Token"]`.
+  [frontend/src/lib/attacks.ts](../../frontend/src/lib/attacks.ts) `SUB_SCORE_LABELS["Fake Token"]`.
 
 ### 5. One-time backfill script (~30 lines)
 
