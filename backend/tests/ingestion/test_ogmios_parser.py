@@ -80,6 +80,16 @@ class TestValidV6Transaction:
         assert sum(1 for i in tx.inputs if i.is_collateral) == 1
         assert len(tx.inputs) == 4
 
+    @pytest.mark.parametrize("spends", ["inputs", "collaterals"])
+    def test_input_count_matches_consumption_predicate(self, spends):
+        # input_count and the enrichment's total_input_value both derive
+        # from TransactionInput.consumed_by_ledger; this pins that the
+        # count really is the predicate's cardinality for both outcomes.
+        tx = parse_ogmios_transaction(_v6_tx(spends=spends))
+        assert tx.input_count == sum(
+            1 for i in tx.inputs if i.consumed_by_ledger(tx.script_valid)
+        )
+
     def test_collateral_return_not_created_when_valid(self):
         # A validated tx never creates the collateralReturn output.
         tx = parse_ogmios_transaction(_v6_tx())
@@ -315,8 +325,18 @@ class TestWithdrawals:
             _v6_tx(withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
         )
         assert "stake1xyz" in tx.addresses
+        assert tx.withdrawal_total == 1_000
         # Withdrawals are input-side value: outputs are untouched.
         assert tx.total_output_value == 4_500_000
+
+    def test_failed_tx_stamps_raw_withdrawal_total(self):
+        # The parser stamps the RAW declared total; the script_valid gate
+        # (a failed tx's withdrawal never applied) lives in enrichment.
+        tx = parse_ogmios_transaction(
+            _v6_tx(spends="collaterals",
+                   withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
+        )
+        assert tx.withdrawal_total == 1_000
 
     def test_v5_bare_int_shape_recorded(self):
         tx = parse_ogmios_transaction(_v6_tx(withdrawals={"stake1abc": 5_000}))
