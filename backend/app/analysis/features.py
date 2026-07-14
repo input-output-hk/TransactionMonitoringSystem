@@ -90,6 +90,11 @@ SCRIPT_ADDRESS_PREFIXES = (
     "addr_test1w", "addr_test1z", "addr_test1x", "addr_test12",
 )
 
+# Cardano protocol constant: 1 ADA = 1,000,000 lovelace (CIP-9 / ledger spec).
+# Single shared definition; graph.py (round-amount test) and
+# notifications/reports.py (fee display) import it from here.
+LOVELACE_PER_ADA = 1_000_000
+
 
 def is_script_address(address: str) -> bool:
     """Detect whether a Cardano address is a script (validator) address.

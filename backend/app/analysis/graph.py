@@ -11,6 +11,7 @@ import statistics
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
+from app.analysis.features import LOVELACE_PER_ADA
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
 from app.db import clickhouse
@@ -33,11 +34,6 @@ _DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE_CFG["default_inter_hop_delta_slots"]
 # the two sites cannot drift (the engine previously hardcoded the value).
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
-
-# Cardano protocol constant: 1 ADA = 1,000,000 lovelace (CIP-9 / ledger spec).
-# Used to test whether an amount is a whole-ADA round number, a stylistic
-# marker of manual layering.
-LOVELACE_PER_ADA = 1_000_000
 
 
 def _first_sorted(addresses) -> str:
