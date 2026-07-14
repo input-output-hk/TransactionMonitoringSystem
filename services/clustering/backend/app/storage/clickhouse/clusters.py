@@ -63,11 +63,29 @@ class _ClusterMixin(_RepoBase):
         "FROM {db}.cluster_runs FINAL {where}"
     )
 
-    def list_runs(self, target: str | None = None) -> list[dict[str, Any]]:
+    def list_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
         where = "WHERE target = {t:String}" if target else ""
-        sql = self._RUN_SELECT.format(db=self._db, where=where) + " ORDER BY created_at DESC"
-        rows = self.client.query(sql, parameters={"t": target} if target else None).result_rows
+        sql = self._RUN_SELECT.format(db=self._db, where=where) + (
+            " ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}"
+        )
+        params: dict[str, Any] = {"lim": limit, "off": offset}
+        if target:
+            params["t"] = target
+        rows = self.client.query(sql, parameters=params).result_rows
         return [self._run_row_to_dict(r) for r in rows]
+
+    def count_runs(self, target: str | None = None) -> int:
+        """Full (unpaginated) run count backing the list envelope's ``total``.
+        ``count() AS total`` is safe under the 26.x alias rule: single aggregate,
+        and ``cluster_runs`` has no ``total`` source column."""
+        where = "WHERE target = {t:String}" if target else ""
+        rows = self.client.query(
+            f"SELECT count() AS total FROM {self._db}.cluster_runs FINAL {where}",
+            parameters={"t": target} if target else None,
+        ).result_rows
+        return int(rows[0][0]) if rows else 0
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         sql = self._RUN_SELECT.format(db=self._db, where="WHERE run_id = {r:String}") + " LIMIT 1"

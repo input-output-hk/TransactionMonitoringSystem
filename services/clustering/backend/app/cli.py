@@ -23,6 +23,7 @@ from app.service import (
     process_contract,
 )
 from app.storage.clickhouse import ClickHouseRepo, select_repo_factory
+from app.storage.protocol import iter_all_rows
 
 app = typer.Typer(add_completion=False, help="Cardano contract transaction clustering tool.")
 
@@ -269,7 +270,8 @@ def migrate(
 def targets() -> None:
     """List ingested targets and their transaction counts."""
     repo = _feature_repo()
-    rows = repo.list_targets()
+    # Exhaustive listing: page through everything (list_targets paginates now).
+    rows = list(iter_all_rows(repo.list_targets))
     if not rows:
         typer.echo("No targets ingested yet.")
         return

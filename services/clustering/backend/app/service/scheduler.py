@@ -29,6 +29,7 @@ from app.config import Settings
 from app.ids import new_id
 from app.jobs import JobManager, RepoFactory
 from app.service._common import target_in_jobs
+from app.storage.protocol import iter_all_rows
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,10 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
     try:
         busy = {j["target"] for j in repo.nonterminal_jobs()}
         cap = settings.feed_max_contracts_per_tick
-        for contract in repo.list_contracts():
+        # Page through the WHOLE registry (list_contracts now paginates with a
+        # default page of 100): a watched contract beyond the first page must
+        # still be scored, or its attacks would silently go unwatched.
+        for contract in iter_all_rows(repo.list_contracts):
             if enqueued >= cap:
                 break
             target = contract["target"]

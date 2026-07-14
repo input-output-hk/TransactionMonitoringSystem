@@ -16,12 +16,38 @@ Sections mirror the ClickHouseRepo mixins (``storage/clickhouse/*.py``).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any, Protocol
 
 import pandas as pd
 
 from app.models import AssetRecord, TxRecord, UtxoRecord
+
+# Page size for exhaustive internal scans over the paginated list_* reads (the
+# feed scheduler, the CLI). Bounds each ClickHouse round-trip's result set while
+# guaranteeing every row is eventually visited; the API's default limit (100) is
+# a response page, not a cap on iteration.
+SCAN_PAGE_SIZE = 500
+
+
+def iter_all_rows(
+    fetch: Callable[..., list[dict[str, Any]]], *, page_size: int = SCAN_PAGE_SIZE
+) -> Iterator[dict[str, Any]]:
+    """Yield every row of a paginated ``list_*`` read by walking its pages.
+
+    ``fetch`` is a bound repo method accepting ``limit``/``offset`` keywords
+    (e.g. ``repo.list_contracts``). Internal callers that must see the WHOLE
+    collection (the feed scheduler deciding which watched contract to score
+    next, the CLI listing) go through this so the API-facing default page size
+    can never silently truncate their scan.
+    """
+    offset = 0
+    while True:
+        rows = fetch(limit=page_size, offset=offset)
+        yield from rows
+        if len(rows) < page_size:
+            return
+        offset += page_size
 
 
 class Repo(Protocol):
@@ -54,7 +80,9 @@ class Repo(Protocol):
         done: bool,
     ) -> None: ...
 
-    def list_targets(self) -> list[dict[str, Any]]: ...
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+
+    def count_targets(self) -> int: ...
 
     def fetch_shape_features(self, target: str) -> pd.DataFrame: ...
 
@@ -72,7 +100,11 @@ class Repo(Protocol):
 
     def save_cluster_labels(self, run_id: str, labels: Sequence[tuple[str, int]]) -> None: ...
 
-    def list_runs(self, target: str | None = None) -> list[dict[str, Any]]: ...
+    def list_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
+
+    def count_runs(self, target: str | None = None) -> int: ...
 
     def get_run(self, run_id: str) -> dict[str, Any] | None: ...
 
@@ -120,7 +152,11 @@ class Repo(Protocol):
 
     def save_anomaly_scores(self, run_id: str, rows: Sequence[tuple[Any, ...]]) -> None: ...
 
-    def list_anomaly_runs(self, target: str | None = None) -> list[dict[str, Any]]: ...
+    def list_anomaly_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
+
+    def count_anomaly_runs(self, target: str | None = None) -> int: ...
 
     def get_anomaly_run(self, run_id: str) -> dict[str, Any] | None: ...
 
@@ -134,7 +170,9 @@ class Repo(Protocol):
 
     def save_contract(self, contract: dict[str, Any]) -> None: ...
 
-    def list_contracts(self) -> list[dict[str, Any]]: ...
+    def list_contracts(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+
+    def count_contracts(self) -> int: ...
 
     def get_contract(self, target: str) -> dict[str, Any] | None: ...
 
@@ -158,7 +196,9 @@ class Repo(Protocol):
 
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
 
-    def list_jobs(self) -> list[dict[str, Any]]: ...
+    def list_jobs(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+
+    def count_jobs(self) -> int: ...
 
     def nonterminal_jobs(self) -> list[dict[str, Any]]: ...
 

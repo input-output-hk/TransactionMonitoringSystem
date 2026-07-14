@@ -33,6 +33,30 @@ target / `max_txs` over cap), **429** (too many in‑flight jobs), **503**
 (ClickHouse unreachable, from `/api/ready`). Internal/source errors are
 **sanitized** in responses; full detail is logged server‑side.
 
+## Pagination
+
+Every collection endpoint (`GET /api/targets`, `GET /api/contracts`,
+`GET /api/jobs`, `GET /api/runs`, `GET /api/anomaly-runs`) returns a list
+envelope rather than a bare array, matching the host API's `ListResponse`
+contract:
+
+```json
+{ "count": 2, "total": 41, "data": [ ... ] }
+```
+
+- `limit` (query, default `100`, max `1000`): page size. A value outside
+  `1..1000` is rejected with **422**.
+- `offset` (query, default `0`, min `0`): rows to skip, in the endpoint's
+  documented order.
+- `count`: number of rows in `data` (the page actually returned).
+- `total`: the full filtered count, independent of paging. For the filtered
+  lists (`/runs?target=`, `/anomaly-runs?target=`) it counts only the rows
+  matching the filter. Keep requesting pages until `offset + count` reaches
+  `total`.
+
+Single-resource reads (`/api/contracts/{target}`, `/api/jobs/{job_id}`,
+`/api/runs/{run_id}`, ...) are unchanged and return the bare object.
+
 ## Health & readiness
 
 | Method | Path | Description |
@@ -50,11 +74,11 @@ the manual counterpart to that loop rather than the only way a contract gets sco
 |---|---|---|
 | POST | `/api/contracts` | Add a contract to the watchlist / refresh it; enqueues the onboarding pipeline. |
 | POST | `/api/contracts/{target}/classify-new` | Incrementally pick up the contract's latest not‑yet‑classified transactions from the TMS's ingested chain data and score them against the contract's frozen model (no full re‑cluster). Enqueues a `classify` job. **404** if unknown, **409** if a job is already running. |
-| GET | `/api/contracts` | List all watched contracts (UI dropdown source). |
+| GET | `/api/contracts?limit=&offset=` | List watched contracts (UI dropdown source), newest update first, in the pagination envelope. |
 | GET | `/api/contracts/{target}` | One contract's metadata + status (**404** if unknown). |
 | PATCH | `/api/contracts/{target}` | Rename (set the display `label`) without re‑running the pipeline. Body: `{label}`. **404** if unknown. |
 | DELETE | `/api/contracts/{target}` | Hard‑delete the contract and **all** its data across every table. **404** if unknown; **409** if a job for it is in flight (stop/wait first). Returns `{"deleted": true, "target": "..."}`. |
-| GET | `/api/jobs` | List all jobs (newest first). Each carries `kind` (`onboard`\|`classify`). |
+| GET | `/api/jobs?limit=&offset=` | List jobs (newest first) in the pagination envelope. Each carries `kind` (`onboard`\|`classify`). |
 | GET | `/api/jobs/{job_id}` | One job's live status (**404** if unknown). Poll this. |
 
 **`POST /api/contracts`** request:
@@ -81,7 +105,8 @@ Response: `{ "job_id": "job-...", "target": "...", "target_type": "address|polic
 Guards: **409** if a non‑terminal job already exists for `target`; **429** if
 `MAX_INFLIGHT_JOBS` non‑terminal jobs already exist.
 
-**Contract shape** (`GET /api/contracts*`):
+**Contract shape** (`GET /api/contracts/{target}` bare; the list returns these
+rows inside the pagination envelope's `data`):
 
 ```json
 {
@@ -100,7 +125,8 @@ the incremental classifier; `reclustering_suggested` is derived at read time,
 `true` once `drift_score ≥ RECLUSTER_NOISE_THRESHOLD` (default `0.25`), and the UI
 surfaces it as a "re-cluster recommended" badge.)
 
-**Job shape** (`GET /api/jobs*`):
+**Job shape** (`GET /api/jobs/{job_id}` bare; the list returns these rows inside
+the pagination envelope's `data`):
 
 ```json
 {
@@ -121,7 +147,7 @@ an external provider.)
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/targets` | Distinct targets present in the ingested transactions with live tx counts. Pre‑dates `contracts`; kept for compatibility. |
+| GET | `/api/targets?limit=&offset=` | Distinct targets present in the ingested transactions with live tx counts, highest count first, in the pagination envelope. Pre‑dates `contracts`; kept for compatibility. |
 
 ## Clustering
 
@@ -129,7 +155,7 @@ an external provider.)
 |---|---|---|
 | GET | `/api/evaluation?target=&feature_set=` | k‑distance curve + scored grid + recommendation. `feature_set` ∈ `shape\|graph\|combined` (default `shape`). |
 | POST | `/api/cluster` | Run DBSCAN and persist a run. Body: `{target, feature_set, eps>0, min_samples>=2, notes?}`. |
-| GET | `/api/runs?target=` | List cluster runs (newest first; `target` optional). |
+| GET | `/api/runs?target=&limit=&offset=` | List cluster runs (newest first; `target` optional) in the pagination envelope; `total` counts the filtered rows. |
 | GET | `/api/runs/{run_id}` | One run's metadata (**404** if unknown). |
 | GET | `/api/runs/{run_id}/clusters` | Per‑cluster summary stats + verdict fields (see below). |
 | GET | `/api/runs/{run_id}/clusters/{cluster_id}/transactions?limit=&offset=` | Transactions in a cluster; each row carries an effective `verdict` + raw `votes`. |
@@ -152,7 +178,7 @@ one. Cluster‑summary rows additionally carry `verdict` (the manual label, or `
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/anomaly` | Run the ensemble and persist a run. Body: `{target, feature_set, eps?, min_samples?, top_quantile?}`. |
-| GET | `/api/anomaly-runs?target=` | List anomaly runs (newest first; `target` optional). |
+| GET | `/api/anomaly-runs?target=&limit=&offset=` | List anomaly runs (newest first; `target` optional) in the pagination envelope; `total` counts the filtered rows. |
 | GET | `/api/anomaly-runs/{run_id}/top?limit=&offset=` | Top‑ranked anomalous transactions for a run. |
 
 See [algorithms.md](algorithms.md) for what the clustering/anomaly parameters and

@@ -2,18 +2,27 @@
 // Public surface (re-exported by the barrel).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { AnomalyRun, AnomalyTopResponse, FeatureSet } from "../types";
-import { anomalyRunItem, arrayOf, validateAnomalyTop } from "../validation";
-import { get, send } from "../transport";
+import type {
+	AnomalyRun,
+	AnomalyTopResponse,
+	FeatureSet,
+	ListPage,
+} from "../types";
+import { anomalyRunItem, listPage, validateAnomalyTop } from "../validation";
+import { get, MAX_PAGE_LIMIT, send } from "../transport";
 
 export function useAnomalyRuns(target: string | undefined) {
 	return useQuery({
 		queryKey: ["clustering", "anomaly-runs", target],
-		queryFn: () =>
-			get<AnomalyRun[]>(
-				`/anomaly-runs?target=${encodeURIComponent(target!)}`,
-				arrayOf("/anomaly-runs", anomalyRunItem),
-			),
+		// The endpoint returns a {count,total,data} envelope; fetch one max-size
+		// page and unwrap so consumers keep seeing a plain array.
+		queryFn: async () =>
+			(
+				await get<ListPage<AnomalyRun>>(
+					`/anomaly-runs?target=${encodeURIComponent(target!)}&limit=${MAX_PAGE_LIMIT}`,
+					listPage("/anomaly-runs", anomalyRunItem),
+				)
+			).data,
 		enabled: !!target,
 	});
 }

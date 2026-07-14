@@ -209,17 +209,22 @@ class HostBackedRepo(ClickHouseRepo):
         ).result_rows
         return int(rows[0][0]) if rows else 0
 
-    def list_targets(self) -> list[dict[str, Any]]:
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         # Raw-tx tables are empty in the integrated deployment; the watchlist is
-        # the contracts registry.
+        # the contracts registry, so the page comes from it too.
         return [
             {
                 "target": c["target"],
                 "target_type": c.get("target_type", "address"),
                 "tx_count": int(c.get("tx_count", 0) or 0),
             }
-            for c in self.list_contracts()
+            for c in self.list_contracts(limit=limit, offset=offset)
         ]
+
+    def count_targets(self) -> int:
+        # Must count the same source list_targets pages over: the contracts
+        # registry, not the (empty) module-local transactions table.
+        return self.count_contracts()
 
     # --- transactions-joined reads that back the UI / online path -------------
 

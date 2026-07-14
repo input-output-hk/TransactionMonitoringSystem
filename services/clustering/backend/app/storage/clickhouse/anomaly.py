@@ -115,13 +115,29 @@ class _AnomalyMixin(_RepoBase):
             float_keys=("eps", "top_quantile"),
         )
 
-    def list_anomaly_runs(self, target: str | None = None) -> list[dict[str, Any]]:
+    def list_anomaly_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
         where = "WHERE target = {t:String}" if target else ""
-        sql = (
-            self._ANOMALY_RUN_SELECT.format(db=self._db, where=where) + " ORDER BY created_at DESC"
+        sql = self._ANOMALY_RUN_SELECT.format(db=self._db, where=where) + (
+            " ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}"
         )
-        rows = self.client.query(sql, parameters={"t": target} if target else None).result_rows
+        params: dict[str, Any] = {"lim": limit, "off": offset}
+        if target:
+            params["t"] = target
+        rows = self.client.query(sql, parameters=params).result_rows
         return [self._anomaly_run_to_dict(r) for r in rows]
+
+    def count_anomaly_runs(self, target: str | None = None) -> int:
+        """Full (unpaginated) anomaly-run count backing the list envelope's
+        ``total``. ``count() AS total`` is safe under the 26.x alias rule: single
+        aggregate, and ``anomaly_runs`` has no ``total`` source column."""
+        where = "WHERE target = {t:String}" if target else ""
+        rows = self.client.query(
+            f"SELECT count() AS total FROM {self._db}.anomaly_runs FINAL {where}",
+            parameters={"t": target} if target else None,
+        ).result_rows
+        return int(rows[0][0]) if rows else 0
 
     def get_anomaly_run(self, run_id: str) -> dict[str, Any] | None:
         sql = (

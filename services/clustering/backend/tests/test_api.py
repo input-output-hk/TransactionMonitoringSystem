@@ -49,14 +49,20 @@ class FakeApiRepo(FakeRepoBase):
             raise RuntimeError("down")
         return True
 
-    def list_contracts(self) -> list[dict[str, Any]]:
-        return self.contracts
+    def list_contracts(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        return self.contracts[offset : offset + limit]
+
+    def count_contracts(self) -> int:
+        return len(self.contracts)
 
     def get_contract(self, target: str) -> dict[str, Any] | None:
         return next((c for c in self.contracts if c["target"] == target), None)
 
-    def list_jobs(self) -> list[dict[str, Any]]:
-        return self.jobs
+    def list_jobs(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        return self.jobs[offset : offset + limit]
+
+    def count_jobs(self) -> int:
+        return len(self.jobs)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         return next((j for j in self.jobs if j["job_id"] == job_id), None)
@@ -64,8 +70,11 @@ class FakeApiRepo(FakeRepoBase):
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self.runs.get(run_id)
 
-    def list_targets(self) -> list[dict[str, Any]]:
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return []
+
+    def count_targets(self) -> int:
+        return 0
 
     def nonterminal_jobs(self) -> list[dict[str, Any]]:
         return self._nonterminal
@@ -235,7 +244,45 @@ def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_list_contracts() -> None:
     repo = FakeApiRepo(contracts=[_contract_row(tx_count=5)])
     r = _client(repo).get("/api/contracts")
-    assert r.status_code == 200 and r.json()[0]["target"] == "addr1a"
+    assert r.status_code == 200 and r.json()["data"][0]["target"] == "addr1a"
+
+
+# --- List pagination envelope ------------------------------------------------
+
+
+def test_list_envelope_shape_total_exceeds_count() -> None:
+    """{count, total, data}: count is the page length, total the full collection
+    size, so total > count signals more rows beyond this page."""
+    jobs = [_job_row(job_id=f"job-{i}") for i in range(3)]
+    body = _client(FakeApiRepo(jobs=jobs)).get("/api/jobs?limit=2").json()
+    assert set(body) == {"count", "total", "data"}
+    assert body["count"] == 2 and body["total"] == 3
+    assert len(body["data"]) == 2 and body["count"] > 0 and body["total"] > body["count"]
+
+
+def test_jobs_list_limit_offset_slice() -> None:
+    jobs = [_job_row(job_id=f"job-{i}") for i in range(5)]
+    client = _client(FakeApiRepo(jobs=jobs))
+    body = client.get("/api/jobs?limit=2&offset=2").json()
+    assert [j["job_id"] for j in body["data"]] == ["job-2", "job-3"]
+    assert body["count"] == 2 and body["total"] == 5
+    # Trailing partial page: count reflects what the page actually holds.
+    body = client.get("/api/jobs?limit=2&offset=4").json()
+    assert [j["job_id"] for j in body["data"]] == ["job-4"]
+    assert body["count"] == 1 and body["total"] == 5
+
+
+def test_jobs_list_default_envelope() -> None:
+    body = _client(FakeApiRepo(jobs=[_job_row()])).get("/api/jobs").json()
+    assert body["count"] == 1 and body["total"] == 1
+    assert body["data"][0]["job_id"] == "job-1"
+
+
+def test_list_limit_bounds_rejected() -> None:
+    client = _client(FakeApiRepo())
+    assert client.get("/api/jobs?limit=1001").status_code == 422  # over le=1000
+    assert client.get("/api/jobs?limit=0").status_code == 422  # under ge=1
+    assert client.get("/api/jobs?offset=-1").status_code == 422  # under ge=0
 
 
 def test_get_contract_404() -> None:
