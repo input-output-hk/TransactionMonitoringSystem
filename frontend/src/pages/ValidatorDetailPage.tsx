@@ -6,7 +6,9 @@
  * tab is open. Contracts are fitted/classified automatically by the sidecar.
  */
 import { Suspense, lazy, useMemo, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
+
+import { qpEnum, useQueryParamState } from "@/lib/url-state";
 
 import { AnomalyHelp } from "@/components/clustering/AnomalyHelp";
 import { AnomalyRunControls } from "@/components/clustering/AnomalyRunControls";
@@ -166,21 +168,11 @@ export function ValidatorDetailPage() {
 	const { data: runs, isError: runsError } = useRuns(decoded);
 
 	// Tab lives in the URL (?tab=) so card deep-links ("Explore", "Outliers") and
-	// browser navigation land on the right surface.
-	const [searchParams, setSearchParams] = useSearchParams();
-	const tabParam = searchParams.get("tab") ?? "";
-	const tab = (TAB_VALUES as readonly string[]).includes(tabParam)
-		? tabParam
-		: "graph";
-	const setTab = (value: string) =>
-		setSearchParams(
-			(prev) => {
-				const next = new URLSearchParams(prev);
-				next.set("tab", value);
-				return next;
-			},
-			{ replace: true },
-		);
+	// browser navigation land on the right surface. Read/write discipline is
+	// shared with ReportsPage via lib/url-state.
+	const { searchParams, setParam } = useQueryParamState();
+	const tab = qpEnum(searchParams, "tab", TAB_VALUES, "graph");
+	const setTab = (value: string) => setParam("tab", value);
 	// Lifted so a graph click can focus a cluster in the Clusters tab.
 	const [selectedCluster, setSelectedCluster] = useState<number | null>(null);
 
