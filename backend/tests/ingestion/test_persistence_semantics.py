@@ -18,38 +18,16 @@ from app.ingestion.ogmios_client import (
     IntersectionNotFoundError,
     OgmiosClient,
 )
-
-
-def _run(coro):
-    return asyncio.run(coro)
+from tests.ingestion.conftest import (
+    make_block as _block,
+    persistence_patches,
+    run_async as _run,
+)
 
 
 @pytest.fixture
 def client():
     return OgmiosClient()
-
-
-def _block(slot=100, txs=1):
-    return {
-        "block": {
-            "id": "ab" * 32,
-            "slot": slot,
-            "height": 7,
-            "transactions": [
-                {
-                    "id": f"{i:02d}" * 32,
-                    "spends": "inputs",
-                    "fee": {"ada": {"lovelace": 200_000}},
-                    "inputs": [{"transaction": {"id": "11" * 32}, "index": 0}],
-                    "outputs": [
-                        {"address": "addr_test1qq", "value": {"ada": {"lovelace": 1}}}
-                    ],
-                }
-                for i in range(txs)
-            ],
-        },
-        "tip": {"slot": slot + 10},
-    }
 
 
 class TestInsertRetry:
@@ -100,34 +78,50 @@ class TestCheckpointNotAdvancedOnFailure:
         save_sync.assert_awaited_once()
 
 
+class TestSlotlessBlocks:
+    """A Byron epoch-boundary block (EBB) carries no slot and no
+    transactions; before the guard, the slot-0 default flowed into
+    save_sync_point and reset the checkpoint to genesis, forcing a full
+    re-sync on the next restart (Ticket F)."""
+
+    def test_ebb_never_checkpoints(self, client):
+        save_sync = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync):
+            _run(client._handle_roll_forward(
+                {"block": {"type": "ebb", "era": "byron", "id": "ab" * 32,
+                           "ancestor": "cd" * 32, "height": 4_492_799},
+                 "tip": {"slot": 999}}
+            ))
+        save_sync.assert_not_awaited()
+
+    def test_slotless_block_with_txs_raises_for_replay(self, client):
+        # Protocol-impossible shape (EBBs are transaction-free): the guard
+        # must neither invent a slot nor quietly continue. A quiet skip
+        # would let the NEXT block's save_sync_point advance past the
+        # unprocessed transactions, losing them forever; raising trips the
+        # breaker so the block replays from the unadvanced checkpoint.
+        blk = _block(slot=100)
+        del blk["block"]["slot"]
+        save_sync = AsyncMock()
+        insert = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync), \
+             patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
+                   insert):
+            with pytest.raises(BlockPersistError):
+                _run(client._handle_roll_forward(blk))
+        save_sync.assert_not_awaited()
+        insert.assert_not_awaited()
+
+
 class TestRawStoreDurability:
     """When RAW_DATA_MAX_BYTES caps the ClickHouse copy, the raw store is
     the ONLY full payload copy: its write must block the checkpoint, and it
     must land before the row becomes engine-visible (review findings)."""
 
     def _patches(self, raw_write, insert=None, save_sync=None):
-        return [
-            patch(
-                "app.ingestion.ogmios_client.raw_store.write_confirmed",
-                raw_write,
-            ),
-            patch(
-                "app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
-                insert or AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.postgres.save_sync_point",
-                save_sync or AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
-                AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async",
-                AsyncMock(return_value={}),
-            ),
-        ]
+        return persistence_patches(
+            insert=insert, save_sync=save_sync, raw_write=raw_write,
+        )
 
     def _run_block(self, client, patches):
         from contextlib import ExitStack
@@ -628,7 +622,7 @@ class TestParseFailurePreservation:
     being silently dropped from every store (review finding)."""
 
     def _patches(self, parse_side_effect, parse_failed=None):
-        return [
+        return persistence_patches() + [
             patch(
                 "app.ingestion.ogmios_client.parse_ogmios_transaction",
                 side_effect=parse_side_effect,
@@ -636,22 +630,6 @@ class TestParseFailurePreservation:
             patch(
                 "app.ingestion.ogmios_client.raw_store.write_parse_failed",
                 parse_failed or AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
-                AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.postgres.save_sync_point",
-                AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
-                AsyncMock(),
-            ),
-            patch(
-                "app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async",
-                AsyncMock(return_value={}),
             ),
         ]
 

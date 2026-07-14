@@ -61,7 +61,7 @@ def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
     if not redeemers:
         return False
     if isinstance(redeemers, dict):
-        # Ogmios v6 keys are "spend:N" / "mint:N" / "publish:N" / "withdraw:N".
+        # Ogmios v5 keys are "spend:N" / "mint:N" / "publish:N" / "withdraw:N".
         return any(str(k).startswith("spend") for k in redeemers.keys())
     if isinstance(redeemers, list):
         for r in redeemers:
@@ -137,6 +137,25 @@ def extract_lovelace(value: Any) -> int:
         except (TypeError, ValueError):
             return 0
     return 0
+
+
+def total_withdrawal_lovelace(raw_data: Any) -> int:
+    """Sum of the tx's reward-account withdrawals, in lovelace.
+
+    Ogmios emits ``withdrawals`` as ``{reward_address: value}`` where the
+    value is a v5 bare int / ``{"lovelace": N}`` or a v6
+    ``{"ada": {"lovelace": N}}`` dict; all three are absorbed by
+    :func:`extract_lovelace`. Withdrawn rewards are consumed value that
+    funds outputs exactly like spent inputs, so the input enrichment folds
+    this into ``total_input_value``. Absent or malformed shapes return 0
+    (recall-first: never abort ingestion over untrusted chain data).
+    """
+    if not isinstance(raw_data, dict):
+        return 0
+    withdrawals = raw_data.get("withdrawals")
+    if not isinstance(withdrawals, dict):
+        return 0
+    return sum(extract_lovelace(v) for v in withdrawals.values())
 
 
 def estimate_utxo_total_bytes(
@@ -590,6 +609,27 @@ def extract_utxo_features(
 # Transaction-level script feature extraction
 # ---------------------------------------------------------------------------
 
+def _redeemer_exunits(entry: Any) -> Tuple[int, int]:
+    """(memory, cpu) execution units of one redeemer entry.
+
+    Tolerates malformed shapes: a non-dict entry, non-dict budget, or
+    garbage unit value degrades to (0, 0). raw_data is untrusted chain
+    data and this runs inside batch ingestion, so a raise here would cost
+    the whole block's feature rows, not just this tx's (recall-first).
+    """
+    if not isinstance(entry, dict):
+        return 0, 0
+    budget = entry.get("executionUnits", entry.get("budget", {}))
+    if not isinstance(budget, dict):
+        return 0, 0
+    try:
+        mem = int(budget.get("memory", 0) or 0)
+        cpu = int(budget.get("cpu", budget.get("steps", 0)) or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    return mem, cpu
+
+
 def extract_tx_script_features(
     tx_hash: str,
     network: str,
@@ -612,19 +652,22 @@ def extract_tx_script_features(
     exunits_cpu = 0
 
     if redeemers:
+        # Non-dict entries and garbage units are skipped, not raised:
+        # this runs inside batch ingestion, and one hostile tx must not
+        # cost the block's feature rows (recall-first degradation).
         if isinstance(redeemers, list):
             redeemers_count = len(redeemers)
             for r in redeemers:
-                budget = r.get("executionUnits", r.get("budget", {}))
-                exunits_mem += int(budget.get("memory", 0))
-                exunits_cpu += int(budget.get("cpu", budget.get("steps", 0)))
+                mem, cpu = _redeemer_exunits(r)
+                exunits_mem += mem
+                exunits_cpu += cpu
         elif isinstance(redeemers, dict):
-            # Ogmios v6 may use dict keyed by "spend:N", "mint:N", etc.
+            # Ogmios v5 uses a dict keyed by "spend:N", "mint:N", etc.
             redeemers_count = len(redeemers)
             for key, r in redeemers.items():
-                budget = r.get("executionUnits", r.get("budget", {}))
-                exunits_mem += int(budget.get("memory", 0))
-                exunits_cpu += int(budget.get("cpu", budget.get("steps", 0)))
+                mem, cpu = _redeemer_exunits(r)
+                exunits_mem += mem
+                exunits_cpu += cpu
 
     mint_policy_count = 0
     mint_entries_json = ""

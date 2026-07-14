@@ -232,10 +232,12 @@ def prune_old_days(retention_days: int) -> int:
 def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[str, Any]]:
     """Read back a transaction's full Ogmios payload from the raw store.
 
-    ``ts`` is the transaction row's ``timestamp``: the ingester passes the
-    same ``now`` to both the ClickHouse row and ``write_confirmed``, so the
-    day directory is derivable. Probe order covers clock-edge skew and
-    mempool-only observation:
+    ``ts`` is the transaction row's ``timestamp`` (chain time): the
+    ingester keys ``write_confirmed`` by the same ``tx.timestamp`` it
+    stores on the ClickHouse row, so the day directory is derivable.
+    Probe order covers clock-edge skew and mempool-only observation
+    (mempool blobs are keyed by observation wall clock, which agrees
+    with chain time within seconds for a tip-observed tx):
 
       1. ``confirmed/{YYYYMMDD(ts)}``
       2. ``confirmed/{YYYYMMDD(ts +/- 1 day)}`` (midnight-boundary writes)
