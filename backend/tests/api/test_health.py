@@ -37,7 +37,8 @@ class TestHealthDetail:
         monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
         monkeypatch.setattr(api_key, "_dev_mode", False)
         r = client.get("/health/detail")
-        assert r.status_code == 403
+        # 401: unauthenticated, so the SPA's session-expiry redirect fires.
+        assert r.status_code == 401
 
     def test_health_detail_open_in_dev_mode(self, client, monkeypatch):
         """With no API keys (dev mode), /health/detail is open — same policy
