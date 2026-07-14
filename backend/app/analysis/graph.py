@@ -34,6 +34,11 @@ _DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE_CFG["default_inter_hop_delta_slots"]
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
 
+# Cardano protocol constant: 1 ADA = 1,000,000 lovelace (CIP-9 / ledger spec).
+# Used to test whether an amount is a whole-ADA round number, a stylistic
+# marker of manual layering.
+LOVELACE_PER_ADA = 1_000_000
+
 
 def _first_sorted(addresses) -> str:
     """Pick a deterministic representative address from an iterable.
@@ -329,7 +334,7 @@ def _build_cycle_result(
         entropy = 0.0
 
     # Round amount flag: origin amount is a round number (divisible by 1 ADA)
-    round_amount_flag = origin_amount > 0 and origin_amount % 1_000_000 == 0
+    round_amount_flag = origin_amount > 0 and origin_amount % LOVELACE_PER_ADA == 0
 
     # Temporal concentration: fraction of hops within a tight slot window
     if len(hop_slots) >= 2:

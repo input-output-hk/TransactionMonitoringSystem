@@ -24,7 +24,12 @@ task.  Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any, Dict, Optional
 
-from app.analysis.normalise import EPSILON, normalise
+from app.analysis.normalise import (
+    BAND_HIGH_THRESHOLD,
+    BAND_MODERATE_THRESHOLD,
+    EPSILON,
+    normalise,
+)
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -41,6 +46,19 @@ _BOOT = _CFG["bootstrap_anchors"]
 _CYCLE = _CFG["cycle"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MODERATE_CAP = float(_CFG["moderate_cap"])
+
+# The cap's contract is "weakly-corroborated cycles stay in Moderate": it
+# must sit inside the Moderate band, or the demotion either reaches High
+# anyway or crushes the finding into Informational. Fail loud at import
+# (explicit raise, not assert, so it survives ``python -O``); mirrors
+# multiple_sat's lazy_validator_floor guard.
+if not (BAND_MODERATE_THRESHOLD <= _MODERATE_CAP < BAND_HIGH_THRESHOLD):
+    raise RuntimeError(
+        f"circular.moderate_cap={_MODERATE_CAP} is outside the Moderate band "
+        f"[{BAND_MODERATE_THRESHOLD}, {BAND_HIGH_THRESHOLD}); the weak-"
+        f"corroboration demotion would land in the wrong band. Fix the cap "
+        f"in detection.yaml or the band thresholds in normalise.py."
+    )
 _STRUCTURAL_CORROBORATION_FLOOR = float(_CFG["structural_corroboration_floor"])
 
 FEE_TOLERANCE_MULTIPLIER = float(_CYCLE["fee_tolerance_multiplier"])

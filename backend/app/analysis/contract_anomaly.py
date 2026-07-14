@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from app.analysis.normalise import score_to_band
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, score_to_band
 from app.analysis.scorer_config import contract_anomaly_config
 from app.models.transaction import RiskBand
 
@@ -67,6 +67,20 @@ if _missing_positive_floors:
         "contract_anomaly positive verdicts missing a configured floor: "
         f"{sorted(_missing_positive_floors)}. Add them to verdict_floors in "
         "config/detection.yaml (or remove them from _POSITIVE_VERDICTS)."
+    )
+
+# A human-labeled malicious cluster must band Critical (the floor's documented
+# contract); a config edit lowering it below the Critical threshold would
+# silently demote curated-malicious verdicts. Fail loud at import, mirroring
+# the guard above. The `anomaly` floor is deliberately 0 (pure consensus) and
+# has no such invariant.
+_MALICIOUS_FLOOR = float(contract_anomaly_config()["verdict_floors"]["malicious"])
+if _MALICIOUS_FLOOR < BAND_CRITICAL_THRESHOLD:
+    raise RuntimeError(
+        f"contract_anomaly.verdict_floors.malicious={_MALICIOUS_FLOOR} is "
+        f"below normalise.BAND_CRITICAL_THRESHOLD={BAND_CRITICAL_THRESHOLD}; "
+        f"a curated-malicious verdict would no longer band Critical. Raise "
+        f"the floor in detection.yaml or adjust the band threshold."
     )
 
 

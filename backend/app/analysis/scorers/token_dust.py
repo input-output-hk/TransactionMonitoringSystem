@@ -28,7 +28,12 @@ from app.analysis.scorer_config import (
     load_network_map as _load_network_map,
     resolved_or_bootstrap as _resolve,
 )
-from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
+from app.analysis.scorers.base import (
+    BaseScorer,
+    ScorerResult,
+    finalise_score,
+    reduce_to_best,
+)
 from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
@@ -148,11 +153,7 @@ class TokenDustScorer(BaseScorer):
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
 
-        best_score = 0.0
-        best_sub = {}
-        best_reasons = []
-        best_bl_source = "missing"
-        best_evidence: Dict[str, Any] = {}
+        candidates = []
 
         for out in outputs:
             addr = out.get("address", "")
@@ -177,21 +178,11 @@ class TokenDustScorer(BaseScorer):
                 # the scorer must be suppressed by config rather than logic.
                 continue
 
-            result = self._score_utxo(out, addr, network, policy_count, token_count)
-            if result.score > best_score:
-                best_score = result.score
-                best_sub = result.sub_scores
-                best_reasons = result.reasons
-                best_bl_source = result.baseline_source
-                best_evidence = result.evidence
+            candidates.append(
+                self._score_utxo(out, addr, network, policy_count, token_count)
+            )
 
-        return ScorerResult(
-            score=best_score,
-            sub_scores=best_sub,
-            reasons=best_reasons,
-            baseline_source=best_bl_source,
-            evidence=best_evidence,
-        )
+        return reduce_to_best(candidates)
 
     def _score_utxo(
         self,
