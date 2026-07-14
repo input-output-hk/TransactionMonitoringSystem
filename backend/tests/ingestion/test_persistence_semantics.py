@@ -100,6 +100,37 @@ class TestCheckpointNotAdvancedOnFailure:
         save_sync.assert_awaited_once()
 
 
+class TestSlotlessBlocks:
+    """A Byron epoch-boundary block (EBB) carries no slot and no
+    transactions; before the guard, the slot-0 default flowed into
+    save_sync_point and reset the checkpoint to genesis, forcing a full
+    re-sync on the next restart (Ticket F)."""
+
+    def test_ebb_never_checkpoints(self, client):
+        save_sync = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync):
+            _run(client._handle_roll_forward(
+                {"block": {"type": "ebb", "era": "byron", "id": "ab" * 32,
+                           "ancestor": "cd" * 32, "height": 4_492_799},
+                 "tip": {"slot": 999}}
+            ))
+        save_sync.assert_not_awaited()
+
+    def test_slotless_block_with_txs_skips_without_checkpoint(self, client):
+        # Protocol-impossible shape (EBBs are transaction-free): the guard
+        # must neither invent a slot nor checkpoint past unprocessed txs.
+        blk = _block(slot=100)
+        del blk["block"]["slot"]
+        save_sync = AsyncMock()
+        insert = AsyncMock()
+        with patch("app.ingestion.ogmios_client.postgres.save_sync_point", save_sync), \
+             patch("app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
+                   insert):
+            _run(client._handle_roll_forward(blk))
+        save_sync.assert_not_awaited()
+        insert.assert_not_awaited()
+
+
 class TestRawStoreDurability:
     """When RAW_DATA_MAX_BYTES caps the ClickHouse copy, the raw store is
     the ONLY full payload copy: its write must block the checkpoint, and it

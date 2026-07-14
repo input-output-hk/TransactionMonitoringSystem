@@ -324,9 +324,32 @@ class OgmiosClient:
         """
         block = result.get("block", {})
         block_id = block.get("id", "")
-        block_slot = block.get("slot", 0)
+        block_slot = block.get("slot")
         block_height = block.get("height", 0)
         transactions = block.get("transactions", [])
+
+        # Byron epoch-boundary blocks (Ogmios type "ebb") carry no slot and
+        # no transactions. Falling through with a slot-0 default would call
+        # save_sync_point(slot=0), resetting the checkpoint to genesis and
+        # forcing a full re-sync on restart. Skip them without
+        # checkpointing; the next real block checkpoints past this point.
+        if block_slot is None:
+            if transactions:
+                # Not a known block shape: every slotted-era block carries
+                # a slot and EBBs are transaction-free. Refuse to guess a
+                # slot, but say loudly that txs were skipped.
+                logger.error(
+                    f"Ogmios [chain]: block {block_id} has "
+                    f"{len(transactions)} transactions but no slot; "
+                    f"skipping WITHOUT checkpoint (transactions not "
+                    f"ingested, block will replay on reconnect)"
+                )
+            else:
+                logger.info(
+                    f"Ogmios [chain]: slotless boundary block {block_id} "
+                    f"skipped (Byron EBB)"
+                )
+            return
 
         # Update telemetry: tip comes from the nextBlock result envelope
         tip = result.get("tip", {})
