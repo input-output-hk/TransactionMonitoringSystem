@@ -65,7 +65,8 @@ async def test_retention_sweep_runs_when_due_and_knobs_enabled(monkeypatch):
 
     monkeypatch.setattr(housekeeping.postgres, "prune_terminal_lifecycle", fake_prune_lifecycle)
 
-    from app.auth import sessions as auth_sessions, tokens as auth_tokens
+    from app.auth import sessions as auth_sessions
+    from app.auth import tokens as auth_tokens
 
     monkeypatch.setattr(auth_tokens, "purge_expired_tokens", _ok(0))
     monkeypatch.setattr(auth_sessions, "purge_expired_sessions", _ok(0))
@@ -88,7 +89,8 @@ async def test_retention_sweep_is_throttled(monkeypatch):
 
     monkeypatch.setattr(housekeeping.postgres, "prune_terminal_lifecycle", fake_prune_lifecycle)
 
-    from app.auth import sessions as auth_sessions, tokens as auth_tokens
+    from app.auth import sessions as auth_sessions
+    from app.auth import tokens as auth_tokens
 
     monkeypatch.setattr(auth_tokens, "purge_expired_tokens", _ok(0))
     monkeypatch.setattr(auth_sessions, "purge_expired_sessions", _ok(0))
@@ -109,7 +111,8 @@ async def test_retention_sweep_always_purges_auth_regardless_of_retention_knobs(
     monkeypatch.setattr(settings, "AUDIT_LOG_RETENTION_DAYS", 0)
     monkeypatch.setattr(settings, "NOTIFY_DEDUP_RETENTION_DAYS", 0)
 
-    from app.auth import sessions as auth_sessions, tokens as auth_tokens
+    from app.auth import sessions as auth_sessions
+    from app.auth import tokens as auth_tokens
 
     purged = {}
 

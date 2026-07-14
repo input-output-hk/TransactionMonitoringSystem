@@ -11,8 +11,6 @@ Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 
 import uuid
 
-import pytest
-
 from app.auth.sessions import create_session, lookup_session
 from app.auth.tokens import (
     claim_session_token,

@@ -1,12 +1,13 @@
 """Unit tests for the analysis engine orchestrator."""
 
 from unittest.mock import patch
+
 from app.analysis.engine import (
-    _score_transaction,
-    _build_scorers,
     _CLASS_NAMES,
-    _handle_incomplete_scoring,
     _analysis_defer_attempts,
+    _build_scorers,
+    _handle_incomplete_scoring,
+    _score_transaction,
 )
 from app.analysis.normalise import score_to_band
 from app.analysis.scorers.base import ScorerResult
@@ -245,8 +246,9 @@ class TestIncompleteScoring:
         assert "_enrichment_failed" not in kept[0]
 
 
+from datetime import UTC, datetime
+
 import app.analysis.engine as _engine_mod
-from datetime import datetime, timezone
 
 
 class TestRescanBoundAndFallback:
@@ -285,7 +287,7 @@ class TestRescanBoundAndFallback:
         ms.ANALYSIS_ENGINE_BATCH_SIZE = 100
         ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
         ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0  # since=None rescan
-        wm = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        wm = datetime(2025, 1, 1, tzinfo=UTC)
         _engine_mod._unanalyzed_watermark["preprod"] = wm
         mock_ch.get_unanalyzed_transactions.side_effect = [RuntimeError("CH OOM"), []]
         result = _engine_mod.run_once("preprod")

@@ -8,7 +8,7 @@ slots) and the wall-clock fallback that keeps ingestion alive when the
 node cannot answer the queries.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,7 +18,11 @@ from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.ogmios_client import OgmiosClient
 from tests.ingestion.conftest import (
     make_block as _block,
+)
+from tests.ingestion.conftest import (
     persistence_patches as _persistence_patches,
+)
+from tests.ingestion.conftest import (
     run_async as _run,
 )
 
@@ -237,7 +241,7 @@ class TestChainSyncWiring:
     def test_block_timestamp_falls_back_to_wall_clock(self, monkeypatch):
         client = OgmiosClient()
         assert client._slot_time is None
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         txs = self._roll_forward(client, SHELLEY_START_SLOT + 30, monkeypatch)
         assert txs[0].timestamp >= before
 
@@ -278,7 +282,7 @@ class TestChainSyncWiring:
         client = OgmiosClient()
         client._slot_time = _converter()
         beyond_horizon = SHELLEY_START_SLOT + 432_000 + 5
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         txs = self._roll_forward(client, beyond_horizon, monkeypatch)
         assert txs[0].timestamp >= before  # wall clock, not extrapolated
         assert client._slot_time_refetch_needed is True

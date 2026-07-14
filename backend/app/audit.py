@@ -28,7 +28,7 @@ lands.
 import hashlib
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import Request
 
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 _ACTOR_FINGERPRINT_LEN = 12
 
 
-def actor_from_principal(principal: Optional[str]) -> str:
+def actor_from_principal(principal: str | None) -> str:
     """Map the credential string returned by ``verify_api_key`` to a
     non-sensitive, server-authoritative actor label for the audit trail.
 
@@ -71,9 +71,9 @@ async def record(
     action: str,
     entity_type: str,
     entity_id: str,
-    details: Dict[str, Any],
-    request: Optional[Request] = None,
-    actor: Optional[str] = None,
+    details: dict[str, Any],
+    request: Request | None = None,
+    actor: str | None = None,
 ) -> None:
     """Write one audit row best-effort; never raises.
 
@@ -105,9 +105,9 @@ async def record_fail_closed(
     action: str,
     entity_type: str,
     entity_id: str,
-    details: Dict[str, Any],
-    request: Optional[Request] = None,
-    actor: Optional[str] = None,
+    details: dict[str, Any],
+    request: Request | None = None,
+    actor: str | None = None,
 ) -> int:
     """Write one audit row or raise AuditUnavailableError.
 
@@ -136,7 +136,7 @@ async def record_fail_closed(
         raise AuditUnavailableError(str(e)) from e
 
 
-async def append_outcome(audit_id: int, outcome: Dict[str, Any]) -> None:
+async def append_outcome(audit_id: int, outcome: dict[str, Any]) -> None:
     """Best-effort merge of the mutation outcome into an intent audit row."""
     try:
         await postgres.update_audit_log_details(audit_id, json.dumps(outcome))

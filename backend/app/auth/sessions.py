@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.config import settings
@@ -48,7 +47,7 @@ async def create_session(
     `tokens.claim_session_token`.
     """
     session_id = secrets.token_urlsafe(_SESSION_BYTES)
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.now(UTC) + timedelta(
         days=settings.SESSION_TTL_DAYS,
     )
 
@@ -81,7 +80,7 @@ async def create_session(
     return session_id, expires_at
 
 
-async def lookup_session(session_id: str) -> Optional[dict]:
+async def lookup_session(session_id: str) -> dict | None:
     """Resolve a session ID to a user dict, or None if invalid/expired.
 
     The returned dict contains the full user row plus ``session_id`` and

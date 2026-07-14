@@ -21,12 +21,16 @@ built, this scorer's gate will not pass.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.analysis.normalise import EPSILON, normalise
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -43,7 +47,7 @@ W_SLOTS = int(_CFG["window_slots"])
 _MIN_PROFIT_LOVELACE = int(_CFG["min_profit_lovelace"])
 
 
-def _get_sandwich_data(features: Dict[str, Any]) -> Optional[Dict]:
+def _get_sandwich_data(features: dict[str, Any]) -> dict | None:
     """Extract sandwich candidate data from features if available.
 
     The engine populates features["sandwich"] when a tx is identified as
@@ -68,7 +72,7 @@ def _get_sandwich_data(features: Dict[str, Any]) -> Optional[Dict]:
 class SandwichScorer(BaseScorer):
     name = "sandwich"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Transaction must be identified as a sandwich victim."""
         sw = _get_sandwich_data(features)
         if not sw:
@@ -76,7 +80,7 @@ class SandwichScorer(BaseScorer):
         # Gate: slot span within window
         return sw.get("slot_span", W_SLOTS + 1) <= W_SLOTS
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         sw = _get_sandwich_data(features)
         if not sw:
             return ScorerResult(score=0.0)

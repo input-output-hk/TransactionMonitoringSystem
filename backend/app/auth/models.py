@@ -12,7 +12,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-
 UserRole = Literal["Admin", "Reviewer"]
 UserStatus = Literal["pending", "active", "disabled"]
 TokenPurpose = Literal["invite", "login"]

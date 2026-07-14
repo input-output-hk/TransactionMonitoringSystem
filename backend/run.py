@@ -2,6 +2,7 @@
 """Entry point for running the Cardano Transaction Monitoring System"""
 
 import uvicorn
+
 from app.config import settings
 
 if __name__ == "__main__":

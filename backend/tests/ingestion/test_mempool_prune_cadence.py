@@ -9,7 +9,7 @@ PROCESSED txs, independent of set-size churn.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -48,7 +48,7 @@ def _process(client, count, churn):
     rollbacks, and reconnects mutating its size arbitrarily."""
 
     async def scenario():
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for i in range(count):
             tx_id, tx_data = _tx(i)
             await client._record_mempool_collisions(tx_id, tx_data, now)
@@ -103,7 +103,7 @@ class TestPruneCadence:
         # End-to-end effect of a fired sweep: a pending entry past the TTL
         # is untracked and its orphaned input-cache entry evicted.
         monkeypatch.setattr(settings, "MEMPOOL_PENDING_TTL_SECONDS", 60)
-        stale_at = datetime.now(timezone.utc) - timedelta(seconds=3600)
+        stale_at = datetime.now(UTC) - timedelta(seconds=3600)
         stale_id = "ee" * 32
         client._pending.track(stale_id, ({("dd" * 32, 0)}, stale_at, 0, "", 0))
         client._pending_input_cache[stale_id] = ({}, stale_at)

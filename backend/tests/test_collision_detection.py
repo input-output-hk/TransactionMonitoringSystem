@@ -1,6 +1,7 @@
 """Unit tests for the front-running scorer with mock collision data."""
 
 import pytest
+
 from app.analysis.scorers.front_running import FrontRunningScorer
 
 

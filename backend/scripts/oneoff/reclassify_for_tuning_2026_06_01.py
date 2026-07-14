@@ -54,7 +54,6 @@ from app.analysis.engine import (
 )
 from app.config import settings
 from app.db import postgres
-
 from scripts.oneoff import _rescore_common as rc
 
 # Bounds the ``WHERE tx_hash IN (...)`` literal that input-resolution builds, so

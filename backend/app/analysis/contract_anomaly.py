@@ -24,7 +24,7 @@ used to drive the score.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.analysis.normalise import score_to_band
 from app.analysis.scorer_config import contract_anomaly_config
@@ -107,7 +107,7 @@ def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBan
     return score, RiskBand(score_to_band(score))
 
 
-def resolve(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def resolve(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Collapse a transaction's raw verdict rows to the highest-severity one,
     with the host-scale score + band computed.
 
@@ -117,7 +117,7 @@ def resolve(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     for another. Returns ``None`` for an empty input. The returned dict carries
     the computed ``score`` / ``risk_band`` plus the winning row's raw fields.
     """
-    best: Optional[Dict[str, Any]] = None
+    best: dict[str, Any] | None = None
     best_score = -1.0
     for row in rows:
         consensus = row.get("consensus")

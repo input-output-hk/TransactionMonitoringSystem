@@ -17,7 +17,7 @@ is a UI concern (its severity filter), independent of this module.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.notifications import config
 from app.notifications.channels.base import Dispatch
@@ -25,7 +25,7 @@ from app.notifications.channels.base import Dispatch
 logger = logging.getLogger(__name__)
 
 
-def resolve_dispatch(band: str, attack_class: str) -> List[Dispatch]:
+def resolve_dispatch(band: str, attack_class: str) -> list[Dispatch]:
     """Return the delivery instructions for an alert of (band, attack_class).
 
     Any band may page if the config routes it — including Informational, if an
@@ -39,7 +39,7 @@ def resolve_dispatch(band: str, attack_class: str) -> List[Dispatch]:
     else:
         channel_names = (triggers.get("defaults") or {}).get(band) or []
 
-    out: List[Dispatch] = []
+    out: list[Dispatch] = []
     for name in channel_names:
         if not config.channel_enabled(name):
             continue  # disabled or unknown (e.g. a stale name) channel
@@ -59,22 +59,22 @@ def resolve_dispatch(band: str, attack_class: str) -> List[Dispatch]:
 
 
 def _match_rule(
-    rules: List[Dict[str, Any]],
+    rules: list[dict[str, Any]],
     band: str,
     attack_class: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """The matching rule (band == band AND class listed), or None.
 
     If several match, the last wins — later rules refine earlier ones (the
     loader warns when authoring overlapping rules)."""
-    matched: Optional[Dict[str, Any]] = None
+    matched: dict[str, Any] | None = None
     for rule in rules:
         if rule.get("band") == band and attack_class in (rule.get("attack_classes") or []):
             matched = rule
     return matched
 
 
-def _resolve_recipients(channel: str, rule: Optional[Dict[str, Any]]) -> List[str]:
+def _resolve_recipients(channel: str, rule: dict[str, Any] | None) -> list[str]:
     """Per-rule recipient override for this channel, else the channel default."""
     if rule is not None:
         override = (rule.get("recipients") or {}).get(channel)
@@ -83,7 +83,7 @@ def _resolve_recipients(channel: str, rule: Optional[Dict[str, Any]]) -> List[st
     return config.channel_recipients(channel)
 
 
-def _resolve_webhook_url(channel: str, rule: Optional[Dict[str, Any]]) -> Optional[str]:
+def _resolve_webhook_url(channel: str, rule: dict[str, Any] | None) -> str | None:
     """Per-rule URL override, else the webhook default. None for non-webhook."""
     if channel != "webhook":
         return None

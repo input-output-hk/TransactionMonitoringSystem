@@ -14,7 +14,7 @@ the event loop; collision enrichment bridges back to the loop captured via
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.config import settings
 from app.db import clickhouse, postgres
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _ENRICHMENT_FAILED_KEY = "_enrichment_failed"
 
 
-def _mark_enrichment_failed(row: Dict[str, Any], name: str) -> None:
+def _mark_enrichment_failed(row: dict[str, Any], name: str) -> None:
     """Record that enrichment ``name`` failed for ``row`` (idempotent)."""
     failed = row.setdefault(_ENRICHMENT_FAILED_KEY, [])
     if name not in failed:
@@ -36,7 +36,7 @@ def _mark_enrichment_failed(row: Dict[str, Any], name: str) -> None:
 
 
 def enrich_inputs_with_resolved_addresses(
-    rows: List[Dict[str, Any]],
+    rows: list[dict[str, Any]],
     network: str,
 ) -> None:
     """Inject resolved input addresses from transaction_inputs into raw_data.
@@ -74,7 +74,7 @@ def enrich_inputs_with_resolved_addresses(
         return
 
     # Build lookup: tx_hash -> {input_index -> (address, amount)}
-    lookup: Dict[str, Dict[int, tuple]] = {}
+    lookup: dict[str, dict[int, tuple]] = {}
     for tx_h, idx, addr, amt in input_rows:
         lookup.setdefault(tx_h, {})[idx] = (addr, amt)
 
@@ -99,7 +99,7 @@ def enrich_inputs_with_resolved_addresses(
         )
         ref_tx_hashes = set(sorted(ref_tx_hashes)[:max_ref_txs])
 
-    ref_outputs: Dict[str, Dict[int, Dict]] = {}  # ref_tx -> {index -> output}
+    ref_outputs: dict[str, dict[int, dict]] = {}  # ref_tx -> {index -> output}
     if ref_tx_hashes:
         try:
             ref_rows = clickhouse._get_client().execute(
@@ -135,7 +135,7 @@ def enrich_inputs_with_resolved_addresses(
                         inp["value"] = ref_out["value"]
 
 
-def enrich_sandwich_features(rows: List[Dict[str, Any]], network: str):
+def enrich_sandwich_features(rows: list[dict[str, Any]], network: str):
     """Enrich rows with structural sandwich pattern detection."""
     if not settings.SCORER_SANDWICH_ENABLED or not settings.SANDWICH_SIMPLIFIED_ENABLED:
         return
@@ -157,7 +157,7 @@ def enrich_sandwich_features(rows: List[Dict[str, Any]], network: str):
             _mark_enrichment_failed(row, "sandwich")
 
 
-def enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
+def enrich_cycle_features(rows: list[dict[str, Any]], network: str):
     """Enrich rows with cycle detection data for circular transfer scoring."""
     if not settings.SCORER_CIRCULAR_ENABLED or not settings.CYCLE_DETECTION_ENABLED:
         return
@@ -189,16 +189,16 @@ def enrich_cycle_features(rows: List[Dict[str, Any]], network: str):
 # that drive the engine directly without run_once_async() will see collision
 # enrichment skipped (debug log emitted); call set_main_loop() manually if
 # that path matters for the test.
-_main_loop: Optional[asyncio.AbstractEventLoop] = None
+_main_loop: asyncio.AbstractEventLoop | None = None
 
 
-def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+def set_main_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     """Set or clear the captured main event loop (engine startup / tests)."""
     global _main_loop
     _main_loop = loop
 
 
-def enrich_collision_features(rows: List[Dict[str, Any]], network: str):
+def enrich_collision_features(rows: list[dict[str, Any]], network: str):
     """Enrich rows with mempool collision data for front-running detection.
 
     Called from the sync run_once() context (on a clickhouse worker thread),

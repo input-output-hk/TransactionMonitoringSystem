@@ -4,9 +4,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import List, Optional
-
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Security
@@ -15,9 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
+from app.config import DEFAULT_DEV_POSTGRES_PASSWORD, settings
 from app.csrf import CSRFMiddleware
-
-from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
 from app.utils.datetime_utils import to_aware_utc
 
 # Configure logging before importing modules that emit log records at import time
@@ -35,41 +32,47 @@ from app.logging_utils import configure_access_log_redaction
 
 configure_access_log_redaction()
 
+from app import leader, notifications
+from app.api import (
+    analysis,
+    archive,
+    entities,
+    lifecycle,
+    notifications_config,
+    transactions,
+)
+from app.api import (
+    auth as auth_api,
+)
+from app.api import (
+    clustering as clustering_api,
+)
+from app.api import (
+    users as users_api,
+)
+from app.db import clickhouse, postgres, raw_store
 from app.rate_limit import (
-    RateLimitMiddleware,
     RateLimiter,
+    RateLimitMiddleware,
     start_all_cleanups,
     stop_all_cleanups,
 )
-from app.db import postgres, clickhouse, raw_store
-from app import notifications, leader
-from app.api import (
-    transactions,
-    entities,
-    lifecycle,
-    analysis,
-    archive,
-    auth as auth_api,
-    users as users_api,
-    clustering as clustering_api,
-    notifications_config,
-)
+from app.routers import ui, websocket
 from app.tasks import analysis as analysis_task
 from app.tasks import housekeeping as housekeeping_task
 from app.tasks import notifications as notifications_task
-from app.routers import ui, websocket
 
 # Global state
-active_connections: List = []
+active_connections: list = []
 ogmios_client = None
 # Strong references to the ingestion supervisor tasks. asyncio holds only weak
 # references to tasks, so a bare create_task() can be garbage-collected mid-run
 # (ingestion silently dies); keeping them here pins their lifetime and lets
 # shutdown await them. See lifespan().
-_ingestion_tasks: List[asyncio.Task] = []
+_ingestion_tasks: list[asyncio.Task] = []
 # The standby retry loop (app.leader guard), while this instance has not yet
 # become leader. None once promoted (or if it was never needed).
-_leader_standby_task: Optional[asyncio.Task] = None
+_leader_standby_task: asyncio.Task | None = None
 # Whether THIS process has started ingestion + the analysis engine — tracked
 # separately from leader.is_leader() so shutdown does the right thing whether
 # the guard is enabled or not (see _start_leader_duties / lifespan).
@@ -119,7 +122,7 @@ async def broadcast_lifecycle_event(event: dict):
         {
             "type": "lifecycle",
             "data": event,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
     )
 
@@ -203,7 +206,7 @@ def _validate_startup_settings() -> None:
     # message instead.
     if settings.TRUSTED_PROXY_ENABLED:
         try:
-            settings.trusted_proxy_networks
+            _ = settings.trusted_proxy_networks
         except ValueError as exc:
             raise RuntimeError(
                 f"TRUSTED_PROXY_CIDRS is malformed: {exc}. Fix the CIDR "
@@ -412,7 +415,7 @@ async def lifespan(app: FastAPI):
 # /docs, /redoc and /openapi.json enumerate the whole admin attack surface
 # and sit in the rate-limit exemption list, so they are exposed only in dev
 # mode or behind an explicit production opt-in.
-from app.auth import _dev_mode as _auth_dev_mode  # noqa: E402
+from app.auth import _dev_mode as _auth_dev_mode
 
 _docs_enabled = _auth_dev_mode or settings.TMS_API_DOCS_ENABLED
 
@@ -548,19 +551,19 @@ async def _clustering_health() -> dict:
     unreachable/empty, ``stale`` when the newest verdict is older than the
     configured freshness window, else ``ok``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.analysis.contract_anomaly import freshness_seconds
     from app.db import clustering_queries
 
     try:
         latest = await clustering_queries.latest_scored_at_async(settings.CARDANO_NETWORK)
-    except Exception:  # noqa: BLE001 - health probe never raises
+    except Exception:
         return {"state": "error", "last_scored_at": None}
     if latest is None:
         return {"state": "absent", "last_scored_at": None}
     window = freshness_seconds()
-    age = (datetime.now(timezone.utc) - to_aware_utc(latest)).total_seconds()
+    age = (datetime.now(UTC) - to_aware_utc(latest)).total_seconds()
     state = "stale" if (window and age > window) else "ok"
     return {"state": state, "last_scored_at": str(latest), "age_seconds": round(age)}
 

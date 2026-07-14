@@ -22,7 +22,6 @@ session-mode pool, for the guard to hold.
 """
 
 import logging
-from typing import Optional
 
 import asyncpg
 
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 # The dedicated connection holding the lock, or None if this process is not
 # (yet) the leader. Never drawn from app.db.postgres's pool — see module
 # docstring.
-_conn: Optional[asyncpg.Connection] = None
+_conn: asyncpg.Connection | None = None
 
 
 async def try_acquire() -> bool:

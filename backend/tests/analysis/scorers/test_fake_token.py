@@ -1,7 +1,9 @@
 """Unit tests for the Fake Token scorer (Class 8)."""
 
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 from app.analysis.scorers.fake_token import FakeTokenScorer
 
 
@@ -131,7 +133,6 @@ class TestScore:
         """The amplification is monotonic (multiplier >= 1.0, capped at 1.0):
         a critical-asset clone is never scored below the same clone without the
         bonus. Compared against the multiplier=1.0 (no-op) baseline."""
-        from unittest.mock import patch
 
         outputs = [{"address": "addr1", "value": {"lovelace": 1_500_000}}]
         feats = _features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=outputs)

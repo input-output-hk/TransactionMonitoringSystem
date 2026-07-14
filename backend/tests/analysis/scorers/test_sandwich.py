@@ -1,6 +1,7 @@
 """Unit tests for the Sandwich scorer (Class 6)."""
 
 import pytest
+
 from app.analysis.scorers.sandwich import SandwichScorer
 
 

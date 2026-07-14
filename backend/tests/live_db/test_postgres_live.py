@@ -7,7 +7,7 @@ removed afterwards. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.db import postgres
 from app.db.postgres import get_connection
@@ -37,7 +37,7 @@ class TestLifecycle:
     def test_pending_to_confirmed_and_summary(self, pg_run):
         async def scenario():
             tx_id = f"livetest-{uuid.uuid4().hex}"
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             try:
                 await postgres.upsert_lifecycle_pending(tx_id, LIVE_NETWORK, first_seen_at=now)
                 pending = await postgres.get_lifecycle_by_tx_id(tx_id)

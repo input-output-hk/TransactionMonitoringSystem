@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from app.api.deps import RepoDep, analysis_slot, run_or_404
-from app.contracts import normalize_target
 from app.api.schemas import (
     ClusterRequest,
     ClusterRunAck,
@@ -20,6 +19,7 @@ from app.api.schemas import (
     ProjectionOut,
     RunOut,
 )
+from app.contracts import normalize_target
 from app.service import (
     build_graph,
     build_projection,

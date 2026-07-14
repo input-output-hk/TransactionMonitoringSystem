@@ -20,13 +20,20 @@ under large_datum.weights and are quoted here only for orientation):
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
+from app.analysis import features as feat_mod
 from app.analysis.normalise import normalise, normalise_inverted
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
     fraction_of_limit as _fraction_of_limit,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import (
@@ -36,7 +43,6 @@ from app.analysis.scorers.base import (
     reduce_to_best,
 )
 from app.analysis.scorers.multiple_sat import _payment_credential
-from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,7 @@ def _datum_hash_only_addresses(outputs, datums=None) -> list:
     ]
 
 
-def _is_bloat_datum(output: Dict[str, Any], datum_bytes: int) -> bool:
+def _is_bloat_datum(output: dict[str, Any], datum_bytes: int) -> bool:
     """True when an output's datum is a bloat-DoS candidate.
 
     Triggers (any one):
@@ -119,7 +125,7 @@ def _per_script_datum_bytes(outputs, datums=None):
     address is used as the key, so two outputs at the same raw address
     still group together.
     """
-    by_script: Dict[str, int] = {}
+    by_script: dict[str, int] = {}
     for out in outputs:
         addr = out.get("address", "")
         if not feat_mod.is_script_address(addr):
@@ -135,7 +141,7 @@ def _per_script_datum_bytes(outputs, datums=None):
 class LargeDatumScorer(BaseScorer):
     name = "large_datum"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Engage scoring when either a single script datum exceeds the
         per-output floor (canonical DoS shape) OR the sum of datum bytes
         AT THE SAME SCRIPT crosses ``aggregate_engagement_min``
@@ -175,7 +181,7 @@ class LargeDatumScorer(BaseScorer):
             return True
         return False
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
@@ -236,7 +242,7 @@ class LargeDatumScorer(BaseScorer):
 
     def _score_utxo(
         self,
-        output: Dict,
+        output: dict,
         address: str,
         datum_bytes: int,
         datum_flag: int,

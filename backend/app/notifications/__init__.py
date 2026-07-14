@@ -17,7 +17,7 @@ stall scoring. The delivery and the dedup claim run in
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.config import settings
 from app.db import postgres
@@ -39,15 +39,15 @@ DELIVER_FAILED = "failed"
 
 # Captured at startup (main.lifespan) so the executor-thread hook can schedule
 # coroutines onto the running event loop. None => notifications are inert.
-_main_loop: Optional[asyncio.AbstractEventLoop] = None
+_main_loop: asyncio.AbstractEventLoop | None = None
 
 # Bounds concurrent deliveries (see NOTIFY_MAX_CONCURRENT_DELIVERIES). Created
 # lazily on the main loop (asyncio.Semaphore binds to the running loop) and
 # reset with the loop so a fresh loop / test gets its own.
-_delivery_sema: Optional[asyncio.Semaphore] = None
+_delivery_sema: asyncio.Semaphore | None = None
 
 
-def set_main_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+def set_main_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     """Set/clear the captured main event loop (startup / shutdown / tests)."""
     global _main_loop, _delivery_sema
     _main_loop = loop
@@ -75,7 +75,7 @@ def build_channels() -> None:
     registry.build_channels()
 
 
-def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
+def on_new_scores(results: list[dict[str, Any]], network: str) -> None:
     """Emit immediate alerts for newly-written scores.
 
     Called from ``engine.run_once`` on the ClickHouse executor thread, right

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -147,7 +146,7 @@ def _clear_session_cookie(request: Request, response: Response) -> None:
     )
 
 
-async def _find_active_user_by_email(email: str) -> Optional[dict]:
+async def _find_active_user_by_email(email: str) -> dict | None:
     """Case-insensitive lookup, restricted to fully ``active`` users.
 
     Pending users (invited but never redeemed their invite link) are
@@ -171,7 +170,7 @@ async def _find_active_user_by_email(email: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-async def _get_user(user_id: UUID) -> Optional[dict]:
+async def _get_user(user_id: UUID) -> dict | None:
     """Fetch a user row by primary key, or ``None`` if not found.
 
     Used after ``consume_token`` to re-read the user (whose ``status``

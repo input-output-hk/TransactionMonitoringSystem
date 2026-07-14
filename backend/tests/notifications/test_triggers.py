@@ -9,7 +9,6 @@ import pytest
 
 from app.notifications import config, triggers
 
-
 BASE = {
     "channels": {
         "email": {"enabled": True, "recipients": ["ops@x.com", "group:soc"]},

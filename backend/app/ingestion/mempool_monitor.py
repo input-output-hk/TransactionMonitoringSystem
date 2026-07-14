@@ -20,8 +20,8 @@ JSON-RPC/telemetry layer).
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 
 from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
@@ -47,8 +47,8 @@ class PendingTxIndex:
     """
 
     def __init__(self) -> None:
-        self._entries: Dict[str, tuple] = {}
-        self._ref_index: Dict[tuple, Set[str]] = {}
+        self._entries: dict[str, tuple] = {}
+        self._ref_index: dict[tuple, set[str]] = {}
 
     def track(self, tx_id: str, entry: tuple) -> None:
         """Register a pending tx in both the entry map and the ref index."""
@@ -68,18 +68,18 @@ class PendingTxIndex:
                 if not ids:
                     self._ref_index.pop(ref, None)
 
-    def get(self, tx_id: str) -> Optional[tuple]:
+    def get(self, tx_id: str) -> tuple | None:
         return self._entries.get(tx_id)
 
-    def sharing(self, refs: Set[tuple]) -> Dict[str, Set[tuple]]:
+    def sharing(self, refs: set[tuple]) -> dict[str, set[tuple]]:
         """Map pending tx id -> the subset of ``refs`` it also spends."""
-        out: Dict[str, Set[tuple]] = {}
+        out: dict[str, set[tuple]] = {}
         for ref in refs:
             for pending_id in self._ref_index.get(ref, ()):
                 out.setdefault(pending_id, set()).add(ref)
         return out
 
-    def stale_ids(self, cutoff: datetime) -> List[str]:
+    def stale_ids(self, cutoff: datetime) -> list[str]:
         """Pending tx ids first seen before ``cutoff`` (for TTL pruning)."""
         return [k for k, v in self._entries.items() if v[1] < cutoff]
 
@@ -91,7 +91,7 @@ class MempoolMonitor:
         self,
         network: str,
         emit: Callable[[dict], Awaitable[None]],
-        query_utxo: Callable[[List[dict]], Awaitable[List[dict]]],
+        query_utxo: Callable[[list[dict]], Awaitable[list[dict]]],
         connect_ws: Callable[[str], Awaitable[object]],
         send_recv: Callable[..., Awaitable[dict]],
     ):
@@ -110,10 +110,10 @@ class MempoolMonitor:
         # (the raw payload silently never persists). Keeping the ref pins the
         # task; the done-callback logs any failure (instead of swallowing it)
         # and drops the ref.
-        self._bg_tasks: Set[asyncio.Task] = set()
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
-        self._seen_mempool_txs: Set[str] = set()
+        self._seen_mempool_txs: set[str] = set()
 
         # Deterministic prune cadence: counts every processed mempool tx and
         # triggers the TTL/cap sweep at MEMPOOL_PRUNE_EVERY_N_TXS. The old
@@ -138,7 +138,7 @@ class MempoolMonitor:
         # evict entries whose tx never reached the pending index (e.g.
         # collision tracking threw before track()), which previously leaked
         # until restart.
-        self._pending_input_cache: Dict[str, Tuple[Dict[tuple, dict], datetime]] = {}
+        self._pending_input_cache: dict[str, tuple[dict[tuple, dict], datetime]] = {}
 
         # Resilience — own breaker so mempool failures stay isolated from
         # the chain-sync connection's.
@@ -168,7 +168,7 @@ class MempoolMonitor:
 
     # --- Seams called by the chain-sync client ---
 
-    def peek_enrichment(self, tx_hash: str) -> Optional[Tuple[Dict[tuple, dict], datetime]]:
+    def peek_enrichment(self, tx_hash: str) -> tuple[dict[tuple, dict], datetime] | None:
         """Read-only enrichment lookup for block parsing; never consumes."""
         return self._pending_input_cache.get(tx_hash)
 
@@ -198,7 +198,7 @@ class MempoolMonitor:
         return self._circuit_breaker.state.value
 
     @staticmethod
-    def _consumed_refs(tx: NormalizedTransaction) -> Set[tuple]:
+    def _consumed_refs(tx: NormalizedTransaction) -> set[tuple]:
         """The input refs a confirmed tx actually CONSUMED: the regular
         inputs for a validated tx, the collaterals for a phase-2-failed one
         (the ledger spends collateral on failure; the regular inputs stay
@@ -213,7 +213,7 @@ class MempoolMonitor:
 
     async def record_displacements(
         self,
-        normalized_txs: List[NormalizedTransaction],
+        normalized_txs: list[NormalizedTransaction],
         now_utc: datetime,
     ) -> None:
         """Detect displacement: a confirmed tx may spend inputs that a
@@ -274,7 +274,7 @@ class MempoolMonitor:
 
     async def settle_confirmed(
         self,
-        normalized_txs: List[NormalizedTransaction],
+        normalized_txs: list[NormalizedTransaction],
         now: datetime,
         block_id: str,
         block_slot: int,
@@ -465,7 +465,7 @@ class MempoolMonitor:
         if not utxos:
             return
 
-        cache_entry: Dict[tuple, dict] = {}
+        cache_entry: dict[tuple, dict] = {}
         for utxo in utxos:
             ref, resolved = parse_resolved_utxo(utxo)
             cache_entry[ref] = resolved
@@ -473,7 +473,7 @@ class MempoolMonitor:
         if cache_entry:
             self._pending_input_cache[tx_id] = (
                 cache_entry,
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
             )
             logger.debug(
                 f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
@@ -503,7 +503,7 @@ class MempoolMonitor:
                     continue
 
                 self._seen_mempool_txs.add(tx_id)
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
 
                 # Collision detection: extract input refs and check against pending txs
                 try:

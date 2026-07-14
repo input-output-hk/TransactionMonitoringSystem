@@ -12,15 +12,14 @@ error on a routed finding must still page via a degraded payload; and per-tx
 failures are isolated.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from app.analysis import contract_anomaly as ca
 from app.config import settings
 from app.db import clustering_queries
-from app.notifications import DELIVER_DUPLICATE, DELIVER_FAILED, DELIVER_SENT
-from app.notifications import triggers
+from app.notifications import DELIVER_DUPLICATE, DELIVER_FAILED, DELIVER_SENT, triggers
 from app.tasks import notifications as task
 
 pytestmark = pytest.mark.asyncio
@@ -33,8 +32,8 @@ _GOOD_ROW = {
     "iso_score": 0.8,
     "lof_score": 0.7,
     "votes": 3,
-    "scored_at": datetime(2026, 6, 1, tzinfo=timezone.utc),
-    "published_at": datetime(2026, 6, 1, tzinfo=timezone.utc),
+    "scored_at": datetime(2026, 6, 1, tzinfo=UTC),
+    "published_at": datetime(2026, 6, 1, tzinfo=UTC),
 }
 
 

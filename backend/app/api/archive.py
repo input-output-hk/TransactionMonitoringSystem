@@ -14,7 +14,6 @@ import csv
 import io
 import logging
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, Security, status
 from fastapi.responses import StreamingResponse
@@ -173,12 +172,12 @@ async def archive_alert(
 @router.get("", dependencies=[Security(verify_api_key)])
 async def list_archived(
     network: NetworkParam = None,
-    date_from: Optional[datetime] = Query(
+    date_from: datetime | None = Query(
         None,
         alias="from",
         description="ISO timestamp; lower bound on archived_at (inclusive)",
     ),
-    date_to: Optional[datetime] = Query(
+    date_to: datetime | None = Query(
         None,
         alias="to",
         description="ISO timestamp; upper bound on archived_at (inclusive)",
@@ -262,8 +261,8 @@ async def bulk_import(
 @router.get("/export", dependencies=[Security(verify_api_key)])
 async def export_csv(
     network: NetworkParam = None,
-    date_from: Optional[datetime] = Query(None, alias="from"),
-    date_to: Optional[datetime] = Query(None, alias="to"),
+    date_from: datetime | None = Query(None, alias="from"),
+    date_to: datetime | None = Query(None, alias="to"),
 ) -> StreamingResponse:
     """Download archive entries as RFC 4180 CSV. The output file is a valid
     input to POST /api/archive/bulk on another TMS instance."""

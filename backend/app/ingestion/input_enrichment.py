@@ -19,7 +19,7 @@ and live with the chain-sync persistence logic, not here.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from app.analysis.features import extract_lovelace, flatten_assets
 from app.db import clickhouse
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # lookup value shape shared by both resolution paths:
 # (address, amount_lovelace, assets or None to keep the input's own)
-ResolvedRef = Tuple[str, int, Optional[Dict[str, int]]]
+ResolvedRef = tuple[str, int, dict[str, int] | None]
 
 
 def _withdrawal_total(tx: NormalizedTransaction) -> int:
@@ -40,7 +40,7 @@ def _withdrawal_total(tx: NormalizedTransaction) -> int:
     return tx.withdrawal_total if tx.script_valid else 0
 
 
-def _flow_addresses(script_valid: bool, inputs: List[TransactionInput]) -> Set[str]:
+def _flow_addresses(script_valid: bool, inputs: list[TransactionInput]) -> set[str]:
     """Input addresses surfaced to the tx's address list: regular inputs
     always (a failed tx's attempted inputs are attack-attempt signal);
     collateral only for a failed tx, where the collateral payer is the
@@ -54,8 +54,8 @@ def _flow_addresses(script_valid: bool, inputs: List[TransactionInput]) -> Set[s
 
 def _resolve_tx_inputs(
     tx: NormalizedTransaction,
-    lookup: Dict[tuple, ResolvedRef],
-) -> Tuple[List[TransactionInput], int, bool]:
+    lookup: dict[tuple, ResolvedRef],
+) -> tuple[list[TransactionInput], int, bool]:
     """Shared per-tx core of both resolution paths.
 
     Resolves every non-reference input present in ``lookup`` via
@@ -70,7 +70,7 @@ def _resolve_tx_inputs(
     one input newly resolved.
     """
     total = _withdrawal_total(tx)
-    new_inputs: List[TransactionInput] = []
+    new_inputs: list[TransactionInput] = []
     changed = False
     for inp in tx.inputs:
         if inp.is_reference:
@@ -99,7 +99,7 @@ def _resolve_tx_inputs(
     return new_inputs, total, changed
 
 
-def parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
+def parse_resolved_utxo(utxo: dict[str, Any]) -> tuple:
     """Parse one resolved UTxO from queryLedgerState/utxo into
     ``((tx_id, index), {address, amount, assets})``.
 
@@ -123,7 +123,7 @@ def parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
 
 def apply_resolved_inputs(
     tx: NormalizedTransaction,
-    resolved: Dict[tuple, dict],
+    resolved: dict[tuple, dict],
 ) -> NormalizedTransaction:
     """Enrich a NormalizedTransaction with previously resolved UTxO input data.
 
@@ -134,7 +134,7 @@ def apply_resolved_inputs(
     tx, where they are exactly what the ledger consumed. Reward-account
     withdrawals fold into the total for validated txs.
     """
-    lookup: Dict[tuple, ResolvedRef] = {
+    lookup: dict[tuple, ResolvedRef] = {
         ref: (u["address"], u["amount"], u.get("assets")) for ref, u in resolved.items()
     }
     new_inputs, total, _ = _resolve_tx_inputs(tx, lookup)
@@ -148,8 +148,8 @@ def apply_resolved_inputs(
 
 
 async def resolve_input_amounts(
-    txs: List[NormalizedTransaction], network: str
-) -> List[NormalizedTransaction]:
+    txs: list[NormalizedTransaction], network: str
+) -> list[NormalizedTransaction]:
     """Resolve input addresses and amounts from ClickHouse and intra-block outputs.
 
     1. Build an intra-block output map from earlier txs in this block.
@@ -162,7 +162,7 @@ async def resolve_input_amounts(
     # Collateral returns included at their EXPLICIT on-chain index (the
     # regular-output count, Babbage): they are real spendable UTxOs and
     # a same-block spend of one must resolve.
-    intra_block: Dict[tuple, tuple] = {}
+    intra_block: dict[tuple, tuple] = {}
     for tx in txs:
         for idx, out in enumerate(tx.outputs):
             chain_idx = out.output_index if out.output_index is not None else idx
@@ -189,13 +189,13 @@ async def resolve_input_amounts(
                 cross_block_refs.append(ref)
 
     # Batch fetch from ClickHouse
-    ch_resolved: Dict[tuple, tuple] = {}
+    ch_resolved: dict[tuple, tuple] = {}
     if cross_block_refs:
         ch_resolved = await clickhouse.get_outputs_for_refs_async(cross_block_refs, network)
 
     # Merge: intra-block takes priority over ClickHouse. assets=None keeps
     # each input's own (parser-fresh inputs carry none).
-    lookup: Dict[tuple, ResolvedRef] = {
+    lookup: dict[tuple, ResolvedRef] = {
         ref: (addr, amt, None) for ref, (addr, amt) in {**ch_resolved, **intra_block}.items()
     }
 

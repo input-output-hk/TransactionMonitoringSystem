@@ -9,7 +9,6 @@ scoring pipeline that consumes it.
 import logging
 import os
 import re
-from typing import List, Optional
 
 import tldextract
 
@@ -45,7 +44,7 @@ def _build_tld_extractor() -> tldextract.TLDExtract:
 _tld = _build_tld_extractor()
 
 
-def registrable_domain(url_or_domain: str) -> Optional[str]:
+def registrable_domain(url_or_domain: str) -> str | None:
     """Return the registrable domain (brand + public suffix), e.g.
     'api.andamio.io' -> 'andamio.io', 'foo.co.uk' -> 'foo.co.uk'.
     Returns None for IP addresses or unparseable input."""
@@ -55,7 +54,7 @@ def registrable_domain(url_or_domain: str) -> Optional[str]:
     return f"{ext.domain}.{ext.suffix}"
 
 
-def brand(url_or_domain: str) -> Optional[str]:
+def brand(url_or_domain: str) -> str | None:
     """Return the brand (registrable domain minus public suffix)."""
     ext = _tld(url_or_domain)
     return ext.domain or None
@@ -109,7 +108,7 @@ def refang(text: str) -> str:
     return _HXXP_RE.sub(r"http\1://", text)
 
 
-def url_candidates(text: str) -> List[str]:
+def url_candidates(text: str) -> list[str]:
     """Raw URL + bare-domain regex hits in ``text`` (defang-normalised,
     un-validated)."""
     text = refang(text)
@@ -214,12 +213,12 @@ def looks_like_domain(candidate: str) -> bool:
     return False
 
 
-def validate_candidates(candidates: List[str]) -> List[str]:
+def validate_candidates(candidates: list[str]) -> list[str]:
     """Validate each candidate through tldextract's PSL. Scheme-prefixed
     hits pass trivially; bare-domain hits only survive if their TLD
     is a real public suffix."""
     seen: set = set()
-    validated: List[str] = []
+    validated: list[str] = []
     for cand in candidates:
         if cand in seen:
             continue

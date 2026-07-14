@@ -1,6 +1,7 @@
 """Unit tests for the Front-Running scorer (Class 5)."""
 
 import pytest
+
 from app.analysis.scorers.front_running import FrontRunningScorer
 
 

@@ -4,8 +4,9 @@ Mocks the ClickHouse baseline lookup to avoid DB dependency in unit tests.
 Scorers will see "missing" baselines and fall through to bootstrap defaults.
 """
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 
 @pytest.fixture(autouse=True)

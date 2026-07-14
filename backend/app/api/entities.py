@@ -3,15 +3,16 @@
 import json
 import logging
 import re
-from typing import Dict, Any
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request, Security
 from pydantic import BaseModel
 
 from app import audit
 from app.api._params import NetworkParam
-from app.db import postgres
 from app.auth import verify_api_key
 from app.config import settings
+from app.db import postgres
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class EntityStateResponse(BaseModel):
 
     entity_type: str
     entity_id: str
-    state: Dict[str, Any]
+    state: dict[str, Any]
 
 
 @router.get("/{entity_type}/{entity_id}", response_model=EntityStateResponse)
@@ -76,7 +77,7 @@ async def set_entity_state(
     request: Request,
     entity_type: str,
     entity_id: str,
-    state: Dict[str, Any],
+    state: dict[str, Any],
     network: NetworkParam = None,
     principal: str = Security(verify_api_key),
 ):

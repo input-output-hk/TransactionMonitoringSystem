@@ -5,6 +5,7 @@ MATERIALIZE PROJECTION, a part-rewriting mutation that must run once per
 deployment, not on every boot. The gate is the live CREATE TABLE text.
 """
 
+from datetime import UTC
 from unittest.mock import MagicMock
 
 from app.db.clickhouse_schema import migrate_transactions_projection
@@ -143,7 +144,6 @@ class TestRetentionTtlRemoval:
     def test_remove_ttl_failure_does_not_block_startup(self, monkeypatch):
         from clickhouse_driver.errors import Error as ClickHouseError
 
-        from app.config import settings
         from app.db.clickhouse_schema import _remove_table_ttl
 
         client = MagicMock()
@@ -161,7 +161,7 @@ class TestInsertShape:
     """The writer must persist the new failed-tx columns."""
 
     def test_insert_includes_script_valid_and_attempt_flags(self, monkeypatch):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from app.db import clickhouse
         from app.models.transaction import (
@@ -175,7 +175,7 @@ class TestInsertShape:
         tx = NormalizedTransaction(
             tx_hash="ff" * 32,
             network="preprod",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fee=0,
             script_valid=False,
             inputs=[
@@ -242,6 +242,7 @@ class TestWideCountColumnGuard:
 
     def test_narrow_input_count_refuses_startup(self):
         import pytest
+
         from app.db.clickhouse_schema import assert_no_legacy_schema
 
         client = self._client(

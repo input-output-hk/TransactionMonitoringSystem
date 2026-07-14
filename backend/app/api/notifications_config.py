@@ -14,7 +14,7 @@ only their "configured: yes/no" status is surfaced.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict
@@ -38,10 +38,10 @@ class NotificationConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     version: int = 1
-    channels: Dict[str, Any] = {}
-    groups: Dict[str, Any] = {}
-    triggers: Dict[str, Any] = {}
-    periodic_report: Optional[Dict[str, Any]] = None
+    channels: dict[str, Any] = {}
+    groups: dict[str, Any] = {}
+    triggers: dict[str, Any] = {}
+    periodic_report: dict[str, Any] | None = None
 
 
 @router.get("/config")

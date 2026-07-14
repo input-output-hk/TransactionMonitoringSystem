@@ -20,9 +20,10 @@ concurrency:
 
 jobs:
   lint:
-    # Formatting is enforced for both Python trees from one job so a drifted
-    # tree can never merge. `ruff check` joins this job in a follow-up commit
-    # once the autofix pass has landed.
+    # Formatting and lint rules are enforced for both Python trees from one
+    # job so a drifted tree can never merge. Pre-existing findings accepted at
+    # gate-introduction time are grandfathered via per-file-ignores burn-down
+    # blocks in each pyproject; new code is held to the full rule set.
     name: Python lint (ruff)
     runs-on: ubuntu-latest
     steps:
@@ -37,12 +38,17 @@ jobs:
         run: uv sync
       - name: Backend format check
         run: uv run ruff format --check backend
+      - name: Backend lint
+        run: uv run ruff check backend
       - name: Sidecar sync
         working-directory: services/clustering/backend
         run: uv sync --extra dev
       - name: Sidecar format check
         working-directory: services/clustering/backend
         run: uv run ruff format --check .
+      - name: Sidecar lint
+        working-directory: services/clustering/backend
+        run: uv run ruff check .
 
   backend:
     name: Backend (pytest + recall gate)

@@ -14,7 +14,7 @@ import json
 import logging
 import math
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.analysis.normalise import EPSILON
 
@@ -39,7 +39,7 @@ def get_cbor2():
 # ---------------------------------------------------------------------------
 
 
-def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
+def has_spend_redeemer(raw_data: dict[str, Any]) -> bool:
     """True if the tx has at least one spend-purpose redeemer (Plutus input).
 
     Native scripts never carry redeemers: they are declarative ledger predicates
@@ -201,7 +201,7 @@ def extract_fee(tx_data: Any) -> int:
     return extract_lovelace(tx_data.get("fee", {}))
 
 
-def flatten_assets(value: Any) -> Dict[str, int]:
+def flatten_assets(value: Any) -> dict[str, int]:
     """Flatten an Ogmios value dict's native assets to ``{"policy.name": qty}``.
 
     Skips the ``ada`` (v6) and ``lovelace`` (v5) components; nested
@@ -211,7 +211,7 @@ def flatten_assets(value: Any) -> Dict[str, int]:
     block parser and the mempool UTxO resolver previously kept
     character-identical copies of this loop.
     """
-    assets: Dict[str, int] = {}
+    assets: dict[str, int] = {}
     if not isinstance(value, dict):
         return assets
 
@@ -295,7 +295,7 @@ def decode_hex_asset_name(hex_name: str) -> str:
         return hex_name
 
 
-def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
+def _estimate_value_cbor_bytes(value: dict[str, Any]) -> int:
     """Estimate the CBOR byte size of an Ogmios output value dict.
 
     Ogmios represents the value as {"lovelace": N, "policyId": {"assetName": qty}}.
@@ -337,7 +337,7 @@ def _nonzero_qty(q: Any) -> bool:
         return False
 
 
-def count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
+def count_assets(value: dict[str, Any]) -> tuple[int, int]:
     """Count unique policy IDs and live asset classes in a value dict.
 
     Zero-quantity entries are skipped: they appear in mint/burn payloads
@@ -364,9 +364,9 @@ def count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
 
 
 def _extract_datum_info(
-    output: Dict[str, Any],
-    datums: Optional[Dict[str, Any]] = None,
-) -> Tuple[int, int]:
+    output: dict[str, Any],
+    datums: dict[str, Any] | None = None,
+) -> tuple[int, int]:
     """Extract datum presence flag and byte size from an Ogmios output.
 
     Returns (datum_present, datum_bytes).
@@ -404,7 +404,7 @@ def _extract_datum_info(
     return 0, 0
 
 
-def _object_datum_byte_leaves(datum: Any) -> List[bytes]:
+def _object_datum_byte_leaves(datum: Any) -> list[bytes]:
     """Decoded byte-string leaves of an Ogmios Plutus-Data-JSON datum object.
 
     Walks the ``{"bytes": hex}`` / ``{"list": [...]}`` / ``{"map": [...]}`` /
@@ -415,8 +415,8 @@ def _object_datum_byte_leaves(datum: Any) -> List[bytes]:
     hex-string form (an object datum otherwise scored as "not assessable" and
     bypassed the content gate).
     """
-    leaves: List[bytes] = []
-    stack: List[Any] = [datum]
+    leaves: list[bytes] = []
+    stack: list[Any] = [datum]
     while stack:
         node = stack.pop()
         if isinstance(node, dict):
@@ -450,7 +450,7 @@ def _object_datum_byte_leaves(datum: Any) -> List[bytes]:
 _MAX_BYTE_ENTROPY_BITS = 8.0
 
 
-def datum_shannon_entropy_bits(output: Dict[str, Any]) -> float:
+def datum_shannon_entropy_bits(output: dict[str, Any]) -> float:
     """Shannon entropy (bits/byte) of an inline datum's raw bytes.
 
     A datum-bloat DoS pads the datum with repetitive, low-information bytes to
@@ -520,7 +520,7 @@ def _max_primitive_leaf_bytes(obj: Any) -> int:
     return best
 
 
-def datum_leaf_concentration(output: Dict[str, Any]) -> float:
+def datum_leaf_concentration(output: dict[str, Any]) -> float:
     """Fraction of total datum bytes held by the single largest CBOR leaf.
 
     A datum-bloat attack concentrates its bytes in one oversized primitive leaf
@@ -565,8 +565,8 @@ def datum_leaf_concentration(output: Dict[str, Any]) -> float:
 def extract_utxo_features(
     tx_hash: str,
     network: str,
-    raw_data: Dict[str, Any],
-) -> List[tuple]:
+    raw_data: dict[str, Any],
+) -> list[tuple]:
     """Extract UTxO-level features from raw Ogmios transaction data.
 
     Returns a list of tuples ready for insert_utxo_features().
@@ -617,7 +617,7 @@ def extract_utxo_features(
 # ---------------------------------------------------------------------------
 
 
-def _redeemer_exunits(entry: Any) -> Tuple[int, int]:
+def _redeemer_exunits(entry: Any) -> tuple[int, int]:
     """(memory, cpu) execution units of one redeemer entry.
 
     Tolerates malformed shapes: a non-dict entry, non-dict budget, or
@@ -641,8 +641,8 @@ def _redeemer_exunits(entry: Any) -> Tuple[int, int]:
 def extract_tx_script_features(
     tx_hash: str,
     network: str,
-    raw_data: Dict[str, Any],
-) -> Optional[tuple]:
+    raw_data: dict[str, Any],
+) -> tuple | None:
     """Extract transaction-level script execution features.
 
     Returns a single tuple ready for insert_tx_script_features(),
@@ -672,7 +672,7 @@ def extract_tx_script_features(
         elif isinstance(redeemers, dict):
             # Ogmios v5 uses a dict keyed by "spend:N", "mint:N", etc.
             redeemers_count = len(redeemers)
-            for key, r in redeemers.items():
+            for _key, r in redeemers.items():
                 mem, cpu = _redeemer_exunits(r)
                 exunits_mem += mem
                 exunits_cpu += cpu

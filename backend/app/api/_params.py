@@ -6,7 +6,7 @@ so the OpenAPI docs and validation cannot drift between routes. Lives in ``api/`
 rather than ``models/`` so the model layer stays free of a FastAPI dependency.
 """
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import Query
 
@@ -16,7 +16,7 @@ from app.models.transaction import NetworkType
 # Callers default it to None (``network: NetworkParam = None``) so the route falls
 # back to the instance's CARDANO_NETWORK setting.
 NetworkParam = Annotated[
-    Optional[NetworkType],
+    NetworkType | None,
     Query(
         description=(
             "Network to query: 'mainnet', 'preprod', or 'preview'. "

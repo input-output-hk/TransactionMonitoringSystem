@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import RepoDep, analysis_slot
-from app.contracts import normalize_target
 from app.api.schemas import (
     AnomalyDetectAck,
     AnomalyRequest,
@@ -16,6 +15,7 @@ from app.api.schemas import (
     AnomalyRunOut,
     AnomalyTopPage,
 )
+from app.contracts import normalize_target
 from app.service import detect_anomalies_for_target, top_anomalies_with_verdicts
 from app.storage.protocol import Repo
 

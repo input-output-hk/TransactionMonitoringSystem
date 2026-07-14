@@ -15,17 +15,24 @@ Sub-scores (Polimi Section 4.1.3):
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
+from app.analysis import features as feat_mod
 from app.analysis.normalise import (
     BAND_MODERATE_MAX,
     normalise,
     normalise_inverted,
 )
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     fraction_of_limit as _fraction_of_limit,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     load_network_map as _load_network_map,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import (
@@ -34,7 +41,6 @@ from app.analysis.scorers.base import (
     finalise_score,
     reduce_to_best,
 )
-from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +59,7 @@ _DOS_ASSET_MIN = int(_CFG["dos_asset_min"])
 _DOS_VALUE_CBOR_MIN = _fraction_of_limit(_CFG["dos_value_cbor_fraction"], "max_value_size_bytes")
 
 
-def _max_assets_per_policy(value: Dict[str, Any]) -> int:
+def _max_assets_per_policy(value: dict[str, Any]) -> int:
     """Return the largest count of distinct asset names under any single policy.
 
     Reported in ``sub_scores`` for observability: lets an analyst see
@@ -76,13 +82,13 @@ def _max_assets_per_policy(value: Dict[str, Any]) -> int:
     return best
 
 
-_ALLOWLIST_PREFIXES: Dict[str, frozenset] = _load_network_map(
+_ALLOWLIST_PREFIXES: dict[str, frozenset] = _load_network_map(
     _CFG.get("allowlist_prefixes"),
     scorer="token_dust",
     field="allowlist_prefixes",
     collect=frozenset,
 )
-_ALLOWLIST_POLICIES: Dict[str, frozenset] = _load_network_map(
+_ALLOWLIST_POLICIES: dict[str, frozenset] = _load_network_map(
     _CFG.get("allowlist_policies"),
     scorer="token_dust",
     field="allowlist_policies",
@@ -90,7 +96,7 @@ _ALLOWLIST_POLICIES: Dict[str, frozenset] = _load_network_map(
 )
 
 
-def _is_allowlisted_utxo(address: str, value: Dict[str, Any], network: str) -> bool:
+def _is_allowlisted_utxo(address: str, value: dict[str, Any], network: str) -> bool:
     """A UTxO is allowlisted when its address matches a network-scoped
     prefix OR every non-ADA policy in its value is under a network-scoped
     allowlisted policy.
@@ -115,7 +121,7 @@ def _is_allowlisted_utxo(address: str, value: Dict[str, Any], network: str) -> b
 class TokenDustScorer(BaseScorer):
     name = "token_dust"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Engage only on a plausible value-bloat DoS shape at a script output.
 
         A script output must carry at least ``min_token_count`` live assets
@@ -146,7 +152,7 @@ class TokenDustScorer(BaseScorer):
                 return True
         return False
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
@@ -182,7 +188,7 @@ class TokenDustScorer(BaseScorer):
 
     def _score_utxo(
         self,
-        output: Dict,
+        output: dict,
         address: str,
         network: str,
         policy_count: int,

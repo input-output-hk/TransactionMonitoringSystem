@@ -14,8 +14,7 @@ back to the next broader tier (per_script -> global -> missing).
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from datetime import UTC, datetime
 
 from app.analysis.scorer_config import baselines_config
 from app.config import settings
@@ -116,12 +115,12 @@ INVERTED_CONSUMER_FEATURES = frozenset({"ada_amount", "value_cbor_bytes"})
 _DRIFT_RATIO_EPSILON = 1e-9
 
 
-def compute_global_baselines(network: str) -> List[tuple]:
+def compute_global_baselines(network: str) -> list[tuple]:
     """Compute global baselines from the utxo_features table (180-day window).
 
     Returns rows ready for insert_baselines().
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = []
 
     for feature in _UTXO_FEATURES:
@@ -182,9 +181,9 @@ def compute_global_baselines(network: str) -> List[tuple]:
 def compute_script_baselines(
     network: str,
     script_hash: str,
-) -> List[tuple]:
+) -> list[tuple]:
     """Compute per-script baselines from utxo_features (90-day window)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = []
 
     for feature in _UTXO_FEATURES:
@@ -223,7 +222,7 @@ def compute_script_baselines(
     return rows
 
 
-def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
+def compute_multiple_sat_per_script_baselines(network: str) -> list[tuple]:
     """Compute per-script baselines for the multiple_sat extraction features.
 
     Sourced from tx_class_scores.evidence (90-day window) rather than an
@@ -241,7 +240,7 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
     spend keeps scoring >= 0 and so keeps emitting evidence even after it
     de-saturates, so the per-script population does not collapse.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     per_script = clickhouse.query_multiple_sat_extraction_percentiles(
         network,
         _PER_SCRIPT_WINDOW_DAYS,
@@ -298,7 +297,7 @@ def bootstrap_baselines(network: str) -> int:
     return len(rows)
 
 
-def get_active_script_addresses(network: str, limit: int = 500) -> List[str]:
+def get_active_script_addresses(network: str, limit: int = 500) -> list[str]:
     """Return the most active script addresses from utxo_features (90-day window).
 
     Ordered by transaction count descending, limited to top N.
@@ -398,7 +397,7 @@ def _drift_ratio(old: float, new: float) -> float:
     return abs(new - old) / (abs(old) + _DRIFT_RATIO_EPSILON)
 
 
-def _filter_drifted(rows: List[tuple]) -> List[tuple]:
+def _filter_drifted(rows: list[tuple]) -> list[tuple]:
     """Hold baseline recomputes that drift in a RECALL-HARMFUL direction.
 
     Direction-aware for pure-normalise features: only de-sensitising moves
@@ -428,7 +427,7 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
     """
     if not _DRIFT_ENABLED:
         return rows
-    kept: List[tuple] = []
+    kept: list[tuple] = []
     for row in rows:
         network, scope_type, scope_id, feature, new_p50, new_p99 = row[:6]
         new_p50, new_p99 = float(new_p50), float(new_p99)
@@ -510,9 +509,9 @@ def _query_percentiles(
     network: str,
     window_days: int,
     *,
-    scope_column: Optional[str] = None,
-    scope_value: Optional[str] = None,
-) -> Optional[Tuple[float, float, int]]:
+    scope_column: str | None = None,
+    scope_value: str | None = None,
+) -> tuple[float, float, int] | None:
     """Query p50 and p99 for a feature over the chain-time window.
 
     With ``scope_column``/``scope_value`` set, the percentiles are restricted to a
@@ -586,7 +585,7 @@ def _query_percentiles_scoped(
     scope_column: str,
     scope_value: str,
     window_days: int,
-) -> Optional[Tuple[float, float, int]]:
+) -> tuple[float, float, int] | None:
     """Per-address/policy p50/p99 (thin wrapper over _query_percentiles)."""
     return _query_percentiles(
         table,

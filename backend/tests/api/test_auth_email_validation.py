@@ -9,7 +9,7 @@ magic-link redemption and the entire ``GET /api/users`` listing.
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -34,7 +34,7 @@ def _user_row(email: str) -> dict:
         "full_name": "Legacy Row",
         "role": "Admin",
         "status": "active",
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "last_login_at": None,
     }
 

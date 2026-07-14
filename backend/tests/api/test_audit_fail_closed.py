@@ -8,7 +8,7 @@ the intent row is written BEFORE the mutation; non-suppression audit events
 stay best-effort.
 """
 
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,10 +18,10 @@ VALID_HASH = "a" * 64
 
 class AuditLog:
     def __init__(self) -> None:
-        self.rows: List[Dict[str, Any]] = []
-        self.outcomes: List[tuple] = []
+        self.rows: list[dict[str, Any]] = []
+        self.outcomes: list[tuple] = []
         self.fail = False
-        self.call_order: List[str] = []
+        self.call_order: list[str] = []
 
 
 @pytest.fixture
@@ -33,10 +33,10 @@ def audit_log() -> AuditLog:
 def client(monkeypatch, audit_log):
     """TestClient with audit persistence + archive store faked, recording
     the relative order of audit writes and archive mutations."""
-    from app.main import app
     from app.db import archive_queries, postgres
+    from app.main import app
 
-    store: Dict[tuple, Dict[str, Any]] = {}
+    store: dict[tuple, dict[str, Any]] = {}
 
     async def fake_insert_audit(**kwargs):
         if audit_log.fail:

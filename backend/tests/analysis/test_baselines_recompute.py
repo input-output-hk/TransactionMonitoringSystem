@@ -1,9 +1,9 @@
 """Unit tests for baseline recomputation scheduling."""
 
-from unittest.mock import patch, MagicMock
+from datetime import UTC
+from unittest.mock import MagicMock, patch
 
 from app.analysis.baselines import (
-    _DRIFT_P50_THRESHOLD,
     _DRIFT_P99_THRESHOLD,
     INVERTED_CONSUMER_FEATURES,
     check_drift,
@@ -74,8 +74,8 @@ class TestMultipleSatPerScriptBaselines:
     @patch("app.analysis.baselines.clickhouse")
     def test_emits_per_script_only_for_all_features(self, mock_ch):
         from app.analysis.baselines import (
-            compute_multiple_sat_per_script_baselines,
             _MULTIPLE_SAT_PER_SCRIPT_FEATURES,
+            compute_multiple_sat_per_script_baselines,
         )
 
         mock_ch.query_multiple_sat_extraction_percentiles.return_value = [
@@ -118,8 +118,8 @@ class TestExtractionPercentilesReshape:
     @patch("app.db.clickhouse._get_client")
     def test_columns_map_to_features_in_order(self, mock_get_client):
         from app.db.clickhouse import (
-            query_multiple_sat_extraction_percentiles,
             _MULTIPLE_SAT_EVIDENCE_KEYS,
+            query_multiple_sat_extraction_percentiles,
         )
 
         client = MagicMock()
@@ -151,9 +151,9 @@ class TestDriftGuard:
     per-script scorer."""
 
     def _row(self, p99, feature="value_cbor_bytes", p50=5.0):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
     @patch("app.analysis.baselines.clickhouse")
@@ -299,9 +299,9 @@ class TestDriftGuardInvertedConsumers:
     recompute de-sensitised the inverted axes (review finding)."""
 
     def _row(self, feature, p50, p99):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
     @patch("app.analysis.baselines.clickhouse")
@@ -434,14 +434,15 @@ class TestHeldDriftWarning:
     applied-safe direction)."""
 
     def _row(self, feature, p50, p99):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
     @patch("app.analysis.baselines.clickhouse")
     def test_warning_names_causal_axis_only(self, mock_ch, caplog):
         import logging
+
         from app.analysis.baselines import _filter_drifted
 
         mock_ch.get_baseline.return_value = {
@@ -464,6 +465,7 @@ class TestHeldDriftWarning:
     @patch("app.analysis.baselines.clickhouse")
     def test_warning_names_both_axes_when_both_cause_hold(self, mock_ch, caplog):
         import logging
+
         from app.analysis.baselines import _filter_drifted
 
         mock_ch.get_baseline.return_value = {

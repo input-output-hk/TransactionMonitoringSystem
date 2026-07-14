@@ -6,8 +6,6 @@ exercise a minimal positive fixture per class and assert the
 class-specific keys we wire into the UI.
 """
 
-import pytest
-
 from app.analysis.scorers.circular import CircularScorer
 from app.analysis.scorers.fake_token import FakeTokenScorer
 from app.analysis.scorers.front_running import FrontRunningScorer

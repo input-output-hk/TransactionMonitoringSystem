@@ -1,10 +1,10 @@
 """Transaction data models"""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import List, Literal, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Any, Literal
 
+from pydantic import BaseModel, Field
 
 # Cardano networks the TMS understands. Enforced at the API boundary via
 # FastAPI's Query type validation. To add a new network, extend this tuple
@@ -94,16 +94,16 @@ class TransactionLifecycleEvent(BaseModel):
     tx_id: str
     network: str = "preprod"
     status: LifecycleStatus
-    first_seen_at: Optional[datetime] = None
-    confirmed_at: Optional[datetime] = None
-    rolled_back_at: Optional[datetime] = None
-    dropped_at: Optional[datetime] = None
-    block_hash: Optional[str] = None
-    slot: Optional[int] = None
-    height: Optional[int] = None
-    latency_ms: Optional[int] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    first_seen_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    rolled_back_at: datetime | None = None
+    dropped_at: datetime | None = None
+    block_hash: str | None = None
+    slot: int | None = None
+    height: int | None = None
+    latency_ms: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class LifecycleSummaryStats(BaseModel):
@@ -114,8 +114,8 @@ class LifecycleSummaryStats(BaseModel):
     confirmed_count: int = 0
     rolled_back_count: int = 0
     dropped_count: int = 0
-    avg_latency_ms: Optional[float] = None
-    rollback_rate: Optional[float] = None
+    avg_latency_ms: float | None = None
+    rollback_rate: float | None = None
 
 
 class TransactionInput(BaseModel):
@@ -125,7 +125,7 @@ class TransactionInput(BaseModel):
     index: int
     address: str
     amount: int
-    assets: Optional[Dict[str, int]] = None
+    assets: dict[str, int] | None = None
     is_reference: bool = Field(
         default=False, description="True if this is a reference input (read-only)"
     )
@@ -161,11 +161,11 @@ class TransactionOutput(BaseModel):
 
     address: str
     amount: int
-    assets: Optional[Dict[str, int]] = None
+    assets: dict[str, int] | None = None
     is_collateral: bool = Field(
         default=False, description="True if this is a collateral return output"
     )
-    output_index: Optional[int] = Field(
+    output_index: int | None = Field(
         default=None,
         description=(
             "Explicit on-chain output index; None = position in the "
@@ -185,23 +185,23 @@ class ClassScoreResult(BaseModel):
 
     tx_hash: str
     network: str
-    scores: Dict[str, float] = Field(
+    scores: dict[str, float] = Field(
         default_factory=dict,
         description="Attack class name -> score (0-100, or -1 if not applicable)",
     )
     max_score: float = Field(0.0, description="Highest score across all classes")
     max_class: str = Field("", description="Attack class with the highest score")
     risk_band: RiskBand = RiskBand.INFORMATIONAL
-    sub_scores: Dict[str, Dict[str, Any]] = Field(
+    sub_scores: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Per-class sub-score breakdown for drill-down",
     )
-    evidence: Dict[str, Dict[str, Any]] = Field(
+    evidence: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Per-class raw evidence (addresses, byte counts, lists) for UI drill-down",
     )
     analysis_version: str = ""
-    analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    analyzed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     corroboration_count: int = Field(
         0,
         description=(
@@ -224,7 +224,7 @@ class ClassScoreResult(BaseModel):
             "never mutated by the read-time merge."
         ),
     )
-    contract_anomaly_scored_at: Optional[datetime] = Field(
+    contract_anomaly_scored_at: datetime | None = Field(
         None,
         description=(
             "When the clustering sidecar last scored this transaction. Lets "
@@ -232,9 +232,9 @@ class ClassScoreResult(BaseModel):
             "down. Absent when no contract_anomaly verdict was merged."
         ),
     )
-    fee: Optional[int] = Field(None, description="Transaction fee in lovelace")
-    output_count: Optional[int] = Field(None, description="Number of transaction outputs")
-    archived: Optional[Dict[str, Any]] = Field(
+    fee: int | None = Field(None, description="Transaction fee in lovelace")
+    output_count: int | None = Field(None, description="Number of transaction outputs")
+    archived: dict[str, Any] | None = Field(
         None,
         description=(
             "Present when an admin has archived this transaction as a known "
@@ -248,26 +248,24 @@ class NormalizedTransaction(BaseModel):
     """Normalized transaction event format"""
 
     tx_hash: str = Field(..., description="Transaction hash")
-    network: Optional[str] = Field(
-        None, description="Network: mainnet, preprod, preview, or testnet"
-    )
-    slot: Optional[int] = Field(None, description="Slot number")
-    block_height: Optional[int] = Field(None, description="Block height")
-    block_hash: Optional[str] = Field(None, description="Block hash")
-    block_index: Optional[int] = Field(
+    network: str | None = Field(None, description="Network: mainnet, preprod, preview, or testnet")
+    slot: int | None = Field(None, description="Slot number")
+    block_height: int | None = Field(None, description="Block height")
+    block_hash: str | None = Field(None, description="Block hash")
+    block_index: int | None = Field(
         None, description="Transaction index within its block (0-based)"
     )
     timestamp: datetime = Field(..., description="Transaction timestamp")
     fee: int = Field(..., description="Transaction fee in lovelace")
-    deposit: Optional[int] = Field(
+    deposit: int | None = Field(
         None,
         description="Deposit amount (positive for deposits, negative for withdrawals) in lovelace",
     )
-    inputs: List[TransactionInput] = Field(default_factory=list)
-    outputs: List[TransactionOutput] = Field(default_factory=list)
+    inputs: list[TransactionInput] = Field(default_factory=list)
+    outputs: list[TransactionOutput] = Field(default_factory=list)
     input_count: int = Field(0, description="Number of inputs")
     output_count: int = Field(0, description="Number of outputs")
-    total_input_value: Optional[int] = Field(
+    total_input_value: int | None = Field(
         None,
         description=(
             "Consumed value in lovelace resolved so far: regular inputs "
@@ -287,8 +285,8 @@ class NormalizedTransaction(BaseModel):
         ),
     )
     total_output_value: int = Field(0, description="Total output value in lovelace")
-    addresses: List[str] = Field(default_factory=list, description="All addresses involved")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Transaction metadata")
+    addresses: list[str] = Field(default_factory=list, description="All addresses involved")
+    metadata: dict[str, Any] | None = Field(None, description="Transaction metadata")
     script_valid: bool = Field(
         True,
         description=(
@@ -297,5 +295,5 @@ class NormalizedTransaction(BaseModel):
             "inputs and created only the collateralReturn output."
         ),
     )
-    raw_data: Optional[Dict[str, Any]] = Field(None, description="Raw transaction data for audit")
-    ingestion_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    raw_data: dict[str, Any] | None = Field(None, description="Raw transaction data for audit")
+    ingestion_timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

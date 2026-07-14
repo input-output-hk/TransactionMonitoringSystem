@@ -14,9 +14,9 @@ import json
 import logging
 import re
 import time
-import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional, Tuple
+import urllib.request
+from typing import Any
 
 from app.config import settings
 
@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 # In-memory caches with TTL
 # ---------------------------------------------------------------------------
 
-_cache: Dict[str, dict] = {}
+_cache: dict[str, dict] = {}
 _CACHE_TTL_SECONDS = 86_400  # 24 hours
 
 
-def _get_cached(key: str) -> Optional[Any]:
+def _get_cached(key: str) -> Any | None:
     entry = _cache.get(key)
     if entry and time.time() - entry["ts"] < _CACHE_TTL_SECONDS:
         return entry["data"]
@@ -49,7 +49,7 @@ def _set_cached(key: str, data: Any):
 # Prefix matching: if a tx input address starts with any of these, the
 # phishing scorer gate returns False.  In production, this list would be
 # fetched from an external curated registry.
-_SENDER_ALLOWLIST_PREFIXES: List[str] = [
+_SENDER_ALLOWLIST_PREFIXES: list[str] = [
     # Cardano Foundation delegation portfolio
     "addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer",
     # IOG/IOHK known distribution addresses
@@ -65,7 +65,7 @@ _SENDER_ALLOWLIST_PREFIXES: List[str] = [
 ]
 
 
-def get_sender_allowlist() -> List[str]:
+def get_sender_allowlist() -> list[str]:
     """Return the list of allowed sender address prefixes."""
     cached = _get_cached("sender_allowlist")
     if cached is not None:
@@ -74,7 +74,7 @@ def get_sender_allowlist() -> List[str]:
     return _SENDER_ALLOWLIST_PREFIXES
 
 
-def is_sender_allowlisted(addresses: List[str]) -> bool:
+def is_sender_allowlisted(addresses: list[str]) -> bool:
     """Check if any address in the list matches an allowlisted sender prefix."""
     prefixes = get_sender_allowlist()
     for addr in addresses:
@@ -90,7 +90,7 @@ def is_sender_allowlisted(addresses: List[str]) -> bool:
 
 # Seed list of known legitimate Cardano ecosystem domains.
 # Used for brand_similarity scoring in the Phishing and Fake Token scorers.
-_KNOWN_PROTOCOL_DOMAINS: List[str] = [
+_KNOWN_PROTOCOL_DOMAINS: list[str] = [
     "cardano.org",
     "iohk.io",
     "emurgo.io",
@@ -123,7 +123,7 @@ _KNOWN_PROTOCOL_DOMAINS: List[str] = [
 ]
 
 
-def get_protocol_domains() -> List[str]:
+def get_protocol_domains() -> list[str]:
     """Return the list of known legitimate protocol domains."""
     cached = _get_cached("protocol_domains")
     if cached is not None:
@@ -145,7 +145,7 @@ def get_protocol_domains() -> List[str]:
 #   Airdrop/claim bait: lure victims with free ADA promises
 #   Governance bait: exploit CIP-1694/Voltaire governance participation
 #   Wallet/credential harvest: direct credential theft attempts
-_PHISHING_DOMAIN_PATTERNS: List[str] = [
+_PHISHING_DOMAIN_PATTERNS: list[str] = [
     # Airdrop / claim bait
     r"cardano-airdrop",
     r"ada-claim",
@@ -171,11 +171,11 @@ _PHISHING_DOMAIN_PATTERNS: List[str] = [
     r"ada-wallet-connect",
 ]
 
-_compiled_patterns: Optional[List[re.Pattern]] = None
-_compiled_tier2: Optional[List[re.Pattern]] = None
+_compiled_patterns: list[re.Pattern] | None = None
+_compiled_tier2: list[re.Pattern] | None = None
 
 
-def get_phishing_patterns() -> List[re.Pattern]:
+def get_phishing_patterns() -> list[re.Pattern]:
     """Return compiled regex patterns for phishing domain detection."""
     global _compiled_patterns
     if _compiled_patterns is not None:
@@ -189,7 +189,7 @@ def get_phishing_patterns() -> List[re.Pattern]:
 # ---------------------------------------------------------------------------
 
 # Tier 1: explicit credential requests (near-deterministic phishing indicator)
-TIER1_CREDENTIAL_PATTERNS: List[str] = [
+TIER1_CREDENTIAL_PATTERNS: list[str] = [
     "seed phrase",
     "recovery phrase",
     "private key",
@@ -203,7 +203,7 @@ TIER1_CREDENTIAL_PATTERNS: List[str] = [
 # Tier 2: urgency, scarcity, and reward-bait language
 # Source: manual curation from observed Cardano on-chain phishing metadata.
 # Includes Voltaire-era governance bait patterns (2024-2026).
-TIER2_URGENCY_PATTERNS: List[str] = [
+TIER2_URGENCY_PATTERNS: list[str] = [
     # Urgency / scarcity
     "limited time",
     "claim before",
@@ -250,7 +250,7 @@ TIER2_URGENCY_PATTERNS: List[str] = [
 ]
 
 # Tier 3: impersonation strings (brand names used in suspicious contexts)
-TIER3_BRAND_NAMES: List[str] = [
+TIER3_BRAND_NAMES: list[str] = [
     "cardano foundation",
     "iohk",
     "emurgo",
@@ -282,7 +282,7 @@ _REGISTRY_FETCH_TIMEOUT = 10  # seconds per request
 # Curated 2026-03-23 from top Cardano native tokens by ecosystem prominence.
 # On startup, full metadata (ticker + display name) is fetched from the
 # registry API at https://tokens.cardano.org/metadata/{subject}.
-_SEED_TOKENS: Dict[str, List[str]] = {
+_SEED_TOKENS: dict[str, list[str]] = {
     "HOSKY": ["a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235"],
     "SNEK": ["279c909f348e533da5808898f87f9a14bb2c3dfbbacccd631d927a3f"],
     "MIN": ["29d222ce763455e3d7a09a665ce554f00ac89d2e99a1a83d267170c6"],
@@ -308,7 +308,7 @@ _SEED_TOKENS: Dict[str, List[str]] = {
 # Curated 2026-03-23 from top Cardano native tokens by ecosystem prominence.
 # To add a token: find its mapping file in the registry, extract the policy_id
 # (first 56 hex chars of the subject) and hex_asset_name (remaining chars).
-_WELL_KNOWN_SUBJECTS: List[tuple] = [
+_WELL_KNOWN_SUBJECTS: list[tuple] = [
     ("a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235", "484f534b59"),  # HOSKY
     ("279c909f348e533da5808898f87f9a14bb2c3dfbbacccd631d927a3f", "534e454b"),  # SNEK
     ("29d222ce763455e3d7a09a665ce554f00ac89d2e99a1a83d267170c6", "4d494e"),  # MIN
@@ -351,7 +351,7 @@ _WELL_KNOWN_SUBJECTS: List[tuple] = [
 ]
 
 
-def _fetch_token_from_registry(subject: str) -> Optional[Dict[str, Any]]:
+def _fetch_token_from_registry(subject: str) -> dict[str, Any] | None:
     """Fetch a single token entry from the Cardano Token Registry API."""
     url = f"{_CARDANO_TOKEN_REGISTRY_URL}/{subject}"
     try:
@@ -363,14 +363,14 @@ def _fetch_token_from_registry(subject: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _refresh_legitimate_tokens() -> Tuple[Dict[str, List[str]], int]:
+def _refresh_legitimate_tokens() -> tuple[dict[str, list[str]], int]:
     """Fetch well-known tokens from the Cardano Token Registry.
 
     Merges remote results with the seed list; returns ``(registry, fetched)``
     so the caller can tell a real refresh from a total outage (seeds-only)
     and avoid shrinking a previously complete cache.
     """
-    registry: Dict[str, List[str]] = {}
+    registry: dict[str, list[str]] = {}
 
     # Start with seed tokens
     for name, policies in _SEED_TOKENS.items():
@@ -408,7 +408,7 @@ def _refresh_legitimate_tokens() -> Tuple[Dict[str, List[str]], int]:
     return registry, fetched
 
 
-def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
+def get_legitimate_tokens(network: str = "mainnet") -> dict[str, list[str]]:
     """Return the legitimate token registry {name: [policy_ids]}.
 
     On first call, fetches from the Cardano Token Registry and caches for 24h.

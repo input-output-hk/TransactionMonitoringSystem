@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.config import settings
 
@@ -105,7 +105,7 @@ def _select(where: str) -> str:
     """
 
 
-def _row_to_dict(row: tuple) -> Dict[str, Any]:
+def _row_to_dict(row: tuple) -> dict[str, Any]:
     d = dict(zip(("tx_hash", *_FIELDS), row))
     if isinstance(d.get("evidence"), str):
         try:
@@ -115,15 +115,15 @@ def _row_to_dict(row: tuple) -> Dict[str, Any]:
     return d
 
 
-def _group(rows: List[tuple]) -> Dict[str, List[Dict[str, Any]]]:
-    out: Dict[str, List[Dict[str, Any]]] = {}
+def _group(rows: list[tuple]) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         d = _row_to_dict(r)
         out.setdefault(d["tx_hash"], []).append(d)
     return out
 
 
-def get_contract_anomaly(network: str, tx_hash: str) -> List[Dict[str, Any]]:
+def get_contract_anomaly(network: str, tx_hash: str) -> list[dict[str, Any]]:
     """All raw contract_anomaly verdict rows for one transaction (one per
     watched contract that touched it). Empty list on a clean miss AND on any
     error reaching the sidecar's database (best-effort)."""
@@ -132,7 +132,7 @@ def get_contract_anomaly(network: str, tx_hash: str) -> List[Dict[str, Any]]:
             _select("network = %(network)s AND tx_hash = %(tx_hash)s"),
             {"network": network, "tx_hash": tx_hash},
         )
-    except Exception as e:  # noqa: BLE001 - best-effort cross-db read
+    except Exception as e:
         logger.debug("contract_anomaly lookup failed for %s: %s", tx_hash, e)
         return []
     return [_row_to_dict(r) for r in rows]
@@ -140,8 +140,8 @@ def get_contract_anomaly(network: str, tx_hash: str) -> List[Dict[str, Any]]:
 
 def get_contract_anomaly_batch(
     network: str,
-    tx_hashes: List[str],
-) -> Dict[str, List[Dict[str, Any]]]:
+    tx_hashes: list[str],
+) -> dict[str, list[dict[str, Any]]]:
     """Raw verdict rows grouped by tx_hash for a page of tx_hashes.
 
     Returns ``{tx_hash: [verdict_row, ...]}``; missing hashes are absent.
@@ -153,7 +153,7 @@ def get_contract_anomaly_batch(
             _select("network = %(network)s AND tx_hash IN %(hashes)s"),
             {"network": network, "hashes": tx_hashes},
         )
-    except Exception as e:  # noqa: BLE001 - best-effort cross-db read
+    except Exception as e:
         logger.debug("contract_anomaly batch lookup failed: %s", e)
         return {}
     return _group(rows)
@@ -162,14 +162,14 @@ def get_contract_anomaly_batch(
 async def get_contract_anomaly_async(
     network: str,
     tx_hash: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     return await _run(get_contract_anomaly, network, tx_hash)
 
 
 async def get_contract_anomaly_batch_async(
     network: str,
-    tx_hashes: List[str],
-) -> Dict[str, List[Dict[str, Any]]]:
+    tx_hashes: list[str],
+) -> dict[str, list[dict[str, Any]]]:
     return await _run(partial(get_contract_anomaly_batch, network, tx_hashes))
 
 
@@ -177,7 +177,7 @@ def flagged_for_network(
     network: str,
     limit: int = _RESCUE_FETCH_CAP,
     raise_on_error: bool = False,
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Raw verdict rows (grouped by tx_hash) for every NON-normal sidecar
     finding on a network, newest first, capped at ``limit``.
 
@@ -208,7 +208,7 @@ def flagged_for_network(
             + " ORDER BY published_at DESC LIMIT %(limit)s",
             {"network": network, "suppressed": _SUPPRESSED_VERDICTS, "limit": limit},
         )
-    except Exception as e:  # noqa: BLE001 - best-effort cross-db read
+    except Exception as e:
         if raise_on_error:
             raise
         logger.debug("contract_anomaly flagged lookup failed: %s", e)
@@ -232,11 +232,11 @@ async def flagged_for_network_async(
     network: str,
     limit: int = _RESCUE_FETCH_CAP,
     raise_on_error: bool = False,
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> dict[str, list[dict[str, Any]]]:
     return await _run(partial(flagged_for_network, network, limit, raise_on_error))
 
 
-def latest_scored_at(network: str) -> Optional[Any]:
+def latest_scored_at(network: str) -> Any | None:
     """Most recent ``scored_at`` across the sidecar's verdicts for a network.
 
     Powers the host ``/health/detail`` freshness probe. Returns None if the
@@ -246,11 +246,11 @@ def latest_scored_at(network: str) -> Optional[Any]:
             f"SELECT max(scored_at) FROM {_table()} WHERE network = %(network)s",
             {"network": network},
         )
-    except Exception as e:  # noqa: BLE001 - best-effort cross-db read
+    except Exception as e:
         logger.debug("contract_anomaly freshness probe failed: %s", e)
         return None
     return rows[0][0] if rows and rows[0][0] else None
 
 
-async def latest_scored_at_async(network: str) -> Optional[Any]:
+async def latest_scored_at_async(network: str) -> Any | None:
     return await _run(latest_scored_at, network)

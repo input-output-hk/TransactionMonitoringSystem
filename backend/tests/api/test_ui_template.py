@@ -29,7 +29,7 @@ import json
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -207,8 +207,8 @@ def archive_client(monkeypatch):
     """TestClient with the archive ClickHouse layer and the fail-closed
     audit writes faked in memory, mirroring tests/api/test_archive.py."""
     from app.auth import api_key
-    from app.main import app
     from app.db import archive_queries, postgres
+    from app.main import app
 
     monkeypatch.setattr(api_key, "_valid_keys", [])
     monkeypatch.setattr(api_key, "_dev_mode", True)
@@ -232,7 +232,7 @@ def archive_client(monkeypatch):
                 "tx_hash": e["tx_hash"],
                 "note": e["note"],
                 "archived_by": e["archived_by"],
-                "archived_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                "archived_at": datetime.now(UTC).replace(tzinfo=None),
                 "source": tag,
             }
         return {"inserted": len(entries), "skipped": 0}

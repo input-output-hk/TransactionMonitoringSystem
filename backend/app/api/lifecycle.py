@@ -1,17 +1,17 @@
 """API endpoints for transaction lifecycle queries"""
 
 import logging
-from typing import Optional
-from fastapi import APIRouter, Query, HTTPException, Security
+
+from fastapi import APIRouter, HTTPException, Query, Security
 
 from app.api._params import NetworkParam
+from app.auth import verify_api_key
 from app.config import settings
 from app.db import postgres
-from app.auth import verify_api_key
 from app.models.transaction import (
-    TransactionLifecycleEvent,
-    LifecycleSummaryStats,
     LifecycleStatus,
+    LifecycleSummaryStats,
+    TransactionLifecycleEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ async def get_lifecycle(tx_id: str) -> TransactionLifecycleEvent:
 
 @router.get("", dependencies=[Security(verify_api_key)])
 async def list_lifecycles(
-    status: Optional[LifecycleStatus] = Query(
+    status: LifecycleStatus | None = Query(
         None,
         description=(
             "Filter by status: PENDING, CONFIRMED, ROLLED_BACK, DROPPED. "

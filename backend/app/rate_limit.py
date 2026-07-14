@@ -9,7 +9,6 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
-from typing import Optional
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -62,7 +61,7 @@ class RateLimiter:
         self.window_seconds = window_seconds
         self._windows: dict[str, deque] = defaultdict(deque)
         self._lock = asyncio.Lock()
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
         # Auto-register so the lifespan can manage our cleanup task. See
         # _REGISTRY above for why this matters.
         _REGISTRY.append(self)

@@ -77,6 +77,30 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
+[tool.ruff.lint.per-file-ignores]
+# Permanent, deliberate patterns:
+# main.py must configure logging before importing app modules (the module
+# docstring explains the ordering); E402 is the point, not an accident.
+"backend/app/main.py" = ["E402"]
+# The phishing detector and its fixtures work with confusable/homoglyph
+# characters on purpose; the "ambiguous unicode" IS the test payload.
+"backend/app/analysis/url_extraction.py" = ["RUF001"]
+"backend/app/analysis/scorers/multiple_sat.py" = ["RUF002"]
+"backend/tests/analysis/scorers/test_fake_token.py" = ["RUF001", "RUF002", "RUF003"]
+
+# Grandfathered burn-down list: pre-existing findings accepted when the ruff
+# gate was introduced. Fix opportunistically and delete the entry; do not add
+# new code that trips these rules.
+"backend/app/api/*.py" = ["B904"]
+"backend/app/cli.py" = ["B904"]
+"backend/app/db/*.py" = ["B905"]
+"backend/scripts/oneoff/_rescore_common.py" = ["B905"]
+"backend/app/ingestion/resilience.py" = ["UP042"]
+"backend/app/models/transaction.py" = ["UP042"]
+"backend/app/notifications/channels/base.py" = ["UP007"]
+"backend/tests/analysis/test_engine.py" = ["E402"]
+"backend/tests/**" = ["B017", "RUF005", "RUF012", "RUF043", "RUF059"]
+
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's parameter helpers are the idiomatic way to declare defaults.
 extend-immutable-calls = [

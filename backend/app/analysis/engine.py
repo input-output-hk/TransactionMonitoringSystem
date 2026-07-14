@@ -11,31 +11,39 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from app.config import settings
-from app.db import clickhouse, raw_store
 from app import notifications
 from app.analysis.enrichment import (
     enrich_collision_features as _enrich_collision_features,
+)
+from app.analysis.enrichment import (
     enrich_cycle_features as _enrich_cycle_features,
+)
+from app.analysis.enrichment import (
     enrich_inputs_with_resolved_addresses as _enrich_inputs_with_resolved_addresses,
+)
+from app.analysis.enrichment import (
     enrich_sandwich_features as _enrich_sandwich_features,
+)
+from app.analysis.enrichment import (
     set_main_loop,
 )
 from app.analysis.normalise import score_to_band
 from app.analysis.scorer_config import composite_corroboration_config
 from app.analysis.scorers.base import BaseScorer
-from app.analysis.scorers.phishing import PhishingScorer
-from app.analysis.scorers.token_dust import TokenDustScorer
-from app.analysis.scorers.large_value import LargeValueScorer
-from app.analysis.scorers.large_datum import LargeDatumScorer
-from app.analysis.scorers.multiple_sat import MultipleSatScorer
-from app.analysis.scorers.front_running import FrontRunningScorer
-from app.analysis.scorers.sandwich import SandwichScorer
 from app.analysis.scorers.circular import CircularScorer
 from app.analysis.scorers.fake_token import FakeTokenScorer
+from app.analysis.scorers.front_running import FrontRunningScorer
+from app.analysis.scorers.large_datum import LargeDatumScorer
+from app.analysis.scorers.large_value import LargeValueScorer
+from app.analysis.scorers.multiple_sat import MultipleSatScorer
+from app.analysis.scorers.phishing import PhishingScorer
+from app.analysis.scorers.sandwich import SandwichScorer
+from app.analysis.scorers.token_dust import TokenDustScorer
+from app.config import settings
+from app.db import clickhouse, raw_store
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +72,13 @@ _CLASS_NAMES = [
 ]
 
 
-def _build_scorers() -> List[BaseScorer]:
+def _build_scorers() -> list[BaseScorer]:
     """Instantiate all enabled scorers.
 
     Scorers for not-yet-implemented classes are simply absent from the list;
     their score defaults to -1 (not applicable) in the output.
     """
-    scorers: List[BaseScorer] = []
+    scorers: list[BaseScorer] = []
 
     if getattr(settings, "SCORER_TOKEN_DUST_ENABLED", True):
         scorers.append(TokenDustScorer())
@@ -95,23 +103,23 @@ def _build_scorers() -> List[BaseScorer]:
 
 
 def _score_transaction(
-    row: Dict[str, Any],
-    scorers: List[BaseScorer],
-) -> Dict[str, Any]:
+    row: dict[str, Any],
+    scorers: list[BaseScorer],
+) -> dict[str, Any]:
     """Run all enabled scorers against a single transaction.
 
     Returns a dict ready for insert_class_scores().
     """
     tx_hash = row["tx_hash"]
     network = row["network"]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Both metadata and raw_data are pre-parsed in run_once()
     metadata = row.get("metadata")
     raw_data = row.get("raw_data")
 
     # Build the features dict available to all scorers
-    features: Dict[str, Any] = {
+    features: dict[str, Any] = {
         "tx_hash": tx_hash,
         "network": network,
         "fee": row.get("fee", 0),
@@ -131,13 +139,13 @@ def _score_transaction(
     }
 
     # Run each scorer
-    scores: Dict[str, float] = {name: -1.0 for name in _CLASS_NAMES}
-    sub_scores: Dict[str, Dict[str, float]] = {}
-    evidence: Dict[str, Dict[str, Any]] = {}
+    scores: dict[str, float] = {name: -1.0 for name in _CLASS_NAMES}
+    sub_scores: dict[str, dict[str, float]] = {}
+    evidence: dict[str, dict[str, Any]] = {}
     # Which baseline tier each scorer used (per_script / per_policy / global /
     # fixed / missing). Kept so the notification payload can report
     # the winning class's baseline_source; not persisted to ClickHouse.
-    baseline_sources: Dict[str, str] = {}
+    baseline_sources: dict[str, str] = {}
     if row.get("raw_data_unavailable"):
         # The raw payload could not be recovered after the fallback budget:
         # raw_data-gated scorers will skip, so mark the degradation in
@@ -148,7 +156,7 @@ def _score_transaction(
     # class at the -1 sentinel, indistinguishable from "not applicable"; the
     # engine uses this list to defer the tx (retry) rather than persist a row
     # that silently masks the unscored class. See _handle_incomplete_scoring.
-    failed_scorers: List[str] = []
+    failed_scorers: list[str] = []
     for scorer in scorers:
         try:
             if scorer.gate(features):
@@ -209,18 +217,18 @@ def _score_transaction(
 # the whole budget in ~1.5 s and degraded-scored exactly the large
 # attack-shaped txs the fallback protects (review finding). In-process only;
 # a restart resets the counters, which merely delays degraded scoring.
-_raw_fallback_attempts: Dict[tuple, Tuple[int, float]] = {}
+_raw_fallback_attempts: dict[tuple, tuple[int, float]] = {}
 
 # Watermark cursor for the unanalyzed poll: network -> the highest
 # ingestion_timestamp scored, minus UNANALYZED_OVERLAP_SECONDS. Bounds all
 # three sides of the poll query so its cost tracks the backlog, not the
 # total table size. In-process only: a restart starts with a full rescan.
-_unanalyzed_watermark: Dict[str, datetime] = {}
+_unanalyzed_watermark: dict[str, datetime] = {}
 # network -> time.monotonic() of the last since=None full rescan.
-_last_full_rescan: Dict[str, float] = {}
+_last_full_rescan: dict[str, float] = {}
 
 
-def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
+def _poll_since(network: str) -> tuple[datetime | None, bool]:
     """The ``(since, is_full_rescan)`` bounds for this poll.
 
     A full rescan (since=None) runs on the first poll after startup and
@@ -243,12 +251,12 @@ def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
         # is the never-skip net in practice.
         window = settings.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS
         if window > 0:
-            return datetime.now(timezone.utc) - timedelta(seconds=window), True
+            return datetime.now(UTC) - timedelta(seconds=window), True
         return None, True
     return _unanalyzed_watermark.get(network), False
 
 
-def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
+def _advance_watermark(network: str, rows: list[dict[str, Any]]) -> None:
     """Advance the poll watermark to the newest fetched row, minus overlap.
 
     Called only AFTER the batch's score rows are persisted, so a failed
@@ -272,9 +280,9 @@ def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
 
 
 def _resolve_raw_data(
-    rows: List[Dict[str, Any]],
+    rows: list[dict[str, Any]],
     network: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Parse each row's raw_data, recovering from the raw store when needed.
 
     The stored column may be empty-with-flag (payload over RAW_DATA_MAX_BYTES)
@@ -295,11 +303,11 @@ def _resolve_raw_data(
 
     Returns the rows to score this run (deferred rows removed).
     """
-    kept: List[Dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
     for row in rows:
         rd = row.get("raw_data")
         truncated = bool(row.get("raw_data_truncated"))
-        parsed: Optional[Dict[str, Any]] = None
+        parsed: dict[str, Any] | None = None
         if isinstance(rd, dict):
             parsed = rd
         elif isinstance(rd, str) and rd:
@@ -362,13 +370,13 @@ def _resolve_raw_data(
 # raised, or a cross-tx enrichment failed): (network, tx_hash) -> (counted
 # attempts, monotonic time of the last counted attempt). Same pacing/budget
 # discipline and in-process-only caveat as _raw_fallback_attempts above.
-_analysis_defer_attempts: Dict[tuple, Tuple[int, float]] = {}
+_analysis_defer_attempts: dict[tuple, tuple[int, float]] = {}
 
 
 def _handle_incomplete_scoring(
-    results: List[Dict[str, Any]],
+    results: list[dict[str, Any]],
     network: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Defer transactions whose scoring was incomplete; degrade after budget.
 
     A result is "incomplete" when a scorer raised (``_failed_scorers``) or a
@@ -395,7 +403,7 @@ def _handle_incomplete_scoring(
             r.pop("_enrichment_failed", None)
         return results
 
-    kept: List[Dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
     now_mono = time.monotonic()
     for r in results:
         failed_scorers = r.pop("_failed_scorers", None) or []

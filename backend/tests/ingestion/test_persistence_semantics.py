@@ -7,6 +7,7 @@ honest empty-with-flag, never an invalid JSON prefix.
 """
 
 import asyncio
+from datetime import UTC
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,7 +21,11 @@ from app.ingestion.ogmios_client import (
 )
 from tests.ingestion.conftest import (
     make_block as _block,
+)
+from tests.ingestion.conftest import (
     persistence_patches,
+)
+from tests.ingestion.conftest import (
     run_async as _run,
 )
 
@@ -204,12 +209,12 @@ class TestMempoolCacheLifetime:
     replays and re-parses) and be dropped only after durable persistence."""
 
     def _seed(self, client):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         tx_hash = "00" * 32  # first tx of _block()
         client.mempool._pending_input_cache[tx_hash] = (
             {("11" * 32, 0): {"address": "addr_test1qsource", "amount": 7}},
-            datetime.now(timezone.utc),
+            datetime.now(UTC),
         )
         return tx_hash
 
@@ -818,7 +823,7 @@ class TestParseFailurePreservation:
         mangled id; preservation must not depend on the broken field. The
         fallback filename is a SHA-256 of the payload — 64 hex chars, so it
         passes the same path validation as a real tx hash."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from app.db import raw_store
 
@@ -834,7 +839,7 @@ class TestParseFailurePreservation:
                     "preprod",
                     bad_id,
                     payload,
-                    datetime.now(timezone.utc),
+                    datetime.now(UTC),
                 )
             )
 
@@ -846,7 +851,7 @@ class TestParseFailurePreservation:
         assert stored_hash != bad_id
 
     def test_valid_tx_id_is_kept_as_the_filename(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from app.db import raw_store
 
@@ -862,7 +867,7 @@ class TestParseFailurePreservation:
                     "preprod",
                     good_id,
                     {"id": good_id},
-                    datetime.now(timezone.utc),
+                    datetime.now(UTC),
                 )
             )
 

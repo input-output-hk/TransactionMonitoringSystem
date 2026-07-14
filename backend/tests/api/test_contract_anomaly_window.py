@@ -6,7 +6,7 @@ analyzed_at. Before the fix, comparing naive vs aware raised TypeError, which th
 endpoint swallowed into an empty page (the "contract_anomaly shows nothing when a
 date filter is applied" bug)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,8 +16,8 @@ from app.api.contract_anomaly_read import _within_analyzed_window
 # ClickHouse returns naive-UTC datetimes for analyzed_at.
 _NAIVE_IN = datetime(2026, 6, 1, 12, 0, 0)
 # The frontend sends Z-suffixed bounds -> FastAPI parses them tz-aware.
-_AWARE_FROM = datetime(2026, 4, 1, 0, 0, 0, tzinfo=timezone.utc)
-_AWARE_TO = datetime(2026, 7, 1, 0, 0, 0, tzinfo=timezone.utc)
+_AWARE_FROM = datetime(2026, 4, 1, 0, 0, 0, tzinfo=UTC)
+_AWARE_TO = datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)
 
 
 def test_naive_value_with_aware_bounds_does_not_raise_and_matches():
@@ -36,7 +36,7 @@ def test_naive_value_at_or_after_aware_to_is_excluded():
 
 def test_aware_value_with_naive_bounds_also_safe():
     # The reverse mix must not raise either.
-    aware_in = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    aware_in = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
     assert _within_analyzed_window(aware_in, datetime(2026, 4, 1), datetime(2026, 7, 1)) is True
 
 

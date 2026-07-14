@@ -2,12 +2,11 @@
 
 import logging
 from datetime import datetime
-from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
-from app.api._params import NetworkParam
 from app.analysis.engine import _CLASS_NAMES
+from app.api._params import NetworkParam
 from app.api.contract_anomaly_read import (
     _CONTRACT_ANOMALY,
     _augment_stats_with_contract_anomaly,
@@ -94,14 +93,14 @@ async def get_analysis_result(
 @router.get("/results", dependencies=[Security(verify_api_key)])
 async def list_analysis_results(
     network: NetworkParam = None,
-    risk_band: List[RiskBand] = Query(
+    risk_band: list[RiskBand] = Query(
         default_factory=list,
         description=(
             "Filter by risk band. Repeat the param to OR-match multiple "
             "values, e.g. `?risk_band=Critical&risk_band=High`."
         ),
     ),
-    attack_class: Optional[str] = Query(
+    attack_class: str | None = Query(
         None,
         description="Filter by attack class name (e.g. phishing, sandwich)",
     ),
@@ -118,11 +117,11 @@ async def list_analysis_results(
         ),
     ),
     sort: str = Query("score", description="Sort order: 'score' or 'date'"),
-    analyzed_from: Optional[datetime] = Query(
+    analyzed_from: datetime | None = Query(
         None,
         description="Only include results with analyzed_at >= this ISO timestamp (inclusive).",
     ),
-    analyzed_to: Optional[datetime] = Query(
+    analyzed_to: datetime | None = Query(
         None,
         description="Only include results with analyzed_at < this ISO timestamp (exclusive).",
     ),

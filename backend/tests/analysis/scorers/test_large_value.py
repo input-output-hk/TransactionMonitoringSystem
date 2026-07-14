@@ -1,8 +1,8 @@
 """Unit tests for the Large Value scorer (Class 2)."""
 
 import pytest
-from app.analysis.scorers.large_value import LargeValueScorer
 
+from app.analysis.scorers.large_value import LargeValueScorer
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
 

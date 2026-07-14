@@ -2,6 +2,7 @@
 token and the WebSocket api_key from access logs."""
 
 import logging
+
 from app.logging_utils import _RedactTokenFilter
 
 
