@@ -11,6 +11,13 @@
  */
 import { fetchWithAuth } from "./fetch";
 
+/**
+ * Cache key for the resolved `/api/auth/me` user. Shared between the
+ * AuthProvider (which owns the query) and the QueryClient's global 401
+ * handler in `main.tsx` (which resets it to anonymous).
+ */
+export const ME_QUERY_KEY = ["auth", "me"] as const;
+
 export type UserRole = "Admin" | "Reviewer";
 export type UserStatus = "pending" | "active" | "disabled";
 
@@ -99,7 +106,12 @@ export async function logout(): Promise<void> {
  * boundary instead of silently treating the user as logged-out.
  */
 export async function fetchMe(): Promise<User | null> {
-	const res = await fetchWithAuth("/api/auth/me");
+	// allow401: anonymous is a normal outcome here, not a session expiry —
+	// mapping it to null (instead of UnauthorizedError) keeps the login
+	// page reachable.
+	const res = await fetchWithAuth("/api/auth/me", undefined, {
+		allow401: true,
+	});
 	if (res.status === 401) return null;
 	if (!res.ok) {
 		throw new Error(`me failed (${res.status})`);
