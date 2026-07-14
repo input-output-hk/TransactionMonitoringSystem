@@ -14,13 +14,50 @@ and live with the chain-sync persistence logic, not here.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
-from app.analysis.features import extract_lovelace, flatten_assets
+from app.analysis.features import (
+    extract_lovelace,
+    flatten_assets,
+    total_withdrawal_lovelace,
+)
 from app.db import clickhouse
 from app.models.transaction import NormalizedTransaction, TransactionInput
 
 logger = logging.getLogger(__name__)
+
+
+def _consumes_value(script_valid: bool, inp: TransactionInput) -> bool:
+    """Whether the ledger actually consumed this input's value.
+
+    Mirrors the parser's input_count rule: regular inputs for a validated
+    tx, collateral inputs for a failed one. Reference inputs are read-only
+    and a failed tx's regular inputs (is_unspent_attempt) stayed live.
+    """
+    if inp.is_reference:
+        return False
+    if script_valid:
+        return not inp.is_collateral and not inp.is_unspent_attempt
+    return inp.is_collateral
+
+
+def _withdrawal_total(tx: NormalizedTransaction) -> int:
+    """Reward-account withdrawals fold into total_input_value: withdrawn
+    rewards fund outputs exactly like spent inputs. Only for validated
+    txs; a phase-2 failure never applies the withdrawal."""
+    return total_withdrawal_lovelace(tx.raw_data) if tx.script_valid else 0
+
+
+def _flow_addresses(script_valid: bool, inputs: List[TransactionInput]) -> Set[str]:
+    """Input addresses surfaced to the tx's address list: regular inputs
+    always (a failed tx's attempted inputs are attack-attempt signal);
+    collateral only for a failed tx, where the collateral payer is the
+    consumed party. Reference inputs are read-only, never involved."""
+    return {
+        i.address for i in inputs
+        if i.address and not i.is_reference
+        and (not i.is_collateral or not script_valid)
+    }
 
 
 def parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
@@ -53,12 +90,15 @@ def apply_resolved_inputs(
 
     Attempted inputs of a failed tx ARE resolved (their addresses are
     attack-attempt signal and belong in the address screen) but never
-    feed total_input_value: the ledger did not consume them.
+    feed total_input_value: the ledger did not consume them. Collateral
+    inputs resolve the same way; their amounts count only for a failed
+    tx, where they are exactly what the ledger consumed. Reward-account
+    withdrawals fold into the total for validated txs.
     """
-    total = 0
+    total = _withdrawal_total(tx)
     new_inputs = []
     for inp in tx.inputs:
-        if not inp.is_collateral and not inp.is_reference:
+        if not inp.is_reference:
             utxo = resolved.get((inp.tx_hash, inp.index))
             if utxo:
                 inp = TransactionInput(
@@ -68,17 +108,14 @@ def apply_resolved_inputs(
                     amount=utxo["amount"],
                     assets=utxo.get("assets"),
                     is_reference=False,
-                    is_collateral=False,
+                    is_collateral=inp.is_collateral,
                     is_unspent_attempt=inp.is_unspent_attempt,
                 )
-                if not inp.is_unspent_attempt:
+                if _consumes_value(tx.script_valid, inp):
                     total += utxo["amount"]
         new_inputs.append(inp)
 
-    resolved_addrs = {
-        i.address for i in new_inputs
-        if i.address and not i.is_collateral and not i.is_reference
-    }
+    resolved_addrs = _flow_addresses(tx.script_valid, new_inputs)
     return tx.model_copy(update={
         "inputs": new_inputs,
         "total_input_value": total if total > 0 else None,
@@ -106,11 +143,15 @@ async def resolve_input_amounts(
             chain_idx = out.output_index if out.output_index is not None else idx
             intra_block[(tx.tx_hash, chain_idx)] = (out.address, out.amount)
 
-    # Collect all unresolved input refs (skip already-resolved from mempool cache)
+    # Collect all unresolved input refs (skip already-resolved from mempool
+    # cache). Collateral inputs resolve too: for a failed tx they are the
+    # consumed flow, and for a validated one the payer address is still
+    # involved-party data behind the is_collateral flag. Reference inputs
+    # stay unresolved (read-only, never a value flow).
     cross_block_refs = []
     for tx in txs:
         for inp in tx.inputs:
-            if inp.is_collateral or inp.is_reference:
+            if inp.is_reference:
                 continue
             if inp.amount > 0:
                 continue  # already resolved
@@ -131,15 +172,16 @@ async def resolve_input_amounts(
     # Apply to each tx
     result = []
     for tx in txs:
-        total = 0
+        withdrawal_total = _withdrawal_total(tx)
+        total = withdrawal_total
         new_inputs = []
         changed = False
         for inp in tx.inputs:
-            if inp.is_collateral or inp.is_reference:
+            if inp.is_reference:
                 new_inputs.append(inp)
-                continue  # don't include collateral/reference in total_input_value
+                continue  # read-only: never resolved, never a value flow
             if inp.amount > 0:
-                if not inp.is_unspent_attempt:
+                if _consumes_value(tx.script_valid, inp):
                     total += inp.amount
                 new_inputs.append(inp)
                 continue
@@ -147,30 +189,30 @@ async def resolve_input_amounts(
             resolved = all_resolved.get(ref)
             if resolved:
                 addr, amt = resolved
-                new_inputs.append(TransactionInput(
+                new_inp = TransactionInput(
                     tx_hash=inp.tx_hash,
                     index=inp.index,
                     address=addr,
                     amount=int(amt),
                     assets=inp.assets,
                     is_reference=False,
-                    is_collateral=False,
+                    is_collateral=inp.is_collateral,
                     is_unspent_attempt=inp.is_unspent_attempt,
-                ))
-                # Attempted inputs of a failed tx resolve for address
-                # visibility but were never consumed: keep them out of
-                # total_input_value.
-                if not inp.is_unspent_attempt:
+                )
+                new_inputs.append(new_inp)
+                # Resolution is for address visibility; only inputs the
+                # ledger actually consumed feed total_input_value (regular
+                # inputs when validated, collateral when failed).
+                if _consumes_value(tx.script_valid, new_inp):
                     total += int(amt)
                 changed = True
             else:
                 new_inputs.append(inp)
 
-        if changed:
-            resolved_addrs = {
-                i.address for i in new_inputs
-                if i.address and not i.is_collateral and not i.is_reference
-            }
+        # A withdrawal alone updates the total even when no input resolved:
+        # withdrawn rewards are consumed value the tx provably moved.
+        if changed or withdrawal_total > 0:
+            resolved_addrs = _flow_addresses(tx.script_valid, new_inputs)
             tx = tx.model_copy(update={
                 "inputs": new_inputs,
                 "total_input_value": total if total > 0 else None,
