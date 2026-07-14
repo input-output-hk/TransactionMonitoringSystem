@@ -8,7 +8,6 @@ slots) and the wall-clock fallback that keeps ingestion alive when the
 node cannot answer the queries.
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +16,11 @@ import pytest
 from app.config import settings
 from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.ogmios_client import OgmiosClient
+from tests.ingestion.conftest import (
+    make_block as _block,
+    persistence_patches as _persistence_patches,
+    run_async as _run,
+)
 
 SYSTEM_START = "2017-09-23T21:44:51Z"
 SYSTEM_START_DT = datetime.fromisoformat(SYSTEM_START)
@@ -60,10 +64,6 @@ ERA_SUMMARIES = [
         },
     },
 ]
-
-
-def _run(coro):
-    return asyncio.run(coro)
 
 
 def _converter():
@@ -175,46 +175,6 @@ class TestFromOgmios:
     )
     def test_unusable_inputs_yield_none(self, start_time, summaries):
         assert SlotTimeConverter.from_ogmios(start_time, summaries) is None
-
-
-def _block(slot):
-    return {
-        "block": {
-            "id": "ab" * 32,
-            "slot": slot,
-            "height": 7,
-            "transactions": [
-                {
-                    "id": "00" * 32,
-                    "spends": "inputs",
-                    "fee": {"ada": {"lovelace": 200_000}},
-                    "inputs": [{"transaction": {"id": "11" * 32}, "index": 0}],
-                    "outputs": [
-                        {"address": "addr_test1qq", "value": {"ada": {"lovelace": 1}}}
-                    ],
-                }
-            ],
-        },
-        "tip": {"slot": slot + 10},
-    }
-
-
-def _persistence_patches(insert=None):
-    return [
-        patch(
-            "app.ingestion.ogmios_client.clickhouse.insert_transactions_batch_async",
-            insert or AsyncMock(),
-        ),
-        patch("app.ingestion.ogmios_client.postgres.save_sync_point", AsyncMock()),
-        patch(
-            "app.ingestion.ogmios_client.postgres.batch_upsert_lifecycle_confirmed",
-            AsyncMock(),
-        ),
-        patch(
-            "app.ingestion.ogmios_client.clickhouse.get_outputs_for_refs_async",
-            AsyncMock(return_value={}),
-        ),
-    ]
 
 
 class TestChainSyncWiring:
