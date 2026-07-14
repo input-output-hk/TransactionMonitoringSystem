@@ -80,7 +80,9 @@ def test_host_backed_top_anomalies_includes_hour_and_day_of_week() -> None:
     row that doesn't match the key count would raise here)."""
     from app.storage.clickhouse.ingest import TX_CONTEXT_KEYS
 
-    score_cols = ("a" * 64, 0.5, 1.2, 1, 0.9, 2, 1)  # tx_hash..score_rank
+    # Unified projection order (shared with the base repo): score_rank, tx_hash,
+    # consensus, votes, iso_score, lof_score, dbscan_noise.
+    score_cols = (1, "a" * 64, 0.9, 2, 0.5, 1.2, 1)
     ctx_cols = ("2026-06-02 03:38:22", 100, 0, 1000, 2000, 1000, 6, 11, 5, 2)
     derived = (3, 2)  # hour_of_day, day_of_week
     assert len(ctx_cols) == len(TX_CONTEXT_KEYS)  # ctx fixture stays in lockstep
@@ -96,6 +98,38 @@ def test_host_backed_top_anomalies_includes_hour_and_day_of_week() -> None:
     # row arity alone can't catch dropping the columns from the SELECT only).
     assert "toHour(t.block_time)" in fake.queries[-1]
     assert "toDayOfWeek(t.block_time)" in fake.queries[-1]
+    # The tx source is the host-shaped windowed relation, not the module table.
+    assert "address_transactions" in fake.queries[-1]
+
+
+def test_top_anomalies_sql_is_identical_across_repos_except_tx_source() -> None:
+    """The five dual-repo reads are written once against the tx-source hooks:
+    the two repos' top_anomalies query text must differ ONLY in the substituted
+    transaction relation (and its scope params), never in projection/aliases."""
+    base_repo, base_fake = _repo([])
+    host_fake = FakeClient([])
+    host_repo = HostBackedRepo(Settings(CLICKHOUSE_DB="tms"), client=host_fake)
+
+    base_repo.top_anomalies("run-1", "addr", limit=10)
+    host_repo.top_anomalies("run-1", "addr", limit=10)
+
+    base_sql = base_fake.queries[-1].replace(base_repo._tx_relation(), "<TX>")
+    host_sql = host_fake.queries[-1].replace(host_repo._tx_relation(), "<TX>")
+    assert base_sql == host_sql
+
+
+def test_cluster_summary_sql_keeps_the_cluster_size_alias_both_repos() -> None:
+    """ClickHouse 26.x Code 184: never alias an aggregate to a source-column
+    name used by sibling aggregates. The tx relation projects `size`, so the
+    count() alias must stay `cluster_size` in BOTH repos' query text."""
+    base_repo, base_fake = _repo([])
+    host_fake = FakeClient([])
+    host_repo = HostBackedRepo(Settings(CLICKHOUSE_DB="tms"), client=host_fake)
+    for repo, fake in ((base_repo, base_fake), (host_repo, host_fake)):
+        repo.cluster_summary("run-1", "addr")
+        sql = fake.queries[-1]
+        assert "count() AS cluster_size" in sql
+        assert "count() AS size" not in sql
 
 
 def _tx() -> TxRecord:
@@ -330,7 +364,7 @@ def test_save_anomaly_run_and_scores() -> None:
     assert score_data[0] == ["an1", "aa", 0.7, 1.2, 1, 0.9, 3, 1]
 
 
-def test_top_anomalies_maps_and_nan_iso() -> None:
+def test_top_anomalies_maps_and_nan_scores() -> None:
     nan = float("nan")
     # Columns: rank, tx, consensus, votes, iso, lof, dbscan, block_time, fees,
     # size, total_input, total_output, net, in, out, assets, redeemers, hour, dow.
@@ -363,7 +397,7 @@ def test_top_anomalies_maps_and_nan_iso() -> None:
                 0.40,
                 1,
                 0.5,
-                0.9,
+                nan,
                 0,
                 "2024-01-02 00:00:00",
                 300000,
@@ -384,8 +418,11 @@ def test_top_anomalies_maps_and_nan_iso() -> None:
     assert rows[0]["score_rank"] == 1
     assert rows[0]["tx_hash"] == "aa"
     assert rows[0]["votes"] == 3
-    assert rows[0]["iso_score"] is None  # NaN -> None
+    # NaN -> None for BOTH detector scores (the unified superset).
+    assert rows[0]["iso_score"] is None
+    assert rows[0]["lof_score"] == 1.8
     assert rows[1]["iso_score"] == 0.5
+    assert rows[1]["lof_score"] is None
 
 
 def test_latest_transactions_maps_rows_and_null_online() -> None:

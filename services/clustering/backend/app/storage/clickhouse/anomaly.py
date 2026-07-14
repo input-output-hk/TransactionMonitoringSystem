@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .base import _RepoBase, _row_to_dict
-from .ingest import TX_CONTEXT_KEYS, TX_CONTEXT_SELECT
+from .ingest import TX_CONTEXT_KEYS, _tx_context_aliased
 
 _ANOMALY_RUN_OUT_KEYS = [
     "run_id",
@@ -163,22 +163,29 @@ class _AnomalyMixin(_RepoBase):
     def top_anomalies(
         self, run_id: str, target: str, *, limit: int, offset: int = 0
     ) -> list[dict[str, Any]]:
+        # `rlim`/`off` page the RESULT; the host-backed tx relation reserves
+        # `lim` for its window subquery, so the two never clobber each other.
+        params = self._tx_scope_params(target)
+        params.update({"r": run_id, "rlim": limit, "off": offset})
         rows = self.client.query(
             f"""
             SELECT s.score_rank AS score_rank, toString(s.tx_hash) AS tx_hash,
                    s.consensus AS consensus, s.votes AS votes,
                    s.iso_score AS iso_score, s.lof_score AS lof_score,
                    s.dbscan_noise AS dbscan_noise,
-                   {TX_CONTEXT_SELECT},
+                   {_tx_context_aliased("t")},
                    toHour(t.block_time) AS hour_of_day,
                    toDayOfWeek(t.block_time) AS day_of_week
-            FROM (SELECT * FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}) s
-            INNER JOIN (SELECT * FROM {self._db}.transactions FINAL WHERE target = {{t:String}}) t
-                USING (tx_hash)
+            FROM (
+                SELECT tx_hash, iso_score, lof_score, dbscan_noise, consensus,
+                       votes, score_rank
+                FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}
+            ) s
+            INNER JOIN {self._tx_relation()} t USING (tx_hash)
             ORDER BY s.score_rank ASC
-            LIMIT {{lim:UInt32}} OFFSET {{off:UInt32}}
+            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,
-            parameters={"r": run_id, "t": target, "lim": limit, "off": offset},
+            parameters=params,
         ).result_rows
         keys = [
             "score_rank",
@@ -192,4 +199,7 @@ class _AnomalyMixin(_RepoBase):
             "hour_of_day",
             "day_of_week",
         ]
-        return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score",))
+        # NaN -> None for BOTH detector scores (the superset of the two former
+        # per-repo variants): iso_score is NaN for the precomputed metric and
+        # lof_score can be NaN when a detector was skipped for the row.
+        return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score", "lof_score"))

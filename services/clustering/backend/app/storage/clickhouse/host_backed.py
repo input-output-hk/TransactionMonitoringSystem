@@ -41,7 +41,6 @@ from app.config import Settings
 from app.models import AssetRecord, TxRecord, UtxoRecord
 
 from . import ClickHouseRepo
-from .ingest import TX_CONTEXT_KEYS
 
 
 class HostBackedRepo(ClickHouseRepo):
@@ -137,6 +136,22 @@ class HostBackedRepo(ClickHouseRepo):
         that every windowed read (fetch_shape_features + the UI/anomaly joins) uses."""
         return self._tx_shaped(self._hashes_expr())
 
+    # --- tx-source hooks (see base._tx_relation) -------------------------------
+    # The five tx-joined reads (latest_transactions, unclassified_tx_hashes,
+    # top_anomalies, cluster_summary, cluster_transactions) live ONCE in the
+    # base mixins; this repo redirects only their transaction source to the
+    # host-shaped, windowed derived tables above. This is the single bridge
+    # point between the host's column vocabulary and the engine's.
+
+    def _tx_relation(self) -> str:
+        return self._windowed_tx()
+
+    def _tx_hashes_relation(self) -> str:
+        return self._hashes_expr()
+
+    def _tx_scope_params(self, target: str) -> dict[str, Any]:
+        return self._scope_params(target)
+
     def _addr_cooccurrence_sql(self, hashes_expr: str, *, order_by: str = "") -> str:
         """DISTINCT (tx_hash, address) over the host inputs+outputs for the txs in
         ``hashes_expr``. Shared by fetch_tx_addresses (windowed subquery, ORDER BY
@@ -226,180 +241,6 @@ class HostBackedRepo(ClickHouseRepo):
         # registry, not the (empty) module-local transactions table.
         return self.count_contracts()
 
-    # --- transactions-joined reads that back the UI / online path -------------
-
-    def latest_transactions(
-        self, target: str, feature_set: str, *, limit: int, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        # `lim` is reserved for the window subquery; the result LIMIT uses a
-        # distinct `rlim` so the two never clobber each other.
-        params = self._scope_params(target)
-        params.update({"f": feature_set, "rlim": limit, "off": offset})
-        rows = self.client.query(
-            f"""
-            SELECT
-                toString(t.tx_hash) AS tx_hash,
-                toString(t.block_time) AS block_time, t.fees AS fees, t.size AS size,
-                t.total_input_lovelace AS total_input_lovelace,
-                t.total_output_lovelace AS total_output_lovelace,
-                t.net_lovelace AS net_lovelace,
-                t.input_count AS input_count, t.output_count AS output_count,
-                t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count,
-                c.cluster_id AS online_cluster_id, c.votes AS online_votes
-            FROM {self._windowed_tx()} t
-            LEFT JOIN (
-                SELECT tx_hash, cluster_id, votes FROM {self._db}.tx_classifications FINAL
-                WHERE target = {{tgt:String}} AND feature_set = {{f:String}}
-            ) c ON t.tx_hash = c.tx_hash
-            ORDER BY t.block_time DESC, t.tx_hash
-            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
-            SETTINGS join_use_nulls = 1
-            """,
-            parameters=params,
-        ).result_rows
-        keys = ["tx_hash", *TX_CONTEXT_KEYS, "online_cluster_id", "online_votes"]
-        return self._rows_to_dicts(keys, rows)
-
-    def unclassified_tx_hashes(
-        self,
-        target: str,
-        feature_set: str,
-        *,
-        run_id: str | None = None,
-        model_id: str | None = None,
-    ) -> list[str]:
-        params = self._scope_params(target)
-        params["f"] = feature_set
-        model_clause = ""
-        if model_id:
-            model_clause = " AND model_id = {m:String}"
-            params["m"] = model_id
-        run_clause = ""
-        if run_id:
-            run_clause = (
-                f" AND tx_hash NOT IN (SELECT tx_hash FROM {self._db}.cluster_labels FINAL "
-                "WHERE run_id = {r:String})"
-            )
-            params["r"] = run_id
-        sql = (
-            f"SELECT tx_hash FROM {self._hashes_expr()} "
-            f"WHERE tx_hash NOT IN (SELECT tx_hash FROM {self._db}.tx_classifications FINAL "
-            "WHERE target = {tgt:String} AND feature_set = {f:String}" + model_clause + ")"
-            f"{run_clause} ORDER BY tx_hash"
-        )
-        return [str(r[0]) for r in self.client.query(sql, parameters=params).result_rows]
-
-    def top_anomalies(
-        self, run_id: str, target: str, *, limit: int, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        params = self._scope_params(target)
-        params.update({"r": run_id, "rlim": limit, "off": offset})
-        rows = self.client.query(
-            f"""
-            SELECT
-                toString(a.tx_hash) AS tx_hash,
-                a.iso_score AS iso_score, a.lof_score AS lof_score,
-                a.dbscan_noise AS dbscan_noise, a.consensus AS consensus,
-                a.votes AS votes, a.score_rank AS score_rank,
-                {_tx_context_aliased("t")},
-                toHour(t.block_time) AS hour_of_day,
-                toDayOfWeek(t.block_time) AS day_of_week
-            FROM (
-                SELECT tx_hash, iso_score, lof_score, dbscan_noise, consensus,
-                       votes, score_rank
-                FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}
-            ) a
-            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
-            ORDER BY a.score_rank
-            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
-            """,
-            parameters=params,
-        ).result_rows
-        keys = [
-            "tx_hash",
-            "iso_score",
-            "lof_score",
-            "dbscan_noise",
-            "consensus",
-            "votes",
-            "score_rank",
-            *TX_CONTEXT_KEYS,
-            "hour_of_day",
-            "day_of_week",
-        ]
-        return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score", "lof_score"))
-
-    def cluster_summary(self, run_id: str, target: str) -> list[dict[str, Any]]:
-        params = self._scope_params(target)
-        params["r"] = run_id
-        # The count() alias is cluster_size, NOT size: _tx_shaped projects a
-        # `size` column into the join input, and ClickHouse 26.x rejects an
-        # aggregate alias that shadows a source column referenced by sibling
-        # aggregates (Code 184).
-        rows = self.client.query(
-            f"""
-            SELECT
-                cluster_id, count() AS cluster_size,
-                round(avg(fees)) AS avg_fees,
-                round(avg(total_output_lovelace)) AS avg_output_lovelace,
-                round(avg(input_count), 2) AS avg_inputs,
-                round(avg(output_count), 2) AS avg_outputs,
-                round(avg(distinct_assets), 2) AS avg_assets
-            FROM (
-                SELECT tx_hash, cluster_id FROM {self._db}.cluster_labels FINAL
-                WHERE run_id = {{r:String}}
-            ) l
-            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
-            GROUP BY cluster_id
-            ORDER BY (cluster_id = -1), cluster_size DESC
-            """,
-            parameters=params,
-        ).result_rows
-        keys = [
-            "cluster_id",
-            "size",
-            "avg_fees",
-            "avg_output_lovelace",
-            "avg_inputs",
-            "avg_outputs",
-            "avg_assets",
-        ]
-        return self._rows_to_dicts(keys, rows)
-
-    def cluster_transactions(
-        self, run_id: str, target: str, cluster_id: int, *, limit: int, offset: int
-    ) -> list[dict[str, Any]]:
-        params = self._scope_params(target)
-        params.update({"r": run_id, "c": cluster_id, "rlim": limit, "off": offset})
-        rows = self.client.query(
-            f"""
-            SELECT
-                toString(t.tx_hash) AS tx_hash, toString(t.block_time) AS block_time,
-                t.fees AS fees, t.total_output_lovelace AS total_output_lovelace,
-                t.input_count AS input_count, t.output_count AS output_count,
-                t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count
-            FROM (
-                SELECT tx_hash FROM {self._db}.cluster_labels FINAL
-                WHERE run_id = {{r:String}} AND cluster_id = {{c:Int32}}
-            ) l
-            INNER JOIN {self._windowed_tx()} t USING (tx_hash)
-            ORDER BY t.block_time DESC
-            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
-            """,
-            parameters=params,
-        ).result_rows
-        keys = [
-            "tx_hash",
-            "block_time",
-            "fees",
-            "total_output_lovelace",
-            "input_count",
-            "output_count",
-            "distinct_assets",
-            "redeemer_count",
-        ]
-        return self._rows_to_dicts(keys, rows)
-
     # --- writes the sidecar must not perform (no download, no duplication) ----
 
     def insert_transactions(self, rows: Sequence[TxRecord]) -> None:
@@ -416,16 +257,3 @@ class HostBackedRepo(ClickHouseRepo):
 
     def upsert_cursor(self, target: str, target_type: str, **kw: Any) -> None:
         return None
-
-
-def _tx_context_aliased(alias: str) -> str:
-    """The TX_CONTEXT_SELECT projection over an already-shaped derived table
-    (columns are the engine names), aliased ``{alias}`` and with block_time
-    stringified to match TX_CONTEXT_SELECT."""
-    parts = []
-    for k in TX_CONTEXT_KEYS:
-        if k == "block_time":
-            parts.append(f"toString({alias}.block_time) AS block_time")
-        else:
-            parts.append(f"{alias}.{k} AS {k}")
-    return ", ".join(parts)
