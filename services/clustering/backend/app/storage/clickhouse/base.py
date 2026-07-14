@@ -34,6 +34,7 @@ def connect(settings: Settings, *, database: str | None = None) -> Client:
         username=settings.clickhouse_user,
         password=settings.clickhouse_password,
         database=database or settings.clickhouse_db,
+        connect_timeout=settings.clickhouse_connect_timeout_seconds,
         send_receive_timeout=settings.clickhouse_send_receive_timeout_seconds,
         settings=query_settings or None,
     )
