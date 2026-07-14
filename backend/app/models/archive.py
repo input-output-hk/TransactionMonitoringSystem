@@ -6,11 +6,10 @@ Cross-instance CSV import is supported, so an entry may exist for a
 transaction this instance has never observed (no matching score row).
 """
 
-from datetime import datetime
-
 from pydantic import BaseModel, Field
 
 from app.models.transaction import NetworkType
+from app.utils.datetime_utils import UtcDateTime
 
 # 64-char lowercase hex. Cardano tx hashes are blake2b-256 of the tx body.
 TX_HASH_PATTERN = r"^[0-9a-f]{64}$"
@@ -29,7 +28,7 @@ class ArchiveBulkEntry(ArchiveEntry):
     """Bulk import entry. Carries the original archived_at + source so a
     CSV exported from one instance round-trips cleanly into another."""
 
-    archived_at: datetime | None = None
+    archived_at: UtcDateTime | None = None
     source: str | None = None
 
 
@@ -63,11 +62,11 @@ class ArchiveEntryEnriched(BaseModel):
     tx_hash: str
     note: str
     archived_by: str
-    archived_at: datetime
+    archived_at: UtcDateTime
     source: str
     # Joined detection data; null when this archive came from a CSV import
     # for a tx this instance never observed locally.
     max_score: float | None = None
     max_class: str | None = None
     risk_band: str | None = None
-    analyzed_at: datetime | None = None
+    analyzed_at: UtcDateTime | None = None

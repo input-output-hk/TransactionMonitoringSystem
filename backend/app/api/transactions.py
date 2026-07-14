@@ -14,6 +14,7 @@ from app.auth import verify_api_key
 from app.config import settings
 from app.db import clickhouse
 from app.models.common import ListResponse
+from app.utils.datetime_utils import UtcDateTime
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class TransactionResponse(BaseModel):
     block_height: int | None
     block_hash: str | None
     block_index: int | None
-    timestamp: datetime
+    timestamp: UtcDateTime
     fee: int
     deposit: int | None
     input_count: int
@@ -288,7 +289,7 @@ class RecentBlockOut(BaseModel):
 
     block_height: int
     block_hash: str
-    timestamp: datetime | None
+    timestamp: UtcDateTime | None
     tx_count: int
     total_output_value: int | None
 
@@ -351,8 +352,8 @@ class TransactionStatsOut(BaseModel):
     total_volume: int | None
     total_fees: int | None
     avg_value: float | None
-    first_tx: datetime | None
-    last_tx: datetime | None
+    first_tx: UtcDateTime | None
+    last_tx: UtcDateTime | None
 
 
 @router.get("/stats/summary", response_model=TransactionStatsOut)

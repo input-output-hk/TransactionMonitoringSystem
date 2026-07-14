@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import AfterValidator, BaseModel, Field, computed_field
 
 from app.anomaly.detect import DEFAULT_TOP_QUANTILE
 from app.config import get_settings
+
+# Matches an explicit timezone suffix: Z or a +HH:MM / -HHMM style offset.
+_TZ_SUFFIX_RE = re.compile(r"(Z|[+-]\d{2}:?\d{2})$")
+
+
+def _iso_z(v: str) -> str:
+    """Normalize a ClickHouse ``YYYY-MM-DD HH:MM:SS`` string to Z-suffixed ISO.
+
+    Storage stringifies timestamps server-side (``toString(...)``), which
+    yields a space separator and no timezone marker; the values are UTC by the
+    schema's convention. The wire contract (shared with the host API) is
+    ``YYYY-MM-DDTHH:MM:SSZ``, so replace the first space with ``T`` and append
+    ``Z`` unless an explicit suffix is already present (pass-through guard:
+    re-validation must not double-suffix).
+    """
+    if not v:
+        return v
+    v = v.replace(" ", "T", 1)
+    if _TZ_SUFFIX_RE.search(v):
+        return v
+    return v + "Z"
+
+
+# Wire timestamp type: every response-model timestamp field uses this so the
+# sidecar emits the same Z-suffixed UTC format as the host API.
+UtcIsoStr = Annotated[str, AfterValidator(_iso_z)]
 
 
 class ListPage[ItemT](BaseModel):
@@ -100,7 +127,7 @@ class RunOut(BaseModel):
     n_noise: int
     silhouette: float | None
     origin: str
-    created_at: str
+    created_at: UtcIsoStr
 
 
 class ClusterSummaryOut(BaseModel):
@@ -163,7 +190,7 @@ class ContractOut(BaseModel):
     sample_tokens: str  # JSON-encoded [{unit, policy_id, name}]
     status: str
     requested_max_txs: int
-    updated_at: str
+    updated_at: UtcIsoStr
     tx_count: int
     # Trailing online-noise rate written by the incremental classifier; 0 until a
     # classify run has scored against this contract's model.
@@ -189,8 +216,8 @@ class JobOut(BaseModel):
     stage_detail: str
     txs_done: int
     error: str
-    created_at: str
-    updated_at: str
+    created_at: UtcIsoStr
+    updated_at: UtcIsoStr
 
 
 class JobAck(BaseModel):
@@ -221,7 +248,7 @@ class AnomalyRunDeleteAck(BaseModel):
 
 class ClusterTxOut(BaseModel):
     tx_hash: str
-    block_time: str
+    block_time: UtcIsoStr
     fees: int
     total_output_lovelace: int
     input_count: int
@@ -393,7 +420,7 @@ class AnomalyRunOut(BaseModel):
     min_samples: int
     top_quantile: float
     origin: str
-    created_at: str
+    created_at: UtcIsoStr
 
 
 class AnomalyReason(BaseModel):
@@ -412,7 +439,7 @@ class AnomalyCandidateOut(BaseModel):
     iso_score: float | None  # None on graph runs (no feature vectors)
     lof_score: float
     dbscan_noise: int
-    block_time: str
+    block_time: UtcIsoStr
     fees: int
     size: int
     total_input_lovelace: int
@@ -437,7 +464,7 @@ class AnomalyTopPage(BaseModel):
 
 class LatestInteractionOut(BaseModel):
     tx_hash: str
-    block_time: str
+    block_time: UtcIsoStr
     fees: int
     size: int
     total_input_lovelace: int

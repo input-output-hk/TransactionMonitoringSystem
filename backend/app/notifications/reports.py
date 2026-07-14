@@ -21,7 +21,7 @@ from app.models.transaction import AttackClass
 from app.notifications import config
 from app.notifications.channels.base import Dispatch
 from app.notifications.payloads import PeriodicReport, ReportSummary, TopAlert
-from app.utils.datetime_utils import to_aware_utc
+from app.utils.datetime_utils import format_iso_utc, to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,10 @@ def report_interval(frequency: str) -> timedelta:
 
 
 def _iso(dt: Any) -> str:
-    return dt.isoformat() if hasattr(dt, "isoformat") else str(dt or "")
+    # Canonical ...Z wire format; non-datetimes stringify (defensive fallback).
+    if isinstance(dt, datetime):
+        return format_iso_utc(dt) or ""
+    return str(dt or "")
 
 
 def _date_param(dt: Any) -> str:

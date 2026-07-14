@@ -1,7 +1,6 @@
 """API endpoints for the multi-class Analysis Engine"""
 
 import logging
-from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, Security
 from pydantic import BaseModel
@@ -23,7 +22,7 @@ from app.config import settings
 from app.db import archive_queries, clickhouse, clustering_queries
 from app.models.common import ListResponse
 from app.models.transaction import ClassScoreResult, RiskBand
-from app.utils.datetime_utils import format_iso_utc
+from app.utils.datetime_utils import UtcDateTime, format_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +238,7 @@ class AnalysisStatsOut(BaseModel):
     moderate_count: int
     informational_count: int
     avg_max_score: float | None
-    last_analyzed_at: datetime | None
+    last_analyzed_at: UtcDateTime | None
     per_class: dict[str, PerClassStats]
     pending_count: int
 

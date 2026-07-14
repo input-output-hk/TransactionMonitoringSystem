@@ -30,6 +30,7 @@ from app.ingestion.input_enrichment import parse_resolved_utxo
 from app.ingestion.ogmios_parser import ogmios_input_ref
 from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
+from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +298,7 @@ class MempoolMonitor:
                     "eventType": "TX_CONFIRMED",
                     "txId": tx.tx_hash,
                     "network": self.network,
-                    "observedAt": now.isoformat(),
+                    "observedAt": format_iso_utc(now),
                     "block": {"hash": block_id, "slot": block_slot, "height": block_height},
                 }
             )
@@ -540,8 +541,8 @@ class MempoolMonitor:
                         "eventType": "TX_PENDING",
                         "txId": tx_id,
                         "network": self.network,
-                        "observedAt": now.isoformat(),
-                        "firstSeenAt": now.isoformat(),
+                        "observedAt": format_iso_utc(now),
+                        "firstSeenAt": format_iso_utc(now),
                     }
                 )
 

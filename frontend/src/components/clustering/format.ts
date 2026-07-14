@@ -15,12 +15,17 @@ export function formatInt(n: number): string {
 }
 
 /**
- * Compact relative age for a ClickHouse `block_time` ("YYYY-MM-DD HH:MM:SS",
- * UTC): "12s ago" / "5m ago" / "3h ago" / "2d ago". Returns the raw string if
- * it can't be parsed. Pair with a `title` of the absolute timestamp.
+ * Compact relative age for a `block_time`: "12s ago" / "5m ago" / "3h ago" /
+ * "2d ago". Accepts both the API's canonical Z-suffixed ISO form and the
+ * legacy ClickHouse "YYYY-MM-DD HH:MM:SS" (UTC, no suffix) form; the tz guard
+ * keeps a Z-suffixed input from becoming an unparseable "...ZZ". Returns the
+ * raw string if it can't be parsed. Pair with a `title` of the absolute
+ * timestamp.
  */
 export function formatAge(blockTime: string): string {
-	const t = Date.parse(`${blockTime.replace(" ", "T")}Z`);
+	const iso = blockTime.replace(" ", "T");
+	const hasTz = /(Z|[+-]\d{2}:?\d{2})$/.test(iso);
+	const t = Date.parse(hasTz ? iso : `${iso}Z`);
 	if (Number.isNaN(t)) return blockTime;
 	const secs = Math.max(0, (Date.now() - t) / 1000);
 	if (secs < 60) return `${Math.floor(secs)}s ago`;

@@ -7,6 +7,9 @@ string format for API responses (``YYYY-MM-DDTHH:MM:SSZ``).
 """
 
 from datetime import UTC, datetime
+from typing import Annotated
+
+from pydantic import PlainSerializer
 
 
 def to_naive_utc(dt: datetime | None) -> datetime | None:
@@ -50,3 +53,13 @@ def format_iso_utc(dt: datetime | None) -> str | None:
     if dt.tzinfo is None:
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Annotated datetime for pydantic response models: serializes to the canonical
+# ``...Z`` wire format on JSON output while staying a real ``datetime`` inside
+# the application. Every wire-facing timestamp field uses this type so the API
+# cannot emit the naive-ISO / ``+00:00`` variants that plain ``datetime``
+# fields and raw ``.isoformat()`` produce.
+UtcDateTime = Annotated[
+    datetime, PlainSerializer(format_iso_utc, return_type=str, when_used="json")
+]

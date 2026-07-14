@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.utils.datetime_utils import UtcDateTime
+
 # Cardano networks the TMS understands. Enforced at the API boundary via
 # FastAPI's Query type validation. To add a new network, extend this tuple
 # and update `settings.CARDANO_NETWORK`'s docstring + .env.example.
@@ -94,16 +96,16 @@ class TransactionLifecycleEvent(BaseModel):
     tx_id: str
     network: str = "preprod"
     status: LifecycleStatus
-    first_seen_at: datetime | None = None
-    confirmed_at: datetime | None = None
-    rolled_back_at: datetime | None = None
-    dropped_at: datetime | None = None
+    first_seen_at: UtcDateTime | None = None
+    confirmed_at: UtcDateTime | None = None
+    rolled_back_at: UtcDateTime | None = None
+    dropped_at: UtcDateTime | None = None
     block_hash: str | None = None
     slot: int | None = None
     height: int | None = None
     latency_ms: int | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: UtcDateTime | None = None
+    updated_at: UtcDateTime | None = None
 
 
 class LifecycleSummaryStats(BaseModel):
@@ -201,7 +203,7 @@ class ClassScoreResult(BaseModel):
         description="Per-class raw evidence (addresses, byte counts, lists) for UI drill-down",
     )
     analysis_version: str = ""
-    analyzed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    analyzed_at: UtcDateTime = Field(default_factory=lambda: datetime.now(UTC))
     corroboration_count: int = Field(
         0,
         description=(
@@ -224,7 +226,7 @@ class ClassScoreResult(BaseModel):
             "never mutated by the read-time merge."
         ),
     )
-    contract_anomaly_scored_at: datetime | None = Field(
+    contract_anomaly_scored_at: UtcDateTime | None = Field(
         None,
         description=(
             "When the clustering sidecar last scored this transaction. Lets "
@@ -255,7 +257,7 @@ class NormalizedTransaction(BaseModel):
     block_index: int | None = Field(
         None, description="Transaction index within its block (0-based)"
     )
-    timestamp: datetime = Field(..., description="Transaction timestamp")
+    timestamp: UtcDateTime = Field(..., description="Transaction timestamp")
     fee: int = Field(..., description="Transaction fee in lovelace")
     deposit: int | None = Field(
         None,
@@ -296,4 +298,4 @@ class NormalizedTransaction(BaseModel):
         ),
     )
     raw_data: dict[str, Any] | None = Field(None, description="Raw transaction data for audit")
-    ingestion_timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    ingestion_timestamp: UtcDateTime = Field(default_factory=lambda: datetime.now(UTC))
