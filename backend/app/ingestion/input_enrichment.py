@@ -7,6 +7,11 @@ mempool-time ledger query (parse_resolved_utxo, cached until the tx confirms),
 outputs of earlier transactions in the same block, and a ClickHouse batch
 lookup for everything else (resolve_input_amounts).
 
+Both public entry points route through one per-tx core (_resolve_tx_inputs)
+so the mempool-cache path and the block-batch path cannot drift: the
+consumption rule lives on the model (TransactionInput.consumed_by_ledger)
+and the withdrawal fold reads the parser-stamped tx.withdrawal_total.
+
 Pure functions over NormalizedTransaction: no instance state, no ordering
 constraints. The caller (OgmiosClient) owns when enrichment is applied and
 when the mempool cache is consumed; those orderings are durability-critical
@@ -14,38 +19,25 @@ and live with the chain-sync persistence logic, not here.
 """
 
 import logging
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.analysis.features import (
-    extract_lovelace,
-    flatten_assets,
-    total_withdrawal_lovelace,
-)
+from app.analysis.features import extract_lovelace, flatten_assets
 from app.db import clickhouse
 from app.models.transaction import NormalizedTransaction, TransactionInput
 
 logger = logging.getLogger(__name__)
 
-
-def _consumes_value(script_valid: bool, inp: TransactionInput) -> bool:
-    """Whether the ledger actually consumed this input's value.
-
-    Mirrors the parser's input_count rule: regular inputs for a validated
-    tx, collateral inputs for a failed one. Reference inputs are read-only
-    and a failed tx's regular inputs (is_unspent_attempt) stayed live.
-    """
-    if inp.is_reference:
-        return False
-    if script_valid:
-        return not inp.is_collateral and not inp.is_unspent_attempt
-    return inp.is_collateral
+# lookup value shape shared by both resolution paths:
+# (address, amount_lovelace, assets or None to keep the input's own)
+ResolvedRef = Tuple[str, int, Optional[Dict[str, int]]]
 
 
 def _withdrawal_total(tx: NormalizedTransaction) -> int:
     """Reward-account withdrawals fold into total_input_value: withdrawn
     rewards fund outputs exactly like spent inputs. Only for validated
-    txs; a phase-2 failure never applies the withdrawal."""
-    return total_withdrawal_lovelace(tx.raw_data) if tx.script_valid else 0
+    txs; a phase-2 failure never applies the withdrawal. The amount is
+    stamped by the parser (tx.withdrawal_total), never re-derived here."""
+    return tx.withdrawal_total if tx.script_valid else 0
 
 
 def _flow_addresses(script_valid: bool, inputs: List[TransactionInput]) -> Set[str]:
@@ -58,6 +50,51 @@ def _flow_addresses(script_valid: bool, inputs: List[TransactionInput]) -> Set[s
         if i.address and not i.is_reference
         and (not i.is_collateral or not script_valid)
     }
+
+
+def _resolve_tx_inputs(
+    tx: NormalizedTransaction,
+    lookup: Dict[tuple, ResolvedRef],
+) -> Tuple[List[TransactionInput], int, bool]:
+    """Shared per-tx core of both resolution paths.
+
+    Resolves every non-reference input present in ``lookup`` via
+    model_copy, which preserves the flags: spelling the fields out is the
+    copy-the-flags bug class that silently dropped is_collateral once
+    already. Accumulates the consumed total, seeded with the withdrawal
+    fold; only inputs the ledger actually consumed
+    (TransactionInput.consumed_by_ledger) feed it, the rest resolve for
+    address visibility behind their flags.
+
+    Returns (new_inputs, total, changed); changed is True when at least
+    one input newly resolved.
+    """
+    total = _withdrawal_total(tx)
+    new_inputs: List[TransactionInput] = []
+    changed = False
+    for inp in tx.inputs:
+        if inp.is_reference:
+            new_inputs.append(inp)
+            continue  # read-only: never resolved, never a value flow
+        if inp.amount > 0:
+            # Already resolved (e.g. mempool cache on a replay).
+            if inp.consumed_by_ledger(tx.script_valid):
+                total += inp.amount
+            new_inputs.append(inp)
+            continue
+        resolved = lookup.get((inp.tx_hash, inp.index))
+        if resolved:
+            addr, amt, assets = resolved
+            inp = inp.model_copy(update={
+                "address": addr,
+                "amount": int(amt),
+                "assets": assets if assets is not None else inp.assets,
+            })
+            changed = True
+            if inp.consumed_by_ledger(tx.script_valid):
+                total += int(amt)
+        new_inputs.append(inp)
+    return new_inputs, total, changed
 
 
 def parse_resolved_utxo(utxo: Dict[str, Any]) -> tuple:
@@ -95,31 +132,17 @@ def apply_resolved_inputs(
     tx, where they are exactly what the ledger consumed. Reward-account
     withdrawals fold into the total for validated txs.
     """
-    total = _withdrawal_total(tx)
-    new_inputs = []
-    for inp in tx.inputs:
-        if not inp.is_reference:
-            utxo = resolved.get((inp.tx_hash, inp.index))
-            if utxo:
-                inp = TransactionInput(
-                    tx_hash=inp.tx_hash,
-                    index=inp.index,
-                    address=utxo["address"],
-                    amount=utxo["amount"],
-                    assets=utxo.get("assets"),
-                    is_reference=False,
-                    is_collateral=inp.is_collateral,
-                    is_unspent_attempt=inp.is_unspent_attempt,
-                )
-                if _consumes_value(tx.script_valid, inp):
-                    total += utxo["amount"]
-        new_inputs.append(inp)
-
-    resolved_addrs = _flow_addresses(tx.script_valid, new_inputs)
+    lookup: Dict[tuple, ResolvedRef] = {
+        ref: (u["address"], u["amount"], u.get("assets"))
+        for ref, u in resolved.items()
+    }
+    new_inputs, total, _ = _resolve_tx_inputs(tx, lookup)
     return tx.model_copy(update={
         "inputs": new_inputs,
         "total_input_value": total if total > 0 else None,
-        "addresses": list(set(tx.addresses) | resolved_addrs),
+        "addresses": list(
+            set(tx.addresses) | _flow_addresses(tx.script_valid, new_inputs)
+        ),
     })
 
 
@@ -129,9 +152,10 @@ async def resolve_input_amounts(
     """Resolve input addresses and amounts from ClickHouse and intra-block outputs.
 
     1. Build an intra-block output map from earlier txs in this block.
-    2. Collect all unresolved (input_tx_hash, input_index) refs.
+    2. Collect the unresolved (input_tx_hash, input_index) refs worth a
+       cross-block lookup.
     3. Batch-fetch from ClickHouse for cross-block refs.
-    4. Apply resolved values to each input.
+    4. Apply resolved values to each input via the shared per-tx core.
     """
     # Build intra-block output map: {(tx_hash, output_index): (address, amount)}.
     # Collateral returns included at their EXPLICIT on-chain index (the
@@ -143,15 +167,19 @@ async def resolve_input_amounts(
             chain_idx = out.output_index if out.output_index is not None else idx
             intra_block[(tx.tx_hash, chain_idx)] = (out.address, out.amount)
 
-    # Collect all unresolved input refs (skip already-resolved from mempool
-    # cache). Collateral inputs resolve too: for a failed tx they are the
-    # consumed flow, and for a validated one the payer address is still
-    # involved-party data behind the is_collateral flag. Reference inputs
+    # Collect unresolved input refs (skip already-resolved from the mempool
+    # cache). Collateral refs go cross-block only for FAILED txs, where they
+    # are the consumed flow; a validated tx's collateral feeds neither
+    # totals, addresses, nor any detection query, so it is not worth
+    # growing this checkpoint-blocking per-block lookup (it still resolves
+    # for free when its source sits in the same block). Reference inputs
     # stay unresolved (read-only, never a value flow).
     cross_block_refs = []
     for tx in txs:
         for inp in tx.inputs:
             if inp.is_reference:
+                continue
+            if inp.is_collateral and tx.script_valid:
                 continue
             if inp.amount > 0:
                 continue  # already resolved
@@ -166,57 +194,26 @@ async def resolve_input_amounts(
             cross_block_refs, network
         )
 
-    # Merge: intra-block takes priority over ClickHouse
-    all_resolved = {**ch_resolved, **intra_block}
+    # Merge: intra-block takes priority over ClickHouse. assets=None keeps
+    # each input's own (parser-fresh inputs carry none).
+    lookup: Dict[tuple, ResolvedRef] = {
+        ref: (addr, amt, None)
+        for ref, (addr, amt) in {**ch_resolved, **intra_block}.items()
+    }
 
-    # Apply to each tx
     result = []
     for tx in txs:
-        withdrawal_total = _withdrawal_total(tx)
-        total = withdrawal_total
-        new_inputs = []
-        changed = False
-        for inp in tx.inputs:
-            if inp.is_reference:
-                new_inputs.append(inp)
-                continue  # read-only: never resolved, never a value flow
-            if inp.amount > 0:
-                if _consumes_value(tx.script_valid, inp):
-                    total += inp.amount
-                new_inputs.append(inp)
-                continue
-            ref = (inp.tx_hash, inp.index)
-            resolved = all_resolved.get(ref)
-            if resolved:
-                addr, amt = resolved
-                new_inp = TransactionInput(
-                    tx_hash=inp.tx_hash,
-                    index=inp.index,
-                    address=addr,
-                    amount=int(amt),
-                    assets=inp.assets,
-                    is_reference=False,
-                    is_collateral=inp.is_collateral,
-                    is_unspent_attempt=inp.is_unspent_attempt,
-                )
-                new_inputs.append(new_inp)
-                # Resolution is for address visibility; only inputs the
-                # ledger actually consumed feed total_input_value (regular
-                # inputs when validated, collateral when failed).
-                if _consumes_value(tx.script_valid, new_inp):
-                    total += int(amt)
-                changed = True
-            else:
-                new_inputs.append(inp)
-
+        new_inputs, total, changed = _resolve_tx_inputs(tx, lookup)
         # A withdrawal alone updates the total even when no input resolved:
-        # withdrawn rewards are consumed value the tx provably moved.
-        if changed or withdrawal_total > 0:
-            resolved_addrs = _flow_addresses(tx.script_valid, new_inputs)
+        # withdrawn rewards are consumed value the tx provably moved (the
+        # stored value is a lower bound; see the model field description).
+        if changed or _withdrawal_total(tx) > 0:
             tx = tx.model_copy(update={
                 "inputs": new_inputs,
                 "total_input_value": total if total > 0 else None,
-                "addresses": list(set(tx.addresses) | resolved_addrs),
+                "addresses": list(
+                    set(tx.addresses) | _flow_addresses(tx.script_valid, new_inputs)
+                ),
             })
         result.append(tx)
     return result

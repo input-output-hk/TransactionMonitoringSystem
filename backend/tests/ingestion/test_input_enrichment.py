@@ -135,6 +135,9 @@ class TestCollateralResolution:
         assert "addr_test1qqattempted" in out.addresses
 
     def test_valid_tx_collateral_resolves_but_never_counts(self):
+        # When a valid tx's collateral IS resolvable (e.g. its source sits
+        # in the same block), it applies for display behind the flag but
+        # must never feed the consumed total or the address list.
         tx = _tx()
         out = _resolve(
             [tx],
@@ -148,6 +151,32 @@ class TestCollateralResolution:
         assert out.total_input_value == 2_000_000  # regular input only
         # Not consumed, so not an involved-party address on a valid tx.
         assert "addr_test1qqpayer" not in out.addresses
+
+    def test_valid_tx_collateral_not_fetched_cross_block(self):
+        # A validated tx's collateral feeds neither totals, addresses, nor
+        # any detection query, so it must not grow the checkpoint-blocking
+        # per-block ClickHouse lookup; a FAILED tx's collateral is the
+        # consumed flow and must be fetched.
+        requested = {}
+
+        async def capture(refs, network):
+            requested["refs"] = list(refs)
+            return {}
+
+        with patch(
+            "app.ingestion.input_enrichment.clickhouse.get_outputs_for_refs_async",
+            AsyncMock(side_effect=capture),
+        ):
+            _run(resolve_input_amounts([_tx()], "preprod"))
+        assert (COLLATERAL_TX, 0) not in requested["refs"]
+        assert (SOURCE_TX, 0) in requested["refs"]
+
+        with patch(
+            "app.ingestion.input_enrichment.clickhouse.get_outputs_for_refs_async",
+            AsyncMock(side_effect=capture),
+        ):
+            _run(resolve_input_amounts([_tx(spends="collaterals")], "preprod"))
+        assert (COLLATERAL_TX, 0) in requested["refs"]
 
     def test_reference_inputs_never_resolve(self):
         tx = _tx()
