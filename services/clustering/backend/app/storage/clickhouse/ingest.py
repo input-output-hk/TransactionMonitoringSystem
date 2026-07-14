@@ -138,12 +138,23 @@ class _IngestMixin(_RepoBase):
         )
 
     def fetch_tx_addresses(self, target: str) -> pd.DataFrame:
-        """(tx_hash, address) pairs for the address co-occurrence features."""
+        """(tx_hash, address, block_time) rows for the address co-occurrence
+        features. ``block_time`` rides along so the graph down-sample keeps the
+        most recent transactions rather than a hash-ordered slice. FINAL stays
+        inside the per-table subqueries (ClickHouse 26 forbids FINAL on a table
+        directly inside a JOIN)."""
         return self.client.query_df(
             f"""
-            SELECT DISTINCT toString(tx_hash) AS tx_hash, address
-            FROM {self._db}.tx_utxos FINAL
-            WHERE target = {{t:String}} AND address != ''
+            SELECT DISTINCT tx_hash, address, block_time FROM (
+                SELECT toString(tx_hash) AS tx_hash, address
+                FROM {self._db}.tx_utxos FINAL
+                WHERE target = {{t:String}} AND address != ''
+            ) u
+            INNER JOIN (
+                SELECT toString(tx_hash) AS tx_hash, block_time
+                FROM {self._db}.transactions FINAL
+                WHERE target = {{t:String}}
+            ) t USING (tx_hash)
             ORDER BY tx_hash
             """,
             parameters={"t": target},

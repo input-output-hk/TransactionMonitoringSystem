@@ -126,11 +126,14 @@ class _ClusterMixin(_RepoBase):
         return self._run_row_to_dict(rows[0]) if rows else None
 
     def cluster_summary(self, run_id: str, target: str) -> list[dict[str, Any]]:
+        # The count() alias is cluster_size, NOT size: transactions has a `size`
+        # source column, and ClickHouse 26.x rejects an aggregate alias that
+        # shadows a source column referenced by sibling aggregates (Code 184).
         rows = self.client.query(
             f"""
             SELECT
                 cluster_id,
-                count() AS size,
+                count() AS cluster_size,
                 round(avg(fees)) AS avg_fees,
                 round(avg(total_output_lovelace)) AS avg_output_lovelace,
                 round(avg(input_count), 2) AS avg_inputs,
@@ -146,7 +149,7 @@ class _ClusterMixin(_RepoBase):
                 FROM {self._db}.transactions FINAL WHERE target = {{t:String}}
             ) t USING (tx_hash)
             GROUP BY cluster_id
-            ORDER BY (cluster_id = -1), size DESC
+            ORDER BY (cluster_id = -1), cluster_size DESC
             """,
             parameters={"r": run_id, "t": target},
         ).result_rows
