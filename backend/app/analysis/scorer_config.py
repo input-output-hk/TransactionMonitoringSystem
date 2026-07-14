@@ -17,7 +17,12 @@ import os
 
 import yaml
 
-from app.analysis.normalise import resolve_baseline
+from app.analysis.normalise import (
+    BAND_CRITICAL_THRESHOLD,
+    BAND_HIGH_THRESHOLD,
+    BAND_MODERATE_THRESHOLD,
+    resolve_baseline,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -459,6 +464,70 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
             f"tunable; every key must be read by the code or listed as a "
             f"known optional): {joined}"
         )
+    _check_band_invariants(path, data)
+
+
+# Band-boundary contracts for config values that cap or floor a score into a
+# specific band. Enforced here, at load time, so a detection.yaml edit that
+# lands a cap/floor in the wrong band fails loud from one place instead of
+# each scorer hand-rolling an import-time guard (and a future banded scorer
+# adds a row here rather than remembering to copy a raise block). Entries:
+# (dotted path from the document root, inclusive lower bound, exclusive
+# upper bound or None, why the boundary exists).
+_BAND_INVARIANTS: Tuple[Tuple[str, float, Optional[float], str], ...] = (
+    (
+        "scorers.multiple_sat.lazy_validator_floor",
+        BAND_HIGH_THRESHOLD,
+        None,
+        "the lazy-validator promotion must reach the High band",
+    ),
+    (
+        "scorers.front_running.high_band_cap",
+        BAND_HIGH_THRESHOLD,
+        BAND_CRITICAL_THRESHOLD,
+        "the low-recurrence demotion must land inside the High band",
+    ),
+    (
+        "scorers.circular.moderate_cap",
+        BAND_MODERATE_THRESHOLD,
+        BAND_HIGH_THRESHOLD,
+        "the weak-corroboration demotion must land inside the Moderate band",
+    ),
+    (
+        "contract_anomaly.verdict_floors.malicious",
+        BAND_CRITICAL_THRESHOLD,
+        None,
+        "a curated-malicious verdict must band Critical",
+    ),
+)
+
+
+def _dotted_get(data: Dict[str, Any], dotted: str) -> Any:
+    """Resolve a dotted path against nested dicts; None when any hop is absent."""
+    node: Any = data
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _check_band_invariants(path: Path, data: Dict[str, Any]) -> None:
+    for dotted, lower, upper, why in _BAND_INVARIANTS:
+        raw = _dotted_get(data, dotted)
+        if raw is None:
+            # Presence is enforced by the required-key checks above (or, for
+            # verdict_floors, by contract_anomaly.py's verdict/floor sync
+            # guard); this check owns only the numeric band boundary.
+            continue
+        value = float(raw)
+        if value < lower or (upper is not None and value >= upper):
+            band = f"[{lower}, {upper})" if upper is not None else f">= {lower}"
+            raise RuntimeError(
+                f"Detection config {path}: {dotted}={value} violates its band "
+                f"contract ({band}): {why}. Fix the value in detection.yaml "
+                f"or the band thresholds in normalise.py."
+            )
 
 
 def _load() -> Dict[str, Any]:

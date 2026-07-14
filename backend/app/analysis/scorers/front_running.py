@@ -23,11 +23,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from app.analysis.features import extract_ttl
-from app.analysis.normalise import (
-    BAND_CRITICAL_THRESHOLD,
-    BAND_HIGH_THRESHOLD,
-    normalise,
-)
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, normalise
 from app.analysis.scorer_config import (
     get as _get_cfg,
     anchor as _anchor,
@@ -48,21 +44,10 @@ _OUTCOME_SCORES: Dict[str, float] = {
 _UNKNOWN_OUTCOME_SCORE = float(_CFG["unknown_outcome_score"])
 _REASON_T = _CFG["reason_thresholds"]
 _MIN_RECURRENCE_WINS = int(_CFG["min_recurrence_wins"])
+# Band contract (cap must sit inside the High band) is enforced at config
+# load: scorer_config._BAND_INVARIANTS.
 _HIGH_BAND_CAP = float(_CFG["high_band_cap"])
 _DELTA_MS_DEFAULT = float(_CFG["delta_ms_default"])
-
-# The cap's contract is "insufficient recurrence holds the band at High":
-# it must sit inside the High band, or the demotion either fails to leave
-# Critical or silently drops a genuine High finding to Moderate. Fail loud
-# at import (explicit raise, not assert, so it survives ``python -O``);
-# mirrors multiple_sat's lazy_validator_floor guard.
-if not (BAND_HIGH_THRESHOLD <= _HIGH_BAND_CAP < BAND_CRITICAL_THRESHOLD):
-    raise RuntimeError(
-        f"front_running.high_band_cap={_HIGH_BAND_CAP} is outside the High "
-        f"band [{BAND_HIGH_THRESHOLD}, {BAND_CRITICAL_THRESHOLD}); the "
-        f"low-recurrence demotion would land in the wrong band. Fix the cap "
-        f"in detection.yaml or the band thresholds in normalise.py."
-    )
 
 
 def _get_collision_data(features: Dict[str, Any]) -> Optional[Dict]:
