@@ -1,0 +1,25 @@
+# systemd unit to keep the webhook test receiver running so it catches real
+# alerts whenever they fire (they are unpredictable). stdlib only, no venv.
+#
+# Install (adjust the checkout path + user to your box):
+#   sudo cp tms-webhook-test.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tms-webhook-test
+# Watch received alerts:
+#   journalctl -u tms-webhook-test -f
+
+[Unit]
+Description=TMS webhook test receiver (dev/test alert sink)
+After=network.target
+
+[Service]
+# -u: unbuffered, so journald shows each POST immediately.
+ExecStart=/usr/bin/python3 -u /opt/tms/backend/scripts/webhook_testing/webhook_receiver.py --host 127.0.0.1 --port 8001
+User=tms
+Restart=on-failure
+RestartSec=2
+# No signing: leave WEBHOOK_SIGNING_SECRET unset here AND on the backend so the
+# sender posts unsigned. To exercise HMAC later, set the SAME value in both.
+# Environment=WEBHOOK_SIGNING_SECRET=
+
+[Install]
+WantedBy=multi-user.target
