@@ -37,7 +37,7 @@ import {
 	nextDayISO,
 	startOfDayISO,
 } from "@/lib/utils/dates";
-import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
+import { ATTACK_TYPES, type AttackType, type Severity } from "@/lib/attacks";
 import { AlertCircle, ArrowUp, Copy, ExternalLink } from "lucide-react";
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -45,40 +45,66 @@ import { toast } from "sonner";
 
 export function ReportsPage() {
 	const navigate = useNavigate();
-	const [searchParams] = useSearchParams();
+	// The URL is the single source of truth for filters, sort and page, so
+	// any filtered view can be shared or bookmarked (same pattern as
+	// ValidatorDetailPage's tab param). Defaults are omitted from the URL
+	// to keep shared links short.
+	const [searchParams, setSearchParams] = useSearchParams();
 	const qpDate = (k: string, fallback: string) => {
 		const v = searchParams.get(k);
 		return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : fallback;
 	};
 	const qpAttack = searchParams.get("attack");
 	const qpSeverity = searchParams.get("severity");
-	const [startDate, setStartDate] = useState(qpDate("from", defaultStart()));
-	const [endDate, setEndDate] = useState(qpDate("to", defaultEnd()));
-	const [attackFilter, setAttackFilter] = useState<string>(
+	const startDate = qpDate("from", defaultStart());
+	const endDate = qpDate("to", defaultEnd());
+	const attackFilter =
 		qpAttack && (ATTACK_TYPES as readonly string[]).includes(qpAttack)
 			? qpAttack
-			: "all",
-	);
-	const [severityFilter, setSeverityFilter] = useState<string>(
+			: "all";
+	const severityFilter =
 		qpSeverity &&
-			["INFORMATIONAL", "MEDIUM", "HIGH", "CRITICAL"].includes(qpSeverity)
+		["INFORMATIONAL", "MEDIUM", "HIGH", "CRITICAL"].includes(qpSeverity)
 			? qpSeverity
-			: "all",
-	);
-	const [sortBy, setSortBy] = useState<"date" | "score">(
-		searchParams.get("sort") === "score" ? "score" : "date",
-	);
+			: "all";
+	const sortBy: "date" | "score" =
+		searchParams.get("sort") === "score" ? "score" : "date";
+	// The URL carries 1-based page numbers ("page=2" is the second page);
+	// everything below stays 0-based to match TableFooter.
+	const qpPage = Number.parseInt(searchParams.get("page") ?? "1", 10);
+	const page = Number.isFinite(qpPage) && qpPage >= 1 ? qpPage - 1 : 0;
 	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-	const [page, setPage] = useState(0);
 	const [exporting, setExporting] = useState(false);
 	const [confirmExportOpen, setConfirmExportOpen] = useState(false);
+
+	/**
+	 * Write one query param back to the URL (null deletes it). Any filter
+	 * or sort change also drops `page`: the old page offset is meaningless
+	 * against a different result set. `replace` keeps Back from stepping
+	 * through every keystroke of filter history.
+	 */
+	const setParam = (key: string, value: string | null) => {
+		setSearchParams(
+			(prev) => {
+				const next = new URLSearchParams(prev);
+				if (value === null) {
+					next.delete(key);
+				} else {
+					next.set(key, value);
+				}
+				if (key !== "page") next.delete("page");
+				return next;
+			},
+			{ replace: true },
+		);
+	};
 
 	// ReportsPage keeps the single-select UX but the API now expects an
 	// array of severities, so we wrap the lone selection.
 	const severities: Severity[] | undefined =
 		severityFilter !== "all" ? [severityFilter as Severity] : undefined;
 
-	const { data, isPending, isError } = useRiskAlerts(
+	const { data, isPending, isError, refetch } = useRiskAlerts(
 		{
 			page,
 			pageSize,
@@ -148,13 +174,6 @@ export function ReportsPage() {
 		}
 	};
 
-	const resetPageOnChange = <T,>(setter: (v: T) => void) => {
-		return (v: T) => {
-			setPage(0);
-			setter(v);
-		};
-	};
-
 	return (
 		<div className="flex flex-col gap-4">
 			{/* Filter bar */}
@@ -163,13 +182,13 @@ export function ReportsPage() {
 					id="report-start"
 					label="Start Date"
 					value={startDate}
-					onChange={resetPageOnChange(setStartDate)}
+					onChange={(v) => setParam("from", v)}
 				/>
 				<DateField
 					id="report-end"
 					label="End Date"
 					value={endDate}
-					onChange={resetPageOnChange(setEndDate)}
+					onChange={(v) => setParam("to", v)}
 				/>
 
 				<div className="flex flex-col gap-1.5">
@@ -178,7 +197,7 @@ export function ReportsPage() {
 					</Label>
 					<Select
 						value={attackFilter}
-						onValueChange={resetPageOnChange(setAttackFilter)}
+						onValueChange={(v) => setParam("attack", v === "all" ? null : v)}
 					>
 						<SelectTrigger id="report-attack" className="h-11 w-[200px]">
 							<SelectValue placeholder="All" />
@@ -200,7 +219,7 @@ export function ReportsPage() {
 					</Label>
 					<Select
 						value={severityFilter}
-						onValueChange={resetPageOnChange(setSeverityFilter)}
+						onValueChange={(v) => setParam("severity", v === "all" ? null : v)}
 					>
 						<SelectTrigger id="report-severity" className="h-11 w-[200px]">
 							<SelectValue placeholder="All" />
@@ -221,10 +240,7 @@ export function ReportsPage() {
 					</Label>
 					<Select
 						value={sortBy}
-						onValueChange={(v) => {
-							setPage(0);
-							setSortBy(v as "date" | "score");
-						}}
+						onValueChange={(v) => setParam("sort", v === "date" ? null : v)}
 					>
 						<SelectTrigger id="report-sort" className="h-11 w-[180px]">
 							<SelectValue />
@@ -273,7 +289,7 @@ export function ReportsPage() {
 							return (
 								<TableRow
 									key={a.slug}
-									onClick={() => navigate(`/attacks/${a.slug}`)}
+									onClick={() => void navigate(`/attacks/${a.slug}`)}
 									className="cursor-pointer"
 								>
 									<TableCell>
@@ -285,7 +301,7 @@ export function ReportsPage() {
 												title="Copy"
 												onClick={(e) => {
 													e.stopPropagation();
-													copyToClipboard(a.fullHash);
+													void copyToClipboard(a.fullHash);
 												}}
 											>
 												<Copy className="h-3.5 w-3.5" />
@@ -331,11 +347,19 @@ export function ReportsPage() {
 						)}
 						{isError && (
 							<TableRow>
-								<TableCell
-									colSpan={4}
-									className="text-status-offline py-10 text-center"
-								>
-									Failed to load risk alerts.
+								<TableCell colSpan={4} className="py-10 text-center">
+									<div className="flex flex-col items-center gap-3">
+										<span className="text-status-offline">
+											Failed to load risk alerts.
+										</span>
+										<Button
+											variant="outline"
+											size="sm"
+											onClick={() => void refetch()}
+										>
+											Retry
+										</Button>
+									</div>
 								</TableCell>
 							</TableRow>
 						)}
@@ -346,12 +370,12 @@ export function ReportsPage() {
 					pageSize={pageSize}
 					onPageSizeChange={(n) => {
 						setPageSize(n);
-						setPage(0);
+						setParam("page", null);
 					}}
 					centerLabel={`Total Risk Alerts: ${total.toLocaleString()}`}
 					page={currentPage}
 					pageCount={pageCount}
-					onPageChange={setPage}
+					onPageChange={(p) => setParam("page", p <= 0 ? null : String(p + 1))}
 				/>
 			</section>
 
@@ -384,7 +408,7 @@ export function ReportsPage() {
 							Cancel
 						</Button>
 						<Button
-							onClick={runExport}
+							onClick={() => void runExport()}
 							className="border-border text-brand hover:bg-accent hover:text-brand border bg-transparent"
 						>
 							Confirm
