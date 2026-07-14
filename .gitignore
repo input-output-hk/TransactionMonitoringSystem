@@ -71,6 +71,10 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
 # RocksDB (removed in ADR-003, entry kept for safety)
 backend/data/rocksdb/
 

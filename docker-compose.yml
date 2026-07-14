@@ -131,7 +131,9 @@ services:
   # Customer prod deployments swap this for a real SMTP server via the
   # SMTP_* env vars on the `app` service.
   mailpit:
-    image: axllent/mailpit:latest
+    # Pinned like every other image: `latest` made this the one service that
+    # could silently change under a compose pull. Bump deliberately.
+    image: axllent/mailpit:v1.30.4
     container_name: tms-mailpit
     ports:
       - "127.0.0.1:1025:1025"  # SMTP submission
