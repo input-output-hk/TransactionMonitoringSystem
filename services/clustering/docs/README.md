@@ -19,6 +19,7 @@ data model, API surface, and design.
 | [architecture.md](architecture.md) | Components, module layering, the per-contract pipeline (metadata, feature read, cluster, anomaly), the background job worker, request lifecycle, key design decisions. |
 | [algorithms.md](algorithms.md) | Clustering and anomaly detection in detail: feature engineering (shape / graph / combined), DBSCAN, parameter selection (k-distance knee + grid search + silhouette), and the anomaly ensemble (Isolation Forest + LOF + DBSCAN-noise). |
 | [data-model.md](data-model.md) | The `tms_clustering` ClickHouse schema, table engines, `ReplacingMergeTree` + `FINAL` semantics, the cross-database feature read, timestamps, migrations, idempotency. |
+| [host-boundary.md](host-boundary.md) | The host/module seam: the two ClickHouse drivers (frozen by decision), the host-to-engine column vocabulary mapping and the tx-source hooks, paired-copy modules, ClickHouse 26.x gotchas. |
 | [api.md](api.md) | The module's REST API reference (reached from the SPA via the `/api/clustering` proxy): every endpoint, request/response shapes, auth, error model, examples. |
 | [online-classification-design.md](online-classification-design.md) | The fit/score split that replaces batch-only DBSCAN, the re-fit/windowing strategy, and the multi-tenant execution model behind the scheduler's continuous classification. |
 | [operations.md](operations.md) | Running the module securely: enabling authentication (API key, signed model blobs, the REQUIRE_AUTH boot guard), CORS, and the auth-exempt health probes. |
