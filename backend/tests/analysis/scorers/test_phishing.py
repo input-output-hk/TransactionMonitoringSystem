@@ -9,15 +9,12 @@ def scorer():
     return PhishingScorer()
 
 
-def _features(metadata=None, addresses=None, output_count=1, raw_data=None,
-              input_addresses=None):
+def _features(metadata=None, addresses=None, output_count=1, raw_data=None, input_addresses=None):
     # input_addresses populate raw_data["inputs"], which is where the gate now
     # reads SENDER addresses from (the allowlist must consider senders only).
     rd = dict(raw_data or {})
     if input_addresses is not None:
-        rd["inputs"] = [{"address": a} for a in input_addresses] + list(
-            rd.get("inputs", [])
-        )
+        rd["inputs"] = [{"address": a} for a in input_addresses] + list(rd.get("inputs", []))
     return {
         "tx_hash": "abc123",
         "network": "preprod",
@@ -115,8 +112,14 @@ class TestScore:
     def test_sub_scores_present(self, scorer):
         meta = {"674": "https://example.com"}
         result = scorer.score(_features(metadata=meta))
-        for key in ("blacklist", "domain_suspicion", "social_engineering",
-                     "content_composite", "recipients", "delivery_composite"):
+        for key in (
+            "blacklist",
+            "domain_suspicion",
+            "social_engineering",
+            "content_composite",
+            "recipients",
+            "delivery_composite",
+        ):
             assert key in result.sub_scores
 
 
@@ -183,10 +186,11 @@ class TestBareDomainAndDatum:
             "fields": [
                 {
                     "map": [
-                        {"k": {"bytes": b"name".hex()},
-                         "v": {"bytes": b"Claim ADA airdrop".hex()}},
-                        {"k": {"bytes": b"url".hex()},
-                         "v": {"bytes": b"https://ada-rewards.example.test/claim".hex()}},
+                        {"k": {"bytes": b"name".hex()}, "v": {"bytes": b"Claim ADA airdrop".hex()}},
+                        {
+                            "k": {"bytes": b"url".hex()},
+                            "v": {"bytes": b"https://ada-rewards.example.test/claim".hex()},
+                        },
                     ]
                 },
                 {"int": 1},
@@ -206,9 +210,15 @@ class TestBareDomainAndDatum:
         # handle both. Here we construct a CBOR blob manually containing
         # a bytes-string value holding an https URL.
         import cbor2
-        datum_obj = cbor2.CBORTag(121, [{
-            b"url": b"https://cardano-phish.xyz/claim",
-        }])
+
+        datum_obj = cbor2.CBORTag(
+            121,
+            [
+                {
+                    b"url": b"https://cardano-phish.xyz/claim",
+                }
+            ],
+        )
         datum_hex = cbor2.dumps(datum_obj).hex()
         raw_data = {
             "outputs": [
@@ -230,11 +240,16 @@ class TestBareDomainAndDatum:
         import cbor2
         from app.analysis.scorers.phishing import _decode_datum_strings
 
-        datum = cbor2.CBORTag(121, [{
-            b"name": b"wallet",
-            b"image": b"claim-reward-ada.xyz",
-            b"url": b"claim-reward-ada.xyz",
-        }])
+        datum = cbor2.CBORTag(
+            121,
+            [
+                {
+                    b"name": b"wallet",
+                    b"image": b"claim-reward-ada.xyz",
+                    b"url": b"claim-reward-ada.xyz",
+                }
+            ],
+        )
         leaves = _decode_datum_strings(cbor2.dumps(datum).hex())
         # Each value (and each key) comes out as a separate entry; no
         # leaf carries the adjacent value's length-prefix byte.

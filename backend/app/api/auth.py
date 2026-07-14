@@ -19,6 +19,7 @@ direct peer, so dev http://localhost still works and an untrusted direct
 caller cannot spoof the scheme). A second, JS-readable CSRF cookie rides
 alongside it (same lifetime, not HTTP-only) — see app.csrf.CSRFMiddleware.
 """
+
 from __future__ import annotations
 
 import logging
@@ -108,7 +109,9 @@ def _set_csrf_cookie(request: Request, response: Response) -> None:
 
 
 def _set_session_cookie(
-    request: Request, response: Response, session_id: str,
+    request: Request,
+    response: Response,
+    session_id: str,
 ) -> None:
     """Apply the session cookie (and its CSRF double-submit companion) to
     ``response`` with the right flags."""
@@ -232,12 +235,14 @@ async def request_link(payload: RequestLinkPayload):
             # Catch-all: do NOT propagate. Logging is the audit trail.
             logger.error(
                 "request-link: token/email issuance failed for %r: %s",
-                payload.email, e,
+                payload.email,
+                e,
             )
     else:
         # Log only — never surface to client.
         logger.info(
-            "request-link: no active user for %r (silent 200)", payload.email,
+            "request-link: no active user for %r (silent 200)",
+            payload.email,
         )
     return {"status": "ok"}
 

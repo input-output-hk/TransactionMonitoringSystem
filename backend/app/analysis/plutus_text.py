@@ -62,7 +62,7 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
         it cleanly."""
         start: Optional[int] = None
         for i, b in enumerate(blob):
-            if 0x20 <= b < 0x7f:
+            if 0x20 <= b < 0x7F:
                 if start is None:
                     start = i
             else:

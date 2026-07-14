@@ -162,9 +162,7 @@ class TestDeleteUser:
         assert r.status_code == 400
         assert "last active Admin" in r.json()["detail"]
 
-    def test_admin_deletable_when_another_remains(
-        self, client, as_admin, conn, monkeypatch
-    ):
+    def test_admin_deletable_when_another_remains(self, client, as_admin, conn, monkeypatch):
         conn.fetchrow.return_value = {"role": "Admin", "status": "active"}
         conn.fetchval.return_value = 1
         revoke = AsyncMock(return_value=2)
@@ -175,9 +173,7 @@ class TestDeleteUser:
         assert r.status_code == 204
         revoke.assert_awaited_once()
 
-    def test_reviewer_deleted_with_sessions_revoked(
-        self, client, as_admin, conn, monkeypatch
-    ):
+    def test_reviewer_deleted_with_sessions_revoked(self, client, as_admin, conn, monkeypatch):
         conn.fetchrow.return_value = {"role": "Reviewer", "status": "active"}
         revoke = AsyncMock(return_value=0)
         monkeypatch.setattr(users_api, "delete_all_sessions_for_user", revoke)

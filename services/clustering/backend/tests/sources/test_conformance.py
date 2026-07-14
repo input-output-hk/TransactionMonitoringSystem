@@ -17,9 +17,11 @@ pytestmark = pytest.mark.parametrize(
 
 def _target_kwargs(sc: Scenario, target: str | None = None) -> dict[str, str | None]:
     t = target if target is not None else sc.target
-    return {"address": t, "policy_id": None} if sc.target_type == "address" else {
-        "address": None, "policy_id": t
-    }
+    return (
+        {"address": t, "policy_id": None}
+        if sc.target_type == "address"
+        else {"address": None, "policy_id": t}
+    )
 
 
 async def _walk(
@@ -114,9 +116,7 @@ async def test_recent_window_yields_newest_or_degrades_to_history(factory) -> No
         assert hashes[:cap] == sc.expected_hashes[:cap]  # hint ignored = history
         return
     async with source:
-        hashes, cursors = await _walk(
-            source, sc, max_items=len(sc.recent_window), window="recent"
-        )
+        hashes, cursors = await _walk(source, sc, max_items=len(sc.recent_window), window="recent")
     assert hashes == sc.recent_window
     assert all(isinstance(c, str) and c for c in cursors)
 
@@ -130,9 +130,7 @@ async def test_recent_window_cursor_resumes_within_the_window(factory) -> None:
         pytest.skip("adapter ignores the recent-window hint")
     k = len(sc.recent_window)
     async with source1:
-        first, cursors = await _walk(
-            source1, sc, max_items=k, window="recent", stop_after_pages=1
-        )
+        first, cursors = await _walk(source1, sc, max_items=k, window="recent", stop_after_pages=1)
     assert first and cursors
 
     source2, _ = factory()
@@ -200,8 +198,12 @@ async def test_metadata_has_exactly_the_documented_keys(factory) -> None:
     async with source:
         meta = await source.metadata(sc.target, sc.target_type)
     assert set(meta) == {
-        "exists", "is_script", "script_type", "balance_lovelace",
-        "asset_count", "sample_tokens",
+        "exists",
+        "is_script",
+        "script_type",
+        "balance_lovelace",
+        "asset_count",
+        "sample_tokens",
     }
     import json
 

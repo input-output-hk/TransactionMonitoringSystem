@@ -74,8 +74,12 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
                     continue
                 job_id = new_id("job")
                 repo.create_job(
-                    job_id, target, contract.get("target_type", "address"),
-                    0, reprocess, kind=kind,
+                    job_id,
+                    target,
+                    contract.get("target_type", "address"),
+                    0,
+                    reprocess,
+                    kind=kind,
                 )
                 manager.enqueue(job_id)
             enqueued += 1
@@ -86,7 +90,10 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
 
 
 async def run_feed(
-    *, manager: JobManager, repo_factory: RepoFactory, settings: Settings,
+    *,
+    manager: JobManager,
+    repo_factory: RepoFactory,
+    settings: Settings,
     stop_event: asyncio.Event,
 ) -> None:
     """Poll-and-enqueue loop until ``stop_event`` is set. Each tick's errors are
@@ -94,7 +101,8 @@ async def run_feed(
     interval = settings.feed_poll_interval_seconds
     logger.info(
         "clustering feed started: interval=%ds, max_per_tick=%d",
-        interval, settings.feed_max_contracts_per_tick,
+        interval,
+        settings.feed_max_contracts_per_tick,
     )
     while not stop_event.is_set():
         try:

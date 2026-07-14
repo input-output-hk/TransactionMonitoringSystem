@@ -31,8 +31,15 @@ logger = logging.getLogger(__name__)
 # the score-query builders (filter validation, the stats aggregation, and the
 # full-vector projection below) so the class list stays defined in one place.
 _CLASS_COLS = (
-    "token_dust", "large_value", "large_datum", "multiple_sat",
-    "front_running", "sandwich", "circular", "fake_token", "phishing",
+    "token_dust",
+    "large_value",
+    "large_datum",
+    "multiple_sat",
+    "front_running",
+    "sandwich",
+    "circular",
+    "fake_token",
+    "phishing",
 )
 
 # The full tx_class_scores column vector in table order. The SELECT projection
@@ -41,11 +48,18 @@ _CLASS_COLS = (
 # longer silently mis-map a row). The INSERT VALUES builder stays hand-ordered
 # because it applies per-column defaults / json.dumps, not a uniform projection.
 _SCORE_COLS = (
-    "tx_hash", "network",
+    "tx_hash",
+    "network",
     *_CLASS_COLS,
-    "max_score", "max_class", "risk_band", "sub_scores", "evidence",
-    "corroboration_count", "corroborating_classes",
-    "analysis_version", "analyzed_at",
+    "max_score",
+    "max_class",
+    "risk_band",
+    "sub_scores",
+    "evidence",
+    "corroboration_count",
+    "corroborating_classes",
+    "analysis_version",
+    "analyzed_at",
 )
 _SCORE_SELECT = ", ".join(_SCORE_COLS)
 
@@ -54,8 +68,7 @@ _SCORE_SELECT = ", ".join(_SCORE_COLS)
 # readers (list, count, stats, timeseries) MUST apply the identical predicate or
 # their counts desync.
 _ARCHIVE_ANTI_JOIN = (
-    "(network, tx_hash) NOT IN ("
-    "SELECT network, tx_hash FROM archived_alerts FINAL)"
+    "(network, tx_hash) NOT IN (SELECT network, tx_hash FROM archived_alerts FINAL)"
 )
 
 
@@ -75,12 +88,14 @@ def _decode_score_json(d: Dict[str, Any]) -> Dict[str, Any]:
 def _client():
     """The facade's per-thread Client, resolved late (monkeypatch-safe)."""
     from app.db import clickhouse
+
     return clickhouse._get_client()
 
 
 async def _run(fn, *args):
     """Run ``fn`` on the facade's ClickHouse executor, resolved late."""
     from app.db import clickhouse
+
     return await clickhouse._in_executor(fn, *args)
 
 
@@ -96,17 +111,26 @@ def insert_class_scores(results: List[Dict[str, Any]]):
         """,
         [
             (
-                r["tx_hash"], r["network"],
-                r.get("token_dust", -1), r.get("large_value", -1),
-                r.get("large_datum", -1), r.get("multiple_sat", -1),
-                r.get("front_running", -1), r.get("sandwich", -1),
-                r.get("circular", -1), r.get("fake_token", -1),
+                r["tx_hash"],
+                r["network"],
+                r.get("token_dust", -1),
+                r.get("large_value", -1),
+                r.get("large_datum", -1),
+                r.get("multiple_sat", -1),
+                r.get("front_running", -1),
+                r.get("sandwich", -1),
+                r.get("circular", -1),
+                r.get("fake_token", -1),
                 r.get("phishing", -1),
-                r["max_score"], r["max_class"], r["risk_band"],
+                r["max_score"],
+                r["max_class"],
+                r["risk_band"],
                 json.dumps(r.get("sub_scores", {})),
                 json.dumps(r.get("evidence", {}), default=str),
-                r.get("corroboration_count", 0), r.get("corroborating_classes", ""),
-                r["analysis_version"], r["analyzed_at"],
+                r.get("corroboration_count", 0),
+                r.get("corroborating_classes", ""),
+                r["analysis_version"],
+                r["analyzed_at"],
             )
             for r in results
         ],
@@ -136,7 +160,9 @@ def get_class_scores(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
 
 
 def get_class_scores_by_hashes(
-    network: str, tx_hashes: List[str], include_archived: bool = False,
+    network: str,
+    tx_hashes: List[str],
+    include_archived: bool = False,
 ) -> List[Dict[str, Any]]:
     """Latest score vectors for a specific set of tx_hashes on a network.
 
@@ -161,7 +187,9 @@ def get_class_scores_by_hashes(
 
 
 async def get_class_scores_by_hashes_async(
-    network: str, tx_hashes: List[str], include_archived: bool = False,
+    network: str,
+    tx_hashes: List[str],
+    include_archived: bool = False,
 ) -> List[Dict[str, Any]]:
     return await _run(
         partial(get_class_scores_by_hashes, network, tx_hashes, include_archived),
@@ -169,7 +197,9 @@ async def get_class_scores_by_hashes_async(
 
 
 def get_tx_block_dates(
-    network: str, tx_hashes: List[str], days: int,
+    network: str,
+    tx_hashes: List[str],
+    days: int,
 ) -> Dict[str, str]:
     """Map each tx_hash to its on-chain block DATE (``YYYY-MM-DD``), restricted to
     the trailing ``days`` window. Used to bucket contract_anomaly-flagged txs into
@@ -191,7 +221,9 @@ def get_tx_block_dates(
 
 
 async def get_tx_block_dates_async(
-    network: str, tx_hashes: List[str], days: int,
+    network: str,
+    tx_hashes: List[str],
+    days: int,
 ) -> Dict[str, str]:
     return await _run(partial(get_tx_block_dates, network, tx_hashes, days))
 
@@ -203,7 +235,9 @@ _MULTIPLE_SAT_EVIDENCE_KEYS = (
 
 
 def query_multiple_sat_extraction_percentiles(
-    network: str, window_days: int, min_samples: int,
+    network: str,
+    window_days: int,
+    min_samples: int,
 ) -> List[Dict[str, Any]]:
     """Per-script p50/p99 of the multiple_sat extraction features.
 
@@ -354,8 +388,14 @@ def get_class_scores_list(
     order_clause = _ALLOWED_SORTS.get(sort, _ALLOWED_SORTS["score"])
 
     conditions, params = _score_filter_conditions(
-        network, risk_band, attack_class, min_score,
-        analyzed_from, analyzed_to, include_archived, min_corroboration,
+        network,
+        risk_band,
+        attack_class,
+        min_score,
+        analyzed_from,
+        analyzed_to,
+        include_archived,
+        min_corroboration,
     )
     params["limit"] = limit
     params["offset"] = offset
@@ -402,27 +442,33 @@ async def get_class_scores_list_async(
     network: str,
     risk_band: Optional[List[str]],
     attack_class: Optional[str],
-    min_score: float, sort: str = "score", limit: int = 100, offset: int = 0,
+    min_score: float,
+    sort: str = "score",
+    limit: int = 100,
+    offset: int = 0,
     include_archived: bool = False,
-    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
+    analyzed_from: Optional[Any] = None,
+    analyzed_to: Optional[Any] = None,
     min_corroboration: int = 0,
 ) -> List[Dict[str, Any]]:
     # Bind by keyword so a future reorder of the sync signature can't silently
     # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
-    return await _run(partial(
-        get_class_scores_list,
-        network=network,
-        risk_band=risk_band,
-        attack_class=attack_class,
-        min_score=min_score,
-        sort=sort,
-        analyzed_from=analyzed_from,
-        analyzed_to=analyzed_to,
-        limit=limit,
-        offset=offset,
-        include_archived=include_archived,
-        min_corroboration=min_corroboration,
-    ))
+    return await _run(
+        partial(
+            get_class_scores_list,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            sort=sort,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            limit=limit,
+            offset=offset,
+            include_archived=include_archived,
+            min_corroboration=min_corroboration,
+        )
+    )
 
 
 def count_class_scores(
@@ -446,8 +492,14 @@ def count_class_scores(
         count aligned with the rows actually surfaced by the list query.
     """
     conditions, params = _score_filter_conditions(
-        network, risk_band, attack_class, min_score,
-        analyzed_from, analyzed_to, include_archived, min_corroboration,
+        network,
+        risk_band,
+        attack_class,
+        min_score,
+        analyzed_from,
+        analyzed_to,
+        include_archived,
+        min_corroboration,
     )
 
     where = " AND ".join(conditions)
@@ -463,21 +515,24 @@ async def count_class_scores_async(
     risk_band: Optional[List[str]],
     attack_class: Optional[str],
     min_score: float,
-    analyzed_from: Optional[Any] = None, analyzed_to: Optional[Any] = None,
+    analyzed_from: Optional[Any] = None,
+    analyzed_to: Optional[Any] = None,
     include_archived: bool = False,
     min_corroboration: int = 0,
 ) -> int:
-    return await _run(partial(
-        count_class_scores,
-        network=network,
-        risk_band=risk_band,
-        attack_class=attack_class,
-        min_score=min_score,
-        analyzed_from=analyzed_from,
-        analyzed_to=analyzed_to,
-        include_archived=include_archived,
-        min_corroboration=min_corroboration,
-    ))
+    return await _run(
+        partial(
+            count_class_scores,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            include_archived=include_archived,
+            min_corroboration=min_corroboration,
+        )
+    )
 
 
 def aggregate_window_counts(
@@ -495,7 +550,13 @@ def aggregate_window_counts(
     by the dominant ``max_class``.
     """
     band_conds, band_params = _score_filter_conditions(
-        network, None, None, 0.0, analyzed_from, analyzed_to, include_archived,
+        network,
+        None,
+        None,
+        0.0,
+        analyzed_from,
+        analyzed_to,
+        include_archived,
     )
     band_rows = _client().execute(
         f"SELECT risk_band, count() FROM tx_class_scores FINAL "
@@ -505,7 +566,13 @@ def aggregate_window_counts(
     by_band = {str(rb): int(n) for rb, n in band_rows}
 
     cls_conds, cls_params = _score_filter_conditions(
-        network, alert_bands, None, 0.0, analyzed_from, analyzed_to, include_archived,
+        network,
+        alert_bands,
+        None,
+        0.0,
+        analyzed_from,
+        analyzed_to,
+        include_archived,
     )
     cls_rows = _client().execute(
         f"SELECT max_class, count() FROM tx_class_scores FINAL "
@@ -523,11 +590,16 @@ async def aggregate_window_counts_async(
     alert_bands: List[str],
     include_archived: bool = False,
 ) -> Dict[str, Any]:
-    return await _run(partial(
-        aggregate_window_counts,
-        network=network, analyzed_from=analyzed_from, analyzed_to=analyzed_to,
-        alert_bands=alert_bands, include_archived=include_archived,
-    ))
+    return await _run(
+        partial(
+            aggregate_window_counts,
+            network=network,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            alert_bands=alert_bands,
+            include_archived=include_archived,
+        )
+    )
 
 
 async def get_class_scores_async(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
@@ -606,8 +678,13 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
     # removes the fragile row[idx+N] / idx+=3 arithmetic that silently breaks if
     # a SELECT column is added or reordered.
     _HEAD_COLS = (
-        "total", "critical_count", "high_count", "moderate_count",
-        "informational_count", "avg_max_score", "last_analyzed_at",
+        "total",
+        "critical_count",
+        "high_count",
+        "moderate_count",
+        "informational_count",
+        "avg_max_score",
+        "last_analyzed_at",
     )
     agg_cols = [f"{col}_{stat}" for col in _CLASS_COLS for stat in ("count", "avg", "max")]
     d = dict(zip([*_HEAD_COLS, *agg_cols], rows[0]))
@@ -682,13 +759,16 @@ def get_pending_count(network: str) -> int:
 
 
 async def get_class_scores_stats_async(
-    network: str, include_archived: bool = False,
+    network: str,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
     return await _run(get_class_scores_stats, network, include_archived)
 
 
 def get_alert_timeseries(
-    network: str, days: int = 14, include_archived: bool = False,
+    network: str,
+    days: int = 14,
+    include_archived: bool = False,
 ) -> List[Dict[str, Any]]:
     """Daily count of High+Critical alerts over the last ``days`` days.
 
@@ -741,10 +821,11 @@ def get_alert_timeseries(
 
 
 async def get_alert_timeseries_async(
-    network: str, days: int = 14, include_archived: bool = False,
+    network: str,
+    days: int = 14,
+    include_archived: bool = False,
 ) -> List[Dict[str, Any]]:
     return await _run(get_alert_timeseries, network, days, include_archived)
-
 
 
 def get_unanalyzed_transactions(
@@ -812,8 +893,21 @@ def get_unanalyzed_transactions(
         """,
         params,
     )
-    keys = ("tx_hash", "network", "fee", "input_count", "output_count",
-            "total_output_value", "metadata", "addresses", "raw_data",
-            "raw_data_truncated", "script_valid", "slot", "block_height",
-            "timestamp", "ingestion_timestamp")
+    keys = (
+        "tx_hash",
+        "network",
+        "fee",
+        "input_count",
+        "output_count",
+        "total_output_value",
+        "metadata",
+        "addresses",
+        "raw_data",
+        "raw_data_truncated",
+        "script_valid",
+        "slot",
+        "block_height",
+        "timestamp",
+        "ingestion_timestamp",
+    )
     return [dict(zip(keys, row)) for row in rows]

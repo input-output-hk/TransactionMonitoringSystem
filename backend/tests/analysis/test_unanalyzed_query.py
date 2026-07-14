@@ -22,12 +22,11 @@ import pytest
 @pytest.fixture
 def captured_queries(monkeypatch):
     from app.db import clickhouse
+
     captured = []
 
     fake_client = MagicMock()
-    fake_client.execute.side_effect = (
-        lambda sql, params=None: (captured.append((sql, params)) or [])
-    )
+    fake_client.execute.side_effect = lambda sql, params=None: captured.append((sql, params)) or []
     monkeypatch.setattr(clickhouse, "_get_client", lambda: fake_client)
     return captured
 
@@ -42,14 +41,12 @@ class TestUnanalyzedQueryDefersUnenrichedTxs:
         sql, params = captured_queries[0]
         # Must reference transaction_inputs as a sentinel for input enrichment readiness.
         assert "transaction_inputs" in sql, (
-            "query must defer txs until transaction_inputs is visible; "
-            f"current SQL: {sql}"
+            f"query must defer txs until transaction_inputs is visible; current SQL: {sql}"
         )
         # The input_count = 0 escape hatch must be present so treasury / collateral-only
         # txs aren't stuck in the queue forever waiting for inputs that never arrive.
         assert "input_count = 0" in sql, (
-            "query must admit input_count=0 txs directly; "
-            f"current SQL: {sql}"
+            f"query must admit input_count=0 txs directly; current SQL: {sql}"
         )
 
     def test_query_is_network_scoped_on_both_tables(self, captured_queries):
@@ -71,6 +68,5 @@ class TestUnanalyzedQueryDefersUnenrichedTxs:
         assert idx != -1, "query must reference transaction_inputs"
         tail = sql[idx:]
         assert "network" in tail, (
-            "transaction_inputs guard must be network-scoped; "
-            f"current SQL: {sql}"
+            f"transaction_inputs guard must be network-scoped; current SQL: {sql}"
         )

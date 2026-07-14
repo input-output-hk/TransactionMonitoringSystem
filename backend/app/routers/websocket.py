@@ -106,7 +106,8 @@ async def _sender(websocket: WebSocket, queue: asyncio.Queue) -> None:
         raise
     except Exception:
         logger.warning(
-            "WebSocket sender failed; closing connection", exc_info=True,
+            "WebSocket sender failed; closing connection",
+            exc_info=True,
         )
         _cleanup(websocket)
         try:
@@ -173,9 +174,7 @@ async def websocket_endpoint(
     """
     if settings.RATE_LIMIT_ENABLED:
         ip = net.client_ip(websocket)
-        allowed, _retry_after = await _handshake_limiter.check(
-            f"ws:{ip or 'unknown'}"
-        )
+        allowed, _retry_after = await _handshake_limiter.check(f"ws:{ip or 'unknown'}")
         if not allowed:
             await _reject(websocket, WS_CLOSE_OVERLOADED)
             return
@@ -207,7 +206,9 @@ async def websocket_endpoint(
             await websocket.receive_text()
             _enqueue(queue, {"type": "pong", "message": "connected"})
     except WebSocketDisconnect:
-        logger.info(f"WebSocket client disconnected. Total connections: {len(active_connections) - 1}")
+        logger.info(
+            f"WebSocket client disconnected. Total connections: {len(active_connections) - 1}"
+        )
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:

@@ -24,7 +24,7 @@ from app.utils.datetime_utils import to_aware_utc
 # (e.g. app.analysis.scorer_config which logs the config file it loaded).
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # uvicorn's access log writes that live credential in plaintext for every
 # redemption (review finding).
 from app.logging_utils import configure_access_log_redaction
+
 configure_access_log_redaction()
 
 from app.rate_limit import (
@@ -42,7 +43,17 @@ from app.rate_limit import (
 )
 from app.db import postgres, clickhouse, raw_store
 from app import notifications, leader
-from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
+from app.api import (
+    transactions,
+    entities,
+    lifecycle,
+    analysis,
+    archive,
+    auth as auth_api,
+    users as users_api,
+    clustering as clustering_api,
+    notifications_config,
+)
 from app.tasks import analysis as analysis_task
 from app.tasks import housekeeping as housekeeping_task
 from app.tasks import notifications as notifications_task
@@ -89,9 +100,7 @@ async def _supervised(label: str, coro_fn):
         except Exception as e:
             if loop.time() - started >= settings.SUPERVISOR_STABLE_RESET_SECONDS:
                 delay = settings.SUPERVISOR_BACKOFF_BASE_SECONDS
-            logger.error(
-                f"[supervisor] {label} crashed: {e!r} — restarting in {delay:.0f} s"
-            )
+            logger.error(f"[supervisor] {label} crashed: {e!r} — restarting in {delay:.0f} s")
             await asyncio.sleep(delay)
             delay = min(delay * 2, settings.SUPERVISOR_BACKOFF_MAX_SECONDS)
 
@@ -106,11 +115,13 @@ async def broadcast_lifecycle_event(event: dict):
     """
     if not active_connections:
         return
-    await websocket.broadcast({
-        "type": "lifecycle",
-        "data": event,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    await websocket.broadcast(
+        {
+            "type": "lifecycle",
+            "data": event,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 def _validate_startup_settings() -> None:
@@ -123,6 +134,7 @@ def _validate_startup_settings() -> None:
     it can live in the layered `.env` files, not just the shell env.
     """
     from app.auth import _dev_mode
+
     allow_dev_mode = (
         settings.TMS_ALLOW_DEV_MODE.strip() == "1"
         or os.environ.get("TMS_ALLOW_DEV_MODE", "").strip() == "1"
@@ -148,7 +160,9 @@ def _validate_startup_settings() -> None:
                 "Set CLICKHOUSE_PASSWORD (and the matching docker-compose "
                 "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
             )
-        logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
+        logger.warning(
+            "CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)"
+        )
     # A baked-in default Postgres password is a guessable credential, never a
     # production posture. Same fail-fast as API_KEYS / CLICKHOUSE_PASSWORD:
     # refuse to start on the known dev default unless dev mode is explicit.
@@ -160,7 +174,9 @@ def _validate_startup_settings() -> None:
                 "the matching docker-compose env) for production, or "
                 "TMS_ALLOW_DEV_MODE=1 for local dev."
             )
-        logger.warning("POSTGRES_PASSWORD is the dev default — guessable credential (development mode)")
+        logger.warning(
+            "POSTGRES_PASSWORD is the dev default — guessable credential (development mode)"
+        )
     # Capped ClickHouse payloads make the raw store the ONLY full copy of
     # oversized (attack-shaped) transactions; running capped without the
     # store means those txs could never be scored at full fidelity.
@@ -334,6 +350,7 @@ async def lifespan(app: FastAPI):
         # Magic-link auth tables (users, magic_link_tokens, user_sessions).
         # Idempotent + handles legacy `users` table migration.
         from app.auth.schema import execute_auth_schema
+
         await execute_auth_schema()
         clickhouse.init_client()
         clickhouse.execute_schema()
@@ -412,7 +429,7 @@ app = FastAPI(
     **Network Parameter**: All endpoints accept an optional `network` parameter.
     - Options: `mainnet`, `preprod`, or `preview`
     - Default: `preprod` (if not specified)
-    """
+    """,
 )
 
 # Middleware registration — Starlette applies middleware in LIFO order,
@@ -569,10 +586,6 @@ if _spa_present:
         # root before serving; anything else falls through to index.html so
         # client-side routing still works (no information leak on traversal).
         candidate = (_DIST_ROOT / full_path).resolve()
-        if (
-            full_path
-            and candidate.is_file()
-            and candidate.is_relative_to(_DIST_ROOT)
-        ):
+        if full_path and candidate.is_file() and candidate.is_relative_to(_DIST_ROOT):
             return FileResponse(candidate)
         return FileResponse(_DIST_ROOT / "index.html")

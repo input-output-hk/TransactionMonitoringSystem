@@ -59,9 +59,20 @@ logger = logging.getLogger(__name__)
 _PUBLISHED = (VERDICT_MALICIOUS, VERDICT_ANOMALY)
 
 _COLUMNS = [
-    "network", "tx_hash", "target", "cluster_id", "iso_score", "lof_score",
-    "consensus", "votes", "verdict", "model_id", "feature_set", "evidence",
-    "scored_at", "published_at",
+    "network",
+    "tx_hash",
+    "target",
+    "cluster_id",
+    "iso_score",
+    "lof_score",
+    "consensus",
+    "votes",
+    "verdict",
+    "model_id",
+    "feature_set",
+    "evidence",
+    "scored_at",
+    "published_at",
 ]
 
 
@@ -111,7 +122,11 @@ def _reconciliation_version(repo: Repo, target: str, network: str) -> datetime:
 
 
 def _publish_batch(
-    repo: Repo, target: str, network: str, feature_set: str, published_at: datetime,
+    repo: Repo,
+    target: str,
+    network: str,
+    feature_set: str,
+    published_at: datetime,
 ) -> set[str]:
     """Resolve and publish the latest batch fit's flagged verdicts. Returns the
     set of tx_hashes published (empty if the target has no cluster run yet).
@@ -147,20 +162,39 @@ def _publish_batch(
     rows = []
     for tx, verdict in flagged.items():
         iso, lof, consensus = scores.get(tx, (float("nan"), float("nan"), 0.0))
-        rows.append([
-            network, tx, target, int(cluster_of.get(tx, -1)),
-            iso, lof, consensus, int(votes.get(tx, 0)), verdict,
-            model_id, feature_set, "{}", stamp, published_at,
-        ])
+        rows.append(
+            [
+                network,
+                tx,
+                target,
+                int(cluster_of.get(tx, -1)),
+                iso,
+                lof,
+                consensus,
+                int(votes.get(tx, 0)),
+                verdict,
+                model_id,
+                feature_set,
+                "{}",
+                stamp,
+                published_at,
+            ]
+        )
     db = repo._db  # type: ignore[attr-defined]
     repo.client.insert(  # type: ignore[attr-defined]
-        f"{db}.tx_contract_anomaly", rows, column_names=_COLUMNS,
+        f"{db}.tx_contract_anomaly",
+        rows,
+        column_names=_COLUMNS,
     )
     return set(flagged)
 
 
 def _publish_online(
-    repo: Repo, target: str, network: str, feature_set: str, published_at: datetime,
+    repo: Repo,
+    target: str,
+    network: str,
+    feature_set: str,
+    published_at: datetime,
 ) -> set[str]:
     """Copy the target's flagged ``tx_classifications`` (incrementally-scored new
     txs) into ``tx_contract_anomaly``, in-database (both in ``tms_clustering``).
@@ -200,17 +234,14 @@ def _publish_online(
     published = {
         str(r[0])
         for r in repo.client.query(  # type: ignore[attr-defined]
-            "SELECT toString(tx_hash) FROM " + db + ".tx_classifications FINAL "
-            "WHERE " + where,
+            "SELECT toString(tx_hash) FROM " + db + ".tx_classifications FINAL WHERE " + where,
             parameters=params,
         ).result_rows
     }
     if not published:
         return set()
     # A human malicious label overrides the stored model verdict on publish.
-    verdict_expr = (
-        "if(toString(tx_hash) IN " + malicious_sub + ", 'malicious', toString(verdict))"
-    )
+    verdict_expr = "if(toString(tx_hash) IN " + malicious_sub + ", 'malicious', toString(verdict))"
     repo.client.command(  # type: ignore[attr-defined]
         "INSERT INTO " + db + ".tx_contract_anomaly (" + ", ".join(_COLUMNS) + ") "
         "SELECT {net:String} AS network, toString(tx_hash), target, cluster_id, "
@@ -224,8 +255,13 @@ def _publish_online(
 
 
 def _retract_stale(
-    repo: Repo, target: str, network: str, feature_set: str,
-    *, keep: set[str], published_at: datetime,
+    repo: Repo,
+    target: str,
+    network: str,
+    feature_set: str,
+    *,
+    keep: set[str],
+    published_at: datetime,
 ) -> int:
     """Append a ``normal`` tombstone for every currently-published (non-normal) tx
     of this ``(network, target, feature_set)`` that is NOT in ``keep`` (the
@@ -250,27 +286,47 @@ def _retract_stale(
             "SELECT DISTINCT toString(tx_hash) FROM " + db + ".tx_contract_anomaly "
             "FINAL WHERE network = {net:String} AND target = {tgt:String} "
             "AND feature_set = {fs:String} AND verdict != {normal:String}",
-            parameters={"net": network, "tgt": target, "fs": feature_set,
-                        "normal": VERDICT_NORMAL},
+            parameters={"net": network, "tgt": target, "fs": feature_set, "normal": VERDICT_NORMAL},
         ).result_rows
     }
     stale = current - keep
     if not stale:
         return 0
     rows = [
-        [network, tx, target, -1, float("nan"), float("nan"), 0.0, 0,
-         VERDICT_NORMAL, "", feature_set, "{}", published_at, published_at]
+        [
+            network,
+            tx,
+            target,
+            -1,
+            float("nan"),
+            float("nan"),
+            0.0,
+            0,
+            VERDICT_NORMAL,
+            "",
+            feature_set,
+            "{}",
+            published_at,
+            published_at,
+        ]
         for tx in stale
     ]
     repo.client.insert(  # type: ignore[attr-defined]
-        f"{db}.tx_contract_anomaly", rows, column_names=_COLUMNS,
+        f"{db}.tx_contract_anomaly",
+        rows,
+        column_names=_COLUMNS,
     )
     return len(rows)
 
 
 def _publish_labels(
-    repo: Repo, target: str, network: str, feature_set: str, published_at: datetime,
-    *, exclude: set[str],
+    repo: Repo,
+    target: str,
+    network: str,
+    feature_set: str,
+    published_at: datetime,
+    *,
+    exclude: set[str],
 ) -> set[str]:
     """Publish malicious MANUAL labels that neither the online nor batch path can
     reach, and return ALL malicious-labeled hashes for this target.
@@ -298,18 +354,38 @@ def _publish_labels(
     fresh = labeled - exclude
     if fresh:
         rows = [
-            [network, tx, target, -1, float("nan"), float("nan"), 0.0, 0,
-             VERDICT_MALICIOUS, "", feature_set, "{}", published_at, published_at]
+            [
+                network,
+                tx,
+                target,
+                -1,
+                float("nan"),
+                float("nan"),
+                0.0,
+                0,
+                VERDICT_MALICIOUS,
+                "",
+                feature_set,
+                "{}",
+                published_at,
+                published_at,
+            ]
             for tx in fresh
         ]
         repo.client.insert(  # type: ignore[attr-defined]
-            f"{db}.tx_contract_anomaly", rows, column_names=_COLUMNS,
+            f"{db}.tx_contract_anomaly",
+            rows,
+            column_names=_COLUMNS,
         )
     return labeled
 
 
 def publish_contract_anomaly(
-    repo: Repo, target: str, *, network: str, feature_set: str = "shape",
+    repo: Repo,
+    target: str,
+    *,
+    network: str,
+    feature_set: str = "shape",
 ) -> int:
     """Reconcile the host-visible contract_anomaly projection for a target.
 
@@ -327,24 +403,34 @@ def publish_contract_anomaly(
     # Malicious manual labels the online/batch paths can't reach (never-scored,
     # non-cluster txs). Folded into keep so they are not tombstoned.
     label_flagged = _publish_labels(
-        repo, target, network, feature_set, published_at,
+        repo,
+        target,
+        network,
+        feature_set,
+        published_at,
         exclude=online_flagged | batch_flagged,
     )
     retracted = _retract_stale(
-        repo, target, network, feature_set,
-        keep=online_flagged | batch_flagged | label_flagged, published_at=published_at,
+        repo,
+        target,
+        network,
+        feature_set,
+        keep=online_flagged | batch_flagged | label_flagged,
+        published_at=published_at,
     )
     db = repo._db  # type: ignore[attr-defined]
     rows = repo.client.query(  # type: ignore[attr-defined]
         f"SELECT count() FROM {db}.tx_contract_anomaly FINAL "
         "WHERE network = {net:String} AND target = {tgt:String} "
         "AND feature_set = {fs:String} AND verdict != {normal:String}",
-        parameters={"net": network, "tgt": target, "fs": feature_set,
-                    "normal": VERDICT_NORMAL},
+        parameters={"net": network, "tgt": target, "fs": feature_set, "normal": VERDICT_NORMAL},
     ).result_rows
     n = int(rows[0][0]) if rows else 0
     logger.info(
         "published contract_anomaly: target=%s feature_set=%s flagged=%d retracted=%d",
-        target[:24], feature_set, n, retracted,
+        target[:24],
+        feature_set,
+        n,
+        retracted,
     )
     return n

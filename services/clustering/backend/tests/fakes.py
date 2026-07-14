@@ -241,6 +241,7 @@ def _drift_check() -> None:  # pragma: no cover - exists for mypy only
 
 # --- Shared concrete fakes (used across service test modules) -----------------
 
+
 class FakeGraphRepo(FakeRepoBase):
     """In-memory repo exposing exactly what the verdict-decorated graph read and
     the cluster-label writes touch. Shared by test_service_verdicts and
@@ -263,7 +264,9 @@ class FakeGraphRepo(FakeRepoBase):
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return {
-            "run_id": run_id, "target": "addr", "feature_set": "shape",
+            "run_id": run_id,
+            "target": "addr",
+            "feature_set": "shape",
             "created_at": "2024-01-01 00:00:00.000000",
         }
 

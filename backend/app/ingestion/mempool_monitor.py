@@ -102,7 +102,7 @@ class MempoolMonitor:
         self._send_recv = send_recv
 
         self._ws = None
-        self._running = True   # set once here; stop() sets it False
+        self._running = True  # set once here; stop() sets it False
         self.connected = False
 
         # Strong refs to fire-and-forget raw-store writes. asyncio only weakly
@@ -205,13 +205,11 @@ class MempoolMonitor:
         live)."""
         if tx.script_valid:
             return {
-                (inp.tx_hash, inp.index) for inp in tx.inputs
+                (inp.tx_hash, inp.index)
+                for inp in tx.inputs
                 if not inp.is_collateral and not inp.is_reference
             }
-        return {
-            (inp.tx_hash, inp.index) for inp in tx.inputs
-            if inp.is_collateral
-        }
+        return {(inp.tx_hash, inp.index) for inp in tx.inputs if inp.is_collateral}
 
     async def record_displacements(
         self,
@@ -233,34 +231,39 @@ class MempoolMonitor:
                 entry = self._pending.get(pending_id)
                 if entry is None:
                     continue
-                (_pending_refs, pending_seen, pending_fee,
-                 pending_addr, pending_ttl) = entry
+                (_pending_refs, pending_seen, pending_fee, pending_addr, pending_ttl) = entry
                 if shared:
                     delta_ms = (now_utc - pending_seen).total_seconds() * 1000
                     conf_addr = ""
                     conf_inp = next(
-                        (i for i in tx.inputs if not i.is_collateral and not i.is_reference and i.address),
+                        (
+                            i
+                            for i in tx.inputs
+                            if not i.is_collateral and not i.is_reference and i.address
+                        ),
                         None,
                     )
                     if conf_inp:
                         conf_addr = conf_inp.address
                     try:
                         await postgres.insert_mempool_collision(
-                            tx_a=pending_id, tx_b=tx.tx_hash,
+                            tx_a=pending_id,
+                            tx_b=tx.tx_hash,
                             network=self.network,
                             shared_inputs=[list(s) for s in shared],
                             shared_count=len(shared),
-                            tx_a_seen_at=pending_seen, tx_b_seen_at=now_utc,
+                            tx_a_seen_at=pending_seen,
+                            tx_b_seen_at=now_utc,
                             delta_ms=delta_ms,
-                            tx_a_fee=pending_fee, tx_b_fee=tx.fee or 0,
+                            tx_a_fee=pending_fee,
+                            tx_b_fee=tx.fee or 0,
                             tx_a_first_input_addr=pending_addr,
                             tx_b_first_input_addr=conf_addr,
-                            tx_a_ttl=pending_ttl, tx_b_ttl=0,
+                            tx_a_ttl=pending_ttl,
+                            tx_b_ttl=0,
                         )
                         # Immediately mark outcome: the confirmed tx (tx_b) won
-                        await postgres.update_collision_outcome(
-                            tx.tx_hash, self.network
-                        )
+                        await postgres.update_collision_outcome(tx.tx_hash, self.network)
                         logger.info(
                             f"Displacement detected: pending {pending_id[:16]}.. "
                             f"displaced by confirmed {tx.tx_hash[:16]}.. "
@@ -284,20 +287,20 @@ class MempoolMonitor:
         for tx in normalized_txs:
             self._pending.untrack(tx.tx_hash)
             try:
-                await postgres.update_collision_outcome(
-                    tx.tx_hash, self.network
-                )
+                await postgres.update_collision_outcome(tx.tx_hash, self.network)
             except Exception:
                 pass
 
         for tx in normalized_txs:
-            await self._emit({
-                "eventType": "TX_CONFIRMED",
-                "txId": tx.tx_hash,
-                "network": self.network,
-                "observedAt": now.isoformat(),
-                "block": {"hash": block_id, "slot": block_slot, "height": block_height},
-            })
+            await self._emit(
+                {
+                    "eventType": "TX_CONFIRMED",
+                    "txId": tx.tx_hash,
+                    "network": self.network,
+                    "observedAt": now.isoformat(),
+                    "block": {"hash": block_id, "slot": block_slot, "height": block_height},
+                }
+            )
 
         for tx in normalized_txs:
             self._seen_mempool_txs.discard(tx.tx_hash)
@@ -306,6 +309,7 @@ class MempoolMonitor:
 
     async def run(self):
         """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
+
         async def _connect():
             self._ws = await self._connect_ws("mempool")
             return self._ws
@@ -332,7 +336,10 @@ class MempoolMonitor:
         )
 
     async def _record_mempool_collisions(
-        self, tx_id: str, tx_data: dict, now: datetime,
+        self,
+        tx_id: str,
+        tx_data: dict,
+        now: datetime,
     ) -> None:
         """Record same-mempool input collisions for a newly seen pending tx,
         register it in the pending index, and run the throttled TTL prune.
@@ -372,22 +379,25 @@ class MempoolMonitor:
                 other_entry = self._pending.get(other_id)
                 if other_entry is None:
                     continue
-                (_other_refs, other_seen, other_fee,
-                 other_addr, other_ttl) = other_entry
+                (_other_refs, other_seen, other_fee, other_addr, other_ttl) = other_entry
                 if shared:
                     delta_ms = (now - other_seen).total_seconds() * 1000
                     try:
                         await postgres.insert_mempool_collision(
-                            tx_a=other_id, tx_b=tx_id,
+                            tx_a=other_id,
+                            tx_b=tx_id,
                             network=self.network,
                             shared_inputs=[list(s) for s in shared],
                             shared_count=len(shared),
-                            tx_a_seen_at=other_seen, tx_b_seen_at=now,
+                            tx_a_seen_at=other_seen,
+                            tx_b_seen_at=now,
                             delta_ms=delta_ms,
-                            tx_a_fee=other_fee, tx_b_fee=tx_fee,
+                            tx_a_fee=other_fee,
+                            tx_b_fee=tx_fee,
                             tx_a_first_input_addr=other_addr,
                             tx_b_first_input_addr=first_input_addr,
-                            tx_a_ttl=other_ttl, tx_b_ttl=tx_ttl,
+                            tx_a_ttl=other_ttl,
+                            tx_b_ttl=tx_ttl,
                         )
                         logger.info(
                             f"Mempool collision: {other_id[:16]}.. vs {tx_id[:16]}.. "
@@ -397,7 +407,8 @@ class MempoolMonitor:
                         logger.error(f"Failed to record collision: {e}")
 
             self._pending.track(
-                tx_id, (input_refs, now, tx_fee, first_input_addr, tx_ttl),
+                tx_id,
+                (input_refs, now, tx_fee, first_input_addr, tx_ttl),
             )
 
         # Prune stale entries (throttled; knobs documented in config.py).
@@ -416,8 +427,7 @@ class MempoolMonitor:
             # never reached the pending index (collision tracking threw
             # before track()) is invisible to stale_ids and leaked forever.
             orphaned = [
-                k for k, (_, cached_at) in self._pending_input_cache.items()
-                if cached_at < cutoff
+                k for k, (_, cached_at) in self._pending_input_cache.items() if cached_at < cutoff
             ]
             for k in orphaned:
                 self._pending_input_cache.pop(k, None)
@@ -441,10 +451,12 @@ class MempoolMonitor:
         for inp in raw_inputs:
             tx_obj = inp.get("transaction", {})
             if isinstance(tx_obj, dict) and tx_obj.get("id"):
-                output_refs.append({
-                    "transaction": {"id": tx_obj["id"]},
-                    "index": inp.get("index", 0),
-                })
+                output_refs.append(
+                    {
+                        "transaction": {"id": tx_obj["id"]},
+                        "index": inp.get("index", 0),
+                    }
+                )
 
         if not output_refs:
             return
@@ -460,7 +472,8 @@ class MempoolMonitor:
 
         if cache_entry:
             self._pending_input_cache[tx_id] = (
-                cache_entry, datetime.now(timezone.utc),
+                cache_entry,
+                datetime.now(timezone.utc),
             )
             logger.debug(
                 f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
@@ -522,12 +535,14 @@ class MempoolMonitor:
                 except Exception as e:
                     logger.error(f"Error persisting pending tx {tx_id}: {e}")
 
-                await self._emit({
-                    "eventType": "TX_PENDING",
-                    "txId": tx_id,
-                    "network": self.network,
-                    "observedAt": now.isoformat(),
-                    "firstSeenAt": now.isoformat(),
-                })
+                await self._emit(
+                    {
+                        "eventType": "TX_PENDING",
+                        "txId": tx_id,
+                        "network": self.network,
+                        "observedAt": now.isoformat(),
+                        "firstSeenAt": now.isoformat(),
+                    }
+                )
 
                 logger.debug(f"TX_PENDING: {tx_id}")

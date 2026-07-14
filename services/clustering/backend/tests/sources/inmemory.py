@@ -57,7 +57,7 @@ def _parse_cursor(cursor: str | None) -> tuple[int, str | None]:
     None/garbled cursor (which then behaves like ``restart``)."""
     if not cursor or not cursor.startswith(_CURSOR_PREFIX):
         return 0, None
-    body = cursor[len(_CURSOR_PREFIX):]
+    body = cursor[len(_CURSOR_PREFIX) :]
     page_part, sep, anchor = body.partition(_ANCHOR_SEP)
     try:
         page = max(0, int(page_part))

@@ -48,14 +48,19 @@ _VERSION = "phase5"
 # Cross-class corroboration: a class counts as corroborating when it scores at
 # or above this threshold. Recorded as a flag only; does not affect max_score
 # or risk_band (see config/detection.yaml composite_corroboration).
-_CORROBORATION_THRESHOLD = float(
-    composite_corroboration_config()["corroboration_threshold"]
-)
+_CORROBORATION_THRESHOLD = float(composite_corroboration_config()["corroboration_threshold"])
 
 # All attack class names in canonical order
 _CLASS_NAMES = [
-    "token_dust", "large_value", "large_datum", "multiple_sat",
-    "front_running", "sandwich", "circular", "fake_token", "phishing",
+    "token_dust",
+    "large_value",
+    "large_datum",
+    "multiple_sat",
+    "front_running",
+    "sandwich",
+    "circular",
+    "fake_token",
+    "phishing",
 ]
 
 
@@ -231,10 +236,7 @@ def _poll_since(network: str) -> Tuple[Optional[datetime], bool]:
     """
     now_mono = time.monotonic()
     last = _last_full_rescan.get(network)
-    if (
-        last is None
-        or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS
-    ):
+    if last is None or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS:
         # Bound the rescan lookback so its anti-join cost tracks the window,
         # not the whole keep-forever table (see the config knob). 0 = legacy
         # unbounded (since=None). Slipped txs are always recent, so the window
@@ -255,7 +257,8 @@ def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
     """
     newest = max(
         (
-            r["ingestion_timestamp"] for r in rows
+            r["ingestion_timestamp"]
+            for r in rows
             if isinstance(r.get("ingestion_timestamp"), datetime)
         ),
         default=None,
@@ -269,7 +272,8 @@ def _advance_watermark(network: str, rows: List[Dict[str, Any]]) -> None:
 
 
 def _resolve_raw_data(
-    rows: List[Dict[str, Any]], network: str,
+    rows: List[Dict[str, Any]],
+    network: str,
 ) -> List[Dict[str, Any]]:
     """Parse each row's raw_data, recovering from the raw store when needed.
 
@@ -304,9 +308,7 @@ def _resolve_raw_data(
             except (json.JSONDecodeError, TypeError):
                 parsed = None
 
-        needs_recovery = parsed is None and (
-            truncated or (isinstance(rd, str) and bool(rd))
-        )
+        needs_recovery = parsed is None and (truncated or (isinstance(rd, str) and bool(rd)))
         if needs_recovery and settings.RAW_FALLBACK_ENABLED:
             ts = row.get("timestamp")
             if isinstance(ts, datetime):
@@ -314,7 +316,8 @@ def _resolve_raw_data(
                     parsed = raw_store.read_confirmed(network, row["tx_hash"], ts)
                 except Exception:
                     logger.exception(
-                        "Raw store fallback failed for %s", row["tx_hash"][:16],
+                        "Raw store fallback failed for %s",
+                        row["tx_hash"][:16],
                     )
                     parsed = None
 
@@ -322,10 +325,7 @@ def _resolve_raw_data(
             key = (network, row["tx_hash"])
             entry = _raw_fallback_attempts.get(key)
             now_mono = time.monotonic()
-            if (
-                entry is not None
-                and now_mono - entry[1] < settings.RAW_FALLBACK_RETRY_SECONDS
-            ):
+            if entry is not None and now_mono - entry[1] < settings.RAW_FALLBACK_RETRY_SECONDS:
                 # Re-polled inside the pacing window: defer WITHOUT counting,
                 # or a busy drain loop exhausts the budget in seconds.
                 logger.debug(
@@ -338,7 +338,8 @@ def _resolve_raw_data(
                 _raw_fallback_attempts[key] = (attempts, now_mono)
                 logger.warning(
                     "Deferring %s: raw_data unrecoverable (attempt %d/%d)",
-                    row["tx_hash"][:16], attempts,
+                    row["tx_hash"][:16],
+                    attempts,
                     settings.RAW_FALLBACK_MAX_ATTEMPTS,
                 )
                 continue
@@ -346,7 +347,8 @@ def _resolve_raw_data(
             row["raw_data_unavailable"] = True
             logger.error(
                 "Scoring %s degraded: raw_data unrecoverable after %d attempts",
-                row["tx_hash"][:16], attempts,
+                row["tx_hash"][:16],
+                attempts,
             )
         elif needs_recovery:
             _raw_fallback_attempts.pop((network, row["tx_hash"]), None)
@@ -364,7 +366,8 @@ _analysis_defer_attempts: Dict[tuple, Tuple[int, float]] = {}
 
 
 def _handle_incomplete_scoring(
-    results: List[Dict[str, Any]], network: str,
+    results: List[Dict[str, Any]],
+    network: str,
 ) -> List[Dict[str, Any]]:
     """Defer transactions whose scoring was incomplete; degrade after budget.
 
@@ -405,10 +408,7 @@ def _handle_incomplete_scoring(
             continue
 
         entry = _analysis_defer_attempts.get(key)
-        if (
-            entry is not None
-            and now_mono - entry[1] < settings.ANALYSIS_DEFER_RETRY_SECONDS
-        ):
+        if entry is not None and now_mono - entry[1] < settings.ANALYSIS_DEFER_RETRY_SECONDS:
             # Re-polled inside the pacing window: defer WITHOUT counting.
             logger.debug(
                 "Deferring %s: incomplete scoring (attempt window)",
@@ -419,10 +419,12 @@ def _handle_incomplete_scoring(
         if attempts < settings.ANALYSIS_DEFER_MAX_ATTEMPTS:
             _analysis_defer_attempts[key] = (attempts, now_mono)
             logger.warning(
-                "Deferring %s: incomplete scoring (scorers=%s enrichment=%s) "
-                "attempt %d/%d",
-                r["tx_hash"][:16], failed_scorers, failed_enrichment,
-                attempts, settings.ANALYSIS_DEFER_MAX_ATTEMPTS,
+                "Deferring %s: incomplete scoring (scorers=%s enrichment=%s) attempt %d/%d",
+                r["tx_hash"][:16],
+                failed_scorers,
+                failed_enrichment,
+                attempts,
+                settings.ANALYSIS_DEFER_MAX_ATTEMPTS,
             )
             continue
         # Budget exhausted: keep the row but mark the degradation so it is
@@ -434,9 +436,11 @@ def _handle_incomplete_scoring(
         if failed_enrichment:
             meta["enrichment_unavailable"] = failed_enrichment
         logger.error(
-            "Scoring %s degraded: incomplete after %d attempts "
-            "(scorers=%s enrichment=%s)",
-            r["tx_hash"][:16], attempts, failed_scorers, failed_enrichment,
+            "Scoring %s degraded: incomplete after %d attempts (scorers=%s enrichment=%s)",
+            r["tx_hash"][:16],
+            attempts,
+            failed_scorers,
+            failed_enrichment,
         )
         kept.append(r)
     return kept
@@ -450,7 +454,9 @@ def run_once(network: str) -> int:
     since, full_rescan = _poll_since(network)
     try:
         fetched = clickhouse.get_unanalyzed_transactions(
-            network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=since,
+            network,
+            settings.ANALYSIS_ENGINE_BATCH_SIZE,
+            since=since,
         )
     except Exception:
         # A failing full rescan must not block the cheap watermark path. Arm
@@ -463,12 +469,16 @@ def run_once(network: str) -> int:
             raise
         logger.error(
             "Full rescan poll failed for %s; arming backoff and falling back "
-            "to watermark poll this tick", network, exc_info=True,
+            "to watermark poll this tick",
+            network,
+            exc_info=True,
         )
         _last_full_rescan[network] = time.monotonic()
         full_rescan = False
         fetched = clickhouse.get_unanalyzed_transactions(
-            network, settings.ANALYSIS_ENGINE_BATCH_SIZE, since=watermark,
+            network,
+            settings.ANALYSIS_ENGINE_BATCH_SIZE,
+            since=watermark,
         )
     if not fetched:
         if full_rescan:

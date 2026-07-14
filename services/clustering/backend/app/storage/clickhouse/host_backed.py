@@ -165,8 +165,7 @@ class HostBackedRepo(ClickHouseRepo):
 
     def fetch_shape_features(self, target: str) -> pd.DataFrame:
         return self.client.query_df(
-            f"SELECT {self._SHAPE_SELECT} FROM {self._windowed_tx()} "
-            "ORDER BY tx_hash",
+            f"SELECT {self._SHAPE_SELECT} FROM {self._windowed_tx()} ORDER BY tx_hash",
             parameters=self._scope_params(target),
         )
 
@@ -214,8 +213,11 @@ class HostBackedRepo(ClickHouseRepo):
         # Raw-tx tables are empty in the integrated deployment; the watchlist is
         # the contracts registry.
         return [
-            {"target": c["target"], "target_type": c.get("target_type", "address"),
-             "tx_count": int(c.get("tx_count", 0) or 0)}
+            {
+                "target": c["target"],
+                "target_type": c.get("target_type", "address"),
+                "tx_count": int(c.get("tx_count", 0) or 0),
+            }
             for c in self.list_contracts()
         ]
 
@@ -254,8 +256,12 @@ class HostBackedRepo(ClickHouseRepo):
         return self._rows_to_dicts(keys, rows)
 
     def unclassified_tx_hashes(
-        self, target: str, feature_set: str, *,
-        run_id: str | None = None, model_id: str | None = None,
+        self,
+        target: str,
+        feature_set: str,
+        *,
+        run_id: str | None = None,
+        model_id: str | None = None,
     ) -> list[str]:
         params = self._scope_params(target)
         params["f"] = feature_set
@@ -290,7 +296,7 @@ class HostBackedRepo(ClickHouseRepo):
                 a.iso_score AS iso_score, a.lof_score AS lof_score,
                 a.dbscan_noise AS dbscan_noise, a.consensus AS consensus,
                 a.votes AS votes, a.score_rank AS score_rank,
-                {_tx_context_aliased('t')},
+                {_tx_context_aliased("t")},
                 toHour(t.block_time) AS hour_of_day,
                 toDayOfWeek(t.block_time) AS day_of_week
             FROM (
@@ -304,8 +310,18 @@ class HostBackedRepo(ClickHouseRepo):
             """,
             parameters=params,
         ).result_rows
-        keys = ["tx_hash", "iso_score", "lof_score", "dbscan_noise", "consensus",
-                "votes", "score_rank", *TX_CONTEXT_KEYS, "hour_of_day", "day_of_week"]
+        keys = [
+            "tx_hash",
+            "iso_score",
+            "lof_score",
+            "dbscan_noise",
+            "consensus",
+            "votes",
+            "score_rank",
+            *TX_CONTEXT_KEYS,
+            "hour_of_day",
+            "day_of_week",
+        ]
         return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score", "lof_score"))
 
     def cluster_summary(self, run_id: str, target: str) -> list[dict[str, Any]]:
@@ -334,8 +350,15 @@ class HostBackedRepo(ClickHouseRepo):
             """,
             parameters=params,
         ).result_rows
-        keys = ["cluster_id", "size", "avg_fees", "avg_output_lovelace",
-                "avg_inputs", "avg_outputs", "avg_assets"]
+        keys = [
+            "cluster_id",
+            "size",
+            "avg_fees",
+            "avg_output_lovelace",
+            "avg_inputs",
+            "avg_outputs",
+            "avg_assets",
+        ]
         return self._rows_to_dicts(keys, rows)
 
     def cluster_transactions(
@@ -360,8 +383,16 @@ class HostBackedRepo(ClickHouseRepo):
             """,
             parameters=params,
         ).result_rows
-        keys = ["tx_hash", "block_time", "fees", "total_output_lovelace",
-                "input_count", "output_count", "distinct_assets", "redeemer_count"]
+        keys = [
+            "tx_hash",
+            "block_time",
+            "fees",
+            "total_output_lovelace",
+            "input_count",
+            "output_count",
+            "distinct_assets",
+            "redeemer_count",
+        ]
         return self._rows_to_dicts(keys, rows)
 
     # --- writes the sidecar must not perform (no download, no duplication) ----

@@ -42,8 +42,17 @@ logger = logging.getLogger(__name__)
 # scored_at which keeps the ORIGINAL scoring time); the report windows on it so a
 # late-published old finding is still counted (see reports._count_...).
 _FIELDS = (
-    "target", "cluster_id", "iso_score", "lof_score", "consensus",
-    "votes", "verdict", "model_id", "feature_set", "evidence", "scored_at",
+    "target",
+    "cluster_id",
+    "iso_score",
+    "lof_score",
+    "consensus",
+    "votes",
+    "verdict",
+    "model_id",
+    "feature_set",
+    "evidence",
+    "scored_at",
     "published_at",
 )
 
@@ -66,12 +75,14 @@ _RESCUE_FETCH_CAP = 10_000
 def _client():
     """The host facade's per-thread Client, resolved late (monkeypatch-safe)."""
     from app.db import clickhouse
+
     return clickhouse._get_client()
 
 
 async def _run(fn, *args):
     """Run ``fn`` on the host facade's ClickHouse executor, resolved late."""
     from app.db import clickhouse
+
     return await clickhouse._in_executor(fn, *args)
 
 
@@ -128,7 +139,8 @@ def get_contract_anomaly(network: str, tx_hash: str) -> List[Dict[str, Any]]:
 
 
 def get_contract_anomaly_batch(
-    network: str, tx_hashes: List[str],
+    network: str,
+    tx_hashes: List[str],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Raw verdict rows grouped by tx_hash for a page of tx_hashes.
 
@@ -148,19 +160,23 @@ def get_contract_anomaly_batch(
 
 
 async def get_contract_anomaly_async(
-    network: str, tx_hash: str,
+    network: str,
+    tx_hash: str,
 ) -> List[Dict[str, Any]]:
     return await _run(get_contract_anomaly, network, tx_hash)
 
 
 async def get_contract_anomaly_batch_async(
-    network: str, tx_hashes: List[str],
+    network: str,
+    tx_hashes: List[str],
 ) -> Dict[str, List[Dict[str, Any]]]:
     return await _run(partial(get_contract_anomaly_batch, network, tx_hashes))
 
 
 def flagged_for_network(
-    network: str, limit: int = _RESCUE_FETCH_CAP, raise_on_error: bool = False,
+    network: str,
+    limit: int = _RESCUE_FETCH_CAP,
+    raise_on_error: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Raw verdict rows (grouped by tx_hash) for every NON-normal sidecar
     finding on a network, newest first, capped at ``limit``.
@@ -206,13 +222,16 @@ def flagged_for_network(
         logger.warning(
             "contract_anomaly flagged fetch hit the cap (%d raw rows) for %s; "
             "oldest findings beyond the cap are dropped and may be missed",
-            limit, network,
+            limit,
+            network,
         )
     return _group(rows)
 
 
 async def flagged_for_network_async(
-    network: str, limit: int = _RESCUE_FETCH_CAP, raise_on_error: bool = False,
+    network: str,
+    limit: int = _RESCUE_FETCH_CAP,
+    raise_on_error: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
     return await _run(partial(flagged_for_network, network, limit, raise_on_error))
 

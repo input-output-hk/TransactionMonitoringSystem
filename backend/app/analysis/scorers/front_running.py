@@ -37,9 +37,7 @@ _CFG = _get_cfg("front_running")
 _W = _CFG["weights"]
 _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
-_OUTCOME_SCORES: Dict[str, float] = {
-    k: float(v) for k, v in _CFG["outcome_scores"].items()
-}
+_OUTCOME_SCORES: Dict[str, float] = {k: float(v) for k, v in _CFG["outcome_scores"].items()}
 # Fallback score for an unrecognised outcome label (neutral midpoint; see config).
 _UNKNOWN_OUTCOME_SCORE = float(_CFG["unknown_outcome_score"])
 _REASON_T = _CFG["reason_thresholds"]
@@ -106,8 +104,12 @@ class FrontRunningScorer(BaseScorer):
         # spec conformance; the 24h value remains in evidence for analysts.
         win_count = collision.get("attacker_win_count", 0)
         p50_r, p99_r, bl1 = _resolve(
-            "collision_win_count", "per_cluster", "__global__", network,
-            _BOOT, "attacker_recurrence",
+            "collision_win_count",
+            "per_cluster",
+            "__global__",
+            network,
+            _BOOT,
+            "attacker_recurrence",
         )
         s_recurrence = normalise(win_count, p50=p50_r, p99=p99_r)
 
@@ -116,14 +118,18 @@ class FrontRunningScorer(BaseScorer):
         counterpart_fee = collision.get("counterpart_fee", 0)
         p50_f, p99_f = _anchor(_FIXED, "fee_delta")
         fee_sim = 1.0 - normalise(
-            abs(fee - counterpart_fee), p50=p50_f, p99=p99_f,
+            abs(fee - counterpart_fee),
+            p50=p50_f,
+            p99=p99_f,
         )
 
         ttl = extract_ttl(features.get("raw_data", {}))
         counterpart_ttl = collision.get("counterpart_ttl", 0)
         p50_t, p99_t = _anchor(_FIXED, "ttl_delta")
         ttl_sim = 1.0 - normalise(
-            abs(ttl - counterpart_ttl), p50=p50_t, p99=p99_t,
+            abs(ttl - counterpart_ttl),
+            p50=p50_t,
+            p99=p99_t,
         )
 
         change_link = 1.0 if collision.get("shares_change_address") else 0.0

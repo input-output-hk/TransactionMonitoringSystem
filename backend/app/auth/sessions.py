@@ -9,6 +9,7 @@ The session ID lives in an HTTP-only cookie named ``tms_session``. The
 SPA never reads or writes it; the browser includes it automatically on
 same-origin requests.
 """
+
 from __future__ import annotations
 
 import logging

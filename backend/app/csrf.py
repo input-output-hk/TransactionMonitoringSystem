@@ -71,7 +71,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if not cookie_token or not hmac.compare_digest(cookie_token, header_token):
             logger.warning(
                 "CSRF check failed for %s %s (missing or mismatched %s)",
-                request.method, request.url.path, CSRF_HEADER_NAME,
+                request.method,
+                request.url.path,
+                CSRF_HEADER_NAME,
             )
             return JSONResponse(
                 status_code=403,

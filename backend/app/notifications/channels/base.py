@@ -52,14 +52,14 @@ class NotificationResult:
 
     channel: str
     ok: bool
-    detail: str = ""        # "sent" / "http 200" / error string
-    skipped: bool = False   # disabled, or no resolved target (not a failure)
+    detail: str = ""  # "sent" / "http 200" / error string
+    skipped: bool = False  # disabled, or no resolved target (not a failure)
 
 
 class NotificationChannel(ABC):
     """Base class every delivery channel inherits."""
 
-    name: str = ""          # machine name: "email", "webhook", "sms", ...
+    name: str = ""  # machine name: "email", "webhook", "sms", ...
 
     @property
     @abstractmethod

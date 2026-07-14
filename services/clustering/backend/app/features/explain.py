@@ -73,9 +73,7 @@ def _band(magnitude: float, *, high: bool) -> str:
 _COMBINATION = Deviation("unusual combination", "combo", "no single feature is extreme")
 
 
-def _candidate_deviations(
-    z: np.ndarray, idx: dict[str, int]
-) -> list[tuple[float, Deviation]]:
+def _candidate_deviations(z: np.ndarray, idx: dict[str, int]) -> list[tuple[float, Deviation]]:
     """``(magnitude, Deviation)`` for every concept, unfiltered: each log feature by its
     signed robust-z (direction high/low), each cyclical pair by the magnitude of its
     2-vector (direction "unusual")."""

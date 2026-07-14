@@ -70,10 +70,13 @@ class TestScoreTransaction:
 
     def test_scorer_exception_handled(self):
         """A crashing scorer should not break the pipeline."""
+
         class BadScorer:
             name = "phishing"
+
             def gate(self, features):
                 raise RuntimeError("boom")
+
         row = _make_row()
         result = _score_transaction(row, [BadScorer()])
         assert result["phishing"] == -1.0  # stays at default
@@ -81,8 +84,16 @@ class TestScoreTransaction:
     def test_result_has_required_fields(self):
         row = _make_row()
         result = _score_transaction(row, _build_scorers())
-        for field in ("tx_hash", "network", "max_score", "max_class",
-                       "risk_band", "sub_scores", "analysis_version", "analyzed_at"):
+        for field in (
+            "tx_hash",
+            "network",
+            "max_score",
+            "max_class",
+            "risk_band",
+            "sub_scores",
+            "analysis_version",
+            "analyzed_at",
+        ):
             assert field in result
 
 
@@ -93,9 +104,9 @@ class TestCorroboration:
         class is excluded."""
         row = _make_row()
         scorers = [
-            _FixedScorer("sandwich", 50.0),     # >= 40 -> counts
-            _FixedScorer("token_dust", 45.0),   # >= 40 -> counts
-            _FixedScorer("circular", 10.0),     # < 40 -> excluded
+            _FixedScorer("sandwich", 50.0),  # >= 40 -> counts
+            _FixedScorer("token_dust", 45.0),  # >= 40 -> counts
+            _FixedScorer("circular", 10.0),  # < 40 -> excluded
         ]
         result = _score_transaction(row, scorers)
         assert result["corroboration_count"] == 2
@@ -292,5 +303,6 @@ class TestRescanBoundAndFallback:
         ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0
         mock_ch.get_unanalyzed_transactions.side_effect = RuntimeError("CH OOM")
         import pytest as _pytest
+
         with _pytest.raises(RuntimeError):
             _engine_mod.run_once("preprod")

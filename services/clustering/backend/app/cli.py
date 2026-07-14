@@ -195,7 +195,8 @@ def _rebuild_contract_anomaly_version(repo: ClickHouseRepo, db: str) -> None:
 @app.command()
 def migrate(
     init_dir: str = typer.Option(
-        "/init", help="Directory of NNN_*.sql migration files (compose mounts clickhouse/init here)."
+        "/init",
+        help="Directory of NNN_*.sql migration files (compose mounts clickhouse/init here).",
     ),
 ) -> None:
     """Apply the schema to the live ClickHouse, statement by statement.
@@ -255,7 +256,8 @@ def migrate(
                 typer.echo(f"STILL MISSING after migrate: {obj}", err=True)
             typer.echo(
                 "The init files don't create the objects above — add the next "
-                "NNN_*.sql migration (see docs/data-model.md).", err=True,
+                "NNN_*.sql migration (see docs/data-model.md).",
+                err=True,
             )
             raise typer.Exit(code=1)
         typer.echo("Schema is up to date.")
@@ -319,8 +321,10 @@ def evaluate(
     repo = _feature_repo()
     report = evaluate_target(repo, target, feature_set)
 
-    typer.echo(f"feature_set={report['feature_set']} metric={report['metric']} "
-               f"n_points={report['n_points']} n_features={report['n_features']}")
+    typer.echo(
+        f"feature_set={report['feature_set']} metric={report['metric']} "
+        f"n_points={report['n_points']} n_features={report['n_features']}"
+    )
     if report.get("message"):
         typer.echo(report["message"])
         return

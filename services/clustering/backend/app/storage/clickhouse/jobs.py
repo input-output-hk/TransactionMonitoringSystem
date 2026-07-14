@@ -28,8 +28,18 @@ _TERMINAL_JOB_STATUSES = ("done", "failed")
 _JOBS_LIST_LIMIT = 200
 
 _JOB_OUT_KEYS = [
-    "job_id", "target", "target_type", "max_txs", "reprocess", "kind", "status",
-    "stage_detail", "txs_done", "error", "created_at", "updated_at",
+    "job_id",
+    "target",
+    "target_type",
+    "max_txs",
+    "reprocess",
+    "kind",
+    "status",
+    "stage_detail",
+    "txs_done",
+    "error",
+    "created_at",
+    "updated_at",
 ]
 _JOB_INT_KEYS = ("max_txs", "reprocess", "txs_done")
 

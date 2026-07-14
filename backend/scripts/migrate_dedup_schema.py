@@ -97,14 +97,15 @@ def _is_v2(info) -> bool:
 
 def _distinct_key_count(client, table: str, key_cols) -> int:
     keys = ", ".join(key_cols)
-    rows = client.execute(
-        f"SELECT count() FROM (SELECT {keys} FROM {table} GROUP BY {keys})"
-    )
+    rows = client.execute(f"SELECT count() FROM (SELECT {keys} FROM {table} GROUP BY {keys})")
     return int(rows[0][0])
 
 
 def migrate_table(
-    client, table: str, apply: bool, legacy_suffix: str,
+    client,
+    table: str,
+    apply: bool,
+    legacy_suffix: str,
     buckets: int = _DEFAULT_HASH_BUCKETS,
     max_memory_bytes: int = _DEFAULT_MAX_MEMORY_BYTES,
 ) -> bool:
@@ -127,12 +128,15 @@ def migrate_table(
             client.execute(f"RENAME TABLE {mig} TO {legacy_name}")
             logger.info(
                 "%s: recovered stranded %s as %s (crash between EXCHANGE "
-                "and RENAME on a prior run)", table, mig, legacy_name,
+                "and RENAME on a prior run)",
+                table,
+                mig,
+                legacy_name,
             )
         else:
             logger.info(
-                "%s: already v2 (ReplacingMergeTree, no partition, wide "
-                "count columns); skipping", table,
+                "%s: already v2 (ReplacingMergeTree, no partition, wide count columns); skipping",
+                table,
             )
         return False
     if stale_cols:
@@ -144,7 +148,11 @@ def migrate_table(
     total_rows = int(client.execute(f"SELECT count() FROM {table}")[0][0])
     logger.info(
         "%s: legacy engine=%s rows=%d distinct_keys=%d (collapsing %d duplicates)",
-        table, info[0], total_rows, distinct_keys, total_rows - distinct_keys,
+        table,
+        info[0],
+        total_rows,
+        distinct_keys,
+        total_rows - distinct_keys,
     )
     if not apply:
         return False
@@ -200,7 +208,9 @@ def migrate_table(
     client.execute(f"RENAME TABLE {mig} TO {legacy_name}")
     logger.info(
         "%s: swapped to v2 (%d rows); legacy data preserved as %s",
-        table, migrated, legacy_name,
+        table,
+        migrated,
+        legacy_name,
     )
     return True
 
@@ -208,15 +218,20 @@ def migrate_table(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="Perform the migration (default: dry-run that only reports counts).",
     )
     parser.add_argument(
-        "--buckets", type=int, default=_DEFAULT_HASH_BUCKETS,
+        "--buckets",
+        type=int,
+        default=_DEFAULT_HASH_BUCKETS,
         help="tx_hash buckets per collapse INSERT (bounds GROUP BY memory).",
     )
     parser.add_argument(
-        "--max-memory-bytes", type=int, default=_DEFAULT_MAX_MEMORY_BYTES,
+        "--max-memory-bytes",
+        type=int,
+        default=_DEFAULT_MAX_MEMORY_BYTES,
         help="Per-INSERT max_memory_usage; external GROUP BY spills at half.",
     )
     args = parser.parse_args()
@@ -249,8 +264,12 @@ def main() -> int:
     swapped = 0
     for table in clickhouse.DEDUP_TABLE_KEYS:
         if migrate_table(
-            client, table, args.apply, legacy_suffix,
-            buckets=args.buckets, max_memory_bytes=args.max_memory_bytes,
+            client,
+            table,
+            args.apply,
+            legacy_suffix,
+            buckets=args.buckets,
+            max_memory_bytes=args.max_memory_bytes,
         ):
             swapped += 1
 
@@ -261,7 +280,8 @@ def main() -> int:
         logger.info("Migration complete: %d table(s) swapped. Schema verified v2.", swapped)
         logger.info(
             "Legacy tables are preserved with the __legacy_%s suffix; "
-            "drop them manually after a verification window.", legacy_suffix,
+            "drop them manually after a verification window.",
+            legacy_suffix,
         )
     else:
         logger.info("Dry-run complete. Re-run with --apply to migrate.")

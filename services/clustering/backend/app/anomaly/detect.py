@@ -52,6 +52,8 @@ def lof_k(n: int, lof_neighbors: int = LOF_NEIGHBORS) -> int:
     of size ``n``. The batch detector forwards its overridable ``lof_neighbors``;
     the online model takes the ``LOF_NEIGHBORS`` default."""
     return max(2, min(lof_neighbors, n - 1))
+
+
 # Fallback eps when no knee is found, chosen by metric: Jaccard distances live in
 # [0, 1] while Euclidean is unbounded, so they warrant different defaults.
 _FALLBACK_EPS_PRECOMPUTED = 0.5

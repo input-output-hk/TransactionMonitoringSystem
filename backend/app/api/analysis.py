@@ -64,7 +64,8 @@ async def get_analysis_result(
     result = _row_to_class_score(row)
     try:
         archive_meta = await archive_queries.archive_get_async(
-            row["network"], row["tx_hash"],
+            row["network"],
+            row["tx_hash"],
         )
         if archive_meta:
             result.archived = {
@@ -79,7 +80,8 @@ async def get_analysis_result(
     if settings.CLUSTERING_ENABLED:
         try:
             ca = await clustering_queries.get_contract_anomaly_async(
-                row["network"], row["tx_hash"],
+                row["network"],
+                row["tx_hash"],
             )
             if ca:
                 _merge_contract_anomaly(result, ca)
@@ -100,11 +102,14 @@ async def list_analysis_results(
         ),
     ),
     attack_class: Optional[str] = Query(
-        None, description="Filter by attack class name (e.g. phishing, sandwich)",
+        None,
+        description="Filter by attack class name (e.g. phishing, sandwich)",
     ),
     min_score: float = Query(0.0, ge=0.0, le=100.0, description="Minimum score filter"),
     min_corroboration: int = Query(
-        0, ge=0, le=len(_CLASS_NAMES),
+        0,
+        ge=0,
+        le=len(_CLASS_NAMES),
         description=(
             "Only include transactions where at least this many distinct attack "
             "classes independently corroborated (scored above the corroboration "
@@ -128,8 +133,7 @@ async def list_analysis_results(
     if attack_class and attack_class not in _VALID_ATTACK_CLASSES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown attack class '{attack_class}'. "
-            f"Valid: {list(_VALID_ATTACK_CLASSES)}",
+            detail=f"Unknown attack class '{attack_class}'. Valid: {list(_VALID_ATTACK_CLASSES)}",
         )
     if sort not in ("score", "date"):
         raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
@@ -167,8 +171,8 @@ async def list_analysis_results(
                 # a silent recall loss. ERROR + exc_info makes the next such bug
                 # loud instead of an invisible empty page.
                 logger.error(
-                    "contract_anomaly list filter: unexpected error, returning "
-                    "empty page", exc_info=True,
+                    "contract_anomaly list filter: unexpected error, returning empty page",
+                    exc_info=True,
                 )
                 ca_data, ca_total = [], 0
             return {"count": len(ca_data), "total": ca_total, "data": ca_data}
@@ -185,7 +189,10 @@ async def list_analysis_results(
             min_corroboration=min_corroboration,
         )
         rows = await clickhouse.get_class_scores_list_async(
-            **filters, sort=sort, limit=limit, offset=offset,
+            **filters,
+            sort=sort,
+            limit=limit,
+            offset=offset,
         )
         total = await clickhouse.count_class_scores_async(**filters)
         data = [_row_to_class_score(r) for r in rows]
@@ -194,11 +201,17 @@ async def list_analysis_results(
         # recall-safe and best-effort; see the helper docstrings.
         await _merge_overlay_onto_page(query_network, data)
         rescued_total = await _rescue_flagged_onto_page(
-            query_network, data,
-            min_score=min_score, bands=rbs,
-            attack_class=attack_class, min_corroboration=min_corroboration,
-            analyzed_from=analyzed_from, analyzed_to=analyzed_to,
-            sort=sort, limit=limit, offset=offset,
+            query_network,
+            data,
+            min_score=min_score,
+            bands=rbs,
+            attack_class=attack_class,
+            min_corroboration=min_corroboration,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            sort=sort,
+            limit=limit,
+            offset=offset,
         )
         return {
             "count": len(data),
@@ -249,7 +262,9 @@ async def analysis_stats_timeseries(
             # Best-effort: never fail the timeseries on a sidecar hiccup.
             try:
                 await _augment_timeseries_with_contract_anomaly(
-                    query_network, days, data,
+                    query_network,
+                    days,
+                    data,
                 )
             except Exception as e:
                 logger.warning(f"contract_anomaly timeseries augmentation failed: {e}")
@@ -269,7 +284,9 @@ async def get_baselines(
     query_network = network or settings.CARDANO_NETWORK
     try:
         rows = await clickhouse.get_baselines_for_scope_async(
-            query_network, scope_type, scope_id,
+            query_network,
+            scope_type,
+            scope_id,
         )
         return {
             "network": query_network,

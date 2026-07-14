@@ -66,9 +66,7 @@ def test_silhouette_sampling_is_deterministic_and_still_scores(
 ) -> None:
     # Cap below n: the score comes from a fixed-seed subsample, so it must stay
     # finite/high for well-separated blobs and be identical across repeat runs.
-    monkeypatch.setattr(
-        "app.config.get_settings", lambda: Settings(SILHOUETTE_SAMPLE_SIZE=20)
-    )
+    monkeypatch.setattr("app.config.get_settings", lambda: Settings(SILHOUETTE_SAMPLE_SIZE=20))
     ci = _two_blobs()
     first = run_dbscan(ci, eps=1.0, min_samples=5)
     second = run_dbscan(ci, eps=1.0, min_samples=5)
@@ -79,9 +77,7 @@ def test_silhouette_sampling_is_deterministic_and_still_scores(
 def test_silhouette_sampling_applies_to_precomputed_metric(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "app.config.get_settings", lambda: Settings(SILHOUETTE_SAMPLE_SIZE=20)
-    )
+    monkeypatch.setattr("app.config.get_settings", lambda: Settings(SILHOUETTE_SAMPLE_SIZE=20))
     shape = _two_blobs()
     D = _euclidean_distance_matrix(shape.data)
     ci = ClusteringInput(shape.tx_hashes, D, "precomputed", "graph", ["jaccard"])
@@ -96,9 +92,7 @@ def test_silhouette_cap_zero_disables_sampling(monkeypatch: pytest.MonkeyPatch) 
     # exact too and the two must match bit-for-bit).
     ci = _two_blobs()
     exact = run_dbscan(ci, eps=1.0, min_samples=5).silhouette
-    monkeypatch.setattr(
-        "app.config.get_settings", lambda: Settings(SILHOUETTE_SAMPLE_SIZE=0)
-    )
+    monkeypatch.setattr("app.config.get_settings", lambda: Settings(SILHOUETTE_SAMPLE_SIZE=0))
     assert run_dbscan(ci, eps=1.0, min_samples=5).silhouette == exact
 
 
@@ -120,8 +114,14 @@ def test_persist_run_records_graph_drop_in_notes() -> None:
     ci.dropped_txs = 40
     result = run_dbscan(ci, eps=1.0, min_samples=5)
     persist_run(
-        _Repo(), run_id="r1", target="t", ci=ci, eps=1.0, min_samples=5,
-        result=result, notes="auto: process_contract",
+        _Repo(),
+        run_id="r1",
+        target="t",
+        ci=ci,
+        eps=1.0,
+        min_samples=5,
+        result=result,
+        notes="auto: process_contract",
     )
     assert "auto: process_contract" in str(saved["notes"])
     assert "dropped 40 older" in str(saved["notes"])

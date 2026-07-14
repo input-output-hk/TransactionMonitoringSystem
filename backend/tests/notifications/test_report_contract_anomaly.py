@@ -32,7 +32,9 @@ def _w(band, scored_at, published_at=None, tx_hash="tx", score=90.0):
     """A fake resolved winner (only the fields the report reads). published_at
     defaults to scored_at (the common, non-relabel case)."""
     return {
-        "tx_hash": tx_hash, "risk_band": band, "score": score,
+        "tx_hash": tx_hash,
+        "risk_band": band,
+        "score": score,
         "scored_at": scored_at,
         "published_at": scored_at if published_at is None else published_at,
     }
@@ -42,8 +44,9 @@ def _w(band, scored_at, published_at=None, tx_hash="tx", score=90.0):
 def flagged(monkeypatch):
     data = {}
 
-    async def fake_flagged(network, limit=clustering_queries._RESCUE_FETCH_CAP,
-                           raise_on_error=False):
+    async def fake_flagged(
+        network, limit=clustering_queries._RESCUE_FETCH_CAP, raise_on_error=False
+    ):
         return data
 
     # resolve() echoes the tx's single pre-built winner, so the test drives band
@@ -56,14 +59,16 @@ def flagged(monkeypatch):
 
 
 async def test_count_filters_by_window_and_min_band(flagged):
-    flagged.update({
-        "in_high":  [_w(RiskBand("High"), datetime(2026, 6, 3, tzinfo=timezone.utc))],
-        "in_mod":   [_w(RiskBand("Moderate"), datetime(2026, 6, 4, tzinfo=timezone.utc))],
-        "in_info":  [_w(RiskBand("Informational"), datetime(2026, 6, 4, tzinfo=timezone.utc))],
-        "before":   [_w(RiskBand("Critical"), datetime(2026, 5, 1, tzinfo=timezone.utc))],
-        "after":    [_w(RiskBand("Critical"), datetime(2026, 7, 1, tzinfo=timezone.utc))],
-        "naive_in": [_w(RiskBand("Critical"), datetime(2026, 6, 5))],  # naive -> UTC
-    })
+    flagged.update(
+        {
+            "in_high": [_w(RiskBand("High"), datetime(2026, 6, 3, tzinfo=timezone.utc))],
+            "in_mod": [_w(RiskBand("Moderate"), datetime(2026, 6, 4, tzinfo=timezone.utc))],
+            "in_info": [_w(RiskBand("Informational"), datetime(2026, 6, 4, tzinfo=timezone.utc))],
+            "before": [_w(RiskBand("Critical"), datetime(2026, 5, 1, tzinfo=timezone.utc))],
+            "after": [_w(RiskBand("Critical"), datetime(2026, 7, 1, tzinfo=timezone.utc))],
+            "naive_in": [_w(RiskBand("Critical"), datetime(2026, 6, 5))],  # naive -> UTC
+        }
+    )
     found = await reports._contract_anomaly_in_window("preprod", _WS, _WE, "Moderate")
     # in_high + in_mod + naive_in; excludes Informational (< min), before, after.
     assert len(found) == 3
@@ -73,22 +78,28 @@ async def test_late_published_relabel_is_counted(flagged):
     # Recall case: a tx scored months ago, relabeled malicious THIS window keeps
     # its OLD scored_at but gets a FRESH published_at. Windowing on scored_at
     # alone would drop it from every report though the poller alerted on it.
-    flagged.update({
-        "relabel": [_w(
-            RiskBand("Critical"),
-            scored_at=datetime(2026, 1, 1, tzinfo=timezone.utc),      # old
-            published_at=datetime(2026, 6, 4, tzinfo=timezone.utc),   # in-window
-        )],
-    })
+    flagged.update(
+        {
+            "relabel": [
+                _w(
+                    RiskBand("Critical"),
+                    scored_at=datetime(2026, 1, 1, tzinfo=timezone.utc),  # old
+                    published_at=datetime(2026, 6, 4, tzinfo=timezone.utc),  # in-window
+                )
+            ],
+        }
+    )
     found = await reports._contract_anomaly_in_window("preprod", _WS, _WE, "Moderate")
     assert len(found) == 1
 
 
 async def test_count_ignores_non_datetime_stamps(flagged):
-    flagged.update({
-        "bad": [_w(RiskBand("Critical"), scored_at=None, published_at=None)],
-        "ok":  [_w(RiskBand("Critical"), datetime(2026, 6, 3, tzinfo=timezone.utc))],
-    })
+    flagged.update(
+        {
+            "bad": [_w(RiskBand("Critical"), scored_at=None, published_at=None)],
+            "ok": [_w(RiskBand("Critical"), datetime(2026, 6, 3, tzinfo=timezone.utc))],
+        }
+    )
     found = await reports._contract_anomaly_in_window("preprod", _WS, _WE, "Moderate")
     assert len(found) == 1
 
@@ -97,6 +108,7 @@ async def test_count_ignores_non_datetime_stamps(flagged):
 def stub_report_scans(monkeypatch):
     """Neutralise the scorer-side report queries so the test isolates the
     contract_anomaly override."""
+
     async def zero_counts(network, ws, we, bands):
         return {"total": 0, "by_band": {}, "by_class": {}}
 
@@ -111,20 +123,17 @@ def stub_report_scans(monkeypatch):
     monkeypatch.setattr(clickhouse_scores, "get_class_scores_list_async", no_rows)
 
 
-_CFG = {"min_band": "Moderate", "attack_classes": "all",
-        "window_days": 7, "frequency": "weekly"}
+_CFG = {"min_band": "Moderate", "attack_classes": "all", "window_days": 7, "frequency": "weekly"}
 
 
 async def test_report_populates_contract_anomaly_when_enabled(monkeypatch, stub_report_scans):
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
 
-    findings = [
-        _w(RiskBand("Critical"), _WS, tx_hash=f"tx{i}", score=90.0 - i)
-        for i in range(7)
-    ]
+    findings = [_w(RiskBand("Critical"), _WS, tx_hash=f"tx{i}", score=90.0 - i) for i in range(7)]
 
     async def fake_findings(network, ws, we, min_band):
         return findings
+
     monkeypatch.setattr(reports, "_contract_anomaly_in_window", fake_findings)
 
     report = await reports.build_periodic_report("preprod", _WS, _WE, _CFG)
@@ -144,19 +153,26 @@ async def test_report_top_alerts_rank_across_both_sources(monkeypatch, stub_repo
     monkeypatch.setattr(settings, "NOTIFY_REPORT_TOP_ALERTS", 1)
 
     async def one_scorer_row(*a, **k):
-        return [{
-            "tx_hash": "scorer_lo", "max_class": "phishing", "max_score": 61.0,
-            "risk_band": "High", "analyzed_at": _WS,
-        }]
+        return [
+            {
+                "tx_hash": "scorer_lo",
+                "max_class": "phishing",
+                "max_score": 61.0,
+                "risk_band": "High",
+                "analyzed_at": _WS,
+            }
+        ]
+
     monkeypatch.setattr(clickhouse_scores, "get_class_scores_list_async", one_scorer_row)
 
     async def fake_findings(network, ws, we, min_band):
         return [_w(RiskBand("Critical"), _WS, tx_hash="ca_hi", score=99.0)]
+
     monkeypatch.setattr(reports, "_contract_anomaly_in_window", fake_findings)
 
     report = await reports.build_periodic_report("preprod", _WS, _WE, _CFG)
     assert len(report.top_alerts) == 1
-    assert report.top_alerts[0].tx_hash == "ca_hi"          # higher score wins
+    assert report.top_alerts[0].tx_hash == "ca_hi"  # higher score wins
     assert report.top_alerts[0].attack_class == "contract_anomaly"
 
 
@@ -165,6 +181,7 @@ async def test_report_skips_contract_anomaly_when_disabled(monkeypatch, stub_rep
 
     async def boom(*a, **k):
         raise AssertionError("must not count contract_anomaly when sidecar is off")
+
     monkeypatch.setattr(reports, "_contract_anomaly_in_window", boom)
 
     report = await reports.build_periodic_report("preprod", _WS, _WE, _CFG)

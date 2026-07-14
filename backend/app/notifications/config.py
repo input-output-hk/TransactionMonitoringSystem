@@ -78,12 +78,24 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
 # camelCase / snake_case / kebab spellings of the same secret are all caught
 # (e.g. ``smtpPassword``, ``webhook_signing_secret``, ``api-key``).
 _FORBIDDEN_KEY_NORMS = {
-    "password", "passwd", "pass",
-    "secret", "secretkey", "signingsecret", "webhooksigningsecret",
+    "password",
+    "passwd",
+    "pass",
+    "secret",
+    "secretkey",
+    "signingsecret",
+    "webhooksigningsecret",
     "smtppassword",
-    "apikey", "apitoken", "accesstoken", "authtoken", "token",
-    "credential", "credentials", "creds",
-    "privatekey", "privkey",
+    "apikey",
+    "apitoken",
+    "accesstoken",
+    "authtoken",
+    "token",
+    "credential",
+    "credentials",
+    "creds",
+    "privatekey",
+    "privkey",
 }
 
 
@@ -112,6 +124,7 @@ async def refresh_from_db() -> Dict[str, Any]:
     """
     global _config
     from app.db import postgres  # late import: keep the module import tree flat
+
     doc = await postgres.get_notification_config()
     if doc is None:
         doc = copy.deepcopy(_DEFAULT_CONFIG)
@@ -157,15 +170,12 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
     version = data.get("version", 1)
     if version != 1:
         raise RuntimeError(
-            f"{source}: unsupported config version {version!r} (this build "
-            "understands version 1)."
+            f"{source}: unsupported config version {version!r} (this build understands version 1)."
         )
     # ── channels ──
     channels = data.get("channels")
     if not isinstance(channels, dict) or not channels:
-        raise RuntimeError(
-            f"{source} must contain a non-empty 'channels' mapping."
-        )
+        raise RuntimeError(f"{source} must contain a non-empty 'channels' mapping.")
     for name, spec in channels.items():
         if not isinstance(spec, dict):
             raise RuntimeError(f"{source}: channels.{name} must be a mapping.")
@@ -198,10 +208,9 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
         for r in recips:
             if not isinstance(r, str):
                 raise RuntimeError(f"{source}: {ref} entries must be strings.")
-            if r.startswith(_GROUP_PREFIX) and r[len(_GROUP_PREFIX):] not in groups:
+            if r.startswith(_GROUP_PREFIX) and r[len(_GROUP_PREFIX) :] not in groups:
                 raise RuntimeError(
-                    f"{source}: {ref} references undefined group "
-                    f"'{r[len(_GROUP_PREFIX):]}'."
+                    f"{source}: {ref} references undefined group '{r[len(_GROUP_PREFIX) :]}'."
                 )
 
     def _check_webhook_url(ref: str, url: Any) -> None:
@@ -210,9 +219,7 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
         # Empty means "no URL"; otherwise require an http(s) scheme so a stored
         # doc can't smuggle file://, gopher://, etc. into the egress path.
         if url and not url.startswith(("http://", "https://")):
-            raise RuntimeError(
-                f"{source}: {ref} must be an http(s) URL (got {url!r})."
-            )
+            raise RuntimeError(f"{source}: {ref} must be an http(s) URL (got {url!r}).")
         if url and is_internal_webhook_target(url) and not settings.WEBHOOK_ALLOW_INTERNAL:
             raise RuntimeError(
                 f"{source}: {ref} points at a loopback/private/link-local "
@@ -293,9 +300,7 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
             )
         wd = report.get("window_days", 7)
         if not isinstance(wd, int) or isinstance(wd, bool) or wd <= 0:
-            raise RuntimeError(
-                f"{source}: periodic_report.window_days must be a positive integer."
-            )
+            raise RuntimeError(f"{source}: periodic_report.window_days must be a positive integer.")
         _check_channel_list("periodic_report.channels", report.get("channels", []))
         if "recipients" in report:
             _check_recipients("periodic_report.recipients", report["recipients"])
@@ -321,6 +326,7 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
 
 
 # ── Accessors (sync, cache-only — never do I/O here) ───────────────────
+
 
 def channels_config() -> Dict[str, Any]:
     return load().get("channels", {})
@@ -361,11 +367,7 @@ def resolve_recipients(recipients: List[str]) -> List[str]:
     out: List[str] = []
     seen: set = set()
     for r in recipients or []:
-        members = (
-            groups.get(r[len(_GROUP_PREFIX):], [])
-            if r.startswith(_GROUP_PREFIX)
-            else [r]
-        )
+        members = groups.get(r[len(_GROUP_PREFIX) :], []) if r.startswith(_GROUP_PREFIX) else [r]
         for m in members:
             if m not in seen:
                 seen.add(m)
@@ -390,7 +392,11 @@ def report_enabled() -> bool:
 # Public webhook inspectors — fine for testing, never a destination for real
 # alert payloads (full tx data egresses in plaintext to a third party).
 _PUBLIC_INSPECTOR_HOSTS = (
-    "webhook.site", "requestbin", "pipedream.net", "beeceptor.com", "hookbin.com",
+    "webhook.site",
+    "requestbin",
+    "pipedream.net",
+    "beeceptor.com",
+    "hookbin.com",
 )
 
 

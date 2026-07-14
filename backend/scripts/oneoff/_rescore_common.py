@@ -61,7 +61,7 @@ def write(client, corrected):
     per-partition loop.
     """
     for start in range(0, len(corrected), WRITE_CHUNK_ROWS):
-        chunk = corrected[start:start + WRITE_CHUNK_ROWS]
+        chunk = corrected[start : start + WRITE_CHUNK_ROWS]
         clickhouse.insert_class_scores(chunk)
         print(f"  wrote rows {start + 1}-{start + len(chunk)} / {len(corrected)}")
     client.execute("OPTIMIZE TABLE tx_class_scores FINAL")

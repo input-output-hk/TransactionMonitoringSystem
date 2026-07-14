@@ -12,6 +12,7 @@ Endpoints:
 - ``DELETE /api/users/{id}``                  — remove user + revoke sessions
 - ``POST   /api/users/{id}/resend-invite``    — regenerate token + email
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,16 +33,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-_USER_COLUMNS = (
-    "id, email, full_name, role, status, created_at, last_login_at"
-)
+_USER_COLUMNS = "id, email, full_name, role, status, created_at, last_login_at"
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
 
 async def _issue_invite_email(
-    user_id: UUID, email: str, full_name: str,
+    user_id: UUID,
+    email: str,
+    full_name: str,
 ) -> None:
     """Mint an invite token and best-effort send the magic link.
 
@@ -59,7 +60,10 @@ async def _issue_invite_email(
         )
     except Exception as e:
         logger.error(
-            "invite issuance failed for user %s (%s): %s", user_id, email, e,
+            "invite issuance failed for user %s (%s): %s",
+            user_id,
+            email,
+            e,
         )
 
 
@@ -158,7 +162,8 @@ async def delete_user(
 
     async with get_connection() as conn:
         target = await conn.fetchrow(
-            "SELECT role, status FROM users WHERE id = $1", user_id,
+            "SELECT role, status FROM users WHERE id = $1",
+            user_id,
         )
         if target is None:
             raise HTTPException(
@@ -188,7 +193,9 @@ async def delete_user(
         revoked = await delete_all_sessions_for_user(user_id)
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
         logger.info(
-            "Deleted user %s (revoked %d active sessions)", user_id, revoked,
+            "Deleted user %s (revoked %d active sessions)",
+            user_id,
+            revoked,
         )
 
 

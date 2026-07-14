@@ -16,6 +16,7 @@ Two dependency shapes:
 - ``require_user`` / ``require_admin`` — raise ``401`` / ``403``
   appropriately. Use when the route is human-only.
 """
+
 from __future__ import annotations
 
 import logging
@@ -52,6 +53,7 @@ async def current_user(request: Request) -> Optional[dict]:
         # which already imports from app.config — keeping the import
         # tree flat helps `python -m app.cli` cold-start.
         from app.auth.tokens import claim_session_token
+
         await claim_session_token(
             session_id=user["session_id"],
             token_hash=user["created_by_token_hash"],

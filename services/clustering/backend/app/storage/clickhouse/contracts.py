@@ -46,12 +46,28 @@ _CONTRACT_DEFAULTS: dict[str, Any] = {
 # by the SELECT projection and the row mapper) plus the int-coerced subset. The DB
 # ``present`` column surfaces as ``exists``.
 _CONTRACT_OUT_KEYS = [
-    "target", "target_type", "label", "exists", "is_script", "script_type",
-    "balance_lovelace", "asset_count", "sample_tokens", "status",
-    "requested_max_txs", "updated_at", "tx_count", "drift_score",
+    "target",
+    "target_type",
+    "label",
+    "exists",
+    "is_script",
+    "script_type",
+    "balance_lovelace",
+    "asset_count",
+    "sample_tokens",
+    "status",
+    "requested_max_txs",
+    "updated_at",
+    "tx_count",
+    "drift_score",
 ]
 _CONTRACT_INT_KEYS = (
-    "exists", "is_script", "balance_lovelace", "asset_count", "requested_max_txs", "tx_count",
+    "exists",
+    "is_script",
+    "balance_lovelace",
+    "asset_count",
+    "requested_max_txs",
+    "tx_count",
 )
 _CONTRACT_FLOAT_KEYS = ("drift_score",)
 
@@ -121,7 +137,10 @@ class _ContractMixin(_RepoBase):
         return [self._contract_row_to_dict(r) for r in rows]
 
     def get_contract(self, target: str) -> dict[str, Any] | None:
-        sql = self._CONTRACT_SELECT.format(db=self._db, where="WHERE target = {t:String}") + " LIMIT 1"
+        sql = (
+            self._CONTRACT_SELECT.format(db=self._db, where="WHERE target = {t:String}")
+            + " LIMIT 1"
+        )
         rows = self.client.query(sql, parameters={"t": target}).result_rows
         return self._contract_row_to_dict(rows[0]) if rows else None
 

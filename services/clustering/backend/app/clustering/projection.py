@@ -91,9 +91,7 @@ def _top_features(loadings: np.ndarray, names: list[str] | None) -> list[tuple[s
     return [(names[i], round(float(loadings[i]), 3)) for i in order]
 
 
-def _pca(
-    X: np.ndarray, k: int, names: list[str] | None
-) -> tuple[np.ndarray, list[AxisInfo]]:
+def _pca(X: np.ndarray, k: int, names: list[str] | None) -> tuple[np.ndarray, list[AxisInfo]]:
     if X.ndim != 2 or X.shape[1] == 0:
         return np.zeros((X.shape[0], k)), [AxisInfo() for _ in range(k)]
     k = min(k, X.shape[1])

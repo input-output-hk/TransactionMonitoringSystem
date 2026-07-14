@@ -194,9 +194,7 @@ def detect_cycle(
                 # Cycle found
                 all_cycle_addresses.extend(list(current_addresses))
                 all_cycle_addresses.append(out_addr)
-                hops.append(
-                    {"address": out_addr, "amount_lovelace": out_amt, "slot": slot}
-                )
+                hops.append({"address": out_addr, "amount_lovelace": out_amt, "slot": slot})
 
                 return _build_cycle_result(
                     cycle_length=hop + 1,
@@ -215,9 +213,7 @@ def detect_cycle(
 
         all_cycle_addresses.extend(list(current_addresses))
         hop_repr = _first_sorted(current_addresses)
-        hops.append(
-            {"address": hop_repr, "amount_lovelace": hop_amount, "slot": hop_slot}
-        )
+        hops.append({"address": hop_repr, "amount_lovelace": hop_amount, "slot": hop_slot})
         visited_addresses |= next_addresses
         current_addresses = next_addresses
 
@@ -320,10 +316,7 @@ def _build_cycle_result(
     n_total = len(addresses)
     n_unique = len(addr_counts)
     if n_unique > 1 and n_total > 0:
-        entropy = -sum(
-            (c / n_total) * math.log2(c / n_total)
-            for c in addr_counts.values()
-        )
+        entropy = -sum((c / n_total) * math.log2(c / n_total) for c in addr_counts.values())
         max_entropy = math.log2(n_unique)
         entropy = entropy / max_entropy if max_entropy > 0 else 0.0
     else:
@@ -344,7 +337,11 @@ def _build_cycle_result(
 
     # Mean inter-hop delta in slots
     if len(hop_slots) >= 2:
-        deltas = [hop_slots[i + 1] - hop_slots[i] for i in range(len(hop_slots) - 1) if hop_slots[i + 1] > hop_slots[i]]
+        deltas = [
+            hop_slots[i + 1] - hop_slots[i]
+            for i in range(len(hop_slots) - 1)
+            if hop_slots[i + 1] > hop_slots[i]
+        ]
         mean_delta = sum(deltas) / len(deltas) if deltas else float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
     else:
         mean_delta = float(_DEFAULT_INTER_HOP_DELTA_SLOTS)

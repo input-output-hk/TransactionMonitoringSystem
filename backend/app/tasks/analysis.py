@@ -82,8 +82,7 @@ async def _loop():
         # thread-pool executor so the blocking HTTP work occupies neither
         # the event loop nor the ClickHouse workers.
         registry_needed = settings.SCORER_FAKE_TOKEN_ENABLED and (
-            settings.CARDANO_NETWORK == "mainnet"
-            or settings.FAKE_TOKEN_TESTNET_MODE
+            settings.CARDANO_NETWORK == "mainnet" or settings.FAKE_TOKEN_TESTNET_MODE
         )
         refresh_interval = settings.TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS * 3600
         if registry_needed and time.time() - _last_registry_refresh > refresh_interval:

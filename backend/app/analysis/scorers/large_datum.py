@@ -60,9 +60,7 @@ _LEAF_CONCENTRATION_MAX = float(_CFG["gate"]["leaf_concentration_max"])
 # regardless of entropy, because it approaches the point where a consuming tx
 # can no longer fit under maxTxSize. Robust against a high-entropy (random)
 # padding attack that evades the entropy gate. Derived from the tx-size limit.
-_SIZE_BACKSTOP = _fraction_of_limit(
-    _CFG["gate"]["size_backstop_fraction"], "max_tx_size_bytes"
-)
+_SIZE_BACKSTOP = _fraction_of_limit(_CFG["gate"]["size_backstop_fraction"], "max_tx_size_bytes")
 _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
 # Observability flag for datumHash-only outputs at script addresses. The
 # referenced datum cannot be sized without an indexer, so a bloat-by-hash
@@ -203,7 +201,12 @@ class LargeDatumScorer(BaseScorer):
 
             candidates.append(
                 self._score_utxo(
-                    out, addr, datum_bytes, datum_flag, network, max_script_datum_bytes,
+                    out,
+                    addr,
+                    datum_bytes,
+                    datum_flag,
+                    network,
+                    max_script_datum_bytes,
                 )
             )
 
@@ -222,23 +225,23 @@ class LargeDatumScorer(BaseScorer):
         # `large_datum` as `max_class` (-1 is filtered out by
         # `applicable = {k: v ... if v >= 0}`); writing -1 to the column
         # matches the existing "scorer didn't produce a finding" convention.
-        hash_only_addrs = (
-            _datum_hash_only_addresses(outputs) if _FLAG_DATUM_HASH_ONLY else []
-        )
+        hash_only_addrs = _datum_hash_only_addresses(outputs) if _FLAG_DATUM_HASH_ONLY else []
         return ScorerResult.no_finding(
             sub_scores={
                 "max_script_datum_bytes": float(max_script_datum_bytes),
                 "datum_hash_only_count": float(len(hash_only_addrs)),
             },
-            evidence=(
-                {"datum_hash_only_addresses": hash_only_addrs}
-                if hash_only_addrs else {}
-            ),
+            evidence=({"datum_hash_only_addresses": hash_only_addrs} if hash_only_addrs else {}),
         )
 
     def _score_utxo(
-        self, output: Dict, address: str, datum_bytes: int, datum_flag: int,
-        network: str, max_script_datum_bytes: int,
+        self,
+        output: Dict,
+        address: str,
+        datum_bytes: int,
+        datum_flag: int,
+        network: str,
+        max_script_datum_bytes: int,
     ) -> ScorerResult:
         value = output.get("value", {})
         if not isinstance(value, dict):
@@ -252,13 +255,21 @@ class LargeDatumScorer(BaseScorer):
 
         # datum_bytes: per-script baseline
         p50_db, p99_db, bl1 = _resolve(
-            "datum_bytes", "per_script", address, network,
-            _BOOT, "datum_bytes",
+            "datum_bytes",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "datum_bytes",
         )
         # value_cbor_bytes: per-script baseline (for inversion)
         p50_cb, p99_cb, _ = _resolve(
-            "value_cbor_bytes", "per_script", address, network,
-            _BOOT, "value_cbor_bytes",
+            "value_cbor_bytes",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "value_cbor_bytes",
         )
         p50_r, p99_r = _anchor(_FIXED, "datum_ratio")
         bl_source = bl1

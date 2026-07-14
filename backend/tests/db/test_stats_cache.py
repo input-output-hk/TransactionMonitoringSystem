@@ -46,7 +46,8 @@ class TestStatsCache:
         monkeypatch.setattr(settings, "STATS_CACHE_TTL_SECONDS", 60)
         clock = {"t": 1000.0}
         monkeypatch.setattr(
-            "app.db.clickhouse_scores.time.monotonic", lambda: clock["t"],
+            "app.db.clickhouse_scores.time.monotonic",
+            lambda: clock["t"],
         )
         clickhouse_scores.get_class_scores_stats("preprod")
         clock["t"] += 61.0

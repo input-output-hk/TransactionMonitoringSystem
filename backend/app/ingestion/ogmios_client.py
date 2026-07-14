@@ -73,7 +73,7 @@ class OgmiosClient:
 
         # Connection state
         self._chain_ws = None
-        self._running = True   # set once here; disconnect() sets it False to stop loops
+        self._running = True  # set once here; disconnect() sets it False to stop loops
         self._connected_chain = False
 
         # Strong references to in-flight delayed score-repurge tasks: a bare
@@ -98,10 +98,10 @@ class OgmiosClient:
 
         # Telemetry — used by /health and pipeline_state
         self._started_at: datetime = datetime.now(timezone.utc)
-        self._last_msg_at: Optional[datetime] = None       # any Ogmios message
-        self._last_block_at: Optional[datetime] = None     # last roll-forward
-        self._last_processed_slot: Optional[int] = None    # slot of last confirmed block
-        self._tip_slot: Optional[int] = None               # chain tip reported by Ogmios
+        self._last_msg_at: Optional[datetime] = None  # any Ogmios message
+        self._last_block_at: Optional[datetime] = None  # last roll-forward
+        self._last_processed_slot: Optional[int] = None  # slot of last confirmed block
+        self._tip_slot: Optional[int] = None  # chain tip reported by Ogmios
 
         # Resilience for the chain-sync connection; the mempool monitor owns
         # its own breaker so chain and mempool failures stay isolated.
@@ -189,7 +189,8 @@ class OgmiosClient:
             try:
                 ws = await self._ensure_query_ws()
                 resp = await self._send_recv(
-                    ws, "queryLedgerState/utxo",
+                    ws,
+                    "queryLedgerState/utxo",
                     {"outputReferences": output_refs},
                 )
                 if "error" in resp:
@@ -225,6 +226,7 @@ class OgmiosClient:
 
     async def run_chain_sync(self):
         """Connect to Ogmios and run the ChainSync mini-protocol with resilience."""
+
         async def _connect():
             self._chain_ws = await self._connect_ws("chain")
             return self._chain_ws
@@ -266,9 +268,11 @@ class OgmiosClient:
 
         if sync_point:
             logger.info(f"Ogmios [chain]: resuming from slot {sync_point['slot']}")
-            resp = await self._send_recv(ws, "findIntersection", {
-                "points": [{"slot": sync_point["slot"], "id": sync_point["id"]}]
-            })
+            resp = await self._send_recv(
+                ws,
+                "findIntersection",
+                {"points": [{"slot": sync_point["slot"], "id": sync_point["id"]}]},
+            )
             # Fail loudly if the checkpoint does not intersect the node's chain.
             # Ogmios returns a JSON-RPC error (IntersectionNotFound) here; if we
             # fell through to nextBlock the read pointer would sit at origin and
@@ -287,9 +291,9 @@ class OgmiosClient:
             resp = await self._send_recv(ws, "findIntersection", {"points": ["origin"]})
             tip = resp.get("result", {}).get("tip", {})
             if isinstance(tip, dict) and "slot" in tip:
-                resp = await self._send_recv(ws, "findIntersection", {
-                    "points": [{"slot": tip["slot"], "id": tip["id"]}]
-                })
+                resp = await self._send_recv(
+                    ws, "findIntersection", {"points": [{"slot": tip["slot"], "id": tip["id"]}]}
+                )
                 logger.info(f"Ogmios [chain]: intersected at tip slot {tip['slot']}")
 
         while self._running:
@@ -323,7 +327,8 @@ class OgmiosClient:
             start_resp = await self._send_recv(ws, "queryNetwork/startTime")
             eras_resp = await self._send_recv(ws, "queryLedgerState/eraSummaries")
             converter = SlotTimeConverter.from_ogmios(
-                start_resp.get("result"), eras_resp.get("result"),
+                start_resp.get("result"),
+                eras_resp.get("result"),
             )
         except Exception as e:
             logger.warning(f"Ogmios [chain]: slot-time queries failed: {e}")
@@ -385,10 +390,7 @@ class OgmiosClient:
                     f"slot or checkpoint past it. Checkpoint NOT advanced, "
                     f"block will replay after reconnect."
                 )
-            logger.info(
-                f"Ogmios [chain]: slotless boundary block {block_id} "
-                f"skipped (Byron EBB)"
-            )
+            logger.info(f"Ogmios [chain]: slotless boundary block {block_id} skipped (Byron EBB)")
             return
 
         # Update telemetry: tip comes from the nextBlock result envelope
@@ -405,15 +407,17 @@ class OgmiosClient:
 
         now = datetime.now(timezone.utc)
         normalized_txs, confirmed_records = await self._parse_block_txs(
-            transactions, block_id, block_slot, block_height, now,
+            transactions,
+            block_id,
+            block_slot,
+            block_height,
+            now,
         )
 
         # Resolve input amounts from ClickHouse + intra-block outputs
         if normalized_txs:
             try:
-                normalized_txs = await resolve_input_amounts(
-                    normalized_txs, self.network
-                )
+                normalized_txs = await resolve_input_amounts(normalized_txs, self.network)
             except Exception as e:
                 logger.error(f"Input amount resolution failed (non-fatal): {e}")
 
@@ -439,7 +443,11 @@ class OgmiosClient:
 
             await self.mempool.record_displacements(normalized_txs, now_utc)
             await self.mempool.settle_confirmed(
-                normalized_txs, now, block_id, block_slot, block_height,
+                normalized_txs,
+                now,
+                block_id,
+                block_slot,
+                block_height,
             )
 
         await postgres.save_sync_point(self.network, block_slot, block_id)
@@ -477,9 +485,7 @@ class OgmiosClient:
         # its true position instead of collapsing it into "now". Wall clock
         # only when the converter is unavailable. Lifecycle records below
         # keep `now`: confirmed_at is operational observation time.
-        block_time = (
-            self._slot_time.slot_to_utc(block_slot) if self._slot_time else None
-        )
+        block_time = self._slot_time.slot_to_utc(block_slot) if self._slot_time else None
         if block_time is None and self._slot_time is not None:
             # The slot is beyond the summaries' forecast horizon: the node
             # crossed an era boundary since the fetch, or a long-lived
@@ -530,12 +536,14 @@ class OgmiosClient:
                 if settings.RAW_STORE_ENABLED:
                     try:
                         await raw_store.write_parse_failed(
-                            self.network, tx_id, tx_data, now,
+                            self.network,
+                            tx_id,
+                            tx_data,
+                            now,
                         )
                     except Exception as store_e:
                         logger.error(
-                            f"Failed to preserve raw payload for unparseable "
-                            f"tx {tx_id}: {store_e}"
+                            f"Failed to preserve raw payload for unparseable tx {tx_id}: {store_e}"
                         )
         return normalized_txs, confirmed_records
 
@@ -565,13 +573,18 @@ class OgmiosClient:
         if not settings.RAW_STORE_ENABLED:
             return
         try:
-            await asyncio.gather(*[
-                raw_store.write_confirmed(
-                    self.network, tx.tx_hash, tx.raw_data, tx.timestamp,
-                )
-                for tx in normalized_txs
-                if tx.raw_data
-            ])
+            await asyncio.gather(
+                *[
+                    raw_store.write_confirmed(
+                        self.network,
+                        tx.tx_hash,
+                        tx.raw_data,
+                        tx.timestamp,
+                    )
+                    for tx in normalized_txs
+                    if tx.raw_data
+                ]
+            )
         except Exception as e:
             if settings.RAW_DATA_MAX_BYTES > 0:
                 raise BlockPersistError(
@@ -582,7 +595,9 @@ class OgmiosClient:
             logger.error(f"Error writing raw store for block {block_slot}: {e}")
 
     async def _insert_block_with_retry(
-        self, normalized_txs: List[NormalizedTransaction], block_slot: int,
+        self,
+        normalized_txs: List[NormalizedTransaction],
+        block_slot: int,
     ) -> None:
         """Persist a block's transactions to ClickHouse, retrying with
         exponential backoff; raise BlockPersistError on exhaustion.
@@ -600,9 +615,11 @@ class OgmiosClient:
             except Exception as e:
                 last_err = e
                 logger.warning(
-                    "ClickHouse insert for block %s failed "
-                    "(attempt %d/%d): %s",
-                    block_slot, attempt, max_attempts, e,
+                    "ClickHouse insert for block %s failed (attempt %d/%d): %s",
+                    block_slot,
+                    attempt,
+                    max_attempts,
+                    e,
                 )
                 if attempt < max_attempts:
                     await asyncio.sleep(delay)
@@ -659,12 +676,14 @@ class OgmiosClient:
         # transient condition.
         if settings.ROLLBACK_CLEANUP_ENABLED and not rolled_back_to_origin:
             purged_hashes = await clickhouse.delete_rolled_back_txs_async(
-                self.network, rollback_slot,
+                self.network,
+                rollback_slot,
             )
             if purged_hashes:
                 logger.warning(
-                    "Rollback cleanup: purged %d orphaned tx(s) past slot %s "
-                    "from ClickHouse", len(purged_hashes), rollback_slot,
+                    "Rollback cleanup: purged %d orphaned tx(s) past slot %s from ClickHouse",
+                    len(purged_hashes),
+                    rollback_slot,
                 )
                 # Second tx_class_scores pass after a delay: an engine batch
                 # in flight during the purge can insert a stale score row
@@ -680,11 +699,10 @@ class OgmiosClient:
                 # the purge above: a write failure propagates, the
                 # connection resets, and the node re-sends the rollback.
                 await postgres.add_pending_score_repurges(
-                    self.network, purged_hashes,
+                    self.network,
+                    purged_hashes,
                 )
-                task = asyncio.create_task(
-                    self._delayed_score_repurge(purged_hashes)
-                )
+                task = asyncio.create_task(self._delayed_score_repurge(purged_hashes))
                 # Strong reference until completion: the event loop only
                 # holds tasks weakly, and a GC'd task silently drops the
                 # delayed pass (the persisted row would still recover it on
@@ -697,7 +715,8 @@ class OgmiosClient:
                 # contract_anomaly rows for vanished txs and makes any
                 # re-confirmed tx "unclassified" again so the feed re-scores it.
                 await clickhouse.delete_clustering_rows_async(
-                    self.network, purged_hashes,
+                    self.network,
+                    purged_hashes,
                 )
 
         if rollback_id:
@@ -707,12 +726,14 @@ class OgmiosClient:
         # the monitor's dedup set so they re-enter tracking.
         self.mempool.clear_on_rollback()
 
-        await self._emit({
-            "eventType": "TX_ROLLED_BACK",
-            "network": self.network,
-            "observedAt": datetime.now(timezone.utc).isoformat(),
-            "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
-        })
+        await self._emit(
+            {
+                "eventType": "TX_ROLLED_BACK",
+                "network": self.network,
+                "observedAt": datetime.now(timezone.utc).isoformat(),
+                "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
+            }
+        )
 
     async def _delayed_score_repurge(self, hashes: List[str]) -> None:
         """Re-delete tx_class_scores rows for rolled-back txs after a delay.
@@ -737,7 +758,8 @@ class OgmiosClient:
             await clickhouse.delete_score_rows_async(self.network, hashes)
             await postgres.clear_pending_score_repurges(self.network, hashes)
             logger.info(
-                "Rollback score repurge: re-cleared %d tx(s)", len(hashes),
+                "Rollback score repurge: re-cleared %d tx(s)",
+                len(hashes),
             )
         except Exception:
             logger.exception(

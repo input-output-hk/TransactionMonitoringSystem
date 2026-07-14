@@ -16,16 +16,17 @@ from app.api._params import NetworkParam
 logger = logging.getLogger(__name__)
 
 # Cardano tx hash: exactly 64 lowercase hex characters.
-_TX_HASH_RE = re.compile(r'^[0-9a-f]{64}$')
+_TX_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # Cardano addresses: bech32 (addr1.../addr_test1...) and legacy base58 (Ae2.../Dzz...).
 # Only alphanumeric + underscore; no SQL metacharacters possible.
-_ADDRESS_RE = re.compile(r'^[A-Za-z0-9_]{10,200}$')
+_ADDRESS_RE = re.compile(r"^[A-Za-z0-9_]{10,200}$")
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
 
 class TransactionResponse(BaseModel):
     """Transaction response model"""
+
     tx_hash: str
     slot: Optional[int]
     block_height: Optional[int]
@@ -43,6 +44,7 @@ class TransactionResponse(BaseModel):
 
 class TransactionDetailResponse(TransactionResponse):
     """Detailed transaction response with inputs and outputs"""
+
     inputs: List[Dict[str, Any]]
     outputs: List[Dict[str, Any]]
     metadata: Optional[Dict[str, Any]] = None
@@ -149,26 +151,32 @@ async def get_transaction_by_hash(
 ):
     """Get detailed transaction information by hash"""
     if not _TX_HASH_RE.match(tx_hash):
-        raise HTTPException(status_code=422, detail="Invalid transaction hash: must be 64 lowercase hex characters")
+        raise HTTPException(
+            status_code=422, detail="Invalid transaction hash: must be 64 lowercase hex characters"
+        )
     try:
         query_network = network or settings.CARDANO_NETWORK
         params = {"tx_hash": tx_hash, "network": query_network}
 
-        tx_results = await clickhouse.execute_query_async("""
+        tx_results = await clickhouse.execute_query_async(
+            """
             SELECT
                 tx_hash, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
                 input_count, output_count, total_input_value, total_output_value, addresses, metadata
             FROM transactions
             WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             LIMIT 1
-        """, params)
+        """,
+            params,
+        )
 
         if not tx_results:
             raise HTTPException(status_code=404, detail="Transaction not found")
 
         tx_row = tx_results[0]
 
-        inputs_results = await clickhouse.execute_query_async("""
+        inputs_results = await clickhouse.execute_query_async(
+            """
             SELECT
                 input_tx_hash, input_index_in_tx, address, amount, assets,
                 is_reference, is_collateral, is_unspent_attempt
@@ -176,7 +184,9 @@ async def get_transaction_by_hash(
             WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             ORDER BY input_index
             LIMIT 500
-        """, params)
+        """,
+            params,
+        )
 
         inputs = []
         for row in inputs_results:
@@ -186,27 +196,32 @@ async def get_transaction_by_hash(
                     assets = json.loads(row[4])
                 except Exception:
                     assets = {"raw": row[4]}
-            inputs.append({
-                "tx_hash": row[0],
-                "index": row[1],
-                "address": row[2],
-                "amount": row[3],
-                "assets": assets,
-                "is_reference": bool(row[5]),
-                "is_collateral": bool(row[6]),
-                # Failed-tx attempted spend: shown in the detail view (what
-                # the tx TRIED to consume), excluded from flow analytics.
-                "is_unspent_attempt": bool(row[7]),
-            })
+            inputs.append(
+                {
+                    "tx_hash": row[0],
+                    "index": row[1],
+                    "address": row[2],
+                    "amount": row[3],
+                    "assets": assets,
+                    "is_reference": bool(row[5]),
+                    "is_collateral": bool(row[6]),
+                    # Failed-tx attempted spend: shown in the detail view (what
+                    # the tx TRIED to consume), excluded from flow analytics.
+                    "is_unspent_attempt": bool(row[7]),
+                }
+            )
 
-        outputs_results = await clickhouse.execute_query_async("""
+        outputs_results = await clickhouse.execute_query_async(
+            """
             SELECT
                 output_index, address, amount, assets, is_collateral
             FROM transaction_outputs
             WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             ORDER BY output_index
             LIMIT 500
-        """, params)
+        """,
+            params,
+        )
 
         outputs = []
         for row in outputs_results:
@@ -216,13 +231,15 @@ async def get_transaction_by_hash(
                     assets = json.loads(row[3])
                 except Exception:
                     assets = {"raw": row[3]}
-            outputs.append({
-                "index": row[0],
-                "address": row[1],
-                "amount": row[2],
-                "assets": assets,
-                "is_collateral": bool(row[4])
-            })
+            outputs.append(
+                {
+                    "index": row[0],
+                    "address": row[1],
+                    "amount": row[2],
+                    "assets": assets,
+                    "is_collateral": bool(row[4]),
+                }
+            )
 
         metadata = None
         if tx_row[13]:
@@ -257,7 +274,9 @@ async def get_transactions_by_address(
     api_key: str = Security(verify_api_key),
 ):
     """Get all transactions involving a specific address"""
-    return await get_transactions(network=network, address=address, limit=limit, before=before, api_key=api_key)
+    return await get_transactions(
+        network=network, address=address, limit=limit, before=before, api_key=api_key
+    )
 
 
 @router.get("/blocks/recent")
@@ -333,7 +352,8 @@ async def get_transaction_stats(
             time_clauses += " AND timestamp <= %(end_time)s"
             params["end_time"] = end_time
 
-        results = await clickhouse.execute_query_async(f"""
+        results = await clickhouse.execute_query_async(
+            f"""
             SELECT
                 count() as total_count,
                 sum(total_output_value) as total_volume,
@@ -344,7 +364,9 @@ async def get_transaction_stats(
             FROM transactions
             WHERE network = %(network)s
               {time_clauses}
-        """, params)
+        """,
+            params,
+        )
         row = results[0]
 
         return {
@@ -353,7 +375,7 @@ async def get_transaction_stats(
             "total_fees": row[2],
             "avg_value": row[3],
             "first_tx": row[4].isoformat() if row[4] else None,
-            "last_tx": row[5].isoformat() if row[5] else None
+            "last_tx": row[5].isoformat() if row[5] else None,
         }
 
     except Exception as e:
@@ -365,7 +387,9 @@ async def get_transaction_stats(
 async def get_transaction_throughput(
     network: NetworkParam = None,
     window_minutes: int = Query(
-        5, ge=1, le=1440,
+        5,
+        ge=1,
+        le=1440,
         description="Sliding window size in minutes (default 5).",
     ),
     api_key: str = Security(verify_api_key),
@@ -405,5 +429,6 @@ async def get_transaction_throughput(
     except Exception as e:
         logger.error(f"Error getting transaction throughput: {e}")
         raise HTTPException(
-            status_code=500, detail="Failed to get transaction throughput",
+            status_code=500,
+            detail="Failed to get transaction throughput",
         )

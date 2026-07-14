@@ -19,6 +19,7 @@ Two purposes share the same table:
 A user's outstanding tokens are revoked on each new issue so a forwarded
 old email can't beat a fresh request.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -194,7 +195,8 @@ async def claim_session_token(session_id: str, token_hash: str) -> int:
             "claim_session_token: revoked %d sibling session(s) for a "
             "magic-link token (hash prefix %s…) — the link was evidently "
             "redeemed by more than one party",
-            revoked, token_hash[:12],
+            revoked,
+            token_hash[:12],
         )
     return revoked
 

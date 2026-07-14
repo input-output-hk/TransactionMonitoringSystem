@@ -24,23 +24,39 @@ def _force_download_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHAIN_SOURCE", "node")
     get_settings.cache_clear()
 
+
 # --- Incremental classification (fit/score) --------------------------------
 
 _CLF_COLUMNS = [
-    "tx_hash", "fees", "size", "input_count", "output_count",
-    "total_input_lovelace", "total_output_lovelace", "net_lovelace",
-    "distinct_assets", "redeemer_count", "hour_of_day", "day_of_week",
+    "tx_hash",
+    "fees",
+    "size",
+    "input_count",
+    "output_count",
+    "total_input_lovelace",
+    "total_output_lovelace",
+    "net_lovelace",
+    "distinct_assets",
+    "redeemer_count",
+    "hour_of_day",
+    "day_of_week",
 ]
 
 
 def _clf_row(tx: str, scale: float) -> dict:
     return {
-        "tx_hash": tx, "fees": 150_000 + scale * 1000, "size": 300 + scale,
-        "input_count": 1, "output_count": 2,
+        "tx_hash": tx,
+        "fees": 150_000 + scale * 1000,
+        "size": 300 + scale,
+        "input_count": 1,
+        "output_count": 2,
         "total_input_lovelace": int(1_000_000 * scale),
         "total_output_lovelace": int(990_000 * scale),
-        "net_lovelace": -int(10_000 * scale), "distinct_assets": 0,
-        "redeemer_count": 1, "hour_of_day": 12, "day_of_week": 3,
+        "net_lovelace": -int(10_000 * scale),
+        "distinct_assets": 0,
+        "redeemer_count": 1,
+        "hour_of_day": 12,
+        "day_of_week": 3,
     }
 
 
@@ -169,6 +185,7 @@ def test_classify_new_rebuilds_on_schema_version_bump() -> None:
 
 # --- update_contract: rate-limited tip walk --------------------------------
 
+
 class _FakeSource:
     """Stub ChainSource async context manager (download is patched out)."""
 
@@ -256,7 +273,10 @@ async def test_update_contract_rate_limited_fails_without_classifying(
     repo = _JobRepo()
     with pytest.raises(SourceRateLimited):
         await update_contract(
-            repo, target="addr1demo", target_type="address", job_id="job-rl",
+            repo,
+            target="addr1demo",
+            target_type="address",
+            job_id="job-rl",
         )
     _job_id, changes = repo.job_updates[-1]
     assert changes["status"] == "failed"

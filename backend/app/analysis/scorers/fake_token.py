@@ -73,56 +73,58 @@ _CRITICALITY_MULTIPLIER = float(_CRIT_CFG["multiplier"])
 # on capitals commonly used in token tickers, broad enough to catch the
 # observed forge attacks without pulling the full confusables.txt
 # table. Extend when a new homoglyph slips through the gate.
-_CONFUSABLES = str.maketrans({
-    # Greek capitals visually identical to Latin
-    "\u0391": "A",  # \u0391 GREEK CAPITAL LETTER ALPHA
-    "\u0392": "B",  # \u0392 BETA
-    "\u0395": "E",  # \u0395 EPSILON
-    "\u0396": "Z",  # \u0396 ZETA
-    "\u0397": "H",  # \u0397 ETA
-    "\u0399": "I",  # \u0399 IOTA
-    "\u039a": "K",  # \u039a KAPPA
-    "\u039c": "M",  # \u039c MU
-    "\u039d": "N",  # \u039d NU
-    "\u039f": "O",  # \u039f OMICRON
-    "\u03a1": "P",  # \u03a1 RHO
-    "\u03a4": "T",  # \u03a4 TAU
-    "\u03a5": "Y",  # \u03a5 UPSILON
-    "\u03a7": "X",  # \u03a7 CHI
-    # Greek lowercase visually similar to Latin
-    "\u03b1": "a",  # \u03b1 ALPHA
-    "\u03b5": "e",  # \u03b5 EPSILON
-    "\u03b9": "i",  # \u03b9 IOTA
-    "\u03bd": "v",  # \u03bd NU (looks like Latin v)
-    "\u03bf": "o",  # \u03bf OMICRON
-    "\u03c1": "p",  # \u03c1 RHO
-    "\u03c5": "u",  # \u03c5 UPSILON
-    # Cyrillic capitals visually identical to Latin
-    "\u0410": "A",  # \u0410
-    "\u0412": "B",  # \u0412
-    "\u0415": "E",  # \u0415
-    "\u041a": "K",  # \u041a
-    "\u041c": "M",  # \u041c
-    "\u041d": "H",  # \u041d (Cyrillic En, looks like Latin H)
-    "\u041e": "O",  # \u041e
-    "\u0420": "P",  # \u0420
-    "\u0421": "C",  # \u0421
-    "\u0422": "T",  # \u0422
-    "\u0423": "Y",  # \u0423
-    "\u0425": "X",  # \u0425
-    "\u0406": "I",  # \u0406
-    "\u04ae": "Y",  # \u04ae CYRILLIC CAPITAL LETTER STRAIGHT U
-    "\u0408": "J",  # \u0408
-    # Cyrillic lowercase visually similar to Latin
-    "\u0430": "a",  # \u0430
-    "\u0435": "e",  # \u0435
-    "\u043e": "o",  # \u043e
-    "\u0440": "p",  # \u0440
-    "\u0441": "c",  # \u0441
-    "\u0443": "y",  # \u0443
-    "\u0445": "x",  # \u0445
-    "\u0456": "i",  # \u0456
-})
+_CONFUSABLES = str.maketrans(
+    {
+        # Greek capitals visually identical to Latin
+        "\u0391": "A",  # \u0391 GREEK CAPITAL LETTER ALPHA
+        "\u0392": "B",  # \u0392 BETA
+        "\u0395": "E",  # \u0395 EPSILON
+        "\u0396": "Z",  # \u0396 ZETA
+        "\u0397": "H",  # \u0397 ETA
+        "\u0399": "I",  # \u0399 IOTA
+        "\u039a": "K",  # \u039a KAPPA
+        "\u039c": "M",  # \u039c MU
+        "\u039d": "N",  # \u039d NU
+        "\u039f": "O",  # \u039f OMICRON
+        "\u03a1": "P",  # \u03a1 RHO
+        "\u03a4": "T",  # \u03a4 TAU
+        "\u03a5": "Y",  # \u03a5 UPSILON
+        "\u03a7": "X",  # \u03a7 CHI
+        # Greek lowercase visually similar to Latin
+        "\u03b1": "a",  # \u03b1 ALPHA
+        "\u03b5": "e",  # \u03b5 EPSILON
+        "\u03b9": "i",  # \u03b9 IOTA
+        "\u03bd": "v",  # \u03bd NU (looks like Latin v)
+        "\u03bf": "o",  # \u03bf OMICRON
+        "\u03c1": "p",  # \u03c1 RHO
+        "\u03c5": "u",  # \u03c5 UPSILON
+        # Cyrillic capitals visually identical to Latin
+        "\u0410": "A",  # \u0410
+        "\u0412": "B",  # \u0412
+        "\u0415": "E",  # \u0415
+        "\u041a": "K",  # \u041a
+        "\u041c": "M",  # \u041c
+        "\u041d": "H",  # \u041d (Cyrillic En, looks like Latin H)
+        "\u041e": "O",  # \u041e
+        "\u0420": "P",  # \u0420
+        "\u0421": "C",  # \u0421
+        "\u0422": "T",  # \u0422
+        "\u0423": "Y",  # \u0423
+        "\u0425": "X",  # \u0425
+        "\u0406": "I",  # \u0406
+        "\u04ae": "Y",  # \u04ae CYRILLIC CAPITAL LETTER STRAIGHT U
+        "\u0408": "J",  # \u0408
+        # Cyrillic lowercase visually similar to Latin
+        "\u0430": "a",  # \u0430
+        "\u0435": "e",  # \u0435
+        "\u043e": "o",  # \u043e
+        "\u0440": "p",  # \u0440
+        "\u0441": "c",  # \u0441
+        "\u0443": "y",  # \u0443
+        "\u0445": "x",  # \u0445
+        "\u0456": "i",  # \u0456
+    }
+)
 
 
 # ASCII visual lookalikes (TMS Forge / spec homoglyph table: O->0, I->l,
@@ -132,11 +134,13 @@ _CONFUSABLES = str.maketrans({
 # similarity comparison and the fold-gain test below, never as a bare
 # presence test: every name containing the letter i/l or a digit would
 # otherwise trip it.
-_ASCII_CONFUSABLES_LC = str.maketrans({
-    "o": "0",
-    "i": "1",
-    "l": "1",
-})
+_ASCII_CONFUSABLES_LC = str.maketrans(
+    {
+        "o": "0",
+        "i": "1",
+        "l": "1",
+    }
+)
 
 
 def _normalise_token_name(name: str) -> str:
@@ -169,7 +173,8 @@ def _ascii_fold_increases_similarity(name: str, legit_name: str) -> bool:
         return False
     sim_without = fuzz.ratio(n1, n2)
     sim_with = fuzz.ratio(
-        n1.translate(_ASCII_CONFUSABLES_LC), n2.translate(_ASCII_CONFUSABLES_LC),
+        n1.translate(_ASCII_CONFUSABLES_LC),
+        n2.translate(_ASCII_CONFUSABLES_LC),
     )
     return sim_with > sim_without
 
@@ -226,7 +231,8 @@ def _compute_unicode_suspicion(name: str) -> float:
 
 
 def _compute_cip25_similarity(
-    tx_metadata: Optional[Dict], legit_name: str,
+    tx_metadata: Optional[Dict],
+    legit_name: str,
 ) -> float:
     """Score CIP-25 metadata similarity against a known legitimate token."""
     if not tx_metadata or not isinstance(tx_metadata, dict):
@@ -305,16 +311,17 @@ def _extract_minted_assets(raw_data: Dict, metadata: Optional[Dict] = None) -> L
             qty_int = int(qty) if qty else 0
             if qty_int > 0:  # only mints, not burns
                 # Resolve human-readable name: prefer CIP-25, then hex decode
-                display_name = (
-                    cip25_names.get((policy_id, hex_asset_name))
-                    or _decode_hex_asset_name(hex_asset_name)
+                display_name = cip25_names.get(
+                    (policy_id, hex_asset_name)
+                ) or _decode_hex_asset_name(hex_asset_name)
+                assets.append(
+                    {
+                        "policy_id": policy_id,
+                        "token_name": display_name,
+                        "token_name_hex": hex_asset_name,
+                        "quantity": qty_int,
+                    }
                 )
-                assets.append({
-                    "policy_id": policy_id,
-                    "token_name": display_name,
-                    "token_name_hex": hex_asset_name,
-                    "quantity": qty_int,
-                })
     return assets
 
 
@@ -335,7 +342,8 @@ class FakeTokenScorer(BaseScorer):
         for asset in minted:
             for legit_name, legit_policies in legit_tokens.items():
                 sim = _compute_tokenname_similarity(
-                    asset["token_name"], legit_name,
+                    asset["token_name"],
+                    legit_name,
                 )
                 if sim >= T_SIM_MIN and asset["policy_id"] not in legit_policies:
                     return True
@@ -359,7 +367,8 @@ class FakeTokenScorer(BaseScorer):
                 if asset["policy_id"] in legit_policies:
                     continue
                 sim = _compute_tokenname_similarity(
-                    asset["token_name"], legit_name,
+                    asset["token_name"],
+                    legit_name,
                 )
                 if sim >= T_SIM_MIN and sim > best_sim:
                     best_sim = sim
@@ -381,7 +390,8 @@ class FakeTokenScorer(BaseScorer):
         # as a cross-script confusable, but only when the fold-gain test
         # proves the lookalike glyph stands in for the matched name's letter.
         ascii_homoglyph = _ASCII_HOMOGLYPHS_ENABLED and _ascii_fold_increases_similarity(
-            hex_decoded or best_candidate["token_name"], best_legit_name,
+            hex_decoded or best_candidate["token_name"],
+            best_legit_name,
         )
         if ascii_homoglyph:
             unicode_score = min(1.0, unicode_score + float(_UNI_SCORES["homoglyphs"]))
@@ -422,16 +432,24 @@ class FakeTokenScorer(BaseScorer):
 
         # recipient_count: per-policy baseline
         p50_rc, p99_rc, bl1 = _resolve(
-            "recipient_count", "per_policy", policy_id, network,
-            _BOOT, "recipient_count",
+            "recipient_count",
+            "per_policy",
+            policy_id,
+            network,
+            _BOOT,
+            "recipient_count",
         )
         s_recipients = normalise(recipient_count, p50=p50_rc, p99=p99_rc)
 
         # mint_to_recipient_ratio inverted
         mint_ratio = best_candidate["quantity"] / (recipient_count + EPSILON)
         p50_mr, p99_mr, _ = _resolve(
-            "mint_to_recipient_ratio", "per_policy", policy_id, network,
-            _BOOT, "mint_to_recipient_ratio",
+            "mint_to_recipient_ratio",
+            "per_policy",
+            policy_id,
+            network,
+            _BOOT,
+            "mint_to_recipient_ratio",
         )
         s_ratio = normalise_inverted(mint_ratio, p50=p50_mr, p99=p99_mr)
 
@@ -509,17 +527,21 @@ class FakeTokenScorer(BaseScorer):
             mapped = _CONFUSABLES.get(ord(c))
             if mapped is not None:
                 target = chr(mapped) if isinstance(mapped, int) else str(mapped)
-                confusables.append({
-                    "kind": "homoglyph",
-                    "from_char": c,
-                    "to_char": target,
-                })
+                confusables.append(
+                    {
+                        "kind": "homoglyph",
+                        "from_char": c,
+                        "to_char": target,
+                    }
+                )
             elif c in _ZW_LABELS:
-                confusables.append({
-                    "kind": "zero_width",
-                    "from_char": _ZW_LABELS[c],
-                    "to_char": "",
-                })
+                confusables.append(
+                    {
+                        "kind": "zero_width",
+                        "from_char": _ZW_LABELS[c],
+                        "to_char": "",
+                    }
+                )
         # Mixed-script flag: emit a single summary entry rather than a per-char
         # row so the UI doesn't list every alpha character. Mirrors the
         # `mixed_scripts` bump in ``_compute_unicode_suspicion``.
@@ -531,19 +553,23 @@ class FakeTokenScorer(BaseScorer):
                 except (ValueError, IndexError):
                     pass
         if len(scripts) > 1:
-            confusables.append({
-                "kind": "mixed_script",
-                "from_char": ", ".join(sorted(scripts)),
-                "to_char": "",
-            })
+            confusables.append(
+                {
+                    "kind": "mixed_script",
+                    "from_char": ", ".join(sorted(scripts)),
+                    "to_char": "",
+                }
+            )
         # ASCII-homoglyph fold evidence: mirrors the unicode_score bump so
         # the UI shows WHY a pure-ASCII forgery ("1NDY") carries suspicion.
         if ascii_homoglyph:
-            confusables.append({
-                "kind": "ascii_homoglyph",
-                "from_char": best_candidate.get("token_name", ""),
-                "to_char": best_legit_name,
-            })
+            confusables.append(
+                {
+                    "kind": "ascii_homoglyph",
+                    "from_char": best_candidate.get("token_name", ""),
+                    "to_char": best_legit_name,
+                }
+            )
 
         return ScorerResult(
             score=final,

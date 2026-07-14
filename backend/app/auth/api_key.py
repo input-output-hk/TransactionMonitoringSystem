@@ -33,9 +33,7 @@ api_key_header = APIKeyHeader(
 
 # Parse and cache valid keys once at startup — avoids repeated string splits on every request
 _valid_keys: List[str] = (
-    [k.strip() for k in settings.API_KEYS.split(",") if k.strip()]
-    if settings.API_KEYS
-    else []
+    [k.strip() for k in settings.API_KEYS.split(",") if k.strip()] if settings.API_KEYS else []
 )
 _dev_mode: bool = not _valid_keys
 # Dev-mode warning is emitted from main.py lifespan so that logging is fully
@@ -94,6 +92,7 @@ async def verify_api_key(
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
     if session_id:
         from app.auth.sessions import lookup_session  # local to dodge cycles
+
         user = await lookup_session(session_id)
         if user:
             # Same session-claim as `deps.current_user`. Lives in both
@@ -103,6 +102,7 @@ async def verify_api_key(
             # `tokens.claim_session_token`.
             if user.get("created_by_token_hash"):
                 from app.auth.tokens import claim_session_token
+
                 await claim_session_token(
                     session_id=user["session_id"],
                     token_hash=user["created_by_token_hash"],

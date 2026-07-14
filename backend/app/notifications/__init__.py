@@ -115,7 +115,11 @@ def on_new_scores(results: List[Dict[str, Any]], network: str) -> None:
 
 
 async def _deliver_with_dedup(
-    network: str, tx_hash: str, band: str, payload, dispatches,
+    network: str,
+    tx_hash: str,
+    band: str,
+    payload,
+    dispatches,
     source: str = "scorer",
 ) -> str:
     """On the main loop: skip duplicates, deliver, then record the claim.
@@ -143,7 +147,8 @@ async def _deliver_with_dedup(
         # Dedup check failed: prefer a possible duplicate over a missed alert.
         logger.exception(
             "notification dedup check failed for %s/%s; delivering anyway",
-            network, tx_hash,
+            network,
+            tx_hash,
         )
     # Bound concurrent sends so a burst (backlog drain / spam wave) cannot open
     # hundreds of simultaneous SMTP/webhook connections and trip the endpoint's
@@ -158,6 +163,8 @@ async def _deliver_with_dedup(
         # Delivered but couldn't record the claim: a later re-score may
         # re-notify (duplicate). Acceptable under recall-first.
         logger.exception(
-            "notification claim record failed for %s/%s", network, tx_hash,
+            "notification claim record failed for %s/%s",
+            network,
+            tx_hash,
         )
     return DELIVER_SENT

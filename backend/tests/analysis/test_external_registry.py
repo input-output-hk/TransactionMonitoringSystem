@@ -26,7 +26,8 @@ class TestRegistryOutage:
         # the guard must read the raw cache, not the TTL-checked accessor.
         external._cache["legitimate_tokens"] = {"data": full, "ts": 0}
         monkeypatch.setattr(
-            external, "_refresh_legitimate_tokens",
+            external,
+            "_refresh_legitimate_tokens",
             lambda: (dict(external._SEED_TOKENS), 0),
         )
         count = external.refresh_token_registry()
@@ -35,7 +36,8 @@ class TestRegistryOutage:
 
     def test_cold_start_outage_still_caches_seeds(self, monkeypatch):
         monkeypatch.setattr(
-            external, "_refresh_legitimate_tokens",
+            external,
+            "_refresh_legitimate_tokens",
             lambda: (dict(external._SEED_TOKENS), 0),
         )
         count = external.refresh_token_registry()
@@ -46,7 +48,9 @@ class TestRegistryOutage:
         external._cache["legitimate_tokens"] = {"data": {"OLD": ["p"]}, "ts": 0}
         fresh = {f"NEW{i}": ["q" * 56] for i in range(10)}
         monkeypatch.setattr(
-            external, "_refresh_legitimate_tokens", lambda: (fresh, 10),
+            external,
+            "_refresh_legitimate_tokens",
+            lambda: (fresh, 10),
         )
         count = external.refresh_token_registry()
         assert count == 10
@@ -62,7 +66,9 @@ class TestRegistryOutage:
         shrunken["ONLYONE"] = ["r" * 56]
         assert len(shrunken) < len(full)
         monkeypatch.setattr(
-            external, "_refresh_legitimate_tokens", lambda: (shrunken, 1),
+            external,
+            "_refresh_legitimate_tokens",
+            lambda: (shrunken, 1),
         )
         count = external.refresh_token_registry()
         assert count == 50
@@ -75,7 +81,9 @@ class TestRegistryOutage:
         external._cache["legitimate_tokens"] = {"data": previous, "ts": 0}
         grown = {f"TOKEN{i}": ["p" * 56] for i in range(12)}
         monkeypatch.setattr(
-            external, "_refresh_legitimate_tokens", lambda: (grown, 12),
+            external,
+            "_refresh_legitimate_tokens",
+            lambda: (grown, 12),
         )
         count = external.refresh_token_registry()
         assert count == 12

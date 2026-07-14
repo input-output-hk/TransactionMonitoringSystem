@@ -139,11 +139,20 @@ class FakeApiRepo(FakeRepoBase):
 def _contract_row(**over: Any) -> dict[str, Any]:
     """A full contract row as the real repo returns it; override what the test cares about."""
     row: dict[str, Any] = {
-        "target": "addr1a", "target_type": "address", "label": "", "exists": 1,
-        "is_script": 1, "script_type": "plutusV2", "balance_lovelace": 0,
-        "asset_count": 0, "sample_tokens": "[]", "status": "done",
-        "requested_max_txs": 0, "updated_at": "2026-01-01 00:00:00.000000",
-        "tx_count": 0, "drift_score": 0.0,
+        "target": "addr1a",
+        "target_type": "address",
+        "label": "",
+        "exists": 1,
+        "is_script": 1,
+        "script_type": "plutusV2",
+        "balance_lovelace": 0,
+        "asset_count": 0,
+        "sample_tokens": "[]",
+        "status": "done",
+        "requested_max_txs": 0,
+        "updated_at": "2026-01-01 00:00:00.000000",
+        "tx_count": 0,
+        "drift_score": 0.0,
     }
     row.update(over)
     return row
@@ -151,9 +160,16 @@ def _contract_row(**over: Any) -> dict[str, Any]:
 
 def _job_row(**over: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
-        "job_id": "job-1", "target": "addr1a", "target_type": "address",
-        "max_txs": 0, "reprocess": 0, "kind": "onboard", "status": "done",
-        "stage_detail": "", "txs_done": 0, "error": "",
+        "job_id": "job-1",
+        "target": "addr1a",
+        "target_type": "address",
+        "max_txs": 0,
+        "reprocess": 0,
+        "kind": "onboard",
+        "status": "done",
+        "stage_detail": "",
+        "txs_done": 0,
+        "error": "",
         "created_at": "2026-01-01 00:00:00.000000",
         "updated_at": "2026-01-01 00:00:00.000000",
     }
@@ -174,6 +190,7 @@ def _reset_overrides() -> Any:
 
 
 # --- Health / readiness ----------------------------------------------------
+
 
 def test_health_is_liveness_only() -> None:
     client = _client(FakeApiRepo())
@@ -213,6 +230,7 @@ def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # --- Reads -----------------------------------------------------------------
+
 
 def test_list_contracts() -> None:
     repo = FakeApiRepo(contracts=[_contract_row(tx_count=5)])
@@ -274,11 +292,14 @@ def test_get_run_404() -> None:
 
 # --- Cluster verdict labels ------------------------------------------------
 
+
 def _run_repo(**extra: Any) -> FakeApiRepo:
     repo = FakeApiRepo(
         runs={
             "r1": {
-                "run_id": "r1", "target": "addr", "feature_set": "shape",
+                "run_id": "r1",
+                "target": "addr",
+                "feature_set": "shape",
                 "created_at": "2024-01-01 00:00:00.000000",
             }
         }
@@ -333,13 +354,23 @@ def test_clear_cluster_label_422_noise_bucket() -> None:
 
 
 def test_cluster_summary_includes_verdict_fields() -> None:
-    summary = [{
-        "cluster_id": 0, "size": 2, "avg_fees": 0.0, "avg_output_lovelace": 0.0,
-        "avg_inputs": 0.0, "avg_outputs": 0.0, "avg_assets": 0.0,
-    }]
+    summary = [
+        {
+            "cluster_id": 0,
+            "size": 2,
+            "avg_fees": 0.0,
+            "avg_output_lovelace": 0.0,
+            "avg_inputs": 0.0,
+            "avg_outputs": 0.0,
+            "avg_assets": 0.0,
+        }
+    ]
     repo = _run_repo(
-        _summary=summary, _membership={"aa": 0, "bb": 0},
-        _explicit={"aa": "malicious"}, _anomaly_run="an1", _votes={"bb": 3},
+        _summary=summary,
+        _membership={"aa": 0, "bb": 0},
+        _explicit={"aa": "malicious"},
+        _anomaly_run="an1",
+        _votes={"bb": 3},
     )
     row = _client(repo).get("/api/runs/r1/clusters").json()[0]
     assert row["verdict"] == "malicious"  # inherited from "aa"
@@ -349,8 +380,14 @@ def test_cluster_summary_includes_verdict_fields() -> None:
 
 def _txrow(h: str) -> dict[str, Any]:
     return {
-        "tx_hash": h, "block_time": "t", "fees": 0, "total_output_lovelace": 0,
-        "input_count": 0, "output_count": 0, "distinct_assets": 0, "redeemer_count": 0,
+        "tx_hash": h,
+        "block_time": "t",
+        "fees": 0,
+        "total_output_lovelace": 0,
+        "input_count": 0,
+        "output_count": 0,
+        "distinct_assets": 0,
+        "redeemer_count": 0,
     }
 
 
@@ -360,7 +397,9 @@ def test_cluster_transactions_include_per_tx_verdict() -> None:
     repo = _run_repo(
         _txs={0: [_txrow("aa")], 1: [_txrow("bb")]},
         _members={0: ["aa"], 1: ["bb"]},
-        _explicit={"aa": "benign"}, _anomaly_run="an1", _votes={"aa": 3, "bb": 3},
+        _explicit={"aa": "benign"},
+        _anomaly_run="an1",
+        _votes={"aa": 3, "bb": 3},
     )
     client = _client(repo)
     c0 = client.get("/api/runs/r1/clusters/0/transactions").json()["transactions"][0]
@@ -370,6 +409,7 @@ def test_cluster_transactions_include_per_tx_verdict() -> None:
 
 
 # --- POST /api/contracts ---------------------------------------------------
+
 
 def test_create_contract_rejects_invalid_target() -> None:
     r = _client(FakeApiRepo()).post("/api/contracts", json={"target": "not a target!"})
@@ -392,9 +432,7 @@ def test_create_contract_enqueues_job() -> None:
 def test_create_contract_persists_display_name() -> None:
     repo = FakeApiRepo()
     client = _client(repo)
-    r = client.post(
-        "/api/contracts", json={"target": "addr1qxyztest0001", "label": "  My Vault  "}
-    )
+    r = client.post("/api/contracts", json={"target": "addr1qxyztest0001", "label": "  My Vault  "})
     assert r.status_code == 200
     assert repo.saved_contracts[0]["label"] == "My Vault"  # stripped
 
@@ -462,6 +500,7 @@ def test_identify_invalid_target_is_not_an_error() -> None:
 
 # --- PATCH /api/contracts/{target} (rename) --------------------------------
 
+
 def test_rename_contract_updates_label() -> None:
     repo = FakeApiRepo(contracts=[_contract_row()])
     r = _client(repo).patch("/api/contracts/addr1a", json={"label": "My Name"})
@@ -474,6 +513,7 @@ def test_rename_contract_404_when_missing() -> None:
 
 
 # --- DELETE /api/anomaly-runs/{run_id} -------------------------------------
+
 
 def test_delete_custom_anomaly_run() -> None:
     repo = FakeApiRepo()
@@ -500,6 +540,7 @@ def test_delete_missing_anomaly_run_404() -> None:
 
 # --- Auth ------------------------------------------------------------------
 
+
 def test_api_key_enforced_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.api.deps.get_settings",
@@ -513,6 +554,7 @@ def test_api_key_enforced_when_configured(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # --- Target normalization: policy ids are case-insensitive -------------------
+
 
 def test_policy_target_case_insensitive_across_endpoints() -> None:
     """POST lowercases stored policy ids; every {target} path lookup must apply

@@ -41,8 +41,7 @@ class TestSchema:
     def test_schema_creates_pending_score_repurges(self, conn):
         _run(postgres.execute_schema())
         ddl = next(
-            c.args[0] for c in conn.execute.call_args_list
-            if "pending_score_repurges" in c.args[0]
+            c.args[0] for c in conn.execute.call_args_list if "pending_score_repurges" in c.args[0]
         )
         # Idempotent (IF NOT EXISTS) with the composite natural key: one
         # row per (network, tx_hash) regardless of rollback re-delivery.
@@ -68,7 +67,8 @@ class TestAddPending:
 class TestGetPending:
     def test_returns_hashes_for_network(self, conn):
         conn.fetch.return_value = [
-            {"tx_hash": "aa" * 32}, {"tx_hash": "bb" * 32},
+            {"tx_hash": "aa" * 32},
+            {"tx_hash": "bb" * 32},
         ]
         result = _run(postgres.get_pending_score_repurges("preprod"))
         assert result == ["aa" * 32, "bb" * 32]

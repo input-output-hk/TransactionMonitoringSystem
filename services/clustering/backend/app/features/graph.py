@@ -182,7 +182,4 @@ def build_graph_edges(
     weights = inter[iu]
     nonzero = np.nonzero(weights)[0]
     order = nonzero[np.argsort(weights[nonzero])[::-1]][:max_edges]
-    return [
-        (tx_hashes[int(iu[0][i])], tx_hashes[int(iu[1][i])], int(weights[i]))
-        for i in order
-    ]
+    return [(tx_hashes[int(iu[0][i])], tx_hashes[int(iu[1][i])], int(weights[i])) for i in order]

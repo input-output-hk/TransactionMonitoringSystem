@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 async def dispatch(
-    payload, dispatches: List[Dispatch],
+    payload,
+    dispatches: List[Dispatch],
     attachments: "Optional[List[Attachment]]" = None,
 ) -> bool:
     """Deliver ``payload`` to every channel in ``dispatches``, fully isolated.

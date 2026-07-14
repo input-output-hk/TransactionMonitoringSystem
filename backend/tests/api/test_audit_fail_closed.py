@@ -71,7 +71,9 @@ def client(monkeypatch, audit_log):
     monkeypatch.setattr(archive_queries, "archive_insert_async", fake_insert)
     monkeypatch.setattr(archive_queries, "archive_delete_async", fake_delete)
     monkeypatch.setattr(
-        archive_queries, "archive_bulk_insert_async", fake_bulk_insert,
+        archive_queries,
+        "archive_bulk_insert_async",
+        fake_bulk_insert,
     )
 
     client = TestClient(app)
@@ -82,6 +84,7 @@ def client(monkeypatch, audit_log):
 @pytest.fixture
 def auth_open(monkeypatch):
     from app.auth import api_key
+
     monkeypatch.setattr(api_key, "_valid_keys", [])
     monkeypatch.setattr(api_key, "_dev_mode", True)
 
@@ -120,9 +123,7 @@ class TestAuditFailureRefusesSuppression:
 
 
 class TestIntentBeforeMutation:
-    def test_audit_written_before_archive_insert(
-        self, client, audit_log, auth_open
-    ):
+    def test_audit_written_before_archive_insert(self, client, audit_log, auth_open):
         resp = client.post("/api/archive", json=_archive_payload())
         assert resp.status_code == 201
         assert audit_log.call_order == ["audit", "mutate"]
@@ -139,7 +140,9 @@ class TestIntentBeforeMutation:
             raise RuntimeError("clickhouse down")
 
         monkeypatch.setattr(
-            archive_queries, "archive_insert_async", broken_insert,
+            archive_queries,
+            "archive_insert_async",
+            broken_insert,
         )
         resp = client.post("/api/archive", json=_archive_payload())
         assert resp.status_code == 500
@@ -149,9 +152,7 @@ class TestIntentBeforeMutation:
 
 
 class TestSpoofedHeaderCannotBreakAudit:
-    def test_malformed_xff_is_sanitized_end_to_end(
-        self, client, audit_log, auth_open, monkeypatch
-    ):
+    def test_malformed_xff_is_sanitized_end_to_end(self, client, audit_log, auth_open, monkeypatch):
         from app.config import settings
 
         monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
@@ -171,9 +172,7 @@ class TestActorIsAuthenticatedPrincipal:
     """The audit actor is the server-derived authenticated principal, never
     the spoofable ``archived_by`` request field (review finding)."""
 
-    def test_actor_is_server_principal_not_client_field(
-        self, client, audit_log, auth_open
-    ):
+    def test_actor_is_server_principal_not_client_field(self, client, audit_log, auth_open):
         import json
 
         payload = _archive_payload()
@@ -186,9 +185,7 @@ class TestActorIsAuthenticatedPrincipal:
         assert details["actor"] == "dev-mode"
         assert details["archived_by"] == "attacker-spoofed-name"
 
-    def test_api_key_actor_is_fingerprint_not_raw_key(
-        self, client, audit_log, monkeypatch
-    ):
+    def test_api_key_actor_is_fingerprint_not_raw_key(self, client, audit_log, monkeypatch):
         import json
 
         from app import audit
@@ -223,6 +220,7 @@ class TestNonSuppressionStaysBestEffort:
         monkeypatch.setattr(postgres, "set_entity_state", fake_set)
         audit_log.fail = True
         resp = client.put(
-            "/api/entities/address/addr_test1xyz", json={"label": "x"},
+            "/api/entities/address/addr_test1xyz",
+            json={"label": "x"},
         )
         assert resp.status_code == 200

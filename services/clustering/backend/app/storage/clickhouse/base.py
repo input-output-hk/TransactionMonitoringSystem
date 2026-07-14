@@ -95,17 +95,27 @@ class _RepoBase:
     # date. Listed explicitly so the startup guard fails fast with a precise
     # message instead of a runtime "table/column not found".
     _EXPECTED_TABLES = (
-        "transactions", "tx_utxos", "tx_utxo_assets", "ingest_cursor",
-        "cluster_runs", "cluster_labels", "anomaly_runs", "anomaly_scores",
-        "contracts", "jobs", "tx_labels", "cluster_models", "tx_classifications",
+        "transactions",
+        "tx_utxos",
+        "tx_utxo_assets",
+        "ingest_cursor",
+        "cluster_runs",
+        "cluster_labels",
+        "anomaly_runs",
+        "anomaly_scores",
+        "contracts",
+        "jobs",
+        "tx_labels",
+        "cluster_models",
+        "tx_classifications",
         "tx_contract_anomaly",
     )
     _EXPECTED_COLUMNS = (
-        ("ingest_cursor", "cursor"),   # 006
-        ("ingest_cursor", "source"),   # 006
-        ("jobs", "kind"),              # 005
-        ("cluster_runs", "origin"),    # 007 (retro-edited into 001 without an ALTER)
-        ("anomaly_runs", "origin"),    # 007 (retro-edited into 002 without an ALTER)
+        ("ingest_cursor", "cursor"),  # 006
+        ("ingest_cursor", "source"),  # 006
+        ("jobs", "kind"),  # 005
+        ("cluster_runs", "origin"),  # 007 (retro-edited into 001 without an ALTER)
+        ("anomaly_runs", "origin"),  # 007 (retro-edited into 002 without an ALTER)
         ("contracts", "drift_score"),  # 008
         ("tx_contract_anomaly", "published_at"),  # 009 (reconciliation version)
     )

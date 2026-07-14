@@ -34,6 +34,7 @@ class TestWatermark:
 
     def test_subsequent_polls_use_watermark(self):
         import time
+
         assert engine._poll_since("preprod") == (None, True)
         # The clock is armed by run_once AFTER the rescan succeeds; arm it
         # here the same way (pure _poll_since no longer writes it).
@@ -46,6 +47,7 @@ class TestWatermark:
 
     def test_rescan_interval_forces_full_poll(self, monkeypatch):
         import time
+
         monkeypatch.setattr(settings, "UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS", 0)
         engine._poll_since("preprod")
         engine._last_full_rescan["preprod"] = time.monotonic()
@@ -63,7 +65,8 @@ class TestWatermark:
     def test_watermark_never_regresses(self):
         engine._advance_watermark("preprod", [{"ingestion_timestamp": TS}])
         engine._advance_watermark(
-            "preprod", [{"ingestion_timestamp": TS - timedelta(hours=1)}],
+            "preprod",
+            [{"ingestion_timestamp": TS - timedelta(hours=1)}],
         )
         expected = TS - timedelta(seconds=settings.UNANALYZED_OVERLAP_SECONDS)
         assert engine._unanalyzed_watermark["preprod"] == expected
@@ -73,9 +76,7 @@ class TestUnanalyzedPollBounds:
     def _capture(self, monkeypatch):
         captured = []
         fake = MagicMock()
-        fake.execute.side_effect = lambda sql, params=None: (
-            captured.append((sql, params)) or []
-        )
+        fake.execute.side_effect = lambda sql, params=None: captured.append((sql, params)) or []
         monkeypatch.setattr(clickhouse, "_get_client", lambda: fake)
         return captured
 

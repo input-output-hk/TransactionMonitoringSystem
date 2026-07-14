@@ -58,8 +58,11 @@ def silhouette_of(ci: ClusteringInput, labels: np.ndarray) -> float:
     try:
         return float(
             silhouette_score(
-                data, sub_labels, metric=metric,
-                sample_size=cap, random_state=_SILHOUETTE_SEED,
+                data,
+                sub_labels,
+                metric=metric,
+                sample_size=cap,
+                random_state=_SILHOUETTE_SEED,
             )
         )
     except ValueError:

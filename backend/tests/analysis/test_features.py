@@ -164,6 +164,7 @@ class TestIterAssets:
         # the dict path previously raised on non-numeric quantities while
         # the docstring promised 0.
         from app.analysis.features import extract_lovelace
+
         assert extract_lovelace({"ada": {"lovelace": "garbage"}}) == 0
         assert extract_lovelace({"lovelace": {"x": 1}}) == 0
         assert extract_lovelace({"ada": {"lovelace": None}}) == 0
@@ -175,6 +176,7 @@ class TestDatumWitnessAndObjectDatum:
 
     def test_datum_hash_sized_from_witness_preimage_hex(self):
         from app.analysis.features import _extract_datum_info
+
         out = {"address": "addr1w...", "datumHash": "abc123"}
         # No witness map -> unsizable (unchanged behaviour).
         assert _extract_datum_info(out) == (1, 0)
@@ -184,6 +186,7 @@ class TestDatumWitnessAndObjectDatum:
 
     def test_datum_hash_sized_from_witness_preimage_object(self):
         from app.analysis.features import _extract_datum_info
+
         out = {"address": "addr1w...", "datumHash": "h1"}
         preimage = {"bytes": "00" * 5000}
         flag, size = _extract_datum_info(out, {"h1": preimage})
@@ -192,21 +195,26 @@ class TestDatumWitnessAndObjectDatum:
 
     def test_object_datum_entropy_is_assessable(self):
         from app.analysis.features import datum_shannon_entropy_bits
+
         # Object datum with a large all-zero ByteArray leaf: low entropy.
         low = {"constructor": 0, "fields": [{"bytes": "00" * 4000}]}
         assert datum_shannon_entropy_bits({"datum": low}) < 1.0
         # Object datum with a high-entropy random-ish leaf: near the ceiling.
         import os
+
         rand_hex = os.urandom(4000).hex()
         high = {"constructor": 0, "fields": [{"bytes": rand_hex}]}
         assert datum_shannon_entropy_bits({"datum": high}) > 7.0
 
     def test_object_datum_leaf_concentration(self):
         from app.analysis.features import datum_leaf_concentration
+
         # One giant leaf + a few tiny ones -> concentration near 1.0.
-        datum = {"list": [
-            {"bytes": "ab" * 5000},
-            {"bytes": "cd"},
-            {"bytes": "ef"},
-        ]}
+        datum = {
+            "list": [
+                {"bytes": "ab" * 5000},
+                {"bytes": "cd"},
+                {"bytes": "ef"},
+            ]
+        }
         assert datum_leaf_concentration({"datum": datum}) > 0.99

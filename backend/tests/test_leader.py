@@ -92,6 +92,7 @@ class TestStandbyPromotion:
     @pytest.fixture(autouse=True)
     def _fast_retry(self, monkeypatch):
         from app import main as app_main
+
         monkeypatch.setattr(app_main.settings, "LEADER_LOCK_RETRY_SECONDS", 0)
 
     async def test_probe_error_does_not_kill_the_retry_loop(self, monkeypatch):
@@ -139,5 +140,5 @@ class TestStandbyPromotion:
         await app_main._standby_promote()
 
         assert attempts["n"] == 2  # failed once, succeeded on the retry
-        stop.assert_awaited_once()      # partial start unwound
-        release.assert_awaited_once()   # lock freed for another instance
+        stop.assert_awaited_once()  # partial start unwound
+        release.assert_awaited_once()  # lock freed for another instance

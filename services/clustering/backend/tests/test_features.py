@@ -88,9 +88,7 @@ def test_jaccard_distance_caps_by_recency_when_block_time_present() -> None:
         {
             "tx_hash": ["t1", "t2", "t3", "t4"],
             "address": ["a", "b", "c", "d"],
-            "block_time": pd.to_datetime(
-                ["2026-01-01", "2026-01-04", "2026-01-02", "2026-01-03"]
-            ),
+            "block_time": pd.to_datetime(["2026-01-01", "2026-01-04", "2026-01-02", "2026-01-03"]),
         }
     )
     tx_hashes, _D, dropped = build_jaccard_distance(df, max_txs=2)

@@ -136,14 +136,37 @@ RFC2606_RESERVED_TLDS = frozenset({"test", "example", "invalid", "localhost"})
 # included here: no legitimate service can live there, so any on-chain
 # URL pointing at one is either a simulation, a test fixture, or an
 # attacker-placeholder — all worth boosting score on.
-PHISHING_PRONE_TLDS = frozenset({
-    # Cheap / bulk / free registration
-    "xyz", "top", "click", "link", "live", "online", "site",
-    "space", "loan", "download", "stream", "tk", "ml", "ga", "cf",
-    "gdn", "work", "party", "trade", "date", "science",
-    # RFC 2606 reserved — non-routable, placeholder use only
-    "test", "example", "invalid", "localhost",
-})
+PHISHING_PRONE_TLDS = frozenset(
+    {
+        # Cheap / bulk / free registration
+        "xyz",
+        "top",
+        "click",
+        "link",
+        "live",
+        "online",
+        "site",
+        "space",
+        "loan",
+        "download",
+        "stream",
+        "tk",
+        "ml",
+        "ga",
+        "cf",
+        "gdn",
+        "work",
+        "party",
+        "trade",
+        "date",
+        "science",
+        # RFC 2606 reserved — non-routable, placeholder use only
+        "test",
+        "example",
+        "invalid",
+        "localhost",
+    }
+)
 
 
 def url_host(url: str) -> str:
@@ -213,14 +236,16 @@ def validate_candidates(candidates: List[str]) -> List[str]:
     # also matches the part after the scheme). The operator sees one
     # URL per real link instead of two.
     scheme_strip = {
-        u[len("https://"):] if u.lower().startswith("https://")
-        else u[len("http://"):] if u.lower().startswith("http://")
+        u[len("https://") :]
+        if u.lower().startswith("https://")
+        else u[len("http://") :]
+        if u.lower().startswith("http://")
         else None
         for u in validated
     }
     scheme_strip.discard(None)
     return [
-        u for u in validated
-        if u.lower().startswith(("http://", "https://"))
-        or u not in scheme_strip
+        u
+        for u in validated
+        if u.lower().startswith(("http://", "https://")) or u not in scheme_strip
     ]

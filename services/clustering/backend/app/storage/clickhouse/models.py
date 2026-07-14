@@ -11,12 +11,28 @@ from .ingest import TX_CONTEXT_KEYS, TX_CONTEXT_SELECT
 # Columns for a persisted cluster model and a per-tx online classification
 # (``created_at``/``scored_at`` default to now64 on insert; newest wins).
 _MODEL_COLUMNS = [
-    "model_id", "target", "feature_set", "run_id", "schema_version",
-    "n_clusters", "n_train", "eps", "min_samples", "blob",
+    "model_id",
+    "target",
+    "feature_set",
+    "run_id",
+    "schema_version",
+    "n_clusters",
+    "n_train",
+    "eps",
+    "min_samples",
+    "blob",
 ]
 _CLASSIFICATION_COLUMNS = [
-    "target", "tx_hash", "feature_set", "model_id", "cluster_id",
-    "iso_score", "lof_score", "votes", "consensus", "verdict",
+    "target",
+    "tx_hash",
+    "feature_set",
+    "model_id",
+    "cluster_id",
+    "iso_score",
+    "lof_score",
+    "votes",
+    "consensus",
+    "verdict",
 ]
 
 
@@ -39,7 +55,8 @@ class _ModelMixin(_RepoBase):
         if not rows:
             return None
         return _row_to_dict(
-            _MODEL_COLUMNS, rows[0],
+            _MODEL_COLUMNS,
+            rows[0],
             int_keys=("schema_version", "n_clusters", "n_train", "min_samples"),
             float_keys=("eps",),
         )

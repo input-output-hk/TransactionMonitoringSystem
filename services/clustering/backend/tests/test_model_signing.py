@@ -105,28 +105,42 @@ def test_online_thresholds_are_frozen_training_values_not_ranks() -> None:
     def _normal(i: int) -> dict[str, Any]:
         return {
             "tx_hash": f"{i:064x}",
-            "fees": 150_000 + (i * 37) % 1_100, "size": 300 + (i * 17) % 13,
-            "input_count": 1, "output_count": 2,
+            "fees": 150_000 + (i * 37) % 1_100,
+            "size": 300 + (i * 17) % 13,
+            "input_count": 1,
+            "output_count": 2,
             "total_input_lovelace": 1_000_000 + (i * 53) % 9_000,
             "total_output_lovelace": 990_000 + (i * 29) % 8_000,
-            "net_lovelace": -10_000 - (i * 13) % 900, "distinct_assets": 0,
-            "redeemer_count": 1, "hour_of_day": 12, "day_of_week": 3,
+            "net_lovelace": -10_000 - (i * 13) % 900,
+            "distinct_assets": 0,
+            "redeemer_count": 1,
+            "hour_of_day": 12,
+            "day_of_week": 3,
         }
 
     def _outlier(j: int) -> dict[str, Any]:
         return {
-            **_normal(90 + j), "tx_hash": f"{'fed':>03}{j:061x}"[-64:],
-            "fees": 60_000_000 + j * 5_000_000, "size": 14_000 + j * 500,
-            "input_count": 25 + j, "output_count": 40 + j,
-            "total_input_lovelace": 10**12, "total_output_lovelace": 10**12,
-            "net_lovelace": -5 * 10**9, "distinct_assets": 30, "redeemer_count": 8,
+            **_normal(90 + j),
+            "tx_hash": f"{'fed':>03}{j:061x}"[-64:],
+            "fees": 60_000_000 + j * 5_000_000,
+            "size": 14_000 + j * 500,
+            "input_count": 25 + j,
+            "output_count": 40 + j,
+            "total_input_lovelace": 10**12,
+            "total_output_lovelace": 10**12,
+            "net_lovelace": -5 * 10**9,
+            "distinct_assets": 30,
+            "redeemer_count": 8,
         }
 
     rows = [_normal(i) for i in range(56)] + [_outlier(j) for j in range(4)]
     train = pd.DataFrame(rows)
     model = build_shape_model(
-        train_df=train, cluster_of={r["tx_hash"]: 0 for r in rows},
-        cluster_verdicts={}, eps=0.5, min_samples=4,
+        train_df=train,
+        cluster_of={r["tx_hash"]: 0 for r in rows},
+        cluster_verdicts={},
+        eps=0.5,
+        min_samples=4,
     )
     # Frozen value thresholds exist and came from the training distribution.
     assert np.isfinite(model.iso_threshold) and np.isfinite(model.lof_threshold)
@@ -140,10 +154,21 @@ def test_online_thresholds_are_frozen_training_values_not_ranks() -> None:
     # A far-out-of-distribution tx must flag on values alone. It has to dwarf the
     # TRAINING outliers on their own axes — the frozen thresholds are anchored to
     # their scores, so a probe milder than them scores as in-distribution.
-    extreme = pd.DataFrame([{
-        **rows[0], "tx_hash": "f" * 64, "fees": 10**10, "size": 10**7,
-        "input_count": 500, "output_count": 800,
-        "total_input_lovelace": 10**14, "total_output_lovelace": 10**14,
-        "net_lovelace": -(10**13), "distinct_assets": 300, "redeemer_count": 60,
-    }])
+    extreme = pd.DataFrame(
+        [
+            {
+                **rows[0],
+                "tx_hash": "f" * 64,
+                "fees": 10**10,
+                "size": 10**7,
+                "input_count": 500,
+                "output_count": 800,
+                "total_input_lovelace": 10**14,
+                "total_output_lovelace": 10**14,
+                "net_lovelace": -(10**13),
+                "distinct_assets": 300,
+                "redeemer_count": 60,
+            }
+        ]
+    )
     assert score_shape(model, extreme)[0].votes >= 1

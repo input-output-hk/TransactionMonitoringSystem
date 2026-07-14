@@ -166,9 +166,7 @@ class TestCurrentUserClaimSideEffect:
             "session_id": "sess-a",
             "created_by_token_hash": "hash-a",
         }
-        monkeypatch.setattr(
-            deps, "lookup_session", AsyncMock(return_value=dict(user))
-        )
+        monkeypatch.setattr(deps, "lookup_session", AsyncMock(return_value=dict(user)))
         claim = AsyncMock(return_value=0)
         # current_user imports claim_session_token lazily from app.auth.tokens.
         monkeypatch.setattr(tokens, "claim_session_token", claim)
@@ -176,9 +174,7 @@ class TestCurrentUserClaimSideEffect:
         request = _Request({settings.SESSION_COOKIE_NAME: "sess-a"})
         resolved = await deps.current_user(request)
 
-        claim.assert_awaited_once_with(
-            session_id="sess-a", token_hash="hash-a"
-        )
+        claim.assert_awaited_once_with(session_id="sess-a", token_hash="hash-a")
         assert resolved["created_by_token_hash"] is None
 
     async def test_already_claimed_session_skips_claim(self, monkeypatch):
@@ -188,9 +184,7 @@ class TestCurrentUserClaimSideEffect:
             "session_id": "sess-a",
             "created_by_token_hash": None,
         }
-        monkeypatch.setattr(
-            deps, "lookup_session", AsyncMock(return_value=dict(user))
-        )
+        monkeypatch.setattr(deps, "lookup_session", AsyncMock(return_value=dict(user)))
         claim = AsyncMock()
         monkeypatch.setattr(tokens, "claim_session_token", claim)
 

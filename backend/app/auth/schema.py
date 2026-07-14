@@ -14,6 +14,7 @@ of a ``password_hash`` column and DROP CASCADE before recreating, so a
 fresh dev box gets the new schema in one go and existing dev boxes get
 migrated on first restart. Subsequent restarts no-op via ``IF NOT EXISTS``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,8 +39,7 @@ async def execute_auth_schema() -> None:
         )
         if legacy:
             logger.warning(
-                "Dropping legacy users table (password_hash schema). "
-                "Magic-link auth replaces it.",
+                "Dropping legacy users table (password_hash schema). Magic-link auth replaces it.",
             )
             await conn.execute("DROP TABLE IF EXISTS users CASCADE")
 

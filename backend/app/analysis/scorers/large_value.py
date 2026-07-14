@@ -146,7 +146,10 @@ class LargeValueScorer(BaseScorer):
         return reduce_to_best(candidates)
 
     def _score_utxo(
-        self, output: Dict, address: str, network: str,
+        self,
+        output: Dict,
+        address: str,
+        network: str,
     ) -> ScorerResult:
         value = output.get("value", {})
         if not isinstance(value, dict):
@@ -163,19 +166,31 @@ class LargeValueScorer(BaseScorer):
         # straight to the bootstrap anchor.
         if policy_id:
             p50_qd, p99_qd, bl1 = _resolve(
-                "quantity_digits", "per_policy", policy_id, network,
-                _BOOT, "quantity_digits",
+                "quantity_digits",
+                "per_policy",
+                policy_id,
+                network,
+                _BOOT,
+                "quantity_digits",
             )
         else:
             p50_qd, p99_qd, bl1 = (*_anchor(_BOOT, "quantity_digits"), "bootstrap")
 
         p50_cb, p99_cb, _ = _resolve(
-            "value_cbor_bytes", "per_script", address, network,
-            _BOOT, "value_cbor_bytes",
+            "value_cbor_bytes",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "value_cbor_bytes",
         )
         p50_ada, p99_ada, _ = _resolve(
-            "ada_amount", "per_script", address, network,
-            _BOOT, "ada_amount",
+            "ada_amount",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "ada_amount",
         )
         bl_source = bl1
 

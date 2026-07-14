@@ -216,7 +216,7 @@ TIER2_URGENCY_PATTERNS: List[str] = [
     "ending soon",
     "immediate action",
     # Explicit urgency framing (common phishing openers)
-    r"\burgent[:\s]",                  # "URGENT:", "urgent ..."
+    r"\burgent[:\s]",  # "URGENT:", "urgent ..."
     r"\btime[- ]sensitive\b",
     "verify your wallet",
     "verify wallet",
@@ -309,36 +309,45 @@ _SEED_TOKENS: Dict[str, List[str]] = {
 # To add a token: find its mapping file in the registry, extract the policy_id
 # (first 56 hex chars of the subject) and hex_asset_name (remaining chars).
 _WELL_KNOWN_SUBJECTS: List[tuple] = [
-    ("a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235", "484f534b59"),          # HOSKY
-    ("279c909f348e533da5808898f87f9a14bb2c3dfbbacccd631d927a3f", "534e454b"),              # SNEK
-    ("29d222ce763455e3d7a09a665ce554f00ac89d2e99a1a83d267170c6", "4d494e"),                # MIN
-    ("9a9693a9a37912a5097918f97918d15240c92ab729a0b7c4aa144d77", "53554e444145"),          # SUNDAE
-    ("1d7f33bd23d85e1a25d87d86fac4f199c3197a2f7afeb662a0f34e1e", "574d54"),                # WMT
-    ("533bb94a8850ee3ccbe483106489399112b74c905342cb1f14f5fc67", "494e4459"),              # INDY
-    ("8fef2d34078659493ce161a6c7fba4b56afefa8535296a5743f69587", "4c454e4649"),            # LENFI
-    ("f66d78b4a3cb3d37afa0ec36461e51ecbde00f26c8f0a68f94b69880", "69555344"),              # iUSD
-    ("8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61", "444a4544"),              # DJED
-    ("8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61", "5348454e"),              # SHEN
-    ("8a1cfae21368b8bebbbed9800fec304e95cce39a2a57dc35e2e3ebaa", "4d494c4b"),              # MILK
-    ("f43a62fdc3965df486de8a0d32fe800963589c41b38946602a8dc8e0", "41474958"),              # AGIX
-    ("edfd7a1d77bcb8b884c474bdc92a16002d1571571ea33c4e1a4e6e36", "4e5458"),                # NTX
-    ("e52964af4aeba6785d6ad4f81a5e48cff94fdddf5e5b5e9e04818c43", "4f5054494d"),            # OPTIM
-    ("da8c30857834c6ae7203935b89278c532b3995245295456f993e1d24", "4c51"),                  # LQ
-    ("682fe60c9918842b3323c43b5144bc3d52a23bd2fb81345560d73f63", "4a5047"),                # JPG
-    ("b6a7467ea1deb012808ef4e87b5ff371e85f7142d7b356a40d9b42a0", "436f726e75636f70696173"),  # Cornucopias
-    ("5dac8536653edc12f6f5e1045d8164b9f59998d3bdc300fc928434894e4d4b52", ""),              # NMKR
-    ("804f5544c1962a40546827cab750a88404dc7108c0f588b72964754f", "4d454c44"),              # MELD
-    ("6ac8ef33b510ec004fe11585f7c5a9f0c07f0c23428ab4f29c1d7d10", "4d45534836"),           # MESH
-    ("078eafce5cd7edafdf63900571f4c422da22b230e5048c55614d3b8b", "43484152"),              # CHAR
-    ("884892bcdc360bcef87d6b3f806e7f9cd5ac30d999d49970e7a903ae", "5749474754"),            # WIGT
-    ("25f0fc240e91bd95dcdaebd2ba7713fc5168ac77234a3d79449fc20c", "534f4349455459"),        # SOCIETY
-    ("b34b3ea80060ace9427bda98690a73d33840e27aaa8d6edb7f0c757a", "634e455441"),            # cNETA
-    ("af2e27f580f7f08e93190a81f72462f153026d06450924726645891b", "44524950"),              # DRIP
-    ("d3501d9531fcc25e3ca4b6429318c2cc374c6e81c2779b7781dfea66", "4141444154"),            # AADAT (AADA Finance)
-    ("b6a7467ea1deb012808ef4e87b5ff371e85f7142d7b356a40d9b42a0", "57696e67526964657273"), # WingRiders
-    ("6787a47e9f73efe4002d763337140da27afa8eb9a39413d2c39d4286", "5759464923"),            # WYFI
-    ("c0ee29a85b13209423b10447d3c2e6a50641a15c57770e27cb9d5073", "57574f524c44"),          # WWORLD
-    ("e4214b7cce62ac6fbba385d164df48e157eae5863521b4b67ca71d86", "4f4144415f4e4654"),      # Jpg.store
+    ("a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481c235", "484f534b59"),  # HOSKY
+    ("279c909f348e533da5808898f87f9a14bb2c3dfbbacccd631d927a3f", "534e454b"),  # SNEK
+    ("29d222ce763455e3d7a09a665ce554f00ac89d2e99a1a83d267170c6", "4d494e"),  # MIN
+    ("9a9693a9a37912a5097918f97918d15240c92ab729a0b7c4aa144d77", "53554e444145"),  # SUNDAE
+    ("1d7f33bd23d85e1a25d87d86fac4f199c3197a2f7afeb662a0f34e1e", "574d54"),  # WMT
+    ("533bb94a8850ee3ccbe483106489399112b74c905342cb1f14f5fc67", "494e4459"),  # INDY
+    ("8fef2d34078659493ce161a6c7fba4b56afefa8535296a5743f69587", "4c454e4649"),  # LENFI
+    ("f66d78b4a3cb3d37afa0ec36461e51ecbde00f26c8f0a68f94b69880", "69555344"),  # iUSD
+    ("8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61", "444a4544"),  # DJED
+    ("8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61", "5348454e"),  # SHEN
+    ("8a1cfae21368b8bebbbed9800fec304e95cce39a2a57dc35e2e3ebaa", "4d494c4b"),  # MILK
+    ("f43a62fdc3965df486de8a0d32fe800963589c41b38946602a8dc8e0", "41474958"),  # AGIX
+    ("edfd7a1d77bcb8b884c474bdc92a16002d1571571ea33c4e1a4e6e36", "4e5458"),  # NTX
+    ("e52964af4aeba6785d6ad4f81a5e48cff94fdddf5e5b5e9e04818c43", "4f5054494d"),  # OPTIM
+    ("da8c30857834c6ae7203935b89278c532b3995245295456f993e1d24", "4c51"),  # LQ
+    ("682fe60c9918842b3323c43b5144bc3d52a23bd2fb81345560d73f63", "4a5047"),  # JPG
+    (
+        "b6a7467ea1deb012808ef4e87b5ff371e85f7142d7b356a40d9b42a0",
+        "436f726e75636f70696173",
+    ),  # Cornucopias
+    ("5dac8536653edc12f6f5e1045d8164b9f59998d3bdc300fc928434894e4d4b52", ""),  # NMKR
+    ("804f5544c1962a40546827cab750a88404dc7108c0f588b72964754f", "4d454c44"),  # MELD
+    ("6ac8ef33b510ec004fe11585f7c5a9f0c07f0c23428ab4f29c1d7d10", "4d45534836"),  # MESH
+    ("078eafce5cd7edafdf63900571f4c422da22b230e5048c55614d3b8b", "43484152"),  # CHAR
+    ("884892bcdc360bcef87d6b3f806e7f9cd5ac30d999d49970e7a903ae", "5749474754"),  # WIGT
+    ("25f0fc240e91bd95dcdaebd2ba7713fc5168ac77234a3d79449fc20c", "534f4349455459"),  # SOCIETY
+    ("b34b3ea80060ace9427bda98690a73d33840e27aaa8d6edb7f0c757a", "634e455441"),  # cNETA
+    ("af2e27f580f7f08e93190a81f72462f153026d06450924726645891b", "44524950"),  # DRIP
+    (
+        "d3501d9531fcc25e3ca4b6429318c2cc374c6e81c2779b7781dfea66",
+        "4141444154",
+    ),  # AADAT (AADA Finance)
+    (
+        "b6a7467ea1deb012808ef4e87b5ff371e85f7142d7b356a40d9b42a0",
+        "57696e67526964657273",
+    ),  # WingRiders
+    ("6787a47e9f73efe4002d763337140da27afa8eb9a39413d2c39d4286", "5759464923"),  # WYFI
+    ("c0ee29a85b13209423b10447d3c2e6a50641a15c57770e27cb9d5073", "57574f524c44"),  # WWORLD
+    ("e4214b7cce62ac6fbba385d164df48e157eae5863521b4b67ca71d86", "4f4144415f4e4654"),  # Jpg.store
 ]
 
 
@@ -429,9 +438,7 @@ def get_legitimate_tokens(network: str = "mainnet") -> Dict[str, List[str]]:
     entry = _cache.get("legitimate_tokens")
     if entry is not None:
         if time.time() - entry["ts"] >= _CACHE_TTL_SECONDS:
-            logger.debug(
-                "Token registry cache stale; serving it pending background refresh"
-            )
+            logger.debug("Token registry cache stale; serving it pending background refresh")
         return entry["data"]
     logger.warning(
         "Token registry not yet fetched; serving seed list only (degraded "
@@ -468,13 +475,17 @@ def refresh_token_registry() -> int:
             "Token registry %s outage (%d/%d subjects fetched): keeping "
             "previous cache of %d names instead of shrinking to %d",
             "total" if fetched == 0 else "partial",
-            fetched, len(_WELL_KNOWN_SUBJECTS),
-            len(previous), len(registry),
+            fetched,
+            len(_WELL_KNOWN_SUBJECTS),
+            len(previous),
+            len(registry),
         )
         return len(previous)
     logger.info(
-        "Token registry refresh applied: %d names cached (%d/%d subjects "
-        "fetched)", len(registry), fetched, len(_WELL_KNOWN_SUBJECTS),
+        "Token registry refresh applied: %d names cached (%d/%d subjects fetched)",
+        len(registry),
+        fetched,
+        len(_WELL_KNOWN_SUBJECTS),
     )
     _set_cached("legitimate_tokens", registry)
     return len(registry)

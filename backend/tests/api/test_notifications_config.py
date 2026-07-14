@@ -3,6 +3,7 @@
 DB + audit + cache-refresh are mocked so no live Postgres is needed; the
 TestClient is used without lifespan (matching the other api tests).
 """
+
 from unittest.mock import AsyncMock
 
 import pytest
@@ -36,7 +37,9 @@ def mocked(monkeypatch):
 
 def _as_admin():
     app.dependency_overrides[require_admin] = lambda: {
-        "email": "admin@x.com", "role": "Admin", "id": "00000000-0000-0000-0000-000000000001",
+        "email": "admin@x.com",
+        "role": "Admin",
+        "id": "00000000-0000-0000-0000-000000000001",
     }
 
 
@@ -54,7 +57,8 @@ def test_put_forbidden_for_reviewer(mocked):
     # current_user so the real require_admin actually runs (rather than the
     # tests' usual bypass of require_admin itself).
     app.dependency_overrides[current_user] = lambda: {
-        "email": "rev@x.com", "role": "Reviewer",
+        "email": "rev@x.com",
+        "role": "Reviewer",
         "id": "00000000-0000-0000-0000-000000000002",
     }
     try:
@@ -95,7 +99,8 @@ def test_get_returns_config_and_secret_status(mocked):
     body = r.json()
     assert "config" in body
     assert set(body["secrets_status"]) == {
-        "webhook_signing_secret_configured", "smtp_configured",
+        "webhook_signing_secret_configured",
+        "smtp_configured",
     }
     # The UI gates the read-time-only contract_anomaly attack class on this flag.
     assert isinstance(body["clustering_enabled"], bool)
