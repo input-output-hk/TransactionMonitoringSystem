@@ -53,7 +53,7 @@ export function UsersPage() {
 	const [pendingRemove, setPendingRemove] = useState<ApiUser | null>(null);
 	const qc = useQueryClient();
 
-	// Server-side pagination via `/api/users?limit&offset` — see backend
+	// Server-side pagination via `/api/v1/users?limit&offset` — see backend
 	// list_users for the {count,total,data} shape.
 	const { data, isPending, isError } = useQuery({
 		queryKey: [...USERS_QUERY_KEY, page, pageSize],
@@ -394,7 +394,7 @@ function InvitationSentStep({
 	draft: AddDraft;
 	onSend: () => void;
 }) {
-	// Confirmation screen after `POST /api/users` succeeded. The backend
+	// Confirmation screen after `POST /api/v1/users` succeeded. The backend
 	// has already emailed the invite — the admin doesn't need to copy a
 	// link manually. We keep a single "Done" affordance instead of the
 	// old fake "Send invitation" button.

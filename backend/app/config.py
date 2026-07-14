@@ -116,7 +116,7 @@ class Settings(BaseSettings):
 
     # Security - API Key Authentication
     API_KEYS: str = ""  # Comma-separated list of valid API keys
-    API_KEY_HEADER: str = "TMS-API-Key"  # Header name for API key
+    API_KEY_HEADER: str = "X-API-Key"  # Header name for API key (matches the sidecar)
     # Must be "1" to allow the app to start with empty API_KEYS (dev mode).
     # Refusal-to-start otherwise prevents accidental open-API production deploys.
     TMS_ALLOW_DEV_MODE: str = ""

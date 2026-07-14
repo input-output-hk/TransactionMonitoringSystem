@@ -1,6 +1,6 @@
 # Cardano Transaction Monitoring System
 
-Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), scores transactions against 9 Polimi attack classes (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing), and exposes a REST API and live WebSocket feed. Access is gated two ways: programmatic clients authenticate with a `TMS-API-Key` header, while the operator dashboard uses magic-link email login with role-based accounts (Admin / Reviewer) backed by PostgreSQL.
+Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), scores transactions against 9 Polimi attack classes (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing), and exposes a REST API and live WebSocket feed. Access is gated two ways: programmatic clients authenticate with a `X-API-Key` header, while the operator dashboard uses magic-link email login with role-based accounts (Admin / Reviewer) backed by PostgreSQL.
 
 **For step-by-step setup and operations see [RUNBOOK.md](RUNBOOK.md).**
 
@@ -82,9 +82,9 @@ Compose profile:
 CLUSTERING_ENABLED=true docker compose --profile app --profile clustering up -d
 ```
 
-`CLUSTERING_ENABLED=true` makes the app wire in the `/api/clustering/*`
+`CLUSTERING_ENABLED=true` makes the app wire in the `/api/v1/clustering/*`
 reverse-proxy (for the Validators / cluster-graph UI) and merge the module's
-`contract_anomaly` verdict into `/api/analysis/*`. Without the profile (or with
+`contract_anomaly` verdict into `/api/v1/analysis/*`. Without the profile (or with
 `CLUSTERING_ENABLED` unset) the system runs as the nine-class engine, unchanged.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#clustering-module-contract_anomaly)
 for how it integrates and [services/clustering/README.md](services/clustering/README.md)
@@ -128,7 +128,7 @@ Postgres (`POSTGRES_*`), ClickHouse (`CLICKHOUSE_*`), the full SMTP/session/magi
 
 ## API
 
-The API accepts two authentication methods. Programmatic clients send a `TMS-API-Key` header. Browser/dashboard clients authenticate with a magic-link session cookie obtained via `/api/auth/*` (no API key needed). For local dev without a key set, boot with both `API_KEYS=` (empty) and `TMS_ALLOW_DEV_MODE=1`; requests are then accepted without either credential.
+The API accepts two authentication methods. Programmatic clients send a `X-API-Key` header. Browser/dashboard clients authenticate with a magic-link session cookie obtained via `/api/v1/auth/*` (no API key needed). For local dev without a key set, boot with both `API_KEYS=` (empty) and `TMS_ALLOW_DEV_MODE=1`; requests are then accepted without either credential.
 All data endpoints accept an optional `network` query parameter (`mainnet`, `preprod`, or `preview`); defaults to the instance's `CARDANO_NETWORK`.
 
 Interactive docs: `http://localhost:8000/docs`
@@ -136,72 +136,72 @@ Interactive docs: `http://localhost:8000/docs`
 ### Transactions
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/transactions/` | List transactions (params: `limit`, `before`, `address`) |
-| GET | `/api/transactions/{tx_hash}` | Transaction detail with inputs, outputs, `block_index` |
-| GET | `/api/transactions/address/{address}` | Transactions for an address |
-| GET | `/api/transactions/stats/summary` | Aggregate stats (count, volume, fees) |
-| GET | `/api/transactions/blocks/recent` | Recent blocks derived from the transactions table (params: `limit`) |
-| GET | `/api/transactions/stats/throughput` | Recent transactions per minute over a sliding window (params: `window_minutes`) |
+| GET | `/api/v1/transactions` | List transactions (params: `limit`, `before`, `address`) |
+| GET | `/api/v1/transactions/{tx_hash}` | Transaction detail with inputs, outputs, `block_index` |
+| GET | `/api/v1/transactions/address/{address}` | Transactions for an address |
+| GET | `/api/v1/transactions/stats/summary` | Aggregate stats (count, volume, fees) |
+| GET | `/api/v1/transactions/blocks/recent` | Recent blocks derived from the transactions table (params: `limit`) |
+| GET | `/api/v1/transactions/stats/throughput` | Recent transactions per minute over a sliding window (params: `window_minutes`) |
 
 ### Lifecycle
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/lifecycle` | List lifecycle records (params: `status`, `limit`, `offset`) |
-| GET | `/api/lifecycle/{tx_id}` | Lifecycle state for a single transaction |
-| GET | `/api/lifecycle/stats/summary` | Pending count, avg latency, rollback rate |
+| GET | `/api/v1/lifecycle` | List lifecycle records (params: `status`, `limit`, `offset`) |
+| GET | `/api/v1/lifecycle/{tx_id}` | Lifecycle state for a single transaction |
+| GET | `/api/v1/lifecycle/stats/summary` | Pending count, avg latency, rollback rate |
 
 Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (chain reorg), `DROPPED` (pending beyond TTL without confirmation).
 
 ### Analysis
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`). Valid `attack_class` values are the nine stored classes (`token_dust`, `large_value`, `large_datum`, `multiple_sat`, `front_running`, `sandwich`, `circular`, `fake_token`, `phishing`) plus the synthetic `contract_anomaly` (resolved at read time; returns empty when the clustering profile is off). |
-| GET | `/api/analysis/results/{tx_hash}` | Analysis result for a single transaction |
-| GET | `/api/analysis/stats` | Risk-band distribution and per-class score stats |
-| GET | `/api/analysis/stats/timeseries` | Daily High and Critical alert counts (params: `days`) |
-| GET | `/api/analysis/baselines/{scope_type}/{scope_id}` | Baseline percentiles for a scope |
+| GET | `/api/v1/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`). Valid `attack_class` values are the nine stored classes (`token_dust`, `large_value`, `large_datum`, `multiple_sat`, `front_running`, `sandwich`, `circular`, `fake_token`, `phishing`) plus the synthetic `contract_anomaly` (resolved at read time; returns empty when the clustering profile is off). |
+| GET | `/api/v1/analysis/results/{tx_hash}` | Analysis result for a single transaction |
+| GET | `/api/v1/analysis/stats` | Risk-band distribution and per-class score stats |
+| GET | `/api/v1/analysis/stats/timeseries` | Daily High and Critical alert counts (params: `days`) |
+| GET | `/api/v1/analysis/baselines/{scope_type}/{scope_id}` | Baseline percentiles for a scope |
 
 ### Authentication & Users
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/auth/request-link` | Request a magic-link login email for an address |
-| GET | `/api/auth/verify` | Verify a magic-link token and start a session |
-| POST | `/api/auth/logout` | Invalidate the current session |
-| GET | `/api/auth/me` | Current authenticated user |
-| GET | `/api/users` | List users (Admin) |
-| POST | `/api/users` | Invite a user (Admin) |
-| DELETE | `/api/users/{user_id}` | Remove a user (Admin) |
-| POST | `/api/users/{user_id}/resend-invite` | Resend an invite magic-link (Admin) |
+| POST | `/api/v1/auth/request-link` | Request a magic-link login email for an address |
+| GET | `/api/v1/auth/verify` | Verify a magic-link token and start a session |
+| POST | `/api/v1/auth/logout` | Invalidate the current session |
+| GET | `/api/v1/auth/me` | Current authenticated user |
+| GET | `/api/v1/users` | List users (Admin) |
+| POST | `/api/v1/users` | Invite a user (Admin) |
+| DELETE | `/api/v1/users/{user_id}` | Remove a user (Admin) |
+| POST | `/api/v1/users/{user_id}/resend-invite` | Resend an invite magic-link (Admin) |
 
 First-admin bootstrap is done from the CLI, not the API: `python -m app.cli create-admin <email> "<name>"` (see [Setup](#setup)).
 
 ### Archive (false-positive suppression)
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/archive` | Archive an analysis result as a known false positive (`tx_hash`, `network`, `note`, `archived_by`) |
-| GET | `/api/archive` | List archived (suppressed) results |
-| POST | `/api/archive/bulk` | Bulk-import archive entries |
-| GET | `/api/archive/export` | Export archived entries as CSV |
-| GET | `/api/archive/{tx_hash}` | Single archive entry |
-| DELETE | `/api/archive/{tx_hash}` | Restore (un-archive) an entry |
+| POST | `/api/v1/archive` | Archive an analysis result as a known false positive (`tx_hash`, `network`, `note`, `archived_by`) |
+| GET | `/api/v1/archive` | List archived (suppressed) results |
+| POST | `/api/v1/archive/bulk` | Bulk-import archive entries |
+| GET | `/api/v1/archive/export` | Export archived entries as CSV |
+| GET | `/api/v1/archive/{tx_hash}` | Single archive entry |
+| DELETE | `/api/v1/archive/{tx_hash}` | Restore (un-archive) an entry |
 
 ### Notifications config
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/notifications/config` | Current notification config (channels, band x attack-class trigger matrix, recipients, periodic report); Admin session required |
-| PUT | `/api/notifications/config` | Replace the notification config; validated, applied without restart, audit-logged |
+| GET | `/api/v1/notifications/config` | Current notification config (channels, band x attack-class trigger matrix, recipients, periodic report); Admin session required |
+| PUT | `/api/v1/notifications/config` | Replace the notification config; validated, applied without restart, audit-logged |
 
 ### Clustering (optional sidecar proxy)
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/clustering/{path}` | Same-origin reverse proxy to the clustering sidecar's read API (contracts, clusters, runs); active only when `CLUSTERING_ENABLED=true` |
-| POST/PATCH/DELETE | `/api/clustering/{path}` | Proxied sidecar mutations (watch a contract, label, tune); requires an Admin session or API key (Reviewer sessions rejected) and is audit-logged |
+| GET | `/api/v1/clustering/{path}` | Same-origin reverse proxy to the clustering sidecar's read API (contracts, clusters, runs); active only when `CLUSTERING_ENABLED=true` |
+| POST/PATCH/DELETE | `/api/v1/clustering/{path}` | Proxied sidecar mutations (watch a contract, label, tune); requires an Admin session or API key (Reviewer sessions rejected) and is audit-logged |
 
 ### Other
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/entities/{type}/{id}` | Entity state |
-| PUT | `/api/entities/{type}/{id}` | Set entity state |
+| GET | `/api/v1/entities/{type}/{id}` | Entity state |
+| PUT | `/api/v1/entities/{type}/{id}` | Set entity state |
 | GET | `/health` | Minimal unauthenticated liveness probe: `{"status":"healthy"}` |
 | GET | `/health/ready` | Unauthenticated readiness probe; returns 503 while the ingestion pipeline is DOWN (the intended load-balancer gate) |
 | GET | `/health/detail` | Full pipeline + Ogmios state (requires API key) |
@@ -212,10 +212,10 @@ First-admin bootstrap is done from the CLI, not the API: `python -m app.cli crea
 
 ```bash
 # List recent transactions
-curl -H "TMS-API-Key: your-key" "http://localhost:8000/api/transactions/?limit=20&network=preprod"
+curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/transactions?limit=20&network=preprod"
 
 # Check mempool
-curl -H "TMS-API-Key: your-key" "http://localhost:8000/api/lifecycle?status=PENDING"
+curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/lifecycle?status=PENDING"
 
 # Health
 curl http://localhost:8000/health

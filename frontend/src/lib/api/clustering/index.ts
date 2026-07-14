@@ -1,5 +1,5 @@
 /**
- * Client for the clustering module, reached through the `/api/clustering`
+ * Client for the clustering module, reached through the `/api/v1/clustering`
  * reverse-proxy (session-authed, same-origin). Powers the Validators surfaces:
  * the watched-contract registry, cluster summaries, anomaly tables, and the
  * cluster graph.

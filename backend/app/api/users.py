@@ -30,7 +30,7 @@ from app.db.postgres import get_connection
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+router = APIRouter(prefix="/users", tags=["users"])
 
 
 _USER_COLUMNS = "id, email, full_name, role, status, created_at, last_login_at"

@@ -4,7 +4,7 @@ A user row whose email fails EmailStr (special-use domains such as
 ``.local``) must be impossible to CREATE through any entry point (API
 payload, bootstrap CLI), but must not break read paths if such a row
 already exists (legacy data, manual SQL): one bad row used to 500 both
-magic-link redemption and the entire ``GET /api/users`` listing.
+magic-link redemption and the entire ``GET /api/v1/users`` listing.
 """
 
 import asyncio

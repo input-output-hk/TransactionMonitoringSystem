@@ -1,5 +1,5 @@
 /**
- * App-wide auth state, backed by `GET /api/auth/me`.
+ * App-wide auth state, backed by `GET /api/v1/auth/me`.
  *
  * Mounts once at the root of the tree (see `main.tsx`) and shares the
  * resolved user via context. Components that need auth state pull it

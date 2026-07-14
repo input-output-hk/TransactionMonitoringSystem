@@ -1,4 +1,4 @@
-"""Tests for the /api/archive endpoints.
+"""Tests for the /api/v1/archive endpoints.
 
 The ClickHouse layer is mocked: the in-memory store below mimics a single
 table keyed on (network, tx_hash) and implements just enough behaviour for
@@ -171,7 +171,7 @@ OTHER_HASH = "b" * 64
 
 def test_archive_then_list_then_delete(client, auth_open, store):
     r = client.post(
-        "/api/archive",
+        "/api/v1/archive",
         json={
             "network": "preprod",
             "tx_hash": VALID_HASH,
@@ -182,17 +182,17 @@ def test_archive_then_list_then_delete(client, auth_open, store):
     assert r.status_code == 201, r.text
     assert ("preprod", VALID_HASH) in store.rows
 
-    r = client.get("/api/archive?network=preprod")
+    r = client.get("/api/v1/archive?network=preprod")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 1
     assert body["data"][0]["tx_hash"] == VALID_HASH
     assert body["data"][0]["note"] == "known FP from CTF testing"
 
-    r = client.delete(f"/api/archive/{VALID_HASH}?network=preprod")
+    r = client.delete(f"/api/v1/archive/{VALID_HASH}?network=preprod")
     assert r.status_code == 204
 
-    r = client.get("/api/archive?network=preprod")
+    r = client.get("/api/v1/archive?network=preprod")
     assert r.json()["count"] == 0
 
 
@@ -203,12 +203,12 @@ def test_archive_duplicate_returns_409(client, auth_open):
         "note": "n",
         "archived_by": "me",
     }
-    assert client.post("/api/archive", json=payload).status_code == 201
-    assert client.post("/api/archive", json=payload).status_code == 409
+    assert client.post("/api/v1/archive", json=payload).status_code == 201
+    assert client.post("/api/v1/archive", json=payload).status_code == 409
 
 
 def test_delete_missing_returns_404(client, auth_open):
-    r = client.delete(f"/api/archive/{VALID_HASH}?network=preprod")
+    r = client.delete(f"/api/v1/archive/{VALID_HASH}?network=preprod")
     assert r.status_code == 404
 
 
@@ -216,7 +216,7 @@ def test_bulk_import_skips_existing(client, auth_open, store):
     # Pre-seed one entry locally.
     assert (
         client.post(
-            "/api/archive",
+            "/api/v1/archive",
             json={
                 "network": "preprod",
                 "tx_hash": VALID_HASH,
@@ -229,7 +229,7 @@ def test_bulk_import_skips_existing(client, auth_open, store):
 
     # Bulk import the same tx + one new tx.
     r = client.post(
-        "/api/archive/bulk",
+        "/api/v1/archive/bulk",
         json={
             "source_label": "instance-b",
             "entries": [
@@ -263,7 +263,7 @@ def test_csv_export_roundtrips_to_import(client, auth_open, store):
     # Seed two local entries.
     for h, note in ((VALID_HASH, "first"), (OTHER_HASH, "second")):
         client.post(
-            "/api/archive",
+            "/api/v1/archive",
             json={
                 "network": "preprod",
                 "tx_hash": h,
@@ -274,7 +274,7 @@ def test_csv_export_roundtrips_to_import(client, auth_open, store):
     assert len(store.rows) == 2
 
     # Export.
-    r = client.get("/api/archive/export?network=preprod")
+    r = client.get("/api/v1/archive/export?network=preprod")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/csv")
     text = r.text
@@ -294,7 +294,7 @@ def test_csv_export_roundtrips_to_import(client, auth_open, store):
         for row in reader
     ]
     r = client.post(
-        "/api/archive/bulk",
+        "/api/v1/archive/bulk",
         json={
             "source_label": "self",
             "entries": entries,
@@ -309,7 +309,7 @@ def test_csv_export_into_empty_store_imports_all(client, auth_open, store):
     (empty store) inserts all rows."""
     for h, note in ((VALID_HASH, "first"), (OTHER_HASH, "second")):
         client.post(
-            "/api/archive",
+            "/api/v1/archive",
             json={
                 "network": "preprod",
                 "tx_hash": h,
@@ -317,7 +317,7 @@ def test_csv_export_into_empty_store_imports_all(client, auth_open, store):
                 "archived_by": "instance-a-admin",
             },
         )
-    csv_text = client.get("/api/archive/export?network=preprod").text
+    csv_text = client.get("/api/v1/archive/export?network=preprod").text
 
     # Simulate "instance B": wipe and re-import.
     store.reset()
@@ -333,7 +333,7 @@ def test_csv_export_into_empty_store_imports_all(client, auth_open, store):
         for row in reader
     ]
     r = client.post(
-        "/api/archive/bulk",
+        "/api/v1/archive/bulk",
         json={
             "source_label": "instance-a",
             "entries": entries,
@@ -353,7 +353,7 @@ def test_csv_export_into_empty_store_imports_all(client, auth_open, store):
 
 def test_invalid_tx_hash_rejected(client, auth_open):
     r = client.post(
-        "/api/archive",
+        "/api/v1/archive",
         json={
             "network": "preprod",
             "tx_hash": "not-a-hash",
@@ -366,7 +366,7 @@ def test_invalid_tx_hash_rejected(client, auth_open):
 
 def test_unknown_network_rejected(client, auth_open):
     r = client.post(
-        "/api/archive",
+        "/api/v1/archive",
         json={
             "network": "testnet",
             "tx_hash": VALID_HASH,
@@ -379,7 +379,7 @@ def test_unknown_network_rejected(client, auth_open):
 
 def test_empty_note_rejected(client, auth_open):
     r = client.post(
-        "/api/archive",
+        "/api/v1/archive",
         json={
             "network": "preprod",
             "tx_hash": VALID_HASH,
@@ -401,7 +401,7 @@ def test_archive_requires_api_key_when_keys_configured(client, monkeypatch):
     monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
     monkeypatch.setattr(api_key, "_dev_mode", False)
     r = client.post(
-        "/api/archive",
+        "/api/v1/archive",
         json={
             "network": "preprod",
             "tx_hash": VALID_HASH,
@@ -420,7 +420,7 @@ def test_archive_accepts_valid_api_key(client, monkeypatch):
     monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
     monkeypatch.setattr(api_key, "_dev_mode", False)
     r = client.post(
-        "/api/archive",
+        "/api/v1/archive",
         json={
             "network": "preprod",
             "tx_hash": VALID_HASH,
@@ -461,14 +461,16 @@ def test_list_filters_by_date_range(client, auth_open, store):
     }
 
     # Window that includes only the newer row.
-    r = client.get("/api/archive?network=preprod&from=2026-03-01T00:00:00Z&to=2026-12-31T23:59:59Z")
+    r = client.get(
+        "/api/v1/archive?network=preprod&from=2026-03-01T00:00:00Z&to=2026-12-31T23:59:59Z"
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 1
     assert body["data"][0]["tx_hash"] == OTHER_HASH
 
     # No bounds => both rows.
-    assert client.get("/api/archive?network=preprod").json()["count"] == 2
+    assert client.get("/api/v1/archive?network=preprod").json()["count"] == 2
 
 
 def test_export_filters_by_date_range(client, auth_open, store):
@@ -492,7 +494,7 @@ def test_export_filters_by_date_range(client, auth_open, store):
         "source": "local",
     }
     r = client.get(
-        "/api/archive/export?network=preprod&from=2026-03-01T00:00:00Z&to=2026-12-31T23:59:59Z"
+        "/api/v1/archive/export?network=preprod&from=2026-03-01T00:00:00Z&to=2026-12-31T23:59:59Z"
     )
     assert r.status_code == 200
     body = r.text
@@ -531,7 +533,7 @@ def test_bulk_import_dedupes_within_batch(client, auth_open, store):
             },
         ],
     }
-    r = client.post("/api/archive/bulk", json=payload)
+    r = client.post("/api/v1/archive/bulk", json=payload)
     assert r.status_code == 200
     assert r.json() == {"inserted": 1, "skipped": 2, "errors": []}
     # Only one row in the store, with the FIRST occurrence's note preserved.
@@ -540,7 +542,7 @@ def test_bulk_import_dedupes_within_batch(client, auth_open, store):
 
 
 # ---------------------------------------------------------------------------
-# Suppression contract on /api/analysis (regression guard for M2)
+# Suppression contract on /api/v1/analysis (regression guard for M2)
 # ---------------------------------------------------------------------------
 
 
@@ -569,7 +571,7 @@ def test_class_scores_list_sql_excludes_archived_by_default():
     assert "archived_alerts" in score_sql, (
         "get_class_scores_list must filter against archived_alerts when "
         "include_archived=False (default), otherwise admin archives have "
-        "no effect on /api/analysis/results"
+        "no effect on /api/v1/analysis/results"
     )
     assert "NOT IN" in score_sql
 
@@ -646,7 +648,7 @@ def test_count_class_scores_sql_includes_archived_when_requested():
 
 
 def test_class_scores_stats_sql_excludes_archived_by_default():
-    """Same contract for /api/analysis/stats: band counts must not include
+    """Same contract for /api/v1/analysis/stats: band counts must not include
     archived transactions."""
     from unittest.mock import patch
 

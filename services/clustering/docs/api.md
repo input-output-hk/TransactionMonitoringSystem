@@ -2,7 +2,7 @@
 
 These endpoints are served by the clustering module (FastAPI app:
 [api/main.py](../backend/app/api/main.py)) and reached from the TMS single‑page app
-through the `/api/clustering` reverse‑proxy: the host forwards `/api/clustering/<x>`
+through the `/api/v1/clustering` reverse‑proxy: the host forwards `/api/v1/clustering/<x>`
 to the module's `/api/v1/<x>`. The paths below are written without that proxy prefix,
 as the module sees them. `/api/v1` is the canonical, versioned prefix carried in the
 OpenAPI schema; a bare `/api` alias serves the same routes (kept for compatibility,
@@ -15,7 +15,7 @@ omitted from the schema). Interactive docs at `/docs` (OpenAPI at `/openapi.json
   the host's reverse‑proxy for exposure.
 - When `API_KEY` is set, every endpoint **except** `/api/health` and `/api/ready`
   (and their `/api/v1` aliases) requires the header `X-API-Key: <key>` (else **401**).
-- The SPA doesn't hold the key: the `/api/clustering` proxy injects `X-API-Key` into
+- The SPA does not hold the key: the `/api/v1/clustering` proxy injects `X-API-Key` into
   the forwarded request **server‑side**, so the browser never sees it. See
   [operations.md](operations.md#enabling-authentication).
 
@@ -162,11 +162,11 @@ outputs mean. A fit's flagged verdicts are also published to
 
 ## Examples
 
-These call the module through the TMS host's `/api/clustering` proxy. From inside the
+These call the module through the TMS host's `/api/v1/clustering` proxy. From inside the
 compose network you can also hit the module's `/api/v1/...` paths directly.
 
 ```bash
-B=https://<tms-host>/api/clustering
+B=https://<tms-host>/api/v1/clustering
 
 # Add a watched contract (poll the returned job_id)
 curl -s -X POST $B/contracts -H 'Content-Type: application/json' \

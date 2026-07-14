@@ -41,10 +41,10 @@ def _dev_mode_auth(monkeypatch):
 # Endpoints that accept ?network=. (path, default_status_range).
 # Every endpoint should accept each valid network and reject the invalid.
 _ENDPOINTS = [
-    "/api/analysis/results",
-    "/api/analysis/stats",
-    "/api/transactions/",
-    "/api/lifecycle",
+    "/api/v1/analysis/results",
+    "/api/v1/analysis/stats",
+    "/api/v1/transactions",
+    "/api/v1/lifecycle",
 ]
 
 
@@ -82,5 +82,5 @@ def test_unauthenticated_gets_401_before_validation(client, monkeypatch):
 
     monkeypatch.setattr(api_key, "_dev_mode", False)
     monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
-    r = client.get("/api/analysis/results?network=testnet")
+    r = client.get("/api/v1/analysis/results?network=testnet")
     assert r.status_code == 401

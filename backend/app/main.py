@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Security
+from fastapi import APIRouter, FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -475,15 +475,21 @@ FRONTEND_DIST = Path("/app/frontend-dist")
 _spa_present = FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file()
 
 app.include_router(websocket.router)
-app.include_router(transactions.router)
-app.include_router(entities.router)
-app.include_router(lifecycle.router)
-app.include_router(analysis.router)
-app.include_router(archive.router)
-app.include_router(auth_api.router)
-app.include_router(users_api.router)
-app.include_router(clustering_api.router)
-app.include_router(notifications_config.router)
+
+# All REST resources mount under one versioned prefix. Health probes and /ws
+# deliberately stay at the root: they are infrastructure surfaces consumed by
+# load balancers and the WS handshake, not versioned API resources.
+api_v1 = APIRouter(prefix="/api/v1")
+api_v1.include_router(transactions.router)
+api_v1.include_router(entities.router)
+api_v1.include_router(lifecycle.router)
+api_v1.include_router(analysis.router)
+api_v1.include_router(archive.router)
+api_v1.include_router(auth_api.router)
+api_v1.include_router(users_api.router)
+api_v1.include_router(clustering_api.router)
+api_v1.include_router(notifications_config.router)
+app.include_router(api_v1)
 
 
 @app.get("/health")

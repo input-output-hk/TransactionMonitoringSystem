@@ -14,7 +14,7 @@ export function useContracts(pollMs = 10_000, enabled = true) {
 		queryFn: () => get<Contract[]>("/contracts", validateContracts),
 		refetchInterval: pollMs,
 		// Let the page hold the query off until it knows clustering is enabled, so
-		// a clustering-disabled deployment never polls /api/clustering/*.
+		// a clustering-disabled deployment never polls /api/v1/clustering/*.
 		enabled,
 	});
 }

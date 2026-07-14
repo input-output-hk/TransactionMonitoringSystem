@@ -37,7 +37,7 @@ export function ValidatorsPage() {
 	const health = useHealth();
 	// Hold the clustering polls until health confirms the module is on, so a
 	// disabled deployment (or the brief pre-health window) never hits
-	// /api/clustering/*. `undefined` keeps each hook's default poll interval.
+	// /api/v1/clustering/*. `undefined` keeps each hook's default poll interval.
 	const clusteringEnabled = health.data?.clustering_enabled === true;
 	const {
 		data: contracts,

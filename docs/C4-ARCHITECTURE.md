@@ -35,7 +35,7 @@ C4Container
 
     System_Boundary(tms, "Transaction Monitoring System") {
         Container(connector, "Blockchain Connector", "Python, websockets", "Ingestion layer. Three persistent Ogmios WebSocket connections: ChainSync, LocalTxMonitor, LocalStateQuery. Normalizes transactions. Resolves mempool input UTxOs. Circuit breaker + checkpoint resumption.")
-        Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. Dual auth: TMS-API-Key (programmatic) and magic-link session cookies (dashboard, Admin/Reviewer roles). Per-key/IP rate limiting. User-management + archive APIs.")
+        Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. Dual auth: X-API-Key (programmatic) and magic-link session cookies (dashboard, Admin/Reviewer roles). Per-key/IP rate limiting. User-management + archive APIs.")
         Container(analysis, "Analysis Engine", "Python", "Services layer. 9-class Polimi detection engine. Reads unscored transactions, assigns multi-class risk scores, writes results to Analytics Warehouse.")
         Container(ui, "TMS Dashboard", "React SPA (served by API Gateway)", "Presentation layer. Real-time mempool feed, confirmed txs, lifecycle stats, analysis results, and the Validators / cluster-graph views.")
         Container(clustering, "Clustering Module", "Python, FastAPI, scikit-learn", "OPTIONAL first-party sidecar (services/clustering, --profile clustering). Per-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict the API merges in. Reads chain facts from the Analytics Warehouse; owns its own ClickHouse database.")
@@ -58,7 +58,7 @@ C4Container
     Rel(api, datalake, "Query transactions + analysis results", "Native :9000")
     Rel(api, admin_db, "Read/write lifecycle + config + entity state + auth/users", "TCP :5432")
     Rel(api, mail, "Send magic-link emails", "SMTP")
-    Rel(api, clustering, "Reverse-proxy /api/clustering/* (Validators UI)", "HTTP")
+    Rel(api, clustering, "Reverse-proxy /api/v1/clustering/* (Validators UI)", "HTTP")
     Rel(api, clusterdb, "Read contract_anomaly verdicts (merge into results)", "Native :9000")
     Rel(clustering, datalake, "Read watched-contract transactions", "HTTP :8123")
     Rel(clustering, clusterdb, "Write models + classifications + contract_anomaly", "HTTP :8123")
@@ -87,25 +87,25 @@ C4Component
 
         Component(analysis_engine, "Analysis Engine", "asyncio background task", "Polls Analytics Warehouse for unscored transactions. 9-class Polimi detection engine assigns multi-class risk scores and labels.")
 
-        Component(tx_api, "Transaction API", "FastAPI Router", "GET /api/transactions/, /api/transactions/{hash}, /api/transactions/address/{addr}, /api/transactions/stats/summary")
+        Component(tx_api, "Transaction API", "FastAPI Router", "GET /api/v1/transactions/, /api/v1/transactions/{hash}, /api/v1/transactions/address/{addr}, /api/v1/transactions/stats/summary")
 
-        Component(lifecycle_api, "Lifecycle API", "FastAPI Router", "GET /api/lifecycle/{txId}, /api/lifecycle?status=, /api/lifecycle/stats/summary")
+        Component(lifecycle_api, "Lifecycle API", "FastAPI Router", "GET /api/v1/lifecycle/{txId}, /api/v1/lifecycle?status=, /api/v1/lifecycle/stats/summary")
 
-        Component(analysis_api, "Analysis API", "FastAPI Router", "GET /api/analysis/results, /api/analysis/results/{hash}, /api/analysis/stats")
+        Component(analysis_api, "Analysis API", "FastAPI Router", "GET /api/v1/analysis/results, /api/v1/analysis/results/{hash}, /api/v1/analysis/stats")
 
-        Component(entity_api, "Entity API", "FastAPI Router", "GET/PUT /api/entities/{type}/{id}")
+        Component(entity_api, "Entity API", "FastAPI Router", "GET/PUT /api/v1/entities/{type}/{id}")
 
         Component(ws_router, "WebSocket Router", "FastAPI WebSocket", "WS /ws: broadcasts real-time lifecycle events to connected clients.")
 
         Component(ui_router, "UI Router", "FastAPI Router", "GET /: serves the TMS Dashboard (HTML5).")
 
-        Component(auth_api, "Auth API", "FastAPI Router", "POST /api/auth/request-link, GET /api/auth/verify, POST /api/auth/logout, GET /api/auth/me. Magic-link login + session lifecycle.")
+        Component(auth_api, "Auth API", "FastAPI Router", "POST /api/v1/auth/request-link, GET /api/v1/auth/verify, POST /api/v1/auth/logout, GET /api/v1/auth/me. Magic-link login + session lifecycle.")
 
-        Component(users_api, "Users API", "FastAPI Router", "GET/POST /api/users, DELETE /api/users/{id}, POST /api/users/{id}/resend-invite. Admin-gated user management.")
+        Component(users_api, "Users API", "FastAPI Router", "GET/POST /api/v1/users, DELETE /api/v1/users/{id}, POST /api/v1/users/{id}/resend-invite. Admin-gated user management.")
 
-        Component(archive_api, "Archive API", "FastAPI Router", "GET/POST/DELETE /api/archive/*. False-positive curation and export.")
+        Component(archive_api, "Archive API", "FastAPI Router", "GET/POST/DELETE /api/v1/archive/*. False-positive curation and export.")
 
-        Component(auth, "Auth Module", "FastAPI Security (app/auth)", "Two paths: TMS-API-Key header validation (constant-time, api_key.py) and magic-link sessions (tokens.py, sessions.py, email.py). deps.py exposes require_user / require_admin. Open API-key access requires empty API_KEYS + TMS_ALLOW_DEV_MODE=1, else startup aborts.")
+        Component(auth, "Auth Module", "FastAPI Security (app/auth)", "Two paths: X-API-Key header validation (constant-time, api_key.py) and magic-link sessions (tokens.py, sessions.py, email.py). deps.py exposes require_user / require_admin. Open API-key access requires empty API_KEYS + TMS_ALLOW_DEV_MODE=1, else startup aborts.")
 
         Component(rate_limiter, "Rate Limiter", "Middleware", "Per-key/IP sliding-window rate limiter. Configurable via RATE_LIMIT_REQUESTS / RATE_LIMIT_WINDOW_SECONDS.")
 
@@ -119,7 +119,7 @@ C4Component
 
         Component(notifications, "Notifications Module", "Python package (app/notifications)", "Band/class-triggered alerting: trigger-rule resolution (triggers.py), isolated channel fan-out (dispatcher.py), email + signed-webhook channels, periodic reports (reports.py). Config document managed via the Notifications Config API.")
 
-        Component(notifications_api, "Notifications Config API", "FastAPI Router", "GET/PUT /api/notifications/config. Admin-gated management of channels, the band x attack-class trigger matrix, and recipient lists.")
+        Component(notifications_api, "Notifications Config API", "FastAPI Router", "GET/PUT /api/v1/notifications/config. Admin-gated management of channels, the band x attack-class trigger matrix, and recipient lists.")
 
         Component(notifications_task, "Notification Tasks", "asyncio background task", "Periodic-report scheduler and the clustering contract_anomaly poller (tasks/notifications.py).")
     }
@@ -294,7 +294,7 @@ sequenceDiagram
     participant PG as Admin DB (PostgreSQL)
     participant CH as Datalake (ClickHouse)
 
-    Client->>API: GET /api/lifecycle/{txId}<br/>TMS-API-Key: secret-key
+    Client->>API: GET /api/v1/lifecycle/{txId}<br/>X-API-Key: secret-key
     API->>Auth: Validate API key
     alt dev mode (API_KEYS empty + TMS_ALLOW_DEV_MODE=1)
         Auth-->>API: Allow (dev mode)
