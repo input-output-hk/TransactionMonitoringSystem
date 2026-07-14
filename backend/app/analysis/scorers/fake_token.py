@@ -17,24 +17,28 @@ Sub-scores (Polimi Section 4.8.3):
 import logging
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from rapidfuzz import fuzz
 
+from app.analysis import external
+from app.analysis.features import decode_hex_asset_name as _decode_hex_asset_name
 from app.analysis.normalise import EPSILON, normalise, normalise_inverted
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import (
-    BaseScorer,
     FUZZ_RATIO_SCALE,
+    BaseScorer,
     ScorerResult,
     finalise_score,
 )
-from app.analysis import external
-from app.analysis.features import decode_hex_asset_name as _decode_hex_asset_name
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +235,7 @@ def _compute_unicode_suspicion(name: str) -> float:
 
 
 def _compute_cip25_similarity(
-    tx_metadata: Optional[Dict],
+    tx_metadata: dict | None,
     legit_name: str,
 ) -> float:
     """Score CIP-25 metadata similarity against a known legitimate token."""
@@ -259,7 +263,7 @@ def _compute_cip25_similarity(
     return max_sim
 
 
-def _flatten_cip25(obj: Any, parts: List[str], depth: int = 0):
+def _flatten_cip25(obj: Any, parts: list[str], depth: int = 0):
     """Recursively extract string values from CIP-25 metadata."""
     # CIP-25 metadata (policy -> asset -> {name,image,...}) is shallow by spec;
     # this bounds the descent over attacker-controlled metadata so a deeply
@@ -280,7 +284,7 @@ def _flatten_cip25(obj: Any, parts: List[str], depth: int = 0):
             _flatten_cip25(item, parts, depth + 1)
 
 
-def _extract_minted_assets(raw_data: Dict, metadata: Optional[Dict] = None) -> List[Dict[str, Any]]:
+def _extract_minted_assets(raw_data: dict, metadata: dict | None = None) -> list[dict[str, Any]]:
     """Extract minted assets from raw_data.mint.
 
     Resolves human-readable names from: (1) hex decoding of the asset name,
@@ -291,7 +295,7 @@ def _extract_minted_assets(raw_data: Dict, metadata: Optional[Dict] = None) -> L
         return []
 
     # Build lookup from CIP-25 metadata: (policy_id, hex_asset_name) -> name
-    cip25_names: Dict[tuple, str] = {}
+    cip25_names: dict[tuple, str] = {}
     if metadata and isinstance(metadata, dict):
         label_721 = metadata.get("721") or metadata.get(721)
         if isinstance(label_721, dict):
@@ -328,7 +332,7 @@ def _extract_minted_assets(raw_data: Dict, metadata: Optional[Dict] = None) -> L
 class FakeTokenScorer(BaseScorer):
     name = "fake_token"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Minting tx where at least one token name matches a legitimate token."""
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
@@ -349,7 +353,7 @@ class FakeTokenScorer(BaseScorer):
                     return True
         return False
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
         network = features.get("network", "")
         metadata = features.get("metadata")
@@ -522,7 +526,7 @@ class FakeTokenScorer(BaseScorer):
             "﻿": "BOM (U+FEFF)",
             "­": "SHY (U+00AD)",
         }
-        confusables: List[Dict[str, str]] = []
+        confusables: list[dict[str, str]] = []
         for c in dict.fromkeys(scan_name):
             mapped = _CONFUSABLES.get(ord(c))
             if mapped is not None:

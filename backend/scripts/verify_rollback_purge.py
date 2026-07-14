@@ -23,15 +23,15 @@ touched; both are cleaned up on every run. Exits non-zero on any failure.
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from clickhouse_driver import Client  # noqa: E402
+from clickhouse_driver import Client
 
-from app.config import settings  # noqa: E402
-from app.db import clickhouse, clickhouse_schema  # noqa: E402
-from app.models.transaction import NormalizedTransaction  # noqa: E402
+from app.config import settings
+from app.db import clickhouse, clickhouse_schema
+from app.models.transaction import NormalizedTransaction
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("verify_rollback_purge")
@@ -102,7 +102,7 @@ def _verify_current_schema_purge(client) -> int:
         slot=_VERIFY_SLOT,
         block_height=1,
         block_hash="aa" * 32,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fee=0,
         raw_data={},
     )
@@ -164,7 +164,7 @@ def _verify_legacy_migration_purge(admin_client) -> int:
             legacy_client.execute(clickhouse_schema.SCHEMA_DDL[table].format(table=table))
         legacy_client.execute(
             "INSERT INTO transactions (tx_hash, network, slot, timestamp, fee) VALUES",
-            [(_VERIFY_TX_HASH, _VERIFY_NETWORK, _VERIFY_SLOT, datetime.now(timezone.utc), 0)],
+            [(_VERIFY_TX_HASH, _VERIFY_NETWORK, _VERIFY_SLOT, datetime.now(UTC), 0)],
         )
         logger.info("Built legacy (pre-projection) sentinel deployment in %s", _LEGACY_DB)
 

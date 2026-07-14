@@ -9,12 +9,11 @@ the FastAPI plumbing end-to-end (validation, status codes, response shapes).
 
 import csv
 import io
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -25,7 +24,7 @@ class FakeArchiveStore:
     """In-memory stand-in for the ``archived_alerts`` ClickHouse table."""
 
     def __init__(self) -> None:
-        self.rows: Dict[tuple, Dict[str, Any]] = {}
+        self.rows: dict[tuple, dict[str, Any]] = {}
 
     def reset(self) -> None:
         self.rows.clear()
@@ -44,10 +43,10 @@ def client(monkeypatch, store):
     on the audit write, so without a working insert_audit_log they would all
     503 (which test_audit_fail_closed.py covers explicitly).
     """
-    from app.main import app
     from app.db import archive_queries, postgres
+    from app.main import app
 
-    audit_rows: List[Dict[str, Any]] = []
+    audit_rows: list[dict[str, Any]] = []
 
     async def fake_insert_audit(**kwargs):
         audit_rows.append(kwargs)
@@ -68,7 +67,7 @@ def client(monkeypatch, store):
             "tx_hash": tx_hash,
             "note": note,
             "archived_by": archived_by,
-            "archived_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            "archived_at": datetime.now(UTC).replace(tzinfo=None),
             "source": archive_queries.SOURCE_LOCAL,
         }
 
@@ -104,7 +103,7 @@ def client(monkeypatch, store):
     async def fake_get(network, tx_hash):
         return store.rows.get((network, tx_hash))
 
-    async def fake_bulk_insert(entries: List[Dict[str, Any]], source_label: str):
+    async def fake_bulk_insert(entries: list[dict[str, Any]], source_label: str):
         inserted = 0
         skipped = 0
         tag = f"{archive_queries.IMPORT_SOURCE_PREFIX}{source_label}"
@@ -115,9 +114,9 @@ def client(monkeypatch, store):
                 continue
             archived_at = e.get("archived_at")
             if archived_at is None:
-                archived_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                archived_at = datetime.now(UTC).replace(tzinfo=None)
             elif archived_at.tzinfo is not None:
-                archived_at = archived_at.astimezone(timezone.utc).replace(tzinfo=None)
+                archived_at = archived_at.astimezone(UTC).replace(tzinfo=None)
             store.rows[key] = {
                 "network": e["network"],
                 "tx_hash": e["tx_hash"],
@@ -551,6 +550,7 @@ def test_class_scores_list_sql_excludes_archived_by_default():
     the dangerous-transactions list. Future refactors of the query path
     must keep this filter or this test fails."""
     from unittest.mock import patch
+
     from app.db import clickhouse
 
     captured = {}
@@ -577,6 +577,7 @@ def test_class_scores_list_sql_excludes_archived_by_default():
 def test_class_scores_list_sql_includes_archived_when_requested():
     """The opt-out switch must remove the anti-join."""
     from unittest.mock import patch
+
     from app.db import clickhouse
 
     captured = {}
@@ -597,6 +598,7 @@ def test_count_class_scores_sql_excludes_archived_by_default():
     apply the same archive anti-join — otherwise pagination totals would count
     archived rows the list itself drops."""
     from unittest.mock import patch
+
     from app.db import clickhouse
 
     captured = {"queries": []}
@@ -621,6 +623,7 @@ def test_count_class_scores_sql_excludes_archived_by_default():
 
 def test_count_class_scores_sql_includes_archived_when_requested():
     from unittest.mock import patch
+
     from app.db import clickhouse
 
     captured = {"queries": []}
@@ -646,6 +649,7 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
     """Same contract for /api/analysis/stats: band counts must not include
     archived transactions."""
     from unittest.mock import patch
+
     from app.db import clickhouse
 
     captured = {"queries": []}
@@ -670,6 +674,7 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
 
 def test_class_scores_stats_sql_skips_filter_when_include_archived():
     from unittest.mock import patch
+
     from app.db import clickhouse
 
     captured = {"queries": []}

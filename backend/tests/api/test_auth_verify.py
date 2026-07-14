@@ -16,7 +16,7 @@ real Postgres in tests/live_db/test_auth_lifecycle_pg.py.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -39,7 +39,7 @@ def _user_row(status="active", user_id=None):
         "full_name": "Op Erator",
         "role": "Reviewer",
         "status": status,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "last_login_at": None,
     }
 
@@ -53,7 +53,7 @@ def client():
 
 @pytest.fixture
 def session_stub(monkeypatch):
-    expires = datetime.now(timezone.utc) + timedelta(days=settings.SESSION_TTL_DAYS)
+    expires = datetime.now(UTC) + timedelta(days=settings.SESSION_TTL_DAYS)
     stub = AsyncMock(return_value=("sess-abc", expires))
     monkeypatch.setattr(auth_api, "create_session", stub)
     return stub

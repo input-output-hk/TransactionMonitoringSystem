@@ -11,7 +11,6 @@ isolation layers protect the system from a slow or broken channel:
 
 import asyncio
 import logging
-from typing import List, Optional
 
 from app import audit
 from app.config import settings
@@ -23,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 async def dispatch(
     payload,
-    dispatches: List[Dispatch],
-    attachments: "Optional[List[Attachment]]" = None,
+    dispatches: list[Dispatch],
+    attachments: "list[Attachment] | None" = None,
 ) -> bool:
     """Deliver ``payload`` to every channel in ``dispatches``, fully isolated.
 

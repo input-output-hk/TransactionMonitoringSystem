@@ -16,7 +16,6 @@ auth specifically (e.g. ``/api/users``) should use ``require_user`` or
 
 import hmac
 import logging
-from typing import List, Optional
 
 from fastapi import HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
@@ -32,7 +31,7 @@ api_key_header = APIKeyHeader(
 )
 
 # Parse and cache valid keys once at startup — avoids repeated string splits on every request
-_valid_keys: List[str] = (
+_valid_keys: list[str] = (
     [k.strip() for k in settings.API_KEYS.split(",") if k.strip()] if settings.API_KEYS else []
 )
 _dev_mode: bool = not _valid_keys
@@ -40,7 +39,7 @@ _dev_mode: bool = not _valid_keys
 # configured before the message is written.
 
 
-def is_valid_api_key(candidate: Optional[str]) -> bool:
+def is_valid_api_key(candidate: str | None) -> bool:
     """Constant-time check against the configured API keys.
 
     Returns True when ``candidate`` matches any key in ``_valid_keys``. The
@@ -62,7 +61,7 @@ def is_valid_api_key(candidate: Optional[str]) -> bool:
 
 async def verify_api_key(
     request: Request,
-    api_key: Optional[str] = Security(api_key_header),
+    api_key: str | None = Security(api_key_header),
 ) -> str:
     """Accept either a valid API key OR a valid session cookie.
 

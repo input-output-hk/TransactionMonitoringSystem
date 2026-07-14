@@ -8,7 +8,6 @@ so a group never splits) and each INSERT carries explicit memory settings.
 
 import importlib.util
 import os
-import sys
 from unittest.mock import MagicMock
 
 import pytest

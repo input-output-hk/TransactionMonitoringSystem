@@ -3,15 +3,16 @@
 import json
 import logging
 import re
-from typing import List, Optional, Dict, Any
 from datetime import datetime
-from fastapi import APIRouter, Query, HTTPException, Security
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, Security
 from pydantic import BaseModel
 
-from app.db import clickhouse
-from app.config import settings
-from app.auth import verify_api_key
 from app.api._params import NetworkParam
+from app.auth import verify_api_key
+from app.config import settings
+from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
 
@@ -28,26 +29,26 @@ class TransactionResponse(BaseModel):
     """Transaction response model"""
 
     tx_hash: str
-    slot: Optional[int]
-    block_height: Optional[int]
-    block_hash: Optional[str]
-    block_index: Optional[int]
+    slot: int | None
+    block_height: int | None
+    block_hash: str | None
+    block_index: int | None
     timestamp: datetime
     fee: int
-    deposit: Optional[int]
+    deposit: int | None
     input_count: int
     output_count: int
-    total_input_value: Optional[int]
+    total_input_value: int | None
     total_output_value: int
-    addresses: List[str]
+    addresses: list[str]
 
 
 class TransactionDetailResponse(TransactionResponse):
     """Detailed transaction response with inputs and outputs"""
 
-    inputs: List[Dict[str, Any]]
-    outputs: List[Dict[str, Any]]
-    metadata: Optional[Dict[str, Any]] = None
+    inputs: list[dict[str, Any]]
+    outputs: list[dict[str, Any]]
+    metadata: dict[str, Any] | None = None
 
 
 def _row_to_transaction(row: Any) -> TransactionResponse:
@@ -75,15 +76,15 @@ def _row_to_transaction(row: Any) -> TransactionResponse:
     )
 
 
-@router.get("/", response_model=List[TransactionResponse])
+@router.get("/", response_model=list[TransactionResponse])
 async def get_transactions(
     network: NetworkParam = None,
     limit: int = Query(100, ge=1, le=200, description="Maximum number of transactions to return"),
-    before: Optional[datetime] = Query(
+    before: datetime | None = Query(
         None,
         description="Cursor pagination: return transactions strictly before this timestamp (ISO format).",
     ),
-    address: Optional[str] = Query(None, description="Filter by address (any input or output)"),
+    address: str | None = Query(None, description="Filter by address (any input or output)"),
     api_key: str = Security(verify_api_key),
 ):
     """List transactions from ClickHouse."""
@@ -91,7 +92,7 @@ async def get_transactions(
         raise HTTPException(status_code=422, detail="Invalid address format")
     try:
         query_network = network or settings.CARDANO_NETWORK
-        params: Dict[str, Any] = {"network": query_network, "limit": limit}
+        params: dict[str, Any] = {"network": query_network, "limit": limit}
 
         if address:
             before_clause = ""
@@ -262,12 +263,12 @@ async def get_transaction_by_hash(
         raise HTTPException(status_code=500, detail="Failed to query transaction")
 
 
-@router.get("/address/{address}", response_model=List[TransactionResponse])
+@router.get("/address/{address}", response_model=list[TransactionResponse])
 async def get_transactions_by_address(
     address: str,
     network: NetworkParam = None,
     limit: int = Query(100, ge=1, le=200),
-    before: Optional[datetime] = Query(
+    before: datetime | None = Query(
         None,
         description="Cursor pagination: return transactions strictly before this timestamp (ISO format).",
     ),
@@ -335,14 +336,14 @@ async def get_recent_blocks(
 @router.get("/stats/summary")
 async def get_transaction_stats(
     network: NetworkParam = None,
-    start_time: Optional[datetime] = Query(None),
-    end_time: Optional[datetime] = Query(None),
+    start_time: datetime | None = Query(None),
+    end_time: datetime | None = Query(None),
     api_key: str = Security(verify_api_key),
 ):
     """Get transaction statistics"""
     try:
         query_network = network or settings.CARDANO_NETWORK
-        params: Dict[str, Any] = {"network": query_network}
+        params: dict[str, Any] = {"network": query_network}
 
         time_clauses = ""
         if start_time:

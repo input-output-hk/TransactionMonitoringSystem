@@ -1,12 +1,12 @@
 """Watermark cursor, poll bounds, and baseline-cache behavior (WS4)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.config import settings
 from app.analysis import engine
+from app.config import settings
 from app.db import clickhouse
 
 # Captured at collection time, BEFORE the autouse conftest fixture patches
@@ -14,7 +14,7 @@ from app.db import clickhouse
 # implementation.
 _real_get_baseline = clickhouse.get_baseline
 
-TS = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
+TS = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)

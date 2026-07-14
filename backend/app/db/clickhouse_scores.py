@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import datetime
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.config import settings
 
@@ -72,7 +72,7 @@ _ARCHIVE_ANTI_JOIN = (
 )
 
 
-def _decode_score_json(d: Dict[str, Any]) -> Dict[str, Any]:
+def _decode_score_json(d: dict[str, Any]) -> dict[str, Any]:
     """Decode the sub_scores/evidence JSON columns of a score row in place,
     swallowing a malformed payload to {} so one bad row can't break a list
     response. Returns the same dict for convenience."""
@@ -99,7 +99,7 @@ async def _run(fn, *args):
     return await clickhouse._in_executor(fn, *args)
 
 
-def insert_class_scores(results: List[Dict[str, Any]]):
+def insert_class_scores(results: list[dict[str, Any]]):
     """Batch-insert multi-class scoring results into tx_class_scores."""
     if not results:
         return
@@ -137,7 +137,7 @@ def insert_class_scores(results: List[Dict[str, Any]]):
     )
 
 
-def get_class_scores(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
+def get_class_scores(tx_hash: str, network: str) -> dict[str, Any] | None:
     """Return the latest multi-class score vector for a single transaction.
 
     Network-scoped: a tx_hash is only unique WITHIN a network (the table's
@@ -161,9 +161,9 @@ def get_class_scores(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
 
 def get_class_scores_by_hashes(
     network: str,
-    tx_hashes: List[str],
+    tx_hashes: list[str],
     include_archived: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Latest score vectors for a specific set of tx_hashes on a network.
 
     Used by the list endpoint's contract_anomaly recall rescue to hydrate the
@@ -188,9 +188,9 @@ def get_class_scores_by_hashes(
 
 async def get_class_scores_by_hashes_async(
     network: str,
-    tx_hashes: List[str],
+    tx_hashes: list[str],
     include_archived: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     return await _run(
         partial(get_class_scores_by_hashes, network, tx_hashes, include_archived),
     )
@@ -198,9 +198,9 @@ async def get_class_scores_by_hashes_async(
 
 def get_tx_block_dates(
     network: str,
-    tx_hashes: List[str],
+    tx_hashes: list[str],
     days: int,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Map each tx_hash to its on-chain block DATE (``YYYY-MM-DD``), restricted to
     the trailing ``days`` window. Used to bucket contract_anomaly-flagged txs into
     the alert timeseries (which buckets on block time, not analyzed_at). A tx_hash
@@ -222,9 +222,9 @@ def get_tx_block_dates(
 
 async def get_tx_block_dates_async(
     network: str,
-    tx_hashes: List[str],
+    tx_hashes: list[str],
     days: int,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     return await _run(partial(get_tx_block_dates, network, tx_hashes, days))
 
 
@@ -238,7 +238,7 @@ def query_multiple_sat_extraction_percentiles(
     network: str,
     window_days: int,
     min_samples: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Per-script p50/p99 of the multiple_sat extraction features.
 
     Aggregates the already-persisted ``tx_class_scores.evidence`` over scored
@@ -282,10 +282,10 @@ def query_multiple_sat_extraction_percentiles(
         {"network": network, "days": window_days, "min_samples": min_samples},
     )
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for row in rows:
         script, cnt = row[0], int(row[1])
-        rec: Dict[str, Any] = {"script": script, "sample_count": cnt}
+        rec: dict[str, Any] = {"script": script, "sample_count": cnt}
         # Remaining columns are (p50, p99) pairs in _MULTIPLE_SAT_EVIDENCE_KEYS order.
         for i, (feature, _key) in enumerate(_MULTIPLE_SAT_EVIDENCE_KEYS):
             p50 = float(row[2 + i * 2])
@@ -298,14 +298,14 @@ def query_multiple_sat_extraction_percentiles(
 # The nine attack-class score columns on tx_class_scores, in canonical order.
 def _score_filter_conditions(
     network: str,
-    risk_band: Optional[List[str]],
-    attack_class: Optional[str],
+    risk_band: list[str] | None,
+    attack_class: str | None,
     min_score: float,
-    analyzed_from: Optional[Any],
-    analyzed_to: Optional[Any],
+    analyzed_from: Any | None,
+    analyzed_to: Any | None,
     include_archived: bool,
     min_corroboration: int = 0,
-) -> Tuple[List[str], Dict[str, Any]]:
+) -> tuple[list[str], dict[str, Any]]:
     """Build the shared WHERE conditions + params for the class-scores list and
     count queries.
 
@@ -320,7 +320,7 @@ def _score_filter_conditions(
     if attack_class and attack_class not in _CLASS_COLS:
         raise ValueError(f"Invalid attack_class '{attack_class}'")
     conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {"network": network}
+    params: dict[str, Any] = {"network": network}
     if risk_band:
         # One named placeholder per value so the query is fully parameterized
         # (no string interpolation of user input); clickhouse-driver does not
@@ -358,17 +358,17 @@ def _score_filter_conditions(
 
 def get_class_scores_list(
     network: str,
-    risk_band: Optional[List[str]] = None,
-    attack_class: Optional[str] = None,
+    risk_band: list[str] | None = None,
+    attack_class: str | None = None,
     min_score: float = 0.0,
     sort: str = "score",
-    analyzed_from: Optional[Any] = None,
-    analyzed_to: Optional[Any] = None,
+    analyzed_from: Any | None = None,
+    analyzed_to: Any | None = None,
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
     min_corroboration: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return multi-class score rows with optional filters.
 
     sort: "score" (default) or "date" (most recent first).
@@ -416,7 +416,7 @@ def get_class_scores_list(
     score_keys = _SCORE_COLS
     # Batch-fetch fee/output_count for matched tx_hashes
     tx_hashes = [r[0] for r in rows]
-    tx_details: Dict[str, Dict[str, Any]] = {}
+    tx_details: dict[str, dict[str, Any]] = {}
     if tx_hashes:
         detail_rows = _client().execute(
             """
@@ -440,17 +440,17 @@ def get_class_scores_list(
 
 async def get_class_scores_list_async(
     network: str,
-    risk_band: Optional[List[str]],
-    attack_class: Optional[str],
+    risk_band: list[str] | None,
+    attack_class: str | None,
     min_score: float,
     sort: str = "score",
     limit: int = 100,
     offset: int = 0,
     include_archived: bool = False,
-    analyzed_from: Optional[Any] = None,
-    analyzed_to: Optional[Any] = None,
+    analyzed_from: Any | None = None,
+    analyzed_to: Any | None = None,
     min_corroboration: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     # Bind by keyword so a future reorder of the sync signature can't silently
     # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
     return await _run(
@@ -473,11 +473,11 @@ async def get_class_scores_list_async(
 
 def count_class_scores(
     network: str,
-    risk_band: Optional[List[str]] = None,
-    attack_class: Optional[str] = None,
+    risk_band: list[str] | None = None,
+    attack_class: str | None = None,
     min_score: float = 0.0,
-    analyzed_from: Optional[Any] = None,
-    analyzed_to: Optional[Any] = None,
+    analyzed_from: Any | None = None,
+    analyzed_to: Any | None = None,
     include_archived: bool = False,
     min_corroboration: int = 0,
 ) -> int:
@@ -512,11 +512,11 @@ def count_class_scores(
 
 async def count_class_scores_async(
     network: str,
-    risk_band: Optional[List[str]],
-    attack_class: Optional[str],
+    risk_band: list[str] | None,
+    attack_class: str | None,
     min_score: float,
-    analyzed_from: Optional[Any] = None,
-    analyzed_to: Optional[Any] = None,
+    analyzed_from: Any | None = None,
+    analyzed_to: Any | None = None,
     include_archived: bool = False,
     min_corroboration: int = 0,
 ) -> int:
@@ -539,9 +539,9 @@ def aggregate_window_counts(
     network: str,
     analyzed_from: Any,
     analyzed_to: Any,
-    alert_bands: List[str],
+    alert_bands: list[str],
     include_archived: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Windowed counts for the periodic report in TWO GROUP BY scans.
 
     Returns ``{total, by_band, by_class}`` where ``by_band`` spans every band in
@@ -587,9 +587,9 @@ async def aggregate_window_counts_async(
     network: str,
     analyzed_from: Any,
     analyzed_to: Any,
-    alert_bands: List[str],
+    alert_bands: list[str],
     include_archived: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return await _run(
         partial(
             aggregate_window_counts,
@@ -602,7 +602,7 @@ async def aggregate_window_counts_async(
     )
 
 
-async def get_class_scores_async(tx_hash: str, network: str) -> Optional[Dict[str, Any]]:
+async def get_class_scores_async(tx_hash: str, network: str) -> dict[str, Any] | None:
     return await _run(get_class_scores, tx_hash, network)
 
 
@@ -612,11 +612,11 @@ async def get_class_scores_async(tx_hash: str, network: str) -> Optional[Dict[st
 # (~15 s), occupying one of the three executor workers with cost that grows
 # with history, not activity. Keyed (network, include_archived); staleness
 # only affects KPI cards, never detection. STATS_CACHE_TTL_SECONDS=0 disables.
-_stats_cache: Dict[Tuple[str, bool], Tuple[Dict[str, Any], float]] = {}
+_stats_cache: dict[tuple[str, bool], tuple[dict[str, Any], float]] = {}
 _stats_cache_lock = threading.Lock()
 
 
-def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict[str, Any]:
+def get_class_scores_stats(network: str, include_archived: bool = False) -> dict[str, Any]:
     """Per-class distribution stats for a network.
 
     include_archived: when False (default), exclude rows whose (network, tx_hash)
@@ -689,7 +689,7 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> Dict
     agg_cols = [f"{col}_{stat}" for col in _CLASS_COLS for stat in ("count", "avg", "max")]
     d = dict(zip([*_HEAD_COLS, *agg_cols], rows[0]))
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "total": d["total"],
         "critical_count": d["critical_count"],
         "high_count": d["high_count"],
@@ -761,7 +761,7 @@ def get_pending_count(network: str) -> int:
 async def get_class_scores_stats_async(
     network: str,
     include_archived: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return await _run(get_class_scores_stats, network, include_archived)
 
 
@@ -769,7 +769,7 @@ def get_alert_timeseries(
     network: str,
     days: int = 14,
     include_archived: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Daily count of High+Critical alerts over the last ``days`` days.
 
     Bucketed on the transaction's on-chain block ``timestamp`` (not
@@ -824,15 +824,15 @@ async def get_alert_timeseries_async(
     network: str,
     days: int = 14,
     include_archived: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     return await _run(get_alert_timeseries, network, days, include_archived)
 
 
 def get_unanalyzed_transactions(
     network: str,
     batch_size: int,
-    since: Optional[datetime] = None,
-) -> List[Dict[str, Any]]:
+    since: datetime | None = None,
+) -> list[dict[str, Any]]:
     """Return transactions that have no multi-class score yet.
 
     Fetches raw_data alongside the standard fields so that the feature
@@ -866,7 +866,7 @@ def get_unanalyzed_transactions(
     since_bound = "AND t.ingestion_timestamp >= %(since)s" if since else ""
     scores_bound = "AND analyzed_at >= %(since)s" if since else ""
     inputs_bound = "AND ingestion_timestamp >= %(since)s" if since else ""
-    params: Dict[str, Any] = {"network": network, "batch_size": batch_size}
+    params: dict[str, Any] = {"network": network, "batch_size": batch_size}
     if since:
         params["since"] = since
     rows = _client().execute(

@@ -1,6 +1,7 @@
 """Unit tests for the Circular Transfers scorer (Class 7)."""
 
 import pytest
+
 from app.analysis.scorers.circular import CircularScorer
 
 

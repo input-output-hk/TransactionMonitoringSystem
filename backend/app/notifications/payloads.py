@@ -9,7 +9,7 @@ so the field names and types are stable wire contracts.
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -44,7 +44,7 @@ class ImmediateAlert(BaseModel):
     risk_band: str  # Informational | Moderate | High | Critical
     tx_hash: str
     network: str  # mainnet | preprod | preview
-    contributing_features: Dict[str, float] = Field(default_factory=dict)
+    contributing_features: dict[str, float] = Field(default_factory=dict)
     baseline_source: str  # per_script | per_policy | global_fallback
     dashboard_url: str
 
@@ -53,8 +53,8 @@ class ReportSummary(BaseModel):
     """The summary block of a periodic report."""
 
     total_transactions_scored: int
-    alerts_by_band: Dict[str, int]  # {Critical, High, Moderate, Informational}
-    alerts_by_class: Dict[str, int]  # per attack class (+ contract_anomaly when sidecar on)
+    alerts_by_band: dict[str, int]  # {Critical, High, Moderate, Informational}
+    alerts_by_class: dict[str, int]  # per attack class (+ contract_anomaly when sidecar on)
     false_positives_archived: int
 
 
@@ -74,17 +74,17 @@ class PeriodicReport(BaseModel):
     notification_type: Literal["periodic_report"] = "periodic_report"
     timestamp: str
     network: str
-    report_window: Dict[str, str]  # {"from": iso, "to": iso}
+    report_window: dict[str, str]  # {"from": iso, "to": iso}
     summary: ReportSummary
-    top_alerts: List[TopAlert]
+    top_alerts: list[TopAlert]
     dashboard_url: str
 
 
 def _top_features(
-    sub_scores: Dict[str, Dict[str, float]],
+    sub_scores: dict[str, dict[str, float]],
     attack_class: str,
     n: int,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Top-N sub-scores of the dominant class, by value descending.
 
     ``sub_scores`` is keyed by class name -> {feature: normalised [0,1] value}
@@ -100,7 +100,7 @@ def _top_features(
     return {k: round(v, _FEATURE_ROUND_DIGITS) for k, v in items[: max(0, n)]}
 
 
-def build_immediate_alert(result: Dict, network: str) -> ImmediateAlert:
+def build_immediate_alert(result: dict, network: str) -> ImmediateAlert:
     """Map an engine result dict (engine._score_transaction) -> ImmediateAlert."""
     tx_hash = result["tx_hash"]
     attack_class = result.get("max_class") or ""
@@ -129,7 +129,7 @@ def build_immediate_alert(result: Dict, network: str) -> ImmediateAlert:
 def build_contract_anomaly_alert(
     tx_hash: str,
     network: str,
-    winner: Dict,
+    winner: dict,
 ) -> ImmediateAlert:
     """Map a resolved clustering contract_anomaly verdict -> ImmediateAlert.
 
@@ -193,7 +193,7 @@ def build_degraded_contract_anomaly_alert(
     )
 
 
-def _spec_baseline_source(raw: Optional[str]) -> str:
+def _spec_baseline_source(raw: str | None) -> str:
     """Map the engine's internal baseline tier to the payload enum.
 
     The engine emits per_script / per_policy / global / fixed / bootstrap /

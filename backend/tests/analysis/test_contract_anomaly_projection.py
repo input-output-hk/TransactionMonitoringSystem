@@ -6,7 +6,7 @@ per-tx fields), the real-anomaly-fires guarantee, and the CLUSTERING_ENABLED
 gate. All hermetic: no ClickHouse, no sidecar.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -138,7 +138,7 @@ def _row(verdict: str = "anomaly", consensus=None, target="addr1xyz") -> dict:
         "model_id": "m1",
         "feature_set": "shape",
         "evidence": {"top": ["fees"]},
-        "scored_at": datetime(2026, 6, 22, tzinfo=timezone.utc),
+        "scored_at": datetime(2026, 6, 22, tzinfo=UTC),
     }
 
 
@@ -205,7 +205,7 @@ class TestMergeAdditivity:
     def test_scored_at_and_evidence_surfaced(self):
         r = _base_result(45.0, "phishing")
         _merge_contract_anomaly(r, [_row("malicious")])
-        assert r.contract_anomaly_scored_at == datetime(2026, 6, 22, tzinfo=timezone.utc)
+        assert r.contract_anomaly_scored_at == datetime(2026, 6, 22, tzinfo=UTC)
         assert r.evidence["contract_anomaly"]["target"] == "addr1xyz"
         assert r.evidence["contract_anomaly"]["top"] == ["fees"]
         assert r.sub_scores["contract_anomaly"]["verdict"] == "malicious"
@@ -239,7 +239,7 @@ _ROW = {
     "corroboration_count": 0,
     "corroborating_classes": "",
     "analysis_version": "phase5",
-    "analyzed_at": datetime(2026, 6, 22, tzinfo=timezone.utc),
+    "analyzed_at": datetime(2026, 6, 22, tzinfo=UTC),
 }
 
 
@@ -622,9 +622,9 @@ def test_list_filter_contract_anomaly_date_sort_orders_newest_first(client, monk
 
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     older = _full_score_row("older", 10.0)
-    older["analyzed_at"] = datetime(2026, 6, 20, tzinfo=timezone.utc)
+    older["analyzed_at"] = datetime(2026, 6, 20, tzinfo=UTC)
     newer = _full_score_row("newer", 10.0)
-    newer["analyzed_at"] = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    newer["analyzed_at"] = datetime(2026, 6, 23, tzinfo=UTC)
     _bind_list_stubs(
         monkeypatch,
         page_rows=[],

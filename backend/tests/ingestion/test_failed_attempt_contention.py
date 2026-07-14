@@ -9,7 +9,7 @@ races the legitimate buyer for the same script UTxO, loses, and confirms
 on-chain as a failed tx that consumed only its collateral.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -39,7 +39,7 @@ def _confirmed_tx(tx_hash, *, script_valid, inputs, fee=200_000):
     return NormalizedTransaction(
         tx_hash=tx_hash,
         network="preprod",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fee=fee,
         script_valid=script_valid,
         inputs=inputs,
@@ -103,7 +103,7 @@ class TestFailedAttemptDisplacementSignal:
         index), then the legitimate tx confirms consuming the contested
         ref. The attempt's attempted inputs must produce the displacement
         record naming it as the displaced party."""
-        seen_at = datetime.now(timezone.utc)
+        seen_at = datetime.now(UTC)
         attempt_mempool_data = {
             "inputs": [
                 {
@@ -140,7 +140,7 @@ class TestFailedAttemptDisplacementSignal:
             # Chain side: the winner confirms, consuming the contested ref.
             await client.record_displacements(
                 [winner],
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
             )
 
         with (
@@ -164,7 +164,7 @@ class TestFailedAttemptDisplacementSignal:
         same ref was NOT displaced (it can still confirm) and must not get
         a false displacement record. The attempt's collateral, which the
         ledger DID spend, is what produces a signal."""
-        seen_at = datetime.now(timezone.utc)
+        seen_at = datetime.now(UTC)
         # A pending tx wanting the contested ref the attempt failed to take.
         client._pending.track(
             "e1" * 32,
@@ -190,7 +190,7 @@ class TestFailedAttemptDisplacementSignal:
             _run(
                 client.record_displacements(
                     [failed_attempt],
-                    datetime.now(timezone.utc),
+                    datetime.now(UTC),
                 )
             )
 

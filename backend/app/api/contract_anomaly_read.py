@@ -24,7 +24,7 @@ band and never mutates the stored per-tx fields. The dependency is one-way
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.analysis import contract_anomaly as ca_projection
 from app.analysis.contract_anomaly import corroboration_threshold
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 _CONTRACT_ANOMALY = "contract_anomaly"
 
 
-def _sort_results(results: List[ClassScoreResult], *, by_date: bool) -> None:
+def _sort_results(results: list[ClassScoreResult], *, by_date: bool) -> None:
     """Re-rank a hydrated result list in place to mirror the SQL ORDER BY.
 
     ``by_date`` sorts (analyzed_at, max_score) descending; otherwise
@@ -59,7 +59,7 @@ def _sort_results(results: List[ClassScoreResult], *, by_date: bool) -> None:
 
 def _merge_contract_anomaly(
     result: ClassScoreResult,
-    rows: List[Dict[str, Any]],
+    rows: list[dict[str, Any]],
 ) -> None:
     """Fold the clustering sidecar's verdict(s) for a tx into a hydrated result.
 
@@ -103,7 +103,7 @@ def _passes_score_band(
     score: float,
     band: RiskBand,
     min_score: float,
-    bands: Optional[List[str]],
+    bands: list[str] | None,
 ) -> bool:
     """Whether a (score, band) pair satisfies the list view's score/band filter.
 
@@ -120,8 +120,8 @@ def _passes_score_band(
 
 def _within_analyzed_window(
     analyzed_at: Any,
-    analyzed_from: Optional[datetime],
-    analyzed_to: Optional[datetime],
+    analyzed_from: datetime | None,
+    analyzed_to: datetime | None,
 ) -> bool:
     """Mirror the DB analyzed_at bounds (>= from, < to) for a rescued row.
 
@@ -161,7 +161,7 @@ _ALERT_BANDS = frozenset({"high", "critical"})
 
 async def _flagged_effective(
     network: str,
-) -> Dict[str, tuple[str, float, str, float]]:
+) -> dict[str, tuple[str, float, str, float]]:
     """For every contract_anomaly-flagged tx on a network, return
     ``{tx_hash: (stored_band, stored_score, effective_ca_band, effective_ca_score)}``
     (bands lowercase).
@@ -183,7 +183,7 @@ async def _flagged_effective(
     stored = {
         r["tx_hash"]: (str(r["risk_band"]).lower(), float(r["max_score"])) for r in stored_rows
     }
-    out: Dict[str, tuple[str, float, str, float]] = {}
+    out: dict[str, tuple[str, float, str, float]] = {}
     for tx, rows in flagged.items():
         s = stored.get(tx)
         if s is None:  # archived / unscored: excluded from the host aggregates
@@ -199,15 +199,15 @@ async def _flagged_effective(
 async def _list_contract_anomaly_results(
     network: str,
     *,
-    bands: Optional[List[str]],
+    bands: list[str] | None,
     min_score: float,
-    analyzed_from: Optional[datetime],
-    analyzed_to: Optional[datetime],
+    analyzed_from: datetime | None,
+    analyzed_to: datetime | None,
     min_corroboration: int,
     sort: str,
     limit: int,
     offset: int,
-) -> tuple[List[ClassScoreResult], int]:
+) -> tuple[list[ClassScoreResult], int]:
     """List page for ``attack_class=contract_anomaly``.
 
     The synthetic class is a read-time overlay with no ``tx_class_scores``
@@ -239,7 +239,7 @@ async def _list_contract_anomaly_results(
         network,
         list(flagged),
     )
-    matched: List[ClassScoreResult] = []
+    matched: list[ClassScoreResult] = []
     for row in stored_rows:
         res = _row_to_class_score(row)
         _merge_contract_anomaly(res, flagged[res.tx_hash])
@@ -263,7 +263,7 @@ async def _list_contract_anomaly_results(
 
 async def _augment_stats_with_contract_anomaly(
     network: str,
-    stats: Dict[str, Any],
+    stats: dict[str, Any],
 ) -> None:
     """Reconcile the KPI aggregate to the EFFECTIVE per-tx score for flagged txs,
     so contract-anomaly-only detections aren't undercounted. Moves a tx from its
@@ -291,7 +291,7 @@ async def _augment_stats_with_contract_anomaly(
 async def _augment_timeseries_with_contract_anomaly(
     network: str,
     days: int,
-    data: List[Dict[str, Any]],
+    data: list[dict[str, Any]],
 ) -> None:
     """Add flagged txs that are an alert (High/Critical) by their EFFECTIVE band
     but NOT by their stored band into the daily alert counts, bucketed on block
@@ -307,7 +307,7 @@ async def _augment_timeseries_with_contract_anomaly(
     if not candidates:
         return
     dates = await clickhouse.get_tx_block_dates_async(network, candidates, days)
-    by_date: Dict[str, int] = {}
+    by_date: dict[str, int] = {}
     for d in dates.values():
         by_date[d] = by_date.get(d, 0) + 1
     index = {row["date"]: row for row in data}
@@ -316,10 +316,10 @@ async def _augment_timeseries_with_contract_anomaly(
             index[d]["count"] += c
 
 
-def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
+def _row_to_class_score(row: dict[str, Any]) -> ClassScoreResult:
     scores = {name: float(row.get(name, -1)) for name in _CLASS_NAMES}
 
-    def _decode_json_field(key: str) -> Dict[str, Any]:
+    def _decode_json_field(key: str) -> dict[str, Any]:
         value = row.get(key, {})
         if isinstance(value, str):
             try:
@@ -350,7 +350,7 @@ def _row_to_class_score(row: Dict[str, Any]) -> ClassScoreResult:
 
 async def _merge_overlay_onto_page(
     network: str,
-    data: List[ClassScoreResult],
+    data: list[ClassScoreResult],
 ) -> None:
     """Batch-merge the clustering sidecar's verdicts into a hydrated results page.
 
@@ -377,14 +377,14 @@ async def _merge_overlay_onto_page(
 
 async def _rescue_flagged_onto_page(
     network: str,
-    data: List[ClassScoreResult],
+    data: list[ClassScoreResult],
     *,
     min_score: float,
-    bands: Optional[List[str]],
-    attack_class: Optional[str],
+    bands: list[str] | None,
+    attack_class: str | None,
     min_corroboration: int,
-    analyzed_from: Optional[datetime],
-    analyzed_to: Optional[datetime],
+    analyzed_from: datetime | None,
+    analyzed_to: datetime | None,
     sort: str,
     limit: int,
     offset: int,

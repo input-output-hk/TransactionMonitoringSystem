@@ -6,7 +6,6 @@ so notification email can be unplugged without affecting sign-in emails.
 
 import logging
 from email.message import EmailMessage
-from typing import List, Optional, Tuple
 
 from app.auth.email import send_smtp
 from app.config import settings
@@ -31,7 +30,7 @@ def _band_label(band: str) -> str:
     return _BAND_DISPLAY.get(band, band)
 
 
-def _render_immediate(payload) -> Tuple[str, str]:
+def _render_immediate(payload) -> tuple[str, str]:
     """(subject, plain-text body) for an immediate alert."""
     band = _band_label(payload.risk_band)
     subject = f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
@@ -55,7 +54,7 @@ def _render_immediate(payload) -> Tuple[str, str]:
     return subject, body
 
 
-def _render_report(payload) -> Tuple[str, str]:
+def _render_report(payload) -> tuple[str, str]:
     """(subject, plain-text body) for a periodic report."""
     s = payload.summary
     win = payload.report_window
@@ -93,7 +92,7 @@ def _render_report(payload) -> Tuple[str, str]:
     return subject, body
 
 
-def _render(payload) -> Tuple[str, str]:
+def _render(payload) -> tuple[str, str]:
     """Dispatch to the renderer for this payload's notification_type."""
     if getattr(payload, "notification_type", None) == "periodic_report":
         return _render_report(payload)
@@ -116,9 +115,9 @@ class EmailChannel(NotificationChannel):
     async def send(
         self,
         payload: NotificationPayload,
-        recipients: List[str],
-        target_url: Optional[str] = None,
-        attachments: Optional[List[Attachment]] = None,
+        recipients: list[str],
+        target_url: str | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> NotificationResult:
         if not recipients:
             return NotificationResult(

@@ -11,7 +11,7 @@ import io
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any
 from urllib.parse import urlencode
 
 from app.analysis.features import LOVELACE_PER_ADA
@@ -56,7 +56,7 @@ _CSV_COLUMNS = [
 _CSV_HARD_CAP = 50_000
 
 
-def _bands_at_or_above(min_band: str) -> List[str]:
+def _bands_at_or_above(min_band: str) -> list[str]:
     if min_band not in _BAND_ORDER:
         return list(_BAND_ORDER)
     return _BAND_ORDER[_BAND_ORDER.index(min_band) :]
@@ -84,7 +84,7 @@ def _date_param(dt: Any) -> str:
     return dt.date().isoformat() if hasattr(dt, "date") else str(dt)[:10]
 
 
-def _in_window(stamps: List[Any], window_start: datetime, window_end: datetime) -> bool:
+def _in_window(stamps: list[Any], window_start: datetime, window_end: datetime) -> bool:
     """True if ANY of the given timestamps lands in the window; non-datetimes are
     ignored. Both the stamps AND the bounds are normalised through
     :func:`to_aware_utc` (naive treated as UTC) so a naive ClickHouse stamp and a
@@ -99,7 +99,7 @@ async def _contract_anomaly_in_window(
     window_start: datetime,
     window_end: datetime,
     min_band: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Resolved sidecar contract_anomaly findings at/above ``min_band`` that fall
     in the window, highest score first. Powers BOTH the per-class count and the
     top-alerts fold, so the summary number and the listed rows come from one set.
@@ -136,7 +136,7 @@ async def _contract_anomaly_in_window(
         )
         return []
     allowed = set(_bands_at_or_above(min_band))
-    found: List[Dict[str, Any]] = []
+    found: list[dict[str, Any]] = []
     for rows in flagged.values():
         winner = ca.resolve(rows)
         if winner is None:
@@ -156,7 +156,7 @@ async def build_periodic_report(
     network: str,
     window_start: datetime,
     window_end: datetime,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
 ) -> PeriodicReport:
     """Assemble the periodic_report payload for the given window."""
     min_band = cfg.get("min_band", "Moderate")
@@ -196,7 +196,7 @@ async def build_periodic_report(
     # Intentionally NOT added to total_transactions_scored or alerts_by_band:
     # those are per-transaction scorer stats and a flagged tx is already counted
     # there by its 9-class score; folding it in again would double-count the tx.
-    ca_findings: List[Dict[str, Any]] = []
+    ca_findings: list[dict[str, Any]] = []
     if settings.CLUSTERING_ENABLED and "contract_anomaly" in in_scope:
         ca_findings = await _contract_anomaly_in_window(
             network,
@@ -226,7 +226,7 @@ async def build_periodic_report(
         analyzed_from=window_start,
         analyzed_to=window_end,
     )
-    top_alerts: List[TopAlert] = []
+    top_alerts: list[TopAlert] = []
     for r in rows:
         if r.get("max_class") not in in_scope:
             continue
@@ -290,7 +290,7 @@ async def build_periodic_report(
     )
 
 
-def _alert_csv_row(r: Dict[str, Any]) -> Dict[str, Any]:
+def _alert_csv_row(r: dict[str, Any]) -> dict[str, Any]:
     """One CSV row in the manual-export shape (frontend toCsvRow)."""
     fee = r.get("fee")
     output_count = r.get("output_count")
@@ -323,7 +323,7 @@ async def build_report_csv(
     network: str,
     window_start: datetime,
     window_end: datetime,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
 ) -> bytes:
     """Assemble the full per-transaction CSV for the report window.
 
@@ -346,7 +346,7 @@ async def build_report_csv(
         else {c for c in attack_classes if c in _CLASS_NAMES}
     )
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     offset = 0
     page_size = 1000
     while len(rows) < _CSV_HARD_CAP:
@@ -378,20 +378,20 @@ async def build_report_csv(
     return buf.getvalue().encode("utf-8")
 
 
-def report_dispatches(cfg: Dict[str, Any]) -> List[Dispatch]:
+def report_dispatches(cfg: dict[str, Any]) -> list[Dispatch]:
     """Resolve the report's channels -> Dispatch list from config.
 
     Recipients default to the channel's global list when the report block
     leaves them empty (the "Global" default).
     """
-    out: List[Dispatch] = []
+    out: list[Dispatch] = []
     report_recipients = cfg.get("recipients") or []
     for ch in cfg.get("channels", []):
         if not config.channel_enabled(ch):
             logger.warning("periodic report: channel '%s' is disabled; skipping", ch)
             continue
         if ch == "webhook":
-            recipients: List[str] = []
+            recipients: list[str] = []
             webhook_url = config.webhook_default_url() or None
         else:
             # report recipients override the channel default; empty => "Global"

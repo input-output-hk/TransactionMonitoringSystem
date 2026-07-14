@@ -22,12 +22,16 @@ task.  Until that infrastructure is built, this scorer's gate will not pass.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.analysis.normalise import EPSILON, normalise
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -55,7 +59,7 @@ _MAX_LEN = int(_CYCLE["max_length"])
 _DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE["default_inter_hop_delta_slots"])
 
 
-def _get_cycle_data(features: Dict[str, Any]) -> Optional[Dict]:
+def _get_cycle_data(features: dict[str, Any]) -> dict | None:
     """Extract cycle detection data from features if available.
 
     The engine populates features["cycle"] when a tx is part of a detected
@@ -88,7 +92,7 @@ def _estimate_fee_ratio(cycle_length: int) -> float:
 class CircularScorer(BaseScorer):
     name = "circular"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Transaction must be part of a detected transfer cycle."""
         cycle = _get_cycle_data(features)
         if not cycle:
@@ -106,7 +110,7 @@ class CircularScorer(BaseScorer):
 
         return True
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         cycle = _get_cycle_data(features)
         if not cycle:
             return ScorerResult(score=0.0)

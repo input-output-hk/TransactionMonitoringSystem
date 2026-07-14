@@ -1,8 +1,8 @@
 """Parser for Ogmios v6 transaction format into NormalizedTransaction"""
 
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
 import logging
+from datetime import UTC, datetime
+from typing import Any
 
 from app.analysis.features import (
     extract_fee,
@@ -19,7 +19,7 @@ from app.models.transaction import (
 logger = logging.getLogger(__name__)
 
 
-def ogmios_input_ref(inp: Dict[str, Any]) -> tuple[str, int]:
+def ogmios_input_ref(inp: dict[str, Any]) -> tuple[str, int]:
     """Extract ``(tx_hash, output_index)`` from an Ogmios input reference.
 
     Tolerates both shapes the node emits: v6 nests the source tx as
@@ -32,12 +32,12 @@ def ogmios_input_ref(inp: Dict[str, Any]) -> tuple[str, int]:
 
 
 def parse_ogmios_transaction(
-    tx_data: Dict[str, Any],
-    block_slot: Optional[int] = None,
-    block_hash: Optional[str] = None,
-    block_height: Optional[int] = None,
-    timestamp: Optional[datetime] = None,
-    block_index: Optional[int] = None,
+    tx_data: dict[str, Any],
+    block_slot: int | None = None,
+    block_hash: str | None = None,
+    block_height: int | None = None,
+    timestamp: datetime | None = None,
+    block_index: int | None = None,
 ) -> NormalizedTransaction:
     """Parse an Ogmios v6 transaction into NormalizedTransaction.
 
@@ -229,7 +229,7 @@ def parse_ogmios_transaction(
         block_height=block_height,
         block_hash=block_hash,
         block_index=block_index,
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         fee=int(fee),
         deposit=deposit,
         inputs=inputs,

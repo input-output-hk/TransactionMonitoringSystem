@@ -8,7 +8,7 @@ namespace with UUID hashes. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.db import clickhouse_scores as scores
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
@@ -22,7 +22,7 @@ _TEST_SCORE = 82.0
 
 def _naive_utc_now() -> datetime:
     # The ClickHouse driver expects naive UTC datetimes for DateTime columns.
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _score_row(tx_hash: str) -> dict:
@@ -70,7 +70,7 @@ class TestTransactionsRoundtrip:
             block_slot=1_000_000,
             block_hash="ef" * 32,
             block_height=500_000,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
         tx.network = LIVE_NETWORK
 
@@ -102,7 +102,7 @@ class TestTransactionsRoundtrip:
                 }
             ],
         }
-        tx = parse_ogmios_transaction(payload, timestamp=datetime.now(timezone.utc))
+        tx = parse_ogmios_transaction(payload, timestamp=datetime.now(UTC))
         tx.network = LIVE_NETWORK
         ch.insert_transactions_batch([tx])
 

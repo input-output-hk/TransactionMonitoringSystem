@@ -43,11 +43,11 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.db import clickhouse  # noqa: E402
+from app.db import clickhouse
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("migrate_dedup_schema")
@@ -242,7 +242,7 @@ def main() -> int:
     # migrations run the same day (observed live: the count-column widening
     # crashed on RENAME because the morning's dedup migration already owned
     # __legacy_<date>, leaving the post-swap table stranded under __mig).
-    legacy_suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    legacy_suffix = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     db_engine = client.execute(
         "SELECT engine FROM system.databases WHERE name = currentDatabase()"

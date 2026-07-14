@@ -6,8 +6,9 @@ assembling a 9-element score vector per transaction.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -17,19 +18,19 @@ class ScorerResult:
     score: float = 0.0
     """Risk score in 0-100 range."""
 
-    sub_scores: Dict[str, float] = field(default_factory=dict)
+    sub_scores: dict[str, float] = field(default_factory=dict)
     """Individual sub-score breakdown (feature_name -> normalised value)."""
 
-    reasons: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
     """Human-readable contributing factors."""
 
     baseline_source: str = "missing"
     """Which baseline tier was used: per_script, per_policy, global, fixed, missing."""
 
-    severity: Optional[str] = None
+    severity: str | None = None
     """Scorer-specific severity classification (e.g. KNOWN_BAD, SUSPICIOUS_NEW_DOMAIN)."""
 
-    evidence: Dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
     """Raw evidence values for UI drill-down (addresses, byte counts, lists).
 
     Distinct from ``sub_scores`` (which are normalised [0,1] dimensions
@@ -41,9 +42,9 @@ class ScorerResult:
     @classmethod
     def no_finding(
         cls,
-        sub_scores: Optional[Dict[str, Any]] = None,
+        sub_scores: dict[str, Any] | None = None,
         baseline_source: str = "missing",
-        evidence: Optional[Dict[str, Any]] = None,
+        evidence: dict[str, Any] | None = None,
     ) -> "ScorerResult":
         """A gated-but-no-finding result (score -1).
 
@@ -108,7 +109,7 @@ class BaseScorer(ABC):
     """Machine-readable attack class name (e.g. 'phishing')."""
 
     @abstractmethod
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Return True if this transaction/UTxO should be scored by this class.
 
         Gate conditions are hard prerequisites (e.g. 'must be a script address').
@@ -116,7 +117,7 @@ class BaseScorer(ABC):
         """
 
     @abstractmethod
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         """Compute the weighted composite risk score.
 
         Called only when gate() returns True.  The features dict contains all

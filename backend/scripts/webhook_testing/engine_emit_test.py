@@ -30,17 +30,17 @@ import asyncio
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # Allow running as a plain file too (see fire_test_alert.py for the rationale).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from app import notifications  # noqa: E402
-from app.config import settings  # noqa: E402
-from app.db import postgres  # noqa: E402
-from app.models.transaction import AttackClass, RiskBand  # noqa: E402
-from app.notifications import dispatcher, triggers  # noqa: E402
-from app.notifications.payloads import build_immediate_alert  # noqa: E402
+from app import notifications
+from app.config import settings
+from app.db import postgres
+from app.models.transaction import AttackClass, RiskBand
+from app.notifications import dispatcher, triggers
+from app.notifications.payloads import build_immediate_alert
 
 _DEFAULT_BAND = RiskBand.CRITICAL.value  # Critical/High are the default-routed bands
 _DEFAULT_CLASS = AttackClass.MULTIPLE_SAT.value  # a representative attack class
@@ -65,7 +65,7 @@ def _synthetic_result(
         "risk_band": band,
         "baseline_source": "per_script",
         "sub_scores": {attack_class: {"double_satisfaction": 0.98, "value_delta": 0.71}},
-        "analyzed_at": datetime.now(timezone.utc),
+        "analyzed_at": datetime.now(UTC),
     }
 
 

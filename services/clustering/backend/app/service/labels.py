@@ -35,7 +35,7 @@ def _sync_host_projection(repo: Repo, target: str) -> None:
             target,
             network=get_settings().cardano_network,
         )
-    except Exception:  # noqa: BLE001 - projection sync is best-effort
+    except Exception:
         logger.warning(
             "host contract_anomaly projection sync failed for %s; "
             "the next publish will reconcile it",

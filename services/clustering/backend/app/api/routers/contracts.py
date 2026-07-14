@@ -9,7 +9,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.deps import RepoDep, reject_if_target_busy
-from app.config import get_settings
 from app.api.schemas import (
     ClassifyJobAck,
     ContractDeleteAck,
@@ -21,6 +20,7 @@ from app.api.schemas import (
     RenameRequest,
     TargetOut,
 )
+from app.config import get_settings
 from app.contracts import classify_target, normalize_target
 from app.ids import new_id
 from app.registry import lookup_label, script_hash_for

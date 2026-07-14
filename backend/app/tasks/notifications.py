@@ -18,13 +18,12 @@ Mirrors :mod:`app.tasks.analysis`: module-level tasks, idempotent
 import asyncio
 import gzip
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.config import settings
 from app.db import postgres
 from app.notifications import (
     DELIVER_DUPLICATE,
-    DELIVER_FAILED,
     _deliver_with_dedup,
     config,
     dispatcher,
@@ -55,7 +54,7 @@ async def _tick() -> None:
 
     cfg = config.periodic_report_config()
     network = settings.CARDANO_NETWORK
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     interval = reports.report_interval(cfg["frequency"])
     state = await postgres.get_report_state(network)

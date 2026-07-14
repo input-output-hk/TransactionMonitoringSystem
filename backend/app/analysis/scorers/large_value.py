@@ -15,16 +15,21 @@ Sub-scores (Polimi Section 4.2.3):
 """
 
 import logging
-from typing import Any, Dict, Tuple
+from typing import Any
 
+from app.analysis import features as feat_mod
 from app.analysis.normalise import (
     BAND_LOW_MAX,
     normalise,
     normalise_inverted,
 )
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import (
@@ -33,7 +38,6 @@ from app.analysis.scorers.base import (
     finalise_score,
     reduce_to_best,
 )
-from app.analysis import features as feat_mod
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +48,7 @@ _REASON_T = float(_CFG["reason_threshold"])
 _MIN_DIGITS_SUBSCORE = float(_CFG["min_digits_subscore"])
 
 
-def _max_quantity_digits(value: Dict[str, Any]) -> int:
+def _max_quantity_digits(value: dict[str, Any]) -> int:
     """Return the number of decimal digits in the largest asset quantity."""
     max_digits = 0
     for key, val in value.items():
@@ -60,7 +64,7 @@ def _max_quantity_digits(value: Dict[str, Any]) -> int:
     return max_digits
 
 
-def _primary_asset(value: Dict[str, Any]) -> Tuple[str, str, int]:
+def _primary_asset(value: dict[str, Any]) -> tuple[str, str, int]:
     """Return ``(policy_id, asset_name_hex, quantity)`` for the largest asset.
 
     Returns empty strings and 0 when the value has no native assets.
@@ -105,7 +109,7 @@ def _hex_to_ascii(hex_str: str) -> str:
 class LargeValueScorer(BaseScorer):
     name = "large_value"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Script address with at most 2 unique asset classes."""
         raw_data = features.get("raw_data")
         if not raw_data or not isinstance(raw_data, dict):
@@ -123,7 +127,7 @@ class LargeValueScorer(BaseScorer):
                 return True
         return False
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         raw_data = features.get("raw_data", {})
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
@@ -147,7 +151,7 @@ class LargeValueScorer(BaseScorer):
 
     def _score_utxo(
         self,
-        output: Dict,
+        output: dict,
         address: str,
         network: str,
     ) -> ScorerResult:

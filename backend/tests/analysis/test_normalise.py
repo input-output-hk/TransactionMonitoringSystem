@@ -188,6 +188,7 @@ class TestRiskBandLegacyAlias:
 
     def test_unknown_still_raises(self):
         import pytest
+
         from app.models.transaction import RiskBand
 
         with pytest.raises(ValueError):

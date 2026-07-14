@@ -11,8 +11,8 @@ Uses three separate WebSocket connections (Ogmios multiplexes one mini-protocol 
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Callable, Awaitable, Optional, Set, List, Tuple
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 import websockets
 
@@ -66,7 +66,7 @@ class IntersectionNotFoundError(Exception):
 class OgmiosClient:
     """Ogmios v6 WebSocket client with mempool monitoring and chain sync."""
 
-    def __init__(self, on_lifecycle_event: Optional[Callable[[dict], Awaitable[None]]] = None):
+    def __init__(self, on_lifecycle_event: Callable[[dict], Awaitable[None]] | None = None):
         self.ws_url = settings.OGMIOS_WS_URL
         self.network = settings.CARDANO_NETWORK
         self.on_lifecycle_event = on_lifecycle_event
@@ -80,7 +80,7 @@ class OgmiosClient:
         # asyncio.create_task result is only weakly referenced by the loop
         # and can be garbage-collected mid-flight, silently dropping the
         # repurge. Tasks discard themselves on completion.
-        self._repurge_tasks: Set[asyncio.Task] = set()
+        self._repurge_tasks: set[asyncio.Task] = set()
 
         # LocalStateQuery connection for UTxO input resolution (on-demand)
         self._query_ws = None
@@ -92,16 +92,16 @@ class OgmiosClient:
         # converter's forecast horizon (e.g. the node crossed an era
         # boundary since the last fetch); the chain loop then refetches,
         # throttled by SLOT_TIME_REFETCH_MIN_SECONDS.
-        self._slot_time: Optional[SlotTimeConverter] = None
+        self._slot_time: SlotTimeConverter | None = None
         self._slot_time_refetch_needed = False
-        self._slot_time_fetched_at: Optional[datetime] = None
+        self._slot_time_fetched_at: datetime | None = None
 
         # Telemetry — used by /health and pipeline_state
-        self._started_at: datetime = datetime.now(timezone.utc)
-        self._last_msg_at: Optional[datetime] = None  # any Ogmios message
-        self._last_block_at: Optional[datetime] = None  # last roll-forward
-        self._last_processed_slot: Optional[int] = None  # slot of last confirmed block
-        self._tip_slot: Optional[int] = None  # chain tip reported by Ogmios
+        self._started_at: datetime = datetime.now(UTC)
+        self._last_msg_at: datetime | None = None  # any Ogmios message
+        self._last_block_at: datetime | None = None  # last roll-forward
+        self._last_processed_slot: int | None = None  # slot of last confirmed block
+        self._tip_slot: int | None = None  # chain tip reported by Ogmios
 
         # Resilience for the chain-sync connection; the mempool monitor owns
         # its own breaker so chain and mempool failures stay isolated.
@@ -131,13 +131,13 @@ class OgmiosClient:
         self._rpc_id += 1
         return str(self._rpc_id)
 
-    def _jsonrpc(self, method: str, params: Optional[dict] = None) -> str:
+    def _jsonrpc(self, method: str, params: dict | None = None) -> str:
         msg = {"jsonrpc": "2.0", "method": method, "id": self._next_id()}
         if params:
             msg["params"] = params
         return json.dumps(msg)
 
-    async def _send_recv(self, ws, method: str, params: Optional[dict] = None) -> dict:
+    async def _send_recv(self, ws, method: str, params: dict | None = None) -> dict:
         """Send a JSON-RPC request and wait for the response.
 
         Large frames (a busy block of Plutus txs serialises to tens of MB;
@@ -150,7 +150,7 @@ class OgmiosClient:
         msg = self._jsonrpc(method, params)
         await ws.send(msg)
         raw = await ws.recv()
-        self._last_msg_at = datetime.now(timezone.utc)
+        self._last_msg_at = datetime.now(UTC)
         if len(raw) > settings.OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES:
             return await asyncio.to_thread(json.loads, raw)
         return json.loads(raw)
@@ -176,7 +176,7 @@ class OgmiosClient:
             self._query_ws = await self._connect_ws("query")
         return self._query_ws
 
-    async def _query_utxo(self, output_refs: List[dict]) -> List[dict]:
+    async def _query_utxo(self, output_refs: list[dict]) -> list[dict]:
         """Query the current UTxO set for specific output references.
 
         Returns a list of UTxO objects with address and value for each reference
@@ -332,7 +332,7 @@ class OgmiosClient:
             )
         except Exception as e:
             logger.warning(f"Ogmios [chain]: slot-time queries failed: {e}")
-        self._slot_time_fetched_at = datetime.now(timezone.utc)
+        self._slot_time_fetched_at = datetime.now(UTC)
         self._slot_time_refetch_needed = False
         if converter is not None:
             self._slot_time = converter
@@ -352,7 +352,7 @@ class OgmiosClient:
         """Throttle horizon-triggered era-summary refetches."""
         if self._slot_time_fetched_at is None:
             return True
-        age = datetime.now(timezone.utc) - self._slot_time_fetched_at
+        age = datetime.now(UTC) - self._slot_time_fetched_at
         return age.total_seconds() >= SLOT_TIME_REFETCH_MIN_SECONDS
 
     async def _handle_roll_forward(self, result: dict):
@@ -397,7 +397,7 @@ class OgmiosClient:
         tip = result.get("tip", {})
         if isinstance(tip, dict) and "slot" in tip:
             self._tip_slot = tip["slot"]
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         self._last_block_at = now_utc
         self._last_processed_slot = block_slot
 
@@ -405,7 +405,7 @@ class OgmiosClient:
             await postgres.save_sync_point(self.network, block_slot, block_id)
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         normalized_txs, confirmed_records = await self._parse_block_txs(
             transactions,
             block_id,
@@ -468,17 +468,17 @@ class OgmiosClient:
 
     async def _parse_block_txs(
         self,
-        transactions: List[dict],
+        transactions: list[dict],
         block_id: str,
         block_slot: int,
         block_height: int,
         now: datetime,
-    ) -> Tuple[List[NormalizedTransaction], List[tuple]]:
+    ) -> tuple[list[NormalizedTransaction], list[tuple]]:
         """Parse a block's raw txs, applying any cached mempool input
         resolution. Returns (normalized txs, lifecycle CONFIRMED records);
         a tx that fails to parse is logged and skipped, never fatal."""
-        normalized_txs: List[NormalizedTransaction] = []
-        confirmed_records: List[tuple] = []
+        normalized_txs: list[NormalizedTransaction] = []
+        confirmed_records: list[tuple] = []
         # transactions.timestamp is CHAIN time: the baselines window on it
         # (see baselines.py). At tip the slot-derived time agrees with wall
         # clock within seconds; during catch-up replay it lands history at
@@ -549,7 +549,7 @@ class OgmiosClient:
 
     async def _write_raw_payloads(
         self,
-        normalized_txs: List[NormalizedTransaction],
+        normalized_txs: list[NormalizedTransaction],
         block_slot: int,
     ) -> None:
         """Write full raw payloads to the local filesystem store.
@@ -596,7 +596,7 @@ class OgmiosClient:
 
     async def _insert_block_with_retry(
         self,
-        normalized_txs: List[NormalizedTransaction],
+        normalized_txs: list[NormalizedTransaction],
         block_slot: int,
     ) -> None:
         """Persist a block's transactions to ClickHouse, retrying with
@@ -607,7 +607,7 @@ class OgmiosClient:
         """
         delay = settings.CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS
         max_attempts = settings.CLICKHOUSE_INSERT_MAX_RETRIES
-        last_err: Optional[Exception] = None
+        last_err: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 await clickhouse.insert_transactions_batch_async(normalized_txs)
@@ -730,12 +730,12 @@ class OgmiosClient:
             {
                 "eventType": "TX_ROLLED_BACK",
                 "network": self.network,
-                "observedAt": datetime.now(timezone.utc).isoformat(),
+                "observedAt": datetime.now(UTC).isoformat(),
                 "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
             }
         )
 
-    async def _delayed_score_repurge(self, hashes: List[str]) -> None:
+    async def _delayed_score_repurge(self, hashes: list[str]) -> None:
         """Re-delete tx_class_scores rows for rolled-back txs after a delay.
 
         Durable, not best-effort: the hashes were persisted to
@@ -834,10 +834,10 @@ class OgmiosClient:
             return "DOWN"
 
         if self._last_block_at is None:
-            uptime = (datetime.now(timezone.utc) - self._started_at).total_seconds()
+            uptime = (datetime.now(UTC) - self._started_at).total_seconds()
             return "OK" if uptime < settings.PIPELINE_STARTUP_GRACE_SECONDS else "DEGRADED"
 
-        block_age = (datetime.now(timezone.utc) - self._last_block_at).total_seconds()
+        block_age = (datetime.now(UTC) - self._last_block_at).total_seconds()
         if block_age > settings.PIPELINE_BLOCK_AGE_DOWN_SECONDS:
             return "DOWN"
         if block_age > settings.PIPELINE_BLOCK_AGE_DEGRADED_SECONDS or cb == "HALF_OPEN":

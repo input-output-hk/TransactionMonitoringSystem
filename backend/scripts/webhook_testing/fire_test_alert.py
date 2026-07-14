@@ -24,8 +24,8 @@ import sys
 # `app` imports resolve, mirroring scripts/init_db.py.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from app.notifications.channels.webhook import WebhookChannel  # noqa: E402
-from app.notifications.payloads import ImmediateAlert  # noqa: E402
+from app.notifications.channels.webhook import WebhookChannel
+from app.notifications.payloads import ImmediateAlert
 
 
 async def main(url: str) -> None:

@@ -9,7 +9,7 @@ stubbed at _issue_invite_email (which is best-effort by design).
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -29,7 +29,7 @@ def _user_row(role="Reviewer", status="active", user_id=None, email=None):
         "full_name": "Test User",
         "role": role,
         "status": status,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "last_login_at": None,
     }
 

@@ -6,8 +6,9 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any, Tuple
+from datetime import UTC, datetime
+from typing import Any
+
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
 
@@ -151,7 +152,7 @@ def execute_schema():
         raise
 
 
-def _serialize_raw_data(raw_data: Optional[Dict[str, Any]]) -> Tuple[str, int]:
+def _serialize_raw_data(raw_data: dict[str, Any] | None) -> tuple[str, int]:
     """Serialize a tx's raw Ogmios payload for the transactions INSERT.
 
     Returns ``(json_string, truncated_flag)``. When RAW_DATA_MAX_BYTES > 0
@@ -171,7 +172,7 @@ def _serialize_raw_data(raw_data: Optional[Dict[str, Any]]) -> Tuple[str, int]:
     return raw_json, 0
 
 
-def insert_transactions_batch(transactions: List[NormalizedTransaction]):
+def insert_transactions_batch(transactions: list[NormalizedTransaction]):
     """Insert multiple transactions in a single batch per table.
 
     Always called via insert_transactions_batch_async (executor); the
@@ -181,7 +182,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
         return
 
     client = _get_client()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         tx_rows = []
@@ -280,7 +281,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
         # ------------------------------------------------------------------
         # Populate extended feature tables from raw_data (best-effort)
         try:
-            from app.analysis.features import extract_utxo_features, extract_tx_script_features
+            from app.analysis.features import extract_tx_script_features, extract_utxo_features
 
             all_utxo_features = []
             all_script_features = []
@@ -320,7 +321,7 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
         raise
 
 
-async def insert_transactions_batch_async(transactions: List[NormalizedTransaction]):
+async def insert_transactions_batch_async(transactions: list[NormalizedTransaction]):
     """Non-blocking wrapper: runs insert_transactions_batch on the dedicated
     ClickHouse executor so it never blocks the event loop or the default pool."""
     await _in_executor(insert_transactions_batch, transactions)
@@ -342,7 +343,7 @@ async def insert_transactions_batch_async(transactions: List[NormalizedTransacti
 # re-scoring via the unanalyzed anti-join). tx_class_scores stays as late as
 # possible (second-to-last) to minimize the window where an in-flight engine
 # batch re-inserts a score row after its purge.
-_ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
+_ROLLBACK_CLEANUP_TABLES: tuple[str, ...] = (
     "transaction_inputs",
     "transaction_outputs",
     "utxo_features",
@@ -364,7 +365,7 @@ _ROLLBACK_CLEANUP_TABLES: Tuple[str, ...] = (
 _LIGHTWEIGHT_DELETE_SETTINGS = {"lightweight_mutation_projection_mode": "rebuild"}
 
 
-def delete_rolled_back_txs(network: str, rollback_slot: int) -> List[str]:
+def delete_rolled_back_txs(network: str, rollback_slot: int) -> list[str]:
     """Delete all rows for transactions confirmed after ``rollback_slot``.
 
     Called on a ChainSync rollBackward: blocks past the rollback point are
@@ -404,12 +405,12 @@ def delete_rolled_back_txs(network: str, rollback_slot: int) -> List[str]:
     return hashes
 
 
-async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> List[str]:
+async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> list[str]:
     """Async wrapper for delete_rolled_back_txs (runs on the CH executor)."""
     return await _in_executor(delete_rolled_back_txs, network, rollback_slot)
 
 
-def delete_score_rows(network: str, hashes: List[str]) -> None:
+def delete_score_rows(network: str, hashes: list[str]) -> None:
     """Targeted tx_class_scores purge: the delayed second rollback pass.
 
     Closes the purge/score-writer race: an engine batch holding rolled-back
@@ -425,12 +426,12 @@ def delete_score_rows(network: str, hashes: List[str]) -> None:
     )
 
 
-async def delete_score_rows_async(network: str, hashes: List[str]) -> None:
+async def delete_score_rows_async(network: str, hashes: list[str]) -> None:
     """Async wrapper for delete_score_rows (runs on the CH executor)."""
     await _in_executor(delete_score_rows, network, hashes)
 
 
-def delete_clustering_rows(network: str, hashes: List[str]) -> None:
+def delete_clustering_rows(network: str, hashes: list[str]) -> None:
     """Purge the clustering sidecar's per-tx state for rolled-back transactions.
 
     On a rollback the sidecar's sibling-database tables would otherwise keep
@@ -472,21 +473,21 @@ def delete_clustering_rows(network: str, hashes: List[str]) -> None:
             {"hashes": hashes},
             settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
-    except Exception as e:  # noqa: BLE001 - sidecar tables may be absent
+    except Exception as e:
         # The sidecar may never have run (database/table absent); a rollback
         # must not crash chain sync over an optional module's tables.
         logger.warning("clustering rollback purge skipped: %s", e)
 
 
-async def delete_clustering_rows_async(network: str, hashes: List[str]) -> None:
+async def delete_clustering_rows_async(network: str, hashes: list[str]) -> None:
     """Async wrapper for delete_clustering_rows (runs on the CH executor)."""
     await _in_executor(delete_clustering_rows, network, hashes)
 
 
 def get_outputs_for_refs(
-    refs: List[tuple],
+    refs: list[tuple],
     network: str,
-) -> Dict[tuple, tuple]:
+) -> dict[tuple, tuple]:
     """Batch-fetch output address and amount for a list of (tx_hash, output_index) pairs.
 
     Returns {(tx_hash, output_index): (address, amount)} for found outputs.
@@ -517,19 +518,19 @@ def get_outputs_for_refs(
 
 
 async def get_outputs_for_refs_async(
-    refs: List[tuple],
+    refs: list[tuple],
     network: str,
-) -> Dict[tuple, tuple]:
+) -> dict[tuple, tuple]:
     """Async wrapper for get_outputs_for_refs."""
     return await _in_executor(get_outputs_for_refs, refs, network)
 
 
-def _execute_query(query: str, params: Optional[Dict] = None) -> list:
+def _execute_query(query: str, params: dict | None = None) -> list:
     """Execute a parameterized SELECT query. Called via execute_query_async."""
     return _get_client().execute(query, params or {})
 
 
-async def execute_query_async(query: str, params: Optional[Dict] = None) -> list:
+async def execute_query_async(query: str, params: dict | None = None) -> list:
     """Non-blocking wrapper: runs a parameterized SELECT on the ClickHouse executor."""
     return await _in_executor(_execute_query, query, params)
 
@@ -538,7 +539,7 @@ async def execute_query_async(query: str, params: Optional[Dict] = None) -> list
 # Multi-class scoring, feature tables, baselines
 
 
-def insert_utxo_features(rows: List[tuple]):
+def insert_utxo_features(rows: list[tuple]):
     """Batch-insert UTxO-level feature rows extracted during ingestion."""
     if not rows:
         return
@@ -554,7 +555,7 @@ def insert_utxo_features(rows: List[tuple]):
     )
 
 
-def insert_tx_script_features(rows: List[tuple]):
+def insert_tx_script_features(rows: list[tuple]):
     """Batch-insert transaction-level script feature rows."""
     if not rows:
         return
@@ -581,7 +582,7 @@ def insert_tx_script_features(rows: List[tuple]):
 # the cache, so the daily recompute invalidates atomically; the TTL is the
 # backstop for out-of-band writes. Guarded by a lock: callers run on the
 # ClickHouse executor threads.
-_baseline_cache: Dict[tuple, tuple] = {}
+_baseline_cache: dict[tuple, tuple] = {}
 _baseline_cache_lock = threading.Lock()
 
 
@@ -595,7 +596,7 @@ def get_baseline(
     scope_type: str,
     scope_id: str,
     feature: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Return the latest baseline for a given (network, scope_type, scope_id, feature)."""
     ttl = settings.BASELINE_CACHE_TTL_SECONDS
     cache_key = (network, scope_type, scope_id, feature)
@@ -640,7 +641,7 @@ def get_baseline(
     return result
 
 
-def insert_baselines(rows: List[tuple]):
+def insert_baselines(rows: list[tuple]):
     """Batch-insert or update baseline statistics.
 
     Each row tuple: ``(network, scope_type, scope_id, feature, p50, p99,
@@ -716,7 +717,7 @@ def get_baselines_for_scope(
     network: str,
     scope_type: str,
     scope_id: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return all baselines for a given scope on a given network."""
     rows = _get_client().execute(
         """
@@ -737,7 +738,7 @@ async def get_baselines_for_scope_async(
     network: str,
     scope_type: str,
     scope_id: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     return await _in_executor(get_baselines_for_scope, network, scope_type, scope_id)
 
 

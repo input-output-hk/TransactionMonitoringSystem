@@ -13,8 +13,7 @@ import logging
 import time
 
 from app.config import settings
-from app.db import postgres
-from app.db import raw_store
+from app.db import postgres, raw_store
 
 logger = logging.getLogger(__name__)
 

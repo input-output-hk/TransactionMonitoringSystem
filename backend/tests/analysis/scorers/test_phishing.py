@@ -1,6 +1,7 @@
 """Unit tests for the Phishing scorer (Class 9)."""
 
 import pytest
+
 from app.analysis.scorers.phishing import PhishingScorer
 
 
@@ -238,6 +239,7 @@ class TestBareDomainAndDatum:
         # which then fooled the URL regex (it caught the host but lost
         # the leading ``E``/``T``/``C`` length prefixes' boundary).
         import cbor2
+
         from app.analysis.scorers.phishing import _decode_datum_strings
 
         datum = cbor2.CBORTag(
@@ -317,13 +319,13 @@ class TestAssetNameCarrier:
         assert scorer.gate(feats) is True
 
     def test_mint_only_gates(self, scorer):
-        hex_name = "visit-ada.top".encode("utf-8").hex()
+        hex_name = b"visit-ada.top".hex()
         raw = {"mint": {self._POLICY: {hex_name: 5}}}
         assert scorer.gate(_features(metadata=None, raw_data=raw)) is True
 
     def test_v5_value_shape_gates(self, scorer):
         # Ogmios v5 puts lovelace at the top level of the value dict.
-        hex_name = "claim-ada-reward.xyz".encode("utf-8").hex()
+        hex_name = b"claim-ada-reward.xyz".hex()
         raw = {
             "outputs": [
                 {
@@ -417,7 +419,7 @@ class TestDeepNestingResilience:
 
         # 'https://cardano-airdrop.scam.example' as a hex byte-string leaf,
         # nested a few levels: still within the cap, so it must be recovered.
-        clean = "https://cardano-airdrop.scam.example".encode().hex()
+        clean = b"https://cardano-airdrop.scam.example".hex()
         node = {"fields": [{"list": [{"bytes": clean}]}]}
         spans = decode_datum_strings(node, min_len=4)
         assert any("cardano-airdrop" in s for s in spans)
@@ -439,7 +441,7 @@ class TestTextOnlyAndBytesCarriers:
     def test_url_as_bytes_metadatum_is_detected(self, scorer):
         # A phishing URL delivered as a CBOR bytes metadatum ({"bytes": hex}),
         # which _flatten_to_text alone leaves as un-decoded hex.
-        url_hex = "https://cardano-airdrop.scam.example/claim".encode().hex()
+        url_hex = b"https://cardano-airdrop.scam.example/claim".hex()
         meta = {"674": {"bytes": url_hex}}
         feats = _features(metadata=meta)
         assert scorer.gate(feats) is True

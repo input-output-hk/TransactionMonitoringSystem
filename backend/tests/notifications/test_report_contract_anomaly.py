@@ -12,7 +12,7 @@ the published_at-vs-scored_at window semantics (the relabel recall case), the
 top-alert fold, and the enable-gate.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -24,8 +24,8 @@ from app.notifications import reports
 
 pytestmark = pytest.mark.asyncio
 
-_WS = datetime(2026, 6, 1, tzinfo=timezone.utc)
-_WE = datetime(2026, 6, 8, tzinfo=timezone.utc)
+_WS = datetime(2026, 6, 1, tzinfo=UTC)
+_WE = datetime(2026, 6, 8, tzinfo=UTC)
 
 
 def _w(band, scored_at, published_at=None, tx_hash="tx", score=90.0):
@@ -61,11 +61,11 @@ def flagged(monkeypatch):
 async def test_count_filters_by_window_and_min_band(flagged):
     flagged.update(
         {
-            "in_high": [_w(RiskBand("High"), datetime(2026, 6, 3, tzinfo=timezone.utc))],
-            "in_mod": [_w(RiskBand("Moderate"), datetime(2026, 6, 4, tzinfo=timezone.utc))],
-            "in_info": [_w(RiskBand("Informational"), datetime(2026, 6, 4, tzinfo=timezone.utc))],
-            "before": [_w(RiskBand("Critical"), datetime(2026, 5, 1, tzinfo=timezone.utc))],
-            "after": [_w(RiskBand("Critical"), datetime(2026, 7, 1, tzinfo=timezone.utc))],
+            "in_high": [_w(RiskBand("High"), datetime(2026, 6, 3, tzinfo=UTC))],
+            "in_mod": [_w(RiskBand("Moderate"), datetime(2026, 6, 4, tzinfo=UTC))],
+            "in_info": [_w(RiskBand("Informational"), datetime(2026, 6, 4, tzinfo=UTC))],
+            "before": [_w(RiskBand("Critical"), datetime(2026, 5, 1, tzinfo=UTC))],
+            "after": [_w(RiskBand("Critical"), datetime(2026, 7, 1, tzinfo=UTC))],
             "naive_in": [_w(RiskBand("Critical"), datetime(2026, 6, 5))],  # naive -> UTC
         }
     )
@@ -83,8 +83,8 @@ async def test_late_published_relabel_is_counted(flagged):
             "relabel": [
                 _w(
                     RiskBand("Critical"),
-                    scored_at=datetime(2026, 1, 1, tzinfo=timezone.utc),  # old
-                    published_at=datetime(2026, 6, 4, tzinfo=timezone.utc),  # in-window
+                    scored_at=datetime(2026, 1, 1, tzinfo=UTC),  # old
+                    published_at=datetime(2026, 6, 4, tzinfo=UTC),  # in-window
                 )
             ],
         }
@@ -97,7 +97,7 @@ async def test_count_ignores_non_datetime_stamps(flagged):
     flagged.update(
         {
             "bad": [_w(RiskBand("Critical"), scored_at=None, published_at=None)],
-            "ok": [_w(RiskBand("Critical"), datetime(2026, 6, 3, tzinfo=timezone.utc))],
+            "ok": [_w(RiskBand("Critical"), datetime(2026, 6, 3, tzinfo=UTC))],
         }
     )
     found = await reports._contract_anomaly_in_window("preprod", _WS, _WE, "Moderate")

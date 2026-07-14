@@ -1,14 +1,17 @@
 """Unit tests for the Multiple Satisfaction scorer (Class 4)."""
 
 import pytest
+
 from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
     BAND_MODERATE_MAX,
     BAND_MODERATE_THRESHOLD,
 )
 from app.analysis.scorers.multiple_sat import (
-    MultipleSatScorer,
     _W as _WEIGHTS,
+)
+from app.analysis.scorers.multiple_sat import (
+    MultipleSatScorer,
     _compute_n_assets_out,
     _iter_assets,
     _reweight_without_extraction,
@@ -507,6 +510,7 @@ class TestWeights:
         """Spec-weight regression guard: the tracked detection.yaml must
         always carry the documented default weights for Multiple Satisfaction."""
         import pathlib
+
         import yaml
 
         here = pathlib.Path(__file__).resolve()
@@ -1102,6 +1106,7 @@ class TestSuppressionEscape:
         # same drain must now escape to Moderate. Every value derives from
         # the config knobs, not bare literals.
         import math
+
         import app.analysis.scorer_config as sc_mod
         from app.analysis.normalise import normalise
 

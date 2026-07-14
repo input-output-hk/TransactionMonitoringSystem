@@ -24,7 +24,7 @@ import copy
 import ipaddress
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -54,7 +54,7 @@ _GROUP_PREFIX = "group:"
 # Shipped-safe default document, seeded into the DB on first boot: email on,
 # webhook off, Critical/High page on all channels, Moderate/Informational
 # silent, no periodic report. Operators tune it from here via the admin UI.
-_DEFAULT_CONFIG: Dict[str, Any] = {
+_DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "channels": {
         "email": {"enabled": True, "recipients": ["ops@example.com"]},
@@ -112,10 +112,10 @@ def _looks_like_secret(key: str) -> bool:
 # place), so a sync accessor running on the ClickHouse executor thread observes
 # either the whole old document or the whole new one — never a torn read.
 # Accessors return references into this dict and MUST treat it as read-only.
-_config: Optional[Dict[str, Any]] = None
+_config: dict[str, Any] | None = None
 
 
-async def refresh_from_db() -> Dict[str, Any]:
+async def refresh_from_db() -> dict[str, Any]:
     """Load the stored config from Postgres into the in-process cache.
 
     Seeds the safe default on first boot. Validates BEFORE caching so a
@@ -136,7 +136,7 @@ async def refresh_from_db() -> Dict[str, Any]:
     return _config
 
 
-def load(force: bool = False) -> Dict[str, Any]:
+def load(force: bool = False) -> dict[str, Any]:
     """Return the in-memory config cache — NO I/O, safe from any thread.
 
     The cache is populated by :func:`refresh_from_db` at startup and after each
@@ -163,7 +163,7 @@ def _reject_secret_keys(source: str, node: Any, path: str = "config") -> None:
             _reject_secret_keys(source, item, f"{path}[{i}]")
 
 
-def _validate(source: str, data: Dict[str, Any]) -> None:
+def _validate(source: str, data: dict[str, Any]) -> None:
     # ── no smuggled secrets ──
     _reject_secret_keys(source, data)
     # ── version ── (forward-compat guard: only schema v1 is understood)
@@ -328,11 +328,11 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
 # ── Accessors (sync, cache-only — never do I/O here) ───────────────────
 
 
-def channels_config() -> Dict[str, Any]:
+def channels_config() -> dict[str, Any]:
     return load().get("channels", {})
 
 
-def triggers_config() -> Dict[str, Any]:
+def triggers_config() -> dict[str, Any]:
     return load().get("triggers", {})
 
 
@@ -341,7 +341,7 @@ def channel_enabled(name: str) -> bool:
     return bool(spec and spec.get("enabled"))
 
 
-def channel_recipients(name: str) -> List[str]:
+def channel_recipients(name: str) -> list[str]:
     """Global default recipients for a channel, with group aliases expanded."""
     spec = channels_config().get(name) or {}
     return resolve_recipients(spec.get("recipients", []))
@@ -352,7 +352,7 @@ def webhook_default_url() -> str:
     return spec.get("default_url", "") or ""
 
 
-def webhook_signing_secret() -> Optional[str]:
+def webhook_signing_secret() -> str | None:
     """The HMAC-SHA256 key used to sign webhook request bodies.
 
     Read from the ``WEBHOOK_SIGNING_SECRET`` setting, which pydantic loads from
@@ -361,10 +361,10 @@ def webhook_signing_secret() -> Optional[str]:
     return settings.WEBHOOK_SIGNING_SECRET or None
 
 
-def resolve_recipients(recipients: List[str]) -> List[str]:
+def resolve_recipients(recipients: list[str]) -> list[str]:
     """Expand ``group:<alias>`` references and dedupe, preserving order."""
     groups = load().get("groups", {}) or {}
-    out: List[str] = []
+    out: list[str] = []
     seen: set = set()
     for r in recipients or []:
         members = groups.get(r[len(_GROUP_PREFIX) :], []) if r.startswith(_GROUP_PREFIX) else [r]
@@ -375,7 +375,7 @@ def resolve_recipients(recipients: List[str]) -> List[str]:
     return out
 
 
-def periodic_report_config() -> Dict[str, Any]:
+def periodic_report_config() -> dict[str, Any]:
     """The periodic_report block with defaults applied.
 
     Returns a deep copy so a caller may read/mutate the result freely without

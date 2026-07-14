@@ -2,15 +2,16 @@
 """Initialize database schemas"""
 
 import asyncio
-import sys
 import os
+import sys
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.db import postgres, clickhouse
-from app.config import settings
 import logging
+
+from app.config import settings
+from app.db import clickhouse, postgres
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

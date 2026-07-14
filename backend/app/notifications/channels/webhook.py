@@ -20,7 +20,6 @@ import hmac
 import ipaddress
 import json
 import logging
-from typing import List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -84,8 +83,8 @@ class WebhookChannel(NotificationChannel):
     async def send(
         self,
         payload: NotificationPayload,
-        recipients: Optional[List[str]] = None,
-        target_url: Optional[str] = None,
+        recipients: list[str] | None = None,
+        target_url: str | None = None,
         attachments=None,  # webhook delivers the JSON payload; attachments N/A
     ) -> NotificationResult:
         url = target_url or config.webhook_default_url()

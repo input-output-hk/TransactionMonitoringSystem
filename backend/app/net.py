@@ -18,7 +18,6 @@ identities past the rate limiter and forge the audit trail's source IP
 
 import ipaddress
 import logging
-from typing import Optional
 
 from starlette.requests import HTTPConnection
 
@@ -27,7 +26,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-def parse_ip(value: Optional[str]) -> Optional[str]:
+def parse_ip(value: str | None) -> str | None:
     """Canonical IP string, or None for anything that is not a plain IP.
 
     Tolerates the ``host:port`` / ``[v6]:port`` forms some proxies emit.
@@ -64,7 +63,7 @@ def parse_ip(value: Optional[str]) -> Optional[str]:
 _warned_malformed_cidrs = False
 
 
-def _peer_is_trusted_proxy(direct: Optional[str]) -> bool:
+def _peer_is_trusted_proxy(direct: str | None) -> bool:
     global _warned_malformed_cidrs
     if direct is None:
         return False
@@ -86,7 +85,7 @@ def _peer_is_trusted_proxy(direct: Optional[str]) -> bool:
     return any(addr in net for net in networks)
 
 
-def is_trusted_proxy_peer(conn: Optional[HTTPConnection]) -> bool:
+def is_trusted_proxy_peer(conn: HTTPConnection | None) -> bool:
     """True if ``conn``'s direct TCP peer is a configured trusted proxy
     (``TRUSTED_PROXY_ENABLED`` and inside ``TRUSTED_PROXY_CIDRS``).
 
@@ -102,7 +101,7 @@ def is_trusted_proxy_peer(conn: Optional[HTTPConnection]) -> bool:
     return settings.TRUSTED_PROXY_ENABLED and _peer_is_trusted_proxy(direct)
 
 
-def client_ip(conn: Optional[HTTPConnection]) -> Optional[str]:
+def client_ip(conn: HTTPConnection | None) -> str | None:
     """Best-effort validated client IP for a Request or WebSocket."""
     if conn is None:
         return None

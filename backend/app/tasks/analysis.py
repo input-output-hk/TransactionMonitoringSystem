@@ -9,10 +9,8 @@ import asyncio
 import logging
 import time
 
+from app.analysis import baselines, engine, external
 from app.config import settings
-from app.analysis import engine
-from app.analysis import baselines
-from app.analysis import external
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)

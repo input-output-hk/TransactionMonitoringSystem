@@ -9,7 +9,7 @@ payload models never reference a concrete channel — that is the
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import Union
 
 from app.notifications.payloads import ImmediateAlert, PeriodicReport
 
@@ -29,8 +29,8 @@ class Dispatch:
     """
 
     channel: str
-    recipients: List[str] = field(default_factory=list)
-    webhook_url: Optional[str] = None
+    recipients: list[str] = field(default_factory=list)
+    webhook_url: str | None = None
 
 
 @dataclass
@@ -75,9 +75,9 @@ class NotificationChannel(ABC):
     async def send(
         self,
         payload: NotificationPayload,
-        recipients: List[str],
-        target_url: Optional[str],
-        attachments: Optional[List[Attachment]] = None,
+        recipients: list[str],
+        target_url: str | None,
+        attachments: list[Attachment] | None = None,
     ) -> NotificationResult:
         """Deliver one payload. MUST NOT raise — return ok=False instead.
 

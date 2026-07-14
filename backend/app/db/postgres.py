@@ -3,17 +3,18 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Optional, List, Dict, Any
-import asyncpg
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any
+
+import asyncpg
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Global connection pool
-_pool: Optional[asyncpg.Pool] = None
+_pool: asyncpg.Pool | None = None
 # Serializes pool creation: without it two concurrent init_pool() callers could
 # both observe `_pool is None`, both create_pool(), and one pool would leak
 # (its connections never closed). asyncio.Lock() needs no running loop to
@@ -485,7 +486,7 @@ async def prune_notified_alerts(older_than_days: int) -> int:
 async def get_report_state(
     network: str,
     report_kind: str = "periodic",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Last-sent bookkeeping for the periodic report, or None if never sent."""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -530,7 +531,7 @@ async def mark_report_sent(
 # --- Notification config document (admin-managed) ---
 
 
-async def get_notification_config() -> Optional[Dict[str, Any]]:
+async def get_notification_config() -> dict[str, Any] | None:
     """The stored notification config document, or None if never set."""
     async with get_connection() as conn:
         row = await conn.fetchrow("SELECT config FROM notification_config WHERE id = TRUE")
@@ -541,7 +542,7 @@ async def get_notification_config() -> Optional[Dict[str, Any]]:
     return json.loads(value) if isinstance(value, str) else value
 
 
-async def set_notification_config(doc: Dict[str, Any], updated_by: str) -> None:
+async def set_notification_config(doc: dict[str, Any], updated_by: str) -> None:
     """Upsert the single notification config row (JSONB)."""
     async with get_connection() as conn:
         await conn.execute(
@@ -617,7 +618,7 @@ async def upsert_lifecycle_confirmed(
         )
 
 
-async def batch_upsert_lifecycle_confirmed(records: List[tuple]):
+async def batch_upsert_lifecycle_confirmed(records: list[tuple]):
     """Batch-upsert confirmed transactions in a single executemany call.
 
     Each record is (tx_id, network, confirmed_at, block_hash, slot, height).
@@ -678,7 +679,7 @@ async def mark_lifecycle_rolled_back(rollback_slot: int, network: str):
         return result
 
 
-async def get_lifecycle_by_tx_id(tx_id: str) -> Optional[Dict[str, Any]]:
+async def get_lifecycle_by_tx_id(tx_id: str) -> dict[str, Any] | None:
     """Get lifecycle record for a single transaction"""
     async with get_connection() as conn:
         row = await conn.fetchrow("SELECT * FROM tx_lifecycle WHERE tx_id = $1", tx_id)
@@ -689,7 +690,7 @@ async def get_lifecycle_by_tx_id(tx_id: str) -> Optional[Dict[str, Any]]:
 
 async def get_lifecycles_by_status(
     status: str, network: str = "preprod", limit: int = 100, offset: int = 0
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Query lifecycle records by status"""
     async with get_connection() as conn:
         rows = await conn.fetch(
@@ -709,7 +710,7 @@ async def get_lifecycles_by_status(
 
 async def get_all_lifecycles(
     network: str = "preprod", limit: int = 100, offset: int = 0
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Query all lifecycle records regardless of status"""
     async with get_connection() as conn:
         rows = await conn.fetch(
@@ -726,7 +727,7 @@ async def get_all_lifecycles(
         return [dict(r) for r in rows]
 
 
-async def get_lifecycle_summary(network: str = "preprod") -> Dict[str, Any]:
+async def get_lifecycle_summary(network: str = "preprod") -> dict[str, Any]:
     """Get aggregate lifecycle statistics"""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -770,7 +771,7 @@ async def save_sync_point(network: str, slot: int, block_id: str):
         )
 
 
-async def get_sync_point(network: str) -> Optional[Dict[str, Any]]:
+async def get_sync_point(network: str) -> dict[str, Any] | None:
     """Return the last saved sync point for the given network, or None on first run."""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -784,7 +785,7 @@ async def get_sync_point(network: str) -> Optional[Dict[str, Any]]:
 # --- Pending score repurges (durable rollback second pass) ---
 
 
-async def add_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+async def add_pending_score_repurges(network: str, tx_hashes: list[str]) -> None:
     """Persist tx hashes awaiting the delayed tx_class_scores repurge.
 
     Written BEFORE the in-memory repurge task is scheduled so a restart or
@@ -805,7 +806,7 @@ async def add_pending_score_repurges(network: str, tx_hashes: List[str]) -> None
         )
 
 
-async def get_pending_score_repurges(network: str) -> List[str]:
+async def get_pending_score_repurges(network: str) -> list[str]:
     """All tx hashes whose delayed score repurge has not completed yet."""
     async with get_connection() as conn:
         rows = await conn.fetch(
@@ -815,7 +816,7 @@ async def get_pending_score_repurges(network: str) -> List[str]:
         return [r["tx_hash"] for r in rows]
 
 
-async def clear_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+async def clear_pending_score_repurges(network: str, tx_hashes: list[str]) -> None:
     """Remove hashes whose tx_class_scores repurge succeeded in ClickHouse.
 
     Called only AFTER delete_score_rows_async returns: clearing first would
@@ -837,9 +838,7 @@ async def clear_pending_score_repurges(network: str, tx_hashes: List[str]) -> No
 # --- Entity State ---
 
 
-async def get_entity_state(
-    entity_type: str, entity_id: str, network: str
-) -> Optional[Dict[str, Any]]:
+async def get_entity_state(entity_type: str, entity_id: str, network: str) -> dict[str, Any] | None:
     """Return the JSON state for a given entity, or None if not found."""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -856,7 +855,7 @@ async def get_entity_state(
         return None
 
 
-async def set_entity_state(entity_type: str, entity_id: str, state: Dict[str, Any], network: str):
+async def set_entity_state(entity_type: str, entity_id: str, state: dict[str, Any], network: str):
     """Upsert the JSON state for a given entity."""
     async with get_connection() as conn:
         await conn.execute(
@@ -909,7 +908,7 @@ async def insert_audit_log(
     entity_type: str,
     entity_id: str,
     details: str,
-    ip_address: Optional[str],
+    ip_address: str | None,
 ) -> int:
     """Append one audit row and return its id. ``details`` is a JSON string;
     ``user_id`` stays NULL until server-side accounts exist (the actor is
@@ -1057,7 +1056,7 @@ async def insert_mempool_collision(
         )
 
 
-async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dict[str, Any]]:
+async def get_collisions_for_txs(tx_hashes: list, network: str) -> dict[str, dict[str, Any]]:
     """Fetch collision data for a batch of tx hashes. Returns {tx_hash: collision_dict}."""
     if not tx_hashes:
         return {}
@@ -1083,8 +1082,8 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
         counterpart_addrs.add(r["tx_b_first_input_addr"])
     counterpart_addrs.discard("")
 
-    win_counts: Dict[str, int] = {}
-    win_counts_24h: Dict[str, int] = {}
+    win_counts: dict[str, int] = {}
+    win_counts_24h: dict[str, int] = {}
     if counterpart_addrs:
         async with get_connection() as conn:
             # Single query covers both the all-time count and the 24-hour
@@ -1127,7 +1126,7 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
             win_counts = {r["addr"]: r["cnt"] for r in win_rows}
             win_counts_24h = {r["addr"]: r["cnt_24h"] for r in win_rows}
 
-    result: Dict[str, Dict[str, Any]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for r in rows:
         for tx_hash in [r["tx_a"], r["tx_b"]]:
             if tx_hash in tx_hashes and tx_hash not in result:

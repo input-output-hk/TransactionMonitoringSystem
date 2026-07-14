@@ -6,7 +6,7 @@ double-submit companion cookie must be issued/cleared alongside the session
 cookie (see app.csrf).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -139,7 +139,7 @@ class TestCSRFSelfHeal:
         "full_name": "Ops",
         "role": "Admin",
         "status": "active",
-        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
         "last_login_at": None,
         "created_by_token_hash": None,
         "session_id": "legacy-sess",

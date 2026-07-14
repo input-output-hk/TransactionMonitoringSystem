@@ -3,9 +3,9 @@
 import os
 
 import pytest
-from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, BAND_HIGH_THRESHOLD
-from app.analysis.scorers.large_datum import LargeDatumScorer, _MIN_DATUM_BYTES
 
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, BAND_HIGH_THRESHOLD
+from app.analysis.scorers.large_datum import _MIN_DATUM_BYTES, LargeDatumScorer
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
 

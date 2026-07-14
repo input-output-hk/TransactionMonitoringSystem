@@ -1,10 +1,10 @@
 """Unit tests for the Token Dust scorer (Class 1)."""
 
 import pytest
-from app.analysis.normalise import BAND_HIGH_THRESHOLD
-from app.analysis.scorers.token_dust import TokenDustScorer, _DOS_VALUE_CBOR_MIN
-from app.analysis.features import _estimate_value_cbor_bytes
 
+from app.analysis.features import _estimate_value_cbor_bytes
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
+from app.analysis.scorers.token_dust import _DOS_VALUE_CBOR_MIN, TokenDustScorer
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
 # Recall pin for the symmetric many-policies DoS shape: it emits more

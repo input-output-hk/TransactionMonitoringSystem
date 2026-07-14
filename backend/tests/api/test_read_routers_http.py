@@ -6,8 +6,7 @@ DB access is faked at each router module's postgres/clickhouse seam,
 following the test_archive.py pattern; auth uses the dev-mode fixture.
 """
 
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -203,7 +202,7 @@ def _score_db_row(tx_hash=VALID_HASH, max_class="token_dust", max_score=72.0):
             "corroboration_count": 1,
             "corroborating_classes": max_class,
             "analysis_version": "test",
-            "analyzed_at": datetime.now(timezone.utc),
+            "analyzed_at": datetime.now(UTC),
         }
     )
     return row
