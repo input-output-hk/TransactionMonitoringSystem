@@ -72,7 +72,9 @@ async def list_lifecycles(
                 status=status.value, network=query_network, limit=limit, offset=offset
             )
         else:
-            rows = await postgres.get_all_lifecycles(network=query_network, limit=limit, offset=offset)
+            rows = await postgres.get_all_lifecycles(
+                network=query_network, limit=limit, offset=offset
+            )
         return {"count": len(rows), "data": rows}
     except Exception as e:
         logger.error(f"Error querying lifecycles: {e}")

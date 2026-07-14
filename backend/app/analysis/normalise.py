@@ -59,6 +59,7 @@ def _min_baseline_spread_ratio() -> float:
     global _MIN_BASELINE_SPREAD_RATIO
     if _MIN_BASELINE_SPREAD_RATIO is None:
         from app.analysis.scorer_config import baselines_config
+
         _MIN_BASELINE_SPREAD_RATIO = float(baselines_config()["min_spread_ratio"])
     return _MIN_BASELINE_SPREAD_RATIO
 

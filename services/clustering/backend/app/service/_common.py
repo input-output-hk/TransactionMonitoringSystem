@@ -18,9 +18,7 @@ def _noop(_: str) -> None:  # pragma: no cover - default progress sink
     pass
 
 
-def _make_set_stage(
-    repo: Repo, job_id: str | None, progress: ProgressFn
-) -> Callable[..., None]:
+def _make_set_stage(repo: Repo, job_id: str | None, progress: ProgressFn) -> Callable[..., None]:
     """Build the progress callback shared by the pipelines: log the stage and,
     when a ``job_id`` is given, write status/detail (and optionally txs_done) to
     the jobs table for UI polling. ``updated_at`` is server-stamped on each write."""
@@ -69,7 +67,9 @@ def _safe_error(exc: Exception) -> str:
 
 # process_contract tunables.
 _MIN_TXS_FOR_ANALYSIS = MIN_POINTS  # evaluate()'s own floor; below it we skip cluster/anomaly
-_FALLBACK_EPS = 0.5  # used when neither the grid recommendation nor the k-distance knee is available
+_FALLBACK_EPS = (
+    0.5  # used when neither the grid recommendation nor the k-distance knee is available
+)
 _FALLBACK_MIN_SAMPLES = 4  # heuristic floor when the grid has no recommendation
 _MAX_ERROR_DETAIL = 500  # cap the error string persisted to the jobs table
 _CLASSIFY_BATCH = 1000  # online-score chunk size (bounds the IN(...) array + matrix)
@@ -92,12 +92,8 @@ def _recommended_params(ev: dict[str, Any]) -> tuple[float, int]:
 
 
 def load_clustering_input(repo: Repo, target: str, feature_set: str) -> Any:
-    shape_df = (
-        repo.fetch_shape_features(target) if feature_set in ("shape", "combined") else None
-    )
-    addr_df = (
-        repo.fetch_tx_addresses(target) if feature_set in ("graph", "combined") else None
-    )
+    shape_df = repo.fetch_shape_features(target) if feature_set in ("shape", "combined") else None
+    addr_df = repo.fetch_tx_addresses(target) if feature_set in ("graph", "combined") else None
     return build_features(
         feature_set, shape_df, addr_df, max_graph_txs=get_settings().max_graph_txs
     )

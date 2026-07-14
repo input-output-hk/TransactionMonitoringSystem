@@ -121,8 +121,8 @@ class TestScore:
 
     def test_larger_datum_scores_higher(self, scorer):
         """Above the gate floor, a larger datum should score higher."""
-        medium = _out(SCRIPT, lovelace=2_000_000, datum="aa" * 9000)    # 9000 bytes
-        large = _out(SCRIPT, lovelace=2_000_000, datum="ff" * 13000)    # 13000 bytes
+        medium = _out(SCRIPT, lovelace=2_000_000, datum="aa" * 9000)  # 9000 bytes
+        large = _out(SCRIPT, lovelace=2_000_000, datum="ff" * 13000)  # 13000 bytes
         r_medium = scorer.score(_features([medium]))
         r_large = scorer.score(_features([large]))
         assert r_medium.score < r_large.score

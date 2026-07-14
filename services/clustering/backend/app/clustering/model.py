@@ -217,11 +217,7 @@ def score_shape(model: ShapeModel, df: pd.DataFrame) -> list[Classification]:
         iso = -model.iso_model.score_samples(X)
     else:
         iso = np.full(n, np.nan)
-    lof = (
-        -model.lof_model.score_samples(X)
-        if model.lof_model is not None
-        else np.full(n, np.nan)
-    )
+    lof = -model.lof_model.score_samples(X) if model.lof_model is not None else np.full(n, np.nan)
 
     # Vote only on the independent novelty detectors; the cluster-noise flag is
     # deliberately excluded (collinear with iso/lof — see `_verdict`).
@@ -326,9 +322,7 @@ def deserialize_model(blob: str) -> ShapeModel:
         if not any(hmac.compare_digest(digest, _digest(payload, k)) for k in keys):
             raise ModelIntegrityError("model blob failed HMAC verification")
     elif digest != _UNSIGNED_DIGEST:
-        raise ModelIntegrityError(
-            "model blob is signed but MODEL_SIGNING_KEYS is not configured"
-        )
+        raise ModelIntegrityError("model blob is signed but MODEL_SIGNING_KEYS is not configured")
     return joblib.load(io.BytesIO(payload))
 
 

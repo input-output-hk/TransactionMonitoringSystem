@@ -126,34 +126,56 @@ def compute_global_baselines(network: str) -> List[tuple]:
 
     for feature in _UTXO_FEATURES:
         result = _query_percentiles(
-            "utxo_features", feature, network, _GLOBAL_WINDOW_DAYS,
+            "utxo_features",
+            feature,
+            network,
+            _GLOBAL_WINDOW_DAYS,
         )
         if result is None:
             continue
         p50, p99, count = result
-        rows.append((
-            network, "global", "__global__", feature,
-            p50, p99, count, now, _GLOBAL_WINDOW_DAYS,
-        ))
+        rows.append(
+            (
+                network,
+                "global",
+                "__global__",
+                feature,
+                p50,
+                p99,
+                count,
+                now,
+                _GLOBAL_WINDOW_DAYS,
+            )
+        )
 
     for feature in _TX_FEATURES:
         result = _query_percentiles(
-            "tx_script_features", feature, network, _GLOBAL_WINDOW_DAYS,
+            "tx_script_features",
+            feature,
+            network,
+            _GLOBAL_WINDOW_DAYS,
         )
         if result is None:
             continue
         p50, p99, count = result
-        rows.append((
-            network, "global", "__global__", feature,
-            p50, p99, count, now, _GLOBAL_WINDOW_DAYS,
-        ))
+        rows.append(
+            (
+                network,
+                "global",
+                "__global__",
+                feature,
+                p50,
+                p99,
+                count,
+                now,
+                _GLOBAL_WINDOW_DAYS,
+            )
+        )
 
     rows = _filter_drifted(rows)
     if rows:
         clickhouse.insert_baselines(rows)
-        logger.info(
-            f"Baselines [global/{network}]: computed {len(rows)} features"
-        )
+        logger.info(f"Baselines [global/{network}]: computed {len(rows)} features")
     return rows
 
 
@@ -167,16 +189,29 @@ def compute_script_baselines(
 
     for feature in _UTXO_FEATURES:
         result = _query_percentiles_scoped(
-            "utxo_features", feature, network,
-            "address", script_hash, _PER_SCRIPT_WINDOW_DAYS,
+            "utxo_features",
+            feature,
+            network,
+            "address",
+            script_hash,
+            _PER_SCRIPT_WINDOW_DAYS,
         )
         if result is None or result[2] < settings.BASELINE_MIN_SAMPLES:
             continue
         p50, p99, count = result
-        rows.append((
-            network, "per_script", script_hash, feature,
-            p50, p99, count, now, _PER_SCRIPT_WINDOW_DAYS,
-        ))
+        rows.append(
+            (
+                network,
+                "per_script",
+                script_hash,
+                feature,
+                p50,
+                p99,
+                count,
+                now,
+                _PER_SCRIPT_WINDOW_DAYS,
+            )
+        )
 
     rows = _filter_drifted(rows)
     if rows:
@@ -208,7 +243,9 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
     """
     now = datetime.now(timezone.utc)
     per_script = clickhouse.query_multiple_sat_extraction_percentiles(
-        network, _PER_SCRIPT_WINDOW_DAYS, settings.BASELINE_MIN_SAMPLES,
+        network,
+        _PER_SCRIPT_WINDOW_DAYS,
+        settings.BASELINE_MIN_SAMPLES,
     )
     rows = []
     for rec in per_script:
@@ -216,10 +253,19 @@ def compute_multiple_sat_per_script_baselines(network: str) -> List[tuple]:
         count = rec["sample_count"]
         for feature in _MULTIPLE_SAT_PER_SCRIPT_FEATURES:
             p50, p99 = rec[feature]
-            rows.append((
-                network, "per_script", script, feature,
-                p50, p99, count, now, _PER_SCRIPT_WINDOW_DAYS,
-            ))
+            rows.append(
+                (
+                    network,
+                    "per_script",
+                    script,
+                    feature,
+                    p50,
+                    p99,
+                    count,
+                    now,
+                    _PER_SCRIPT_WINDOW_DAYS,
+                )
+            )
 
     rows = _filter_drifted(rows)
     if rows:
@@ -238,7 +284,10 @@ def bootstrap_baselines(network: str) -> int:
     Returns the number of baseline rows created.
     """
     existing = clickhouse.get_baseline(
-        network, "global", "__global__", "value_cbor_bytes",
+        network,
+        "global",
+        "__global__",
+        "value_cbor_bytes",
     )
     if existing and existing["sample_count"] >= settings.BASELINE_MIN_SAMPLES:
         logger.info("Baselines already bootstrapped, skipping")
@@ -395,10 +444,7 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
         symmetric_hold = feature in INVERTED_CONSUMER_FEATURES
         p99_drifted = check_drift(old_p99, new_p99, _DRIFT_P99_THRESHOLD)
         p50_drifted = check_drift(old_p50, new_p50, _DRIFT_P50_THRESHOLD)
-        p99_hold = (
-            p99_drifted and old_p99 > 0
-            and (new_p99 > old_p99 or symmetric_hold)
-        )
+        p99_hold = p99_drifted and old_p99 > 0 and (new_p99 > old_p99 or symmetric_hold)
         p50_hold = p50_drifted and (new_p50 > old_p50 or symmetric_hold)
         held = p99_hold or p50_hold
 
@@ -415,9 +461,16 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
         for axis, old_v, new_v in drifted_axes:
             try:
                 clickhouse.insert_baseline_drift_event(
-                    network, scope_type, scope_id, feature,
-                    old_v, new_v, _drift_ratio(old_v, new_v), computed_at,
-                    axis=axis, applied=not held,
+                    network,
+                    scope_type,
+                    scope_id,
+                    feature,
+                    old_v,
+                    new_v,
+                    _drift_ratio(old_v, new_v),
+                    computed_at,
+                    axis=axis,
+                    applied=not held,
                 )
             except Exception:
                 logger.exception("Failed to record baseline drift event")
@@ -427,20 +480,25 @@ def _filter_drifted(rows: List[tuple]) -> List[tuple]:
             # be two); an axis that merely drifted in an applied-safe
             # direction must not be reported as the cause.
             detail = "; ".join(
-                f"{axis} {old_v:.4g} -> {new_v:.4g} "
-                f"(ratio {_drift_ratio(old_v, new_v):.2f})"
+                f"{axis} {old_v:.4g} -> {new_v:.4g} (ratio {_drift_ratio(old_v, new_v):.2f})"
                 for axis, old_v, new_v in held_axes
             )
             logger.warning(
-                "Baseline drift HELD on %s: %s/%s %s/%s; "
-                "prior baseline stays active",
-                detail, scope_type, scope_id[:16], network, feature,
+                "Baseline drift HELD on %s: %s/%s %s/%s; prior baseline stays active",
+                detail,
+                scope_type,
+                scope_id[:16],
+                network,
+                feature,
             )
             continue
         if drifted_axes:
             logger.info(
                 "Baseline drift applied (recall-safe direction): %s/%s %s/%s",
-                scope_type, scope_id[:16], network, feature,
+                scope_type,
+                scope_id[:16],
+                network,
+                feature,
             )
         kept.append(row)
     return kept
@@ -531,6 +589,10 @@ def _query_percentiles_scoped(
 ) -> Optional[Tuple[float, float, int]]:
     """Per-address/policy p50/p99 (thin wrapper over _query_percentiles)."""
     return _query_percentiles(
-        table, feature, network, window_days,
-        scope_column=scope_column, scope_value=scope_value,
+        table,
+        feature,
+        network,
+        window_days,
+        scope_column=scope_column,
+        scope_value=scope_value,
     )

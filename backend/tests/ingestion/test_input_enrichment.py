@@ -38,9 +38,7 @@ def _tx(spends="inputs", **overrides):
         "inputs": [{"transaction": {"id": SOURCE_TX}, "index": 0}],
         "references": [{"transaction": {"id": REFERENCE_TX}, "index": 0}],
         "collaterals": [{"transaction": {"id": COLLATERAL_TX}, "index": 0}],
-        "outputs": [
-            {"address": "addr_test1qqout", "value": {"ada": {"lovelace": 1_000_000}}}
-        ],
+        "outputs": [{"address": "addr_test1qqout", "value": {"ada": {"lovelace": 1_000_000}}}],
     }
     body.update(overrides)
     return parse_ogmios_transaction(body)

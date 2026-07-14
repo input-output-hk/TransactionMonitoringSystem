@@ -75,8 +75,7 @@ class TestConsumeTokenSemantics:
                 # eligible for the purge sweep.
                 async with get_connection() as conn:
                     consumed_at = await conn.fetchval(
-                        "SELECT consumed_at FROM magic_link_tokens"
-                        " WHERE token_hash = $1",
+                        "SELECT consumed_at FROM magic_link_tokens WHERE token_hash = $1",
                         hash_token(token),
                     )
                 assert consumed_at is not None
@@ -154,9 +153,7 @@ class TestSessionClaimToctou:
                 first, _ = await create_session(user_id, token_hash=token_hash)
                 second, _ = await create_session(user_id, token_hash=token_hash)
 
-                revoked = await claim_session_token(
-                    session_id=first, token_hash=token_hash
-                )
+                revoked = await claim_session_token(session_id=first, token_hash=token_hash)
 
                 assert revoked == 1
                 assert await lookup_session(second) is None
@@ -175,16 +172,12 @@ class TestSessionClaimToctou:
                 token = await issue_token(user_id, "login")
                 token_hash = hash_token(token)
                 first, _ = await create_session(user_id, token_hash=token_hash)
-                await claim_session_token(
-                    session_id=first, token_hash=token_hash
-                )
+                await claim_session_token(session_id=first, token_hash=token_hash)
                 # A later redemption of the same link claims its own
                 # session; the already-claimed one has a NULL back-ref and
                 # must not be caught in the sibling DELETE.
                 third, _ = await create_session(user_id, token_hash=token_hash)
-                revoked = await claim_session_token(
-                    session_id=third, token_hash=token_hash
-                )
+                revoked = await claim_session_token(session_id=third, token_hash=token_hash)
                 assert revoked == 0
                 assert await lookup_session(first) is not None
                 assert await lookup_session(third) is not None

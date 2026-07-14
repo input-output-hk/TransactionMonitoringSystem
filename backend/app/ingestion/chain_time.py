@@ -59,9 +59,7 @@ class SlotTimeConverter:
         self._eras = sorted(eras, key=lambda e: e[0])
 
     @classmethod
-    def from_ogmios(
-        cls, start_time: Any, era_summaries: Any
-    ) -> Optional["SlotTimeConverter"]:
+    def from_ogmios(cls, start_time: Any, era_summaries: Any) -> Optional["SlotTimeConverter"]:
         """Build a converter from the raw Ogmios query results.
 
         Returns None on any unexpected shape; the caller keeps the
@@ -82,11 +80,7 @@ class SlotTimeConverter:
                 if slot_length <= 0:
                     return None
                 end = summary.get("end")
-                end_slot = (
-                    int(end["slot"])
-                    if isinstance(end, dict) and "slot" in end
-                    else None
-                )
+                end_slot = int(end["slot"]) if isinstance(end, dict) and "slot" in end else None
                 eras.append(
                     (
                         int(start["slot"]),
@@ -97,10 +91,7 @@ class SlotTimeConverter:
                 )
             return cls(system_start, eras)
         except (KeyError, TypeError, ValueError) as e:
-            logger.warning(
-                f"Unusable era summaries / start time for slot-time "
-                f"conversion: {e}"
-            )
+            logger.warning(f"Unusable era summaries / start time for slot-time conversion: {e}")
             return None
 
     def slot_to_utc(self, slot: Optional[int]) -> Optional[datetime]:

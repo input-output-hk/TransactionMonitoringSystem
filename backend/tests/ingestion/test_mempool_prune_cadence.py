@@ -77,7 +77,8 @@ class TestPruneCadence:
         stuck_set = {"w" * 64, "x" * 64, "y" * 64, "z" * 64}
         client._seen_mempool_txs = set(stuck_set)
         _process(
-            client, PRUNE_EVERY * 2,
+            client,
+            PRUNE_EVERY * 2,
             churn=lambda i: client._seen_mempool_txs.update(stuck_set),
         )
         assert len(sweeps) == 2  # fired on the 3rd and 6th processed tx
@@ -86,7 +87,8 @@ class TestPruneCadence:
         # Rollbacks/reconnects clear the set; cadence must be unaffected.
         sweeps = self._spy_sweeps(client)
         _process(
-            client, PRUNE_EVERY * 2,
+            client,
+            PRUNE_EVERY * 2,
             churn=lambda i: client._seen_mempool_txs.clear(),
         )
         assert len(sweeps) == 2

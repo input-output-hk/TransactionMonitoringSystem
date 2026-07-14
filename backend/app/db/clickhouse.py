@@ -105,6 +105,7 @@ def init_client():
 
 def close_client():
     """Disconnect ClickHouse clients on all threads."""
+
     def _close_thread():
         client = getattr(_thread_local, "client", None)
         if client:
@@ -186,27 +187,29 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
         tx_rows = []
         for tx in transactions:
             raw_json, raw_truncated = _serialize_raw_data(tx.raw_data)
-            tx_rows.append((
-                tx.tx_hash,
-                tx.network or settings.CARDANO_NETWORK,
-                tx.slot,
-                tx.block_height,
-                tx.block_hash,
-                tx.block_index,
-                tx.timestamp,
-                tx.fee,
-                tx.deposit,
-                tx.input_count,
-                tx.output_count,
-                tx.total_input_value,
-                tx.total_output_value,
-                tx.addresses,
-                json.dumps(tx.metadata) if tx.metadata else "",
-                raw_json,
-                raw_truncated,
-                1 if tx.script_valid else 0,
-                tx.ingestion_timestamp or now,
-            ))
+            tx_rows.append(
+                (
+                    tx.tx_hash,
+                    tx.network or settings.CARDANO_NETWORK,
+                    tx.slot,
+                    tx.block_height,
+                    tx.block_hash,
+                    tx.block_index,
+                    tx.timestamp,
+                    tx.fee,
+                    tx.deposit,
+                    tx.input_count,
+                    tx.output_count,
+                    tx.total_input_value,
+                    tx.total_output_value,
+                    tx.addresses,
+                    json.dumps(tx.metadata) if tx.metadata else "",
+                    raw_json,
+                    raw_truncated,
+                    1 if tx.script_valid else 0,
+                    tx.ingestion_timestamp or now,
+                )
+            )
         client.execute(
             """
             INSERT INTO transactions (
@@ -295,7 +298,8 @@ def insert_transactions_batch(transactions: List[NormalizedTransaction]):
                 except Exception as e:
                     logger.warning(
                         "Feature extraction failed for tx %s (non-fatal): %s",
-                        tx.tx_hash, e,
+                        tx.tx_hash,
+                        e,
                     )
                     continue
                 all_utxo_features.extend(utxo_rows)
@@ -415,8 +419,7 @@ def delete_score_rows(network: str, hashes: List[str]) -> None:
     if not hashes:
         return
     _get_client().execute(
-        "DELETE FROM tx_class_scores "
-        "WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+        "DELETE FROM tx_class_scores WHERE network = %(network)s AND tx_hash IN %(hashes)s",
         {"network": network, "hashes": hashes},
         settings=_LIGHTWEIGHT_DELETE_SETTINGS,
     )
@@ -465,8 +468,7 @@ def delete_clustering_rows(network: str, hashes: List[str]) -> None:
             settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
         client.execute(
-            f"DELETE FROM {db}.tx_classifications "
-            "WHERE toString(tx_hash) IN %(hashes)s",
+            f"DELETE FROM {db}.tx_classifications WHERE toString(tx_hash) IN %(hashes)s",
             {"hashes": hashes},
             settings=_LIGHTWEIGHT_DELETE_SETTINGS,
         )
@@ -511,10 +513,7 @@ def get_outputs_for_refs(
     # output rows and those are real spendable UTxOs (Babbage); excluding
     # them left total_input_value NULL on any tx spending one.
     # Only return rows matching requested (tx_hash, output_index) pairs
-    return {
-        (r[0], r[1]): (r[2], int(r[3]))
-        for r in rows if (r[0], r[1]) in ref_set
-    }
+    return {(r[0], r[1]): (r[2], int(r[3])) for r in rows if (r[0], r[1]) in ref_set}
 
 
 async def get_outputs_for_refs_async(
@@ -535,9 +534,9 @@ async def execute_query_async(query: str, params: Optional[Dict] = None) -> list
     return await _in_executor(_execute_query, query, params)
 
 
-
 # ---------------------------------------------------------------------------
 # Multi-class scoring, feature tables, baselines
+
 
 def insert_utxo_features(rows: List[tuple]):
     """Batch-insert UTxO-level feature rows extracted during ingestion."""
@@ -592,7 +591,10 @@ def _baseline_cache_clear() -> None:
 
 
 def get_baseline(
-    network: str, scope_type: str, scope_id: str, feature: str,
+    network: str,
+    scope_type: str,
+    scope_id: str,
+    feature: str,
 ) -> Optional[Dict[str, Any]]:
     """Return the latest baseline for a given (network, scope_type, scope_id, feature)."""
     ttl = settings.BASELINE_CACHE_TTL_SECONDS
@@ -686,11 +688,20 @@ def insert_baseline_drift_event(
             old_p99, new_p99, drift_ratio, detected_at, axis, applied
         ) VALUES
         """,
-        [(
-            network, scope_type, scope_id, feature,
-            float(old_p99), float(new_p99), float(drift_ratio), detected_at,
-            axis, 1 if applied else 0,
-        )],
+        [
+            (
+                network,
+                scope_type,
+                scope_id,
+                feature,
+                float(old_p99),
+                float(new_p99),
+                float(drift_ratio),
+                detected_at,
+                axis,
+                1 if applied else 0,
+            )
+        ],
     )
 
 
@@ -702,7 +713,9 @@ def insert_baseline_drift_event(
 # back out of the persisted ``tx_class_scores.evidence``. Keys are a fixed
 # allowlist (no user input) so they are safe to interpolate.
 def get_baselines_for_scope(
-    network: str, scope_type: str, scope_id: str,
+    network: str,
+    scope_type: str,
+    scope_id: str,
 ) -> List[Dict[str, Any]]:
     """Return all baselines for a given scope on a given network."""
     rows = _get_client().execute(
@@ -721,9 +734,12 @@ def get_baselines_for_scope(
 
 
 async def get_baselines_for_scope_async(
-    network: str, scope_type: str, scope_id: str,
+    network: str,
+    scope_type: str,
+    scope_id: str,
 ) -> List[Dict[str, Any]]:
     return await _in_executor(get_baselines_for_scope, network, scope_type, scope_id)
+
 
 # ---------------------------------------------------------------------------
 # tx_class_scores layer: lives in app.db.clickhouse_scores; re-exported here

@@ -10,6 +10,7 @@ with ``role='Admin'``; an API key alone is not enough). Secrets (SMTP creds,
 the webhook HMAC signing key) live in env and are never read or written here —
 only their "configured: yes/no" status is surfaced.
 """
+
 from __future__ import annotations
 
 import logging
@@ -79,7 +80,7 @@ async def put_config(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
     await postgres.set_notification_config(doc, admin.get("email") or "unknown")
-    await notif_config.refresh_from_db()       # rebind the cache to the new doc
+    await notif_config.refresh_from_db()  # rebind the cache to the new doc
     notif_config.warn_if_webhook_egress_public()
 
     # Accountability: best-effort, matching the admin user-CRUD posture (the

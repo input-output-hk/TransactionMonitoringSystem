@@ -102,9 +102,7 @@ class TestTransactionsRoundtrip:
                 }
             ],
         }
-        tx = parse_ogmios_transaction(
-            payload, timestamp=datetime.now(timezone.utc)
-        )
+        tx = parse_ogmios_transaction(payload, timestamp=datetime.now(timezone.utc))
         tx.network = LIVE_NETWORK
         ch.insert_transactions_batch([tx])
 
@@ -131,12 +129,7 @@ class TestScoreReadPath:
         )
         assert any(r["tx_hash"] == tx_hash for r in listed)
 
-        assert (
-            scores.count_class_scores(
-                network=LIVE_NETWORK, risk_band=["Critical"]
-            )
-            >= 1
-        )
+        assert scores.count_class_scores(network=LIVE_NETWORK, risk_band=["Critical"]) >= 1
 
         # The stats aggregate is where an aggregate-alias rename would
         # blow up server-side; keys are consumed by the dashboard tiles.
@@ -168,9 +161,7 @@ class TestBaselines:
                 )
             ]
         )
-        baseline = ch.get_baseline(
-            LIVE_NETWORK, "script", scope_id, "output_count"
-        )
+        baseline = ch.get_baseline(LIVE_NETWORK, "script", scope_id, "output_count")
         assert baseline is not None
         assert baseline["p50"] == 2.0
         assert baseline["p99"] == 9.0

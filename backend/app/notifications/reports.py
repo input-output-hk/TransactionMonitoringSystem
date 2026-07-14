@@ -32,12 +32,25 @@ _CLASS_NAMES = [c.value for c in AttackClass]
 # CSV columns + order — must match the web interface's manual export
 # (frontend AlertCsvRow / toCsvRow) so the automated report is the same format.
 _CSV_COLUMNS = [
-    "tx_hash", "analyzed_at", "network", "max_class", "max_score", "risk_band",
-    "fee_ada", "output_count",
-    "score_token_dust", "score_large_value", "score_large_datum",
-    "score_multiple_sat", "score_front_running", "score_sandwich",
-    "score_circular", "score_fake_token", "score_phishing",
-    "sub_scores", "analysis_version",
+    "tx_hash",
+    "analyzed_at",
+    "network",
+    "max_class",
+    "max_score",
+    "risk_band",
+    "fee_ada",
+    "output_count",
+    "score_token_dust",
+    "score_large_value",
+    "score_large_datum",
+    "score_multiple_sat",
+    "score_front_running",
+    "score_sandwich",
+    "score_circular",
+    "score_fake_token",
+    "score_phishing",
+    "sub_scores",
+    "analysis_version",
 ]
 # Same as the frontend export safety cap.
 _CSV_HARD_CAP = 50_000
@@ -46,7 +59,7 @@ _CSV_HARD_CAP = 50_000
 def _bands_at_or_above(min_band: str) -> List[str]:
     if min_band not in _BAND_ORDER:
         return list(_BAND_ORDER)
-    return _BAND_ORDER[_BAND_ORDER.index(min_band):]
+    return _BAND_ORDER[_BAND_ORDER.index(min_band) :]
 
 
 def effective_window_days(frequency: str, window_days: int) -> int:
@@ -78,14 +91,14 @@ def _in_window(stamps: List[Any], window_start: datetime, window_end: datetime) 
     caller's bound can never raise the naive-vs-aware TypeError that silently
     emptied the read path's contract_anomaly list."""
     lo, hi = to_aware_utc(window_start), to_aware_utc(window_end)
-    return any(
-        isinstance(s, datetime) and lo <= to_aware_utc(s) <= hi
-        for s in stamps
-    )
+    return any(isinstance(s, datetime) and lo <= to_aware_utc(s) <= hi for s in stamps)
 
 
 async def _contract_anomaly_in_window(
-    network: str, window_start: datetime, window_end: datetime, min_band: str,
+    network: str,
+    window_start: datetime,
+    window_end: datetime,
+    min_band: str,
 ) -> List[Dict[str, Any]]:
     """Resolved sidecar contract_anomaly findings at/above ``min_band`` that fall
     in the window, highest score first. Powers BOTH the per-class count and the
@@ -111,12 +124,15 @@ async def _contract_anomaly_in_window(
 
     try:
         flagged = await clustering_queries.flagged_for_network_async(
-            network, raise_on_error=True,
+            network,
+            raise_on_error=True,
         )
     except Exception:
         logger.warning(
             "periodic report: contract_anomaly fetch failed for %s; counting 0 "
-            "for this window (sidecar unreachable)", network, exc_info=True,
+            "for this window (sidecar unreachable)",
+            network,
+            exc_info=True,
         )
         return []
     allowed = set(_bands_at_or_above(min_band))
@@ -137,7 +153,10 @@ async def _contract_anomaly_in_window(
 
 
 async def build_periodic_report(
-    network: str, window_start: datetime, window_end: datetime, cfg: Dict[str, Any],
+    network: str,
+    window_start: datetime,
+    window_end: datetime,
+    cfg: Dict[str, Any],
 ) -> PeriodicReport:
     """Assemble the periodic_report payload for the given window."""
     min_band = cfg.get("min_band", "Moderate")
@@ -146,7 +165,8 @@ async def build_periodic_report(
 
     bands = _bands_at_or_above(min_band)
     in_scope = (
-        set(_CLASS_NAMES) if attack_classes == "all"
+        set(_CLASS_NAMES)
+        if attack_classes == "all"
         else {c for c in attack_classes if c in _CLASS_NAMES}
     )
 
@@ -154,7 +174,10 @@ async def build_periodic_report(
     # by_band spans all bands (total = their sum); by_class counts only
     # rows at/above min_band, which we then narrow to the in-scope classes.
     counts = await clickhouse_scores.aggregate_window_counts_async(
-        network, window_start, window_end, bands,
+        network,
+        window_start,
+        window_end,
+        bands,
     )
     total = counts["total"]
     alerts_by_band = {
@@ -162,8 +185,7 @@ async def build_periodic_report(
         for band in ("Critical", "High", "Moderate", "Informational")
     }
     alerts_by_class = {
-        cls: (counts["by_class"].get(cls, 0) if cls in in_scope else 0)
-        for cls in _CLASS_NAMES
+        cls: (counts["by_class"].get(cls, 0) if cls in in_scope else 0) for cls in _CLASS_NAMES
     }
     # contract_anomaly is the sidecar's read-time-only class: it never lands in
     # tx_class_scores, so the GROUP BY above always counts it 0. When the sidecar
@@ -177,33 +199,46 @@ async def build_periodic_report(
     ca_findings: List[Dict[str, Any]] = []
     if settings.CLUSTERING_ENABLED and "contract_anomaly" in in_scope:
         ca_findings = await _contract_anomaly_in_window(
-            network, window_start, window_end, min_band,
+            network,
+            window_start,
+            window_end,
+            min_band,
         )
         alerts_by_class["contract_anomaly"] = len(ca_findings)
 
     false_positives = await archive_queries.archive_count_async(
-        network, date_from=window_start, date_to=window_end,
+        network,
+        date_from=window_start,
+        date_to=window_end,
     )
 
     # Top alerts by score (>= min_band) in the window. When the report is
     # scoped to a class subset we over-fetch and post-filter to the subset.
     fetch_limit = top_n if attack_classes == "all" else max(top_n * 5, 50)
     rows = await clickhouse_scores.get_class_scores_list_async(
-        network, bands, None, 0.0,
-        sort="score", limit=fetch_limit, offset=0,
-        analyzed_from=window_start, analyzed_to=window_end,
+        network,
+        bands,
+        None,
+        0.0,
+        sort="score",
+        limit=fetch_limit,
+        offset=0,
+        analyzed_from=window_start,
+        analyzed_to=window_end,
     )
     top_alerts: List[TopAlert] = []
     for r in rows:
         if r.get("max_class") not in in_scope:
             continue
-        top_alerts.append(TopAlert(
-            tx_hash=r["tx_hash"],
-            attack_class=r.get("max_class") or "",
-            risk_score=r.get("max_score", 0.0),
-            risk_band=r.get("risk_band", ""),
-            timestamp=_iso(r.get("analyzed_at")),
-        ))
+        top_alerts.append(
+            TopAlert(
+                tx_hash=r["tx_hash"],
+                attack_class=r.get("max_class") or "",
+                risk_score=r.get("max_score", 0.0),
+                risk_band=r.get("risk_band", ""),
+                timestamp=_iso(r.get("analyzed_at")),
+            )
+        )
         if len(top_alerts) >= top_n:
             break
 
@@ -215,13 +250,15 @@ async def build_periodic_report(
     # is 9-class-only; see build_report_csv.)
     for w in ca_findings:
         raw_band = w.get("risk_band")
-        top_alerts.append(TopAlert(
-            tx_hash=w.get("tx_hash", ""),
-            attack_class="contract_anomaly",
-            risk_score=float(w.get("score") or 0.0),
-            risk_band=raw_band.value if hasattr(raw_band, "value") else str(raw_band or ""),
-            timestamp=_iso(w.get("scored_at")),
-        ))
+        top_alerts.append(
+            TopAlert(
+                tx_hash=w.get("tx_hash", ""),
+                attack_class="contract_anomaly",
+                risk_score=float(w.get("score") or 0.0),
+                risk_band=raw_band.value if hasattr(raw_band, "value") else str(raw_band or ""),
+                timestamp=_iso(w.get("scored_at")),
+            )
+        )
     if ca_findings:
         top_alerts.sort(key=lambda a: a.risk_score, reverse=True)
         top_alerts = top_alerts[:top_n]
@@ -242,11 +279,14 @@ async def build_periodic_report(
         # txs), NOT a single transaction. Pre-scope it to the report
         # window and sort by score so the page opens with these top alerts
         # leading (the reports page seeds its filters from these query params).
-        dashboard_url=f"{base}/reports?" + urlencode({
-            "from": _date_param(window_start),
-            "to": _date_param(window_end),
-            "sort": "score",
-        }),
+        dashboard_url=f"{base}/reports?"
+        + urlencode(
+            {
+                "from": _date_param(window_start),
+                "to": _date_param(window_end),
+                "sort": "score",
+            }
+        ),
     )
 
 
@@ -280,7 +320,10 @@ def _alert_csv_row(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def build_report_csv(
-    network: str, window_start: datetime, window_end: datetime, cfg: Dict[str, Any],
+    network: str,
+    window_start: datetime,
+    window_end: datetime,
+    cfg: Dict[str, Any],
 ) -> bytes:
     """Assemble the full per-transaction CSV for the report window.
 
@@ -298,7 +341,8 @@ async def build_report_csv(
     attack_classes = cfg.get("attack_classes", "all")
     bands = _bands_at_or_above(min_band)
     in_scope = (
-        set(_CLASS_NAMES) if attack_classes == "all"
+        set(_CLASS_NAMES)
+        if attack_classes == "all"
         else {c for c in attack_classes if c in _CLASS_NAMES}
     )
 
@@ -307,9 +351,15 @@ async def build_report_csv(
     page_size = 1000
     while len(rows) < _CSV_HARD_CAP:
         page = await clickhouse_scores.get_class_scores_list_async(
-            network, bands, None, 0.0,
-            sort="score", limit=page_size, offset=offset,
-            analyzed_from=window_start, analyzed_to=window_end,
+            network,
+            bands,
+            None,
+            0.0,
+            sort="score",
+            limit=page_size,
+            offset=offset,
+            analyzed_from=window_start,
+            analyzed_to=window_end,
         )
         rows.extend(page)
         if len(page) < page_size:
@@ -346,13 +396,15 @@ def report_dispatches(cfg: Dict[str, Any]) -> List[Dispatch]:
         else:
             # report recipients override the channel default; empty => "Global"
             recipients = (
-                config.resolve_recipients(report_recipients) if report_recipients
+                config.resolve_recipients(report_recipients)
+                if report_recipients
                 else config.channel_recipients(ch)
             )
             webhook_url = None
         if not recipients and not webhook_url:
             logger.warning(
-                "periodic report: channel '%s' has no recipients/URL; skipping", ch,
+                "periodic report: channel '%s' has no recipients/URL; skipping",
+                ch,
             )
             continue
         out.append(Dispatch(channel=ch, recipients=recipients, webhook_url=webhook_url))

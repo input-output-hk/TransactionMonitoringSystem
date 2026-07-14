@@ -75,9 +75,7 @@ async def _forward(path: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail="Invalid clustering path")
     url = f"{settings.CLUSTERING_SIDECAR_URL.rstrip('/')}/api/v1/{path}"
     body = await request.body()
-    headers = {
-        k: v for k, v in request.headers.items() if k.lower() in _FORWARD_HEADERS
-    }
+    headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARD_HEADERS}
     # Authenticate to the sidecar when a key is configured. The host's own
     # session/API-key auth (the Security dependency above) gates who may reach
     # this proxy; this forwarded key is a separate service credential so the
@@ -87,8 +85,11 @@ async def _forward(path: str, request: Request) -> Response:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             upstream = await client.request(
-                request.method, url,
-                params=request.query_params, content=body, headers=headers,
+                request.method,
+                url,
+                params=request.query_params,
+                content=body,
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         logger.warning("clustering proxy to %s failed: %s", url, exc)

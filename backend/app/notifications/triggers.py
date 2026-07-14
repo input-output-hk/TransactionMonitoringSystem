@@ -49,7 +49,9 @@ def resolve_dispatch(band: str, attack_class: str) -> List[Dispatch]:
             logger.warning(
                 "notification: channel '%s' selected for band=%s class=%s but "
                 "has no resolved recipients or URL; skipping (config gap)",
-                name, band, attack_class,
+                name,
+                band,
+                attack_class,
             )
             continue
         out.append(Dispatch(channel=name, recipients=recipients, webhook_url=webhook_url))
@@ -57,7 +59,9 @@ def resolve_dispatch(band: str, attack_class: str) -> List[Dispatch]:
 
 
 def _match_rule(
-    rules: List[Dict[str, Any]], band: str, attack_class: str,
+    rules: List[Dict[str, Any]],
+    band: str,
+    attack_class: str,
 ) -> Optional[Dict[str, Any]]:
     """The matching rule (band == band AND class listed), or None.
 

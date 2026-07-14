@@ -19,6 +19,7 @@ def client():
     # Import here so patching TMS_CONFIG_DIR or CARDANO_NETWORK in
     # future sibling tests doesn't leak into app.main import time.
     from app.main import app
+
     return TestClient(app)
 
 
@@ -33,6 +34,7 @@ def _dev_mode_auth(monkeypatch):
     is locked in by test_unauthenticated_gets_401_before_validation.
     """
     from app.auth import api_key
+
     monkeypatch.setattr(api_key, "_dev_mode", True)
 
 
@@ -77,6 +79,7 @@ def test_unauthenticated_gets_401_before_validation(client, monkeypatch):
     """Auth runs before query validation: an unauthenticated caller learns
     nothing about parameter shapes (401, not 422)."""
     from app.auth import api_key
+
     monkeypatch.setattr(api_key, "_dev_mode", False)
     monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
     r = client.get("/api/analysis/results?network=testnet")

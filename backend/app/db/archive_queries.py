@@ -37,7 +37,10 @@ def _archive_exists(network: str, tx_hash: str) -> bool:
 async def archive_exists_async(network: str, tx_hash: str) -> bool:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_exists, network, tx_hash,
+        _ch_executor,
+        _archive_exists,
+        network,
+        tx_hash,
     )
 
 
@@ -65,7 +68,10 @@ def _archive_get(network: str, tx_hash: str) -> Optional[Dict[str, Any]]:
 async def archive_get_async(network: str, tx_hash: str) -> Optional[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_get, network, tx_hash,
+        _ch_executor,
+        _archive_get,
+        network,
+        tx_hash,
     )
 
 
@@ -97,8 +103,14 @@ async def archive_insert_async(
     loop = asyncio.get_running_loop()
     archived_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await loop.run_in_executor(
-        _ch_executor, _archive_insert,
-        network, tx_hash, note, archived_by, archived_at, SOURCE_LOCAL,
+        _ch_executor,
+        _archive_insert,
+        network,
+        tx_hash,
+        note,
+        archived_by,
+        archived_at,
+        SOURCE_LOCAL,
     )
 
 
@@ -138,13 +150,25 @@ def _archive_delete(network: str, tx_hash: str) -> int:
 async def archive_delete_async(network: str, tx_hash: str) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_delete, network, tx_hash,
+        _ch_executor,
+        _archive_delete,
+        network,
+        tx_hash,
     )
 
 
 _LIST_COLUMNS = (
-    "network", "tx_hash", "note", "archived_by", "archived_at", "source",
-    "max_score", "max_class", "risk_band", "analyzed_at", "_has_score",
+    "network",
+    "tx_hash",
+    "note",
+    "archived_by",
+    "archived_at",
+    "source",
+    "max_score",
+    "max_class",
+    "risk_band",
+    "analyzed_at",
+    "_has_score",
 )
 
 
@@ -157,7 +181,9 @@ def _archive_list(
 ) -> List[Dict[str, Any]]:
     conditions = ["a.network = %(network)s"]
     params: Dict[str, Any] = {
-        "network": network, "limit": limit, "offset": offset,
+        "network": network,
+        "limit": limit,
+        "offset": offset,
     }
     if date_from is not None:
         conditions.append("a.archived_at >= %(date_from)s")
@@ -216,13 +242,19 @@ async def archive_list_async(
 ) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_list,
-        network, date_from, date_to, limit, offset,
+        _ch_executor,
+        _archive_list,
+        network,
+        date_from,
+        date_to,
+        limit,
+        offset,
     )
 
 
 def _archive_get_enriched(
-    network: str, tx_hash: str,
+    network: str,
+    tx_hash: str,
 ) -> Optional[Dict[str, Any]]:
     """Single archive row with the same detection-record LEFT JOIN as the list.
 
@@ -265,11 +297,15 @@ def _archive_get_enriched(
 
 
 async def archive_get_enriched_async(
-    network: str, tx_hash: str,
+    network: str,
+    tx_hash: str,
 ) -> Optional[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_get_enriched, network, tx_hash,
+        _ch_executor,
+        _archive_get_enriched,
+        network,
+        tx_hash,
     )
 
 
@@ -307,7 +343,11 @@ async def archive_count_async(
 ) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_count, network, date_from, date_to,
+        _ch_executor,
+        _archive_count,
+        network,
+        date_from,
+        date_to,
     )
 
 
@@ -358,10 +398,16 @@ def _archive_bulk_insert(
         archived_at = entry.get("archived_at") or fallback_ts
         if isinstance(archived_at, datetime) and archived_at.tzinfo is not None:
             archived_at = archived_at.astimezone(timezone.utc).replace(tzinfo=None)
-        to_insert.append((
-            entry["tx_hash"], entry["network"], entry["note"],
-            entry["archived_by"], archived_at, source_tag,
-        ))
+        to_insert.append(
+            (
+                entry["tx_hash"],
+                entry["network"],
+                entry["note"],
+                entry["archived_by"],
+                archived_at,
+                source_tag,
+            )
+        )
     if to_insert:
         _get_client().execute(
             """
@@ -373,7 +419,9 @@ def _archive_bulk_insert(
         )
     logger.debug(
         "archive bulk import from %s: inserted=%d skipped=%d",
-        source_label, len(to_insert), skipped,
+        source_label,
+        len(to_insert),
+        skipped,
     )
     return {"inserted": len(to_insert), "skipped": skipped}
 
@@ -384,12 +432,20 @@ async def archive_bulk_insert_async(
 ) -> Dict[str, int]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_bulk_insert, entries, source_label,
+        _ch_executor,
+        _archive_bulk_insert,
+        entries,
+        source_label,
     )
 
 
 _EXPORT_COLUMNS = (
-    "network", "tx_hash", "note", "archived_by", "archived_at", "source",
+    "network",
+    "tx_hash",
+    "note",
+    "archived_by",
+    "archived_at",
+    "source",
 )
 
 
@@ -426,7 +482,9 @@ async def archive_export_rows_async(
 ) -> List[Dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_export_rows, network, date_from, date_to,
+        _ch_executor,
+        _archive_export_rows,
+        network,
+        date_from,
+        date_to,
     )
-
-

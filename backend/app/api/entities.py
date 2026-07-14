@@ -42,6 +42,7 @@ def _validate_entity_identifiers(entity_type: str, entity_id: str) -> None:
 
 class EntityStateResponse(BaseModel):
     """Entity state response model"""
+
     entity_type: str
     entity_id: str
     state: Dict[str, Any]
@@ -62,11 +63,7 @@ async def get_entity_state(
         if not state:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        return EntityStateResponse(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            state=state
-        )
+        return EntityStateResponse(entity_type=entity_type, entity_id=entity_id, state=state)
     except HTTPException:
         raise
     except Exception as e:
@@ -104,7 +101,10 @@ async def set_entity_state(
         await postgres.set_entity_state(entity_type, entity_id, state, query_network)
         logger.info(
             "Entity state updated: network=%s type=%s id=%s size=%d",
-            query_network, entity_type, entity_id, size,
+            query_network,
+            entity_type,
+            entity_id,
+            size,
         )
         await audit.record(
             event_type="entity_state",

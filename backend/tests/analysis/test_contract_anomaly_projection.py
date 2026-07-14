@@ -111,21 +111,32 @@ class TestProjectScore:
 
 def _base_result(max_score: float, max_class: str) -> ClassScoreResult:
     return ClassScoreResult(
-        tx_hash="tx", network="preprod",
+        tx_hash="tx",
+        network="preprod",
         scores={"phishing": max_score},
-        max_score=max_score, max_class=max_class,
+        max_score=max_score,
+        max_class=max_class,
         risk_band=RiskBand(score_to_band(max_score)),
-        sub_scores={}, evidence={},
-        corroboration_count=2, corroborating_classes="phishing,circular",
+        sub_scores={},
+        evidence={},
+        corroboration_count=2,
+        corroborating_classes="phishing,circular",
     )
 
 
 def _row(verdict: str = "anomaly", consensus=None, target="addr1xyz") -> dict:
     """A raw sidecar verdict row (no host-scale score; the host computes it)."""
     return {
-        "tx_hash": "tx", "target": target, "cluster_id": 3,
-        "iso_score": 0.7, "lof_score": 0.6, "consensus": consensus, "votes": 2,
-        "verdict": verdict, "model_id": "m1", "feature_set": "shape",
+        "tx_hash": "tx",
+        "target": target,
+        "cluster_id": 3,
+        "iso_score": 0.7,
+        "lof_score": 0.6,
+        "consensus": consensus,
+        "votes": 2,
+        "verdict": verdict,
+        "model_id": "m1",
+        "feature_set": "shape",
         "evidence": {"top": ["fees"]},
         "scored_at": datetime(2026, 6, 22, tzinfo=timezone.utc),
     }
@@ -133,15 +144,15 @@ def _row(verdict: str = "anomaly", consensus=None, target="addr1xyz") -> dict:
 
 class TestMergeAdditivity:
     def test_higher_ca_raises_max_score_and_band(self):
-        r = _base_result(45.0, "phishing")   # Moderate
-        _merge_contract_anomaly(r, [_row("malicious")])   # -> 80 (Critical)
+        r = _base_result(45.0, "phishing")  # Moderate
+        _merge_contract_anomaly(r, [_row("malicious")])  # -> 80 (Critical)
         assert r.max_score == _floors()["malicious"]
         assert r.max_class == "contract_anomaly"
         assert r.risk_band is RiskBand.CRITICAL
         assert r.scores["contract_anomaly"] == _floors()["malicious"]
 
     def test_lower_ca_never_lowers_existing_detection(self):
-        r = _base_result(72.0, "phishing")   # High
+        r = _base_result(72.0, "phishing")  # High
         before_score, before_class, before_band = r.max_score, r.max_class, r.risk_band
         # A positive verdict that scores BELOW the stored detection (anomaly 50
         # < phishing 72): the stored detection must win, unchanged.
@@ -209,13 +220,24 @@ class TestMergeAdditivity:
 # --- Endpoint-level gating ---------------------------------------------------
 
 _ROW = {
-    "tx_hash": "tx", "network": "preprod",
-    "token_dust": -1, "large_value": -1, "large_datum": -1, "multiple_sat": -1,
-    "front_running": -1, "sandwich": -1, "circular": -1, "fake_token": -1,
+    "tx_hash": "tx",
+    "network": "preprod",
+    "token_dust": -1,
+    "large_value": -1,
+    "large_datum": -1,
+    "multiple_sat": -1,
+    "front_running": -1,
+    "sandwich": -1,
+    "circular": -1,
+    "fake_token": -1,
     "phishing": 45.0,
-    "max_score": 45.0, "max_class": "phishing", "risk_band": "Moderate",
-    "sub_scores": {}, "evidence": {},
-    "corroboration_count": 0, "corroborating_classes": "",
+    "max_score": 45.0,
+    "max_class": "phishing",
+    "risk_band": "Moderate",
+    "sub_scores": {},
+    "evidence": {},
+    "corroboration_count": 0,
+    "corroborating_classes": "",
     "analysis_version": "phase5",
     "analyzed_at": datetime(2026, 6, 22, tzinfo=timezone.utc),
 }
@@ -224,12 +246,14 @@ _ROW = {
 @pytest.fixture
 def client():
     from app.main import app
+
     return TestClient(app)
 
 
 @pytest.fixture(autouse=True)
 def _dev_mode_auth(monkeypatch):
     from app.auth import api_key
+
     monkeypatch.setattr(api_key, "_dev_mode", True)
 
 
@@ -251,6 +275,7 @@ def _stub_db(monkeypatch):
 def test_merge_skipped_when_flag_off(client, monkeypatch):
     from app.config import settings
     from app.db import clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", False)
 
     called = False
@@ -272,6 +297,7 @@ def test_merge_skipped_when_flag_off(client, monkeypatch):
 def test_merge_applied_when_flag_on(client, monkeypatch):
     from app.config import settings
     from app.db import clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
 
     async def _verdict(_net, _tx):
@@ -291,6 +317,7 @@ def test_merge_best_effort_when_sidecar_errors(client, monkeypatch):
     """A sidecar read failure must not fail the main fetch."""
     from app.config import settings
     from app.db import clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
 
     async def _boom(_net, _tx):
@@ -309,6 +336,7 @@ def test_merge_best_effort_when_sidecar_errors(client, monkeypatch):
 # contract_anomaly verdict projects above it must still appear in the filtered
 # list: the DB filter sees only the stored score, so without the rescue the
 # detection is silently dropped (recall-first violation, see CLAUDE.md).
+
 
 def _full_score_row(tx_hash: str, max_score: float, max_class: str = "phishing") -> dict:
     row = dict(_ROW)
@@ -349,6 +377,7 @@ def _bind_list_stubs(monkeypatch, *, page_rows, total, flagged, by_hashes):
 def test_list_rescues_high_anomaly_below_score_filter(client, monkeypatch):
     """min_score filter: a low-stored-score tx flagged malicious is re-admitted."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     # Stored score 30 (Moderate) is below the min_score=70 filter, so the DB
     # page is empty; the sidecar flagged it malicious (-> 80, Critical).
@@ -373,6 +402,7 @@ def test_list_rescues_high_anomaly_below_score_filter(client, monkeypatch):
 def test_list_rescue_skips_rows_still_below_filter(client, monkeypatch):
     """A flagged-but-benign tx that stays below the filter is NOT re-admitted."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     _bind_list_stubs(
         monkeypatch,
@@ -397,6 +427,7 @@ def test_list_rescue_inactive_when_unfiltered(client, monkeypatch):
     separately). The default view is date-sorted, where recent CA txs appear."""
     from app.config import settings
     from app.db import clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     flagged_called = False
 
@@ -416,6 +447,7 @@ def test_list_rescue_caps_page_to_limit(client, monkeypatch):
     """Rescued rows are re-ranked and the page is capped back to `limit`, so a
     request never returns more than `limit` rows."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     # DB page already full at limit=2 (both pass the filter); two more flagged txs
     # are rescued, but the response must still cap at 2.
@@ -429,9 +461,9 @@ def test_list_rescue_caps_page_to_limit(client, monkeypatch):
     r = client.get("/api/analysis/results?network=preprod&min_score=70&limit=2")
     assert r.status_code == 200
     body = r.json()
-    assert len(body["data"]) == 2          # capped to limit
+    assert len(body["data"]) == 2  # capped to limit
     assert body["count"] == 2
-    assert body["total"] == 4              # 2 stored + 2 genuinely rescued
+    assert body["total"] == 4  # 2 stored + 2 genuinely rescued
 
 
 def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
@@ -439,6 +471,7 @@ def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
     so the rescue/surface never fires under it."""
     from app.config import settings
     from app.db import clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     flagged_called = False
 
@@ -448,7 +481,11 @@ def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
         return {"lowtx": [_row("malicious")]}
 
     _bind_list_stubs(
-        monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[],
+        monkeypatch,
+        page_rows=[],
+        total=0,
+        flagged={},
+        by_hashes=[],
     )
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
     r = client.get("/api/analysis/results?network=preprod&attack_class=phishing")
@@ -461,16 +498,19 @@ def test_list_rescue_inactive_under_attack_class_filter(client, monkeypatch):
 # endpoint resolves flagged txs in memory and keeps the ones whose verdict
 # projects ABOVE the stored 9-class max (effective max_class = contract_anomaly).
 
+
 def test_list_filter_contract_anomaly_accepts_and_returns_flagged(client, monkeypatch):
     """attack_class=contract_anomaly is no longer a 400; it returns the flagged
     txs whose sidecar verdict makes contract_anomaly their effective max_class."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     # Stored phishing 30 (Moderate); malicious verdict projects to Critical, so
     # contract_anomaly becomes the effective max_class.
     _bind_list_stubs(
         monkeypatch,
-        page_rows=[], total=0,
+        page_rows=[],
+        total=0,
         flagged={"catx": [_row("malicious", target="addrZ")]},
         by_hashes=[_full_score_row("catx", 30.0)],
     )
@@ -487,12 +527,14 @@ def test_list_filter_contract_anomaly_excludes_stored_dominant(client, monkeypat
     """A flagged tx whose stored 9-class score still dominates its verdict is a
     stored-class detection, not a contract_anomaly one, so it's excluded."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     # Stored phishing 95 (Critical) > anomaly verdict (65, High): max_class stays
     # phishing, so this tx does not belong to the contract_anomaly filter.
     _bind_list_stubs(
         monkeypatch,
-        page_rows=[], total=0,
+        page_rows=[],
+        total=0,
         flagged={"domtx": [_row("anomaly", consensus=0.65, target="addrZ")]},
         by_hashes=[_full_score_row("domtx", 95.0)],
     )
@@ -507,19 +549,20 @@ def test_list_filter_contract_anomaly_applies_band_filter(client, monkeypatch):
     """The score/band filter narrows the contract_anomaly list exactly as it does
     the stored-class list: a risk_band=Critical filter drops a High-only verdict."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     _bind_list_stubs(
         monkeypatch,
-        page_rows=[], total=0,
+        page_rows=[],
+        total=0,
         flagged={
-            "crit": [_row("malicious", target="a")],                # -> Critical
+            "crit": [_row("malicious", target="a")],  # -> Critical
             "high": [_row("anomaly", consensus=0.65, target="b")],  # -> High (65)
         },
         by_hashes=[_full_score_row("crit", 10.0), _full_score_row("high", 10.0)],
     )
     r = client.get(
-        "/api/analysis/results?network=preprod"
-        "&attack_class=contract_anomaly&risk_band=Critical"
+        "/api/analysis/results?network=preprod&attack_class=contract_anomaly&risk_band=Critical"
     )
     assert r.status_code == 200
     body = r.json()
@@ -532,6 +575,7 @@ def test_list_filter_contract_anomaly_empty_when_clustering_disabled(client, mon
     is legitimately empty (not a 400) and the sidecar is never queried."""
     from app.config import settings
     from app.db import clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", False)
     flagged_called = False
 
@@ -552,21 +596,22 @@ def test_list_filter_contract_anomaly_paginates(client, monkeypatch):
     """offset/limit page the in-memory match set, and total reports the full
     count so the UI pager is consistent with the stored-class views."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     _bind_list_stubs(
         monkeypatch,
-        page_rows=[], total=0,
+        page_rows=[],
+        total=0,
         flagged={t: [_row("malicious", target=t)] for t in ("t1", "t2", "t3")},
         by_hashes=[_full_score_row(t, 10.0) for t in ("t1", "t2", "t3")],
     )
     r = client.get(
-        "/api/analysis/results?network=preprod"
-        "&attack_class=contract_anomaly&limit=2&offset=0"
+        "/api/analysis/results?network=preprod&attack_class=contract_anomaly&limit=2&offset=0"
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == 2          # page capped to limit
-    assert body["total"] == 3          # full match count
+    assert body["count"] == 2  # page capped to limit
+    assert body["total"] == 3  # full match count
     assert len(body["data"]) == 2
 
 
@@ -574,6 +619,7 @@ def test_list_filter_contract_anomaly_date_sort_orders_newest_first(client, monk
     """sort=date orders the contract_anomaly list newest-first, matching the
     SQL ORDER BY the stored-class list uses (shared _sort_results helper)."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     older = _full_score_row("older", 10.0)
     older["analyzed_at"] = datetime(2026, 6, 20, tzinfo=timezone.utc)
@@ -581,16 +627,15 @@ def test_list_filter_contract_anomaly_date_sort_orders_newest_first(client, monk
     newer["analyzed_at"] = datetime(2026, 6, 23, tzinfo=timezone.utc)
     _bind_list_stubs(
         monkeypatch,
-        page_rows=[], total=0,
+        page_rows=[],
+        total=0,
         flagged={
             "older": [_row("malicious", target="a")],
             "newer": [_row("malicious", target="b")],
         },
         by_hashes=[older, newer],
     )
-    r = client.get(
-        "/api/analysis/results?network=preprod&attack_class=contract_anomaly&sort=date"
-    )
+    r = client.get("/api/analysis/results?network=preprod&attack_class=contract_anomaly&sort=date")
     assert r.status_code == 200
     body = r.json()
     assert [d["tx_hash"] for d in body["data"]] == ["newer", "older"]
@@ -600,6 +645,7 @@ def test_list_filter_contract_anomaly_date_sort_orders_newest_first(client, monk
 def test_list_filter_rejects_unknown_attack_class(client, monkeypatch):
     """Validation still rejects a genuinely unknown class with a 400."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     _bind_list_stubs(monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[])
     r = client.get("/api/analysis/results?network=preprod&attack_class=not_a_class")
@@ -608,16 +654,24 @@ def test_list_filter_rejects_unknown_attack_class(client, monkeypatch):
 
 # --- Stats / timeseries contract_anomaly augmentation ------------------------
 
+
 def test_stats_reclassifies_flagged_tx_to_effective_band(client, monkeypatch):
     """A tx stored Moderate but flagged malicious (Critical) moves from the
     moderate count to the critical count, so the KPI cards don't undercount."""
     from app.config import settings
     from app.db import clickhouse, clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     base = {
-        "total": 1, "critical_count": 0, "high_count": 0, "moderate_count": 1,
-        "informational_count": 0, "avg_max_score": 45.0,
-        "last_analyzed_at": None, "per_class": {}, "pending_count": 0,
+        "total": 1,
+        "critical_count": 0,
+        "high_count": 0,
+        "moderate_count": 1,
+        "informational_count": 0,
+        "avg_max_score": 45.0,
+        "last_analyzed_at": None,
+        "per_class": {},
+        "pending_count": 0,
     }
 
     async def _stats(_net, *a, **k):
@@ -646,6 +700,7 @@ def test_timeseries_adds_contract_anomaly_only_alerts(client, monkeypatch):
     the daily alert count, bucketed on its block date."""
     from app.config import settings
     from app.db import clickhouse, clustering_queries
+
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     base = [
         {"date": "2026-06-22", "count": 0},

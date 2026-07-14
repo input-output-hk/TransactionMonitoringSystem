@@ -117,7 +117,8 @@ async def archive_alert(
     """
     try:
         already = await archive_queries.archive_exists_async(
-            entry.network, entry.tx_hash,
+            entry.network,
+            entry.tx_hash,
         )
         if already:
             raise HTTPException(
@@ -151,7 +152,10 @@ async def archive_alert(
     )
     try:
         await archive_queries.archive_insert_async(
-            entry.network, entry.tx_hash, entry.note, entry.archived_by,
+            entry.network,
+            entry.tx_hash,
+            entry.note,
+            entry.archived_by,
         )
     except Exception as e:
         logger.error(f"Error archiving {entry.tx_hash}: {e}")
@@ -170,11 +174,13 @@ async def archive_alert(
 async def list_archived(
     network: NetworkParam = None,
     date_from: Optional[datetime] = Query(
-        None, alias="from",
+        None,
+        alias="from",
         description="ISO timestamp; lower bound on archived_at (inclusive)",
     ),
     date_to: Optional[datetime] = Query(
-        None, alias="to",
+        None,
+        alias="to",
         description="ISO timestamp; upper bound on archived_at (inclusive)",
     ),
     limit: int = Query(100, ge=1, le=1000),
@@ -231,17 +237,21 @@ async def bulk_import(
     )
     try:
         outcome = await archive_queries.archive_bulk_insert_async(
-            payload, payload_request.source_label,
+            payload,
+            payload_request.source_label,
         )
     except Exception as e:
         logger.error(f"Error during bulk import: {e}")
         await audit.append_outcome(audit_id, {"phase": "failed"})
         raise HTTPException(status_code=500, detail="Failed to import archive batch")
-    await audit.append_outcome(audit_id, {
-        "phase": "applied",
-        "inserted": outcome["inserted"],
-        "skipped": outcome["skipped"],
-    })
+    await audit.append_outcome(
+        audit_id,
+        {
+            "phase": "applied",
+            "inserted": outcome["inserted"],
+            "skipped": outcome["skipped"],
+        },
+    )
     return BulkArchiveResult(
         inserted=outcome["inserted"],
         skipped=outcome["skipped"],
@@ -272,15 +282,17 @@ async def export_csv(
     writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
     writer.writeheader()
     for row in rows:
-        writer.writerow({
-            "network": row["network"],
-            "tx_hash": row["tx_hash"],
-            "note": _csv_safe(row["note"]),
-            "archived_by": _csv_safe(row["archived_by"]),
-            # ISO-8601 UTC; assume naive datetimes from ClickHouse are UTC.
-            "archived_at": format_iso_utc(row["archived_at"]) or "",
-            "source": _csv_safe(row["source"]),
-        })
+        writer.writerow(
+            {
+                "network": row["network"],
+                "tx_hash": row["tx_hash"],
+                "note": _csv_safe(row["note"]),
+                "archived_by": _csv_safe(row["archived_by"]),
+                # ISO-8601 UTC; assume naive datetimes from ClickHouse are UTC.
+                "archived_at": format_iso_utc(row["archived_at"]) or "",
+                "source": _csv_safe(row["source"]),
+            }
+        )
     buf.seek(0)
 
     # File name encodes the query so two exports from the same instance don't
@@ -382,7 +394,8 @@ async def get_archived(
     query_network = network or settings.CARDANO_NETWORK
     try:
         row = await archive_queries.archive_get_enriched_async(
-            query_network, tx_hash,
+            query_network,
+            tx_hash,
         )
     except Exception as e:
         logger.error(f"Error fetching archive entry {tx_hash}: {e}")

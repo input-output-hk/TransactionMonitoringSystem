@@ -93,7 +93,9 @@ def enrich_inputs_with_resolved_addresses(
     max_ref_txs = settings.ANALYSIS_MAX_REF_TXS
     if len(ref_tx_hashes) > max_ref_txs:
         logger.warning(
-            "Capping ref tx lookups: %d -> %d", len(ref_tx_hashes), max_ref_txs,
+            "Capping ref tx lookups: %d -> %d",
+            len(ref_tx_hashes),
+            max_ref_txs,
         )
         ref_tx_hashes = set(sorted(ref_tx_hashes)[:max_ref_txs])
 

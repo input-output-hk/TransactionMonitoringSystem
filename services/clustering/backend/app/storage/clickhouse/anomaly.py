@@ -9,8 +9,17 @@ from .base import _RepoBase, _row_to_dict
 from .ingest import TX_CONTEXT_KEYS, TX_CONTEXT_SELECT
 
 _ANOMALY_RUN_OUT_KEYS = [
-    "run_id", "target", "feature_set", "methods", "n_points", "n_flagged",
-    "eps", "min_samples", "top_quantile", "origin", "created_at",
+    "run_id",
+    "target",
+    "feature_set",
+    "methods",
+    "n_points",
+    "n_flagged",
+    "eps",
+    "min_samples",
+    "top_quantile",
+    "origin",
+    "created_at",
 ]
 _ANOMALY_RUN_INT_KEYS = ("n_points", "n_flagged", "min_samples")
 
@@ -100,20 +109,25 @@ class _AnomalyMixin(_RepoBase):
     @staticmethod
     def _anomaly_run_to_dict(r: Sequence[Any]) -> dict[str, Any]:
         return _row_to_dict(
-            _ANOMALY_RUN_OUT_KEYS, r,
-            int_keys=_ANOMALY_RUN_INT_KEYS, float_keys=("eps", "top_quantile"),
+            _ANOMALY_RUN_OUT_KEYS,
+            r,
+            int_keys=_ANOMALY_RUN_INT_KEYS,
+            float_keys=("eps", "top_quantile"),
         )
 
     def list_anomaly_runs(self, target: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE target = {t:String}" if target else ""
-        sql = self._ANOMALY_RUN_SELECT.format(db=self._db, where=where) + " ORDER BY created_at DESC"
-        rows = self.client.query(
-            sql, parameters={"t": target} if target else None
-        ).result_rows
+        sql = (
+            self._ANOMALY_RUN_SELECT.format(db=self._db, where=where) + " ORDER BY created_at DESC"
+        )
+        rows = self.client.query(sql, parameters={"t": target} if target else None).result_rows
         return [self._anomaly_run_to_dict(r) for r in rows]
 
     def get_anomaly_run(self, run_id: str) -> dict[str, Any] | None:
-        sql = self._ANOMALY_RUN_SELECT.format(db=self._db, where="WHERE run_id = {r:String}") + " LIMIT 1"
+        sql = (
+            self._ANOMALY_RUN_SELECT.format(db=self._db, where="WHERE run_id = {r:String}")
+            + " LIMIT 1"
+        )
         rows = self.client.query(sql, parameters={"r": run_id}).result_rows
         return self._anomaly_run_to_dict(rows[0]) if rows else None
 
@@ -151,7 +165,15 @@ class _AnomalyMixin(_RepoBase):
             parameters={"r": run_id, "t": target, "lim": limit, "off": offset},
         ).result_rows
         keys = [
-            "score_rank", "tx_hash", "consensus", "votes", "iso_score", "lof_score",
-            "dbscan_noise", *TX_CONTEXT_KEYS, "hour_of_day", "day_of_week",
+            "score_rank",
+            "tx_hash",
+            "consensus",
+            "votes",
+            "iso_score",
+            "lof_score",
+            "dbscan_noise",
+            *TX_CONTEXT_KEYS,
+            "hour_of_day",
+            "day_of_week",
         ]
         return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score",))

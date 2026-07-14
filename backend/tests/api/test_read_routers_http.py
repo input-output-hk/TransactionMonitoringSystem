@@ -66,9 +66,7 @@ class TestEntitiesGet:
         [("Wallet", "ok"), ("w@llet", "ok"), ("wallet", "bad id with spaces")],
         ids=["uppercase-type", "symbol-type", "spaced-id"],
     )
-    def test_invalid_identifiers_rejected(
-        self, client, auth_open, entity_type, entity_id
-    ):
+    def test_invalid_identifiers_rejected(self, client, auth_open, entity_type, entity_id):
         r = client.get(f"/api/entities/{entity_type}/{entity_id}")
         assert r.status_code == 400
 
@@ -85,9 +83,7 @@ class TestEntitiesPut:
     def test_update_persists_and_audits(self, client, auth_open, seams):
         setter, auditor = seams
 
-        r = client.put(
-            "/api/entities/wallet/addr_test1qq", json={"flagged": True}
-        )
+        r = client.put("/api/entities/wallet/addr_test1qq", json={"flagged": True})
 
         assert r.status_code == 200, r.text
         assert r.json()["message"] == "Entity state updated"
@@ -166,16 +162,10 @@ class TestLifecycle:
         assert client.get(f"/api/lifecycle/{VALID_HASH}").status_code == 404
 
     def test_list_with_status_filter(self, client, auth_open, monkeypatch):
-        by_status = AsyncMock(
-            return_value=[{"tx_id": VALID_HASH, "status": "PENDING"}]
-        )
+        by_status = AsyncMock(return_value=[{"tx_id": VALID_HASH, "status": "PENDING"}])
         all_rows = AsyncMock(return_value=[])
-        monkeypatch.setattr(
-            lifecycle_api.postgres, "get_lifecycles_by_status", by_status
-        )
-        monkeypatch.setattr(
-            lifecycle_api.postgres, "get_all_lifecycles", all_rows
-        )
+        monkeypatch.setattr(lifecycle_api.postgres, "get_lifecycles_by_status", by_status)
+        monkeypatch.setattr(lifecycle_api.postgres, "get_all_lifecycles", all_rows)
 
         r = client.get("/api/lifecycle?status=PENDING")
 
@@ -186,9 +176,7 @@ class TestLifecycle:
 
     def test_list_without_filter_uses_all(self, client, auth_open, monkeypatch):
         all_rows = AsyncMock(return_value=[])
-        monkeypatch.setattr(
-            lifecycle_api.postgres, "get_all_lifecycles", all_rows
-        )
+        monkeypatch.setattr(lifecycle_api.postgres, "get_all_lifecycles", all_rows)
 
         r = client.get("/api/lifecycle")
 
@@ -227,9 +215,7 @@ class TestAnalysisResults:
         # The overlay/rescue merges are best-effort reads against the
         # clustering store; on a dev machine with the sidecar enabled and
         # a live ClickHouse they would pollute the page with real rows.
-        monkeypatch.setattr(
-            analysis_api.settings, "CLUSTERING_ENABLED", False
-        )
+        monkeypatch.setattr(analysis_api.settings, "CLUSTERING_ENABLED", False)
 
     def test_single_result_shape(self, client, auth_open, monkeypatch):
         monkeypatch.setattr(

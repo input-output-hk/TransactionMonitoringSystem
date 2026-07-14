@@ -4,6 +4,7 @@ Guards the sync-cache / async-refresh contract the refactor introduced: the
 accessors read the in-memory cache only (no I/O), refresh_from_db seeds + caches
 the default on an empty DB, and validation rejects bad documents.
 """
+
 import pytest
 
 from app.notifications import config
@@ -46,29 +47,61 @@ def test_validate_accepts_default():
     config._validate("t", config._DEFAULT_CONFIG)  # no raise
 
 
-@pytest.mark.parametrize("bad", [
-    {"version": 2, "channels": {"email": {"enabled": True}}, "triggers": {"defaults": {}}},
-    {"version": 1, "channels": {}, "triggers": {"defaults": {}}},
-    {"version": 1, "channels": {"email": {"enabled": True}}, "triggers": {"defaults": {"Bogus": ["email"]}}},
-    {"version": 1, "channels": {"email": {"enabled": True}}, "triggers": {"defaults": {"Critical": ["sms"]}}},
-    {"version": 1, "channels": {"email": {"enabled": True, "smtp_password": "x"}}, "triggers": {"defaults": {}}},
-    # secret-looking keys in non-snake spellings must also be rejected
-    {"version": 1, "channels": {"email": {"enabled": True, "smtpPassword": "x"}}, "triggers": {"defaults": {}}},
-    {"version": 1, "channels": {"email": {"enabled": True}}, "triggers": {"defaults": {}}, "webhookSigningSecret": "x"},
-    {"version": 1, "channels": {"email": {"enabled": True}}, "triggers": {"defaults": {}}, "apiKey": "x"},
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"version": 2, "channels": {"email": {"enabled": True}}, "triggers": {"defaults": {}}},
+        {"version": 1, "channels": {}, "triggers": {"defaults": {}}},
+        {
+            "version": 1,
+            "channels": {"email": {"enabled": True}},
+            "triggers": {"defaults": {"Bogus": ["email"]}},
+        },
+        {
+            "version": 1,
+            "channels": {"email": {"enabled": True}},
+            "triggers": {"defaults": {"Critical": ["sms"]}},
+        },
+        {
+            "version": 1,
+            "channels": {"email": {"enabled": True, "smtp_password": "x"}},
+            "triggers": {"defaults": {}},
+        },
+        # secret-looking keys in non-snake spellings must also be rejected
+        {
+            "version": 1,
+            "channels": {"email": {"enabled": True, "smtpPassword": "x"}},
+            "triggers": {"defaults": {}},
+        },
+        {
+            "version": 1,
+            "channels": {"email": {"enabled": True}},
+            "triggers": {"defaults": {}},
+            "webhookSigningSecret": "x",
+        },
+        {
+            "version": 1,
+            "channels": {"email": {"enabled": True}},
+            "triggers": {"defaults": {}},
+            "apiKey": "x",
+        },
+    ],
+)
 def test_validate_rejects_bad_docs(bad):
     with pytest.raises(RuntimeError):
         config._validate("t", bad)
 
 
-@pytest.mark.parametrize("url", [
-    "http://127.0.0.1:9000/hook",
-    "http://localhost/hook",
-    "http://169.254.169.254/latest/meta-data/",  # cloud metadata (link-local)
-    "http://10.0.0.5/hook",
-    "http://192.168.1.5/hook",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:9000/hook",
+        "http://localhost/hook",
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata (link-local)
+        "http://10.0.0.5/hook",
+        "http://192.168.1.5/hook",
+    ],
+)
 def test_validate_rejects_internal_webhook_url_by_default(url):
     doc = {
         "version": 1,
@@ -98,14 +131,17 @@ def test_validate_allows_public_webhook_url():
     config._validate("t", doc)  # no raise
 
 
-@pytest.mark.parametrize("url,expected", [
-    ("http://127.0.0.1/x", True),
-    ("http://localhost/x", True),
-    ("http://169.254.169.254/x", True),
-    ("http://10.1.2.3/x", True),
-    ("https://hooks.example.com/x", False),
-    ("", False),
-])
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("http://127.0.0.1/x", True),
+        ("http://localhost/x", True),
+        ("http://169.254.169.254/x", True),
+        ("http://10.1.2.3/x", True),
+        ("https://hooks.example.com/x", False),
+        ("", False),
+    ],
+)
 def test_is_internal_webhook_target(url, expected):
     assert config.is_internal_webhook_target(url) is expected
 
@@ -113,6 +149,7 @@ def test_is_internal_webhook_target(url, expected):
 @pytest.mark.asyncio
 async def test_refresh_seeds_default_on_empty_db(monkeypatch):
     import app.db.postgres as pg
+
     seeded = {}
 
     async def get_none():
@@ -128,7 +165,7 @@ async def test_refresh_seeds_default_on_empty_db(monkeypatch):
     doc = await config.refresh_from_db()
     assert doc["channels"]["email"]["enabled"] is True
     assert config._config is doc
-    assert seeded["doc"]["version"] == 1          # default persisted
+    assert seeded["doc"]["version"] == 1  # default persisted
     assert seeded["by"] == "system:seed"
 
 

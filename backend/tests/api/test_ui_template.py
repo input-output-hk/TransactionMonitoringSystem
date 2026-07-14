@@ -38,27 +38,22 @@ from fastapi.testclient import TestClient
 # the exact expression text (post-strip); extend only with a justification.
 SAFE_INTERPOLATIONS = {
     # Date/number formatter outputs: digits and locale punctuation, no markup.
-    "new Date(tx.observedAt).toLocaleTimeString()":
-        "Date formatter output, never raw API text",
+    "new Date(tx.observedAt).toLocaleTimeString()": "Date formatter output, never raw API text",
     "(v * 100).toFixed(0)": "numeric formatting",
     "score.toFixed(1)": "numeric formatting",
     "a.max_score.toFixed(0)": "numeric formatting",
     # Lookups into hardcoded label tables; the miss path is esc()-wrapped.
-    "SUB_SCORE_LABELS[k] || esc(k)":
-        "static label table, esc()-wrapped fallback",
-    "CLASS_LABELS[cls] || esc(cls)":
-        "static label table, esc()-wrapped fallback",
+    "SUB_SCORE_LABELS[k] || esc(k)": "static label table, esc()-wrapped fallback",
+    "CLASS_LABELS[cls] || esc(cls)": "static label table, esc()-wrapped fallback",
     # Pure-literal expressions.
     "v > 0.7 ? '#ff6d00' : '#888'": "ternary over two string literals",
     "bandOf(score)": "returns one of four hardcoded band names",
     # Conditional HTML wrappers: the only dynamic piece is the NESTED
     # interpolation, which the scanner extracts and checks on its own.
-    "tx.block.height ? `<span class=\"tx-fee\">Block "
-    "${esc(tx.block.height)}</span>` : ''":
-        "static markup; nested ${esc(...)} checked separately",
-    "explain ? `<div class=\"risk-sub\" style=\"margin-top:2px\">"
-    "${explain}</div>` : ''":
-        "static markup; nested ${explain} checked separately",
+    'tx.block.height ? `<span class="tx-fee">Block '
+    "${esc(tx.block.height)}</span>` : ''": "static markup; nested ${esc(...)} checked separately",
+    'explain ? `<div class="risk-sub" style="margin-top:2px">'
+    "${explain}</div>` : ''": "static markup; nested ${explain} checked separately",
     # Locals holding HTML assembled above from esc()-wrapped / allowlisted
     # pieces only (classHtml, explain) or esc()-wrapped at assignment
     # (noteHtml: `${esc(a.note)}`, pinned by test_note_escaped_at_assignment).
@@ -110,7 +105,7 @@ def extract_interpolations(page: str) -> list:
                 depth -= 1
             j += 1
         assert j < len(page), f"unterminated ${{...}} at offset {start}"
-        found.append(page[start + 2:j].strip())
+        found.append(page[start + 2 : j].strip())
         # Resume INSIDE the expression so nested ${...} are extracted too.
         i = start + 2
 
@@ -174,7 +169,8 @@ class TestNoRawInterpolations:
         found = extract_interpolations(page)
         assert found, "scanner found no interpolations; template moved?"
         offenders = [
-            expr for expr in found
+            expr
+            for expr in found
             if not is_fully_esc_wrapped(expr) and expr not in SAFE_INTERPOLATIONS
         ]
         assert offenders == [], f"unescaped template interpolations: {offenders}"
@@ -198,8 +194,11 @@ VALID_HASH = "c" * 64
 def esc_reference(value: str) -> str:
     """Python mirror of the template's esc() (same map, & first)."""
     return (
-        value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        .replace('"', "&quot;").replace("'", "&#39;")
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
     )
 
 
@@ -229,8 +228,10 @@ def archive_client(monkeypatch):
         tag = f"{archive_queries.IMPORT_SOURCE_PREFIX}{source_label}"
         for e in entries:
             rows[(e["network"], e["tx_hash"])] = {
-                "network": e["network"], "tx_hash": e["tx_hash"],
-                "note": e["note"], "archived_by": e["archived_by"],
+                "network": e["network"],
+                "tx_hash": e["tx_hash"],
+                "note": e["note"],
+                "archived_by": e["archived_by"],
                 "archived_at": datetime.now(timezone.utc).replace(tzinfo=None),
                 "source": tag,
             }
@@ -239,7 +240,8 @@ def archive_client(monkeypatch):
     async def fake_list(network, date_from=None, date_to=None, limit=100, offset=0):
         return [
             dict(r, max_score=None, max_class=None, risk_band=None, analyzed_at=None)
-            for k, r in rows.items() if k[0] == network
+            for k, r in rows.items()
+            if k[0] == network
         ]
 
     async def fake_count(network, date_from=None, date_to=None):
@@ -260,7 +262,7 @@ def _extract_js(page: str, anchor: str) -> str:
         # (its entity strings like '&amp;' contain semicolons); it ends
         # uniquely with the map indexing '[c]);'.
         end_marker = "[c]);"
-        return page[start: page.index(end_marker, start) + len(end_marker)]
+        return page[start : page.index(end_marker, start) + len(end_marker)]
     # Function declaration: brace-match from its opening '{'.
     depth = 0
     j = page.index("{", start)
@@ -270,7 +272,7 @@ def _extract_js(page: str, anchor: str) -> str:
         elif page[pos] == "}":
             depth -= 1
             if depth == 0:
-                return page[start: pos + 1]
+                return page[start : pos + 1]
     raise AssertionError(f"unbalanced braces after {anchor!r}")
 
 
@@ -284,13 +286,20 @@ def test_stored_xss_payload_is_escaped_end_to_end(archive_client, page):
     dashboard -> the template's actual renderArchive() executed under node
     with a stub DOM. The emitted innerHTML must contain only the
     entity-escaped form, never the raw payload."""
-    r = archive_client.post("/api/archive/bulk", json={
-        "source_label": XSS_PAYLOAD,
-        "entries": [{
-            "network": "preprod", "tx_hash": VALID_HASH,
-            "note": XSS_PAYLOAD, "archived_by": "mallory",
-        }],
-    })
+    r = archive_client.post(
+        "/api/archive/bulk",
+        json={
+            "source_label": XSS_PAYLOAD,
+            "entries": [
+                {
+                    "network": "preprod",
+                    "tx_hash": VALID_HASH,
+                    "note": XSS_PAYLOAD,
+                    "archived_by": "mallory",
+                }
+            ],
+        },
+    )
     assert r.status_code == 200, r.text
 
     r = archive_client.get("/api/archive?network=preprod")
@@ -300,20 +309,25 @@ def test_stored_xss_payload_is_escaped_end_to_end(archive_client, page):
     # transport); the escaping duty sits entirely on the renderer.
     assert items[0]["note"] == XSS_PAYLOAD
 
-    script = "\n".join([
-        # Stub just enough DOM for renderArchive: an innerHTML sink and the
-        # counter badge.
-        "const __stubs = { archivePanel: { innerHTML: '' },"
-        " archiveCount: { textContent: '' } };",
-        "const document = { getElementById: (id) => __stubs[id] };",
-        _extract_js(page, "const esc = (v)"),
-        _extract_js(page, "function renderArchive(items)"),
-        "renderArchive(JSON.parse(require('fs').readFileSync(0, 'utf8')));",
-        "console.log(__stubs.archivePanel.innerHTML);",
-    ])
+    script = "\n".join(
+        [
+            # Stub just enough DOM for renderArchive: an innerHTML sink and the
+            # counter badge.
+            "const __stubs = { archivePanel: { innerHTML: '' },"
+            " archiveCount: { textContent: '' } };",
+            "const document = { getElementById: (id) => __stubs[id] };",
+            _extract_js(page, "const esc = (v)"),
+            _extract_js(page, "function renderArchive(items)"),
+            "renderArchive(JSON.parse(require('fs').readFileSync(0, 'utf8')));",
+            "console.log(__stubs.archivePanel.innerHTML);",
+        ]
+    )
     proc = subprocess.run(
         ["node", "-e", script],
-        input=json.dumps(items), capture_output=True, text=True, timeout=30,
+        input=json.dumps(items),
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
     rendered = proc.stdout
@@ -321,5 +335,5 @@ def test_stored_xss_payload_is_escaped_end_to_end(archive_client, page):
     assert XSS_PAYLOAD not in rendered
     assert "<img" not in rendered
     # Both stored fields (note and import source label) come out escaped.
-    assert f'"{esc_reference(XSS_PAYLOAD)}"' in rendered           # note
-    assert f"import:{esc_reference(XSS_PAYLOAD)}" in rendered      # source
+    assert f'"{esc_reference(XSS_PAYLOAD)}"' in rendered  # note
+    assert f"import:{esc_reference(XSS_PAYLOAD)}" in rendered  # source

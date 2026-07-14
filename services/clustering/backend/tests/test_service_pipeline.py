@@ -54,6 +54,7 @@ def test_recommended_params_returns_float_and_int() -> None:
 
 # --- process_contract integration ------------------------------------------
 
+
 def _shape_df(n: int) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -160,8 +161,12 @@ async def test_process_contract_reprocess_runs_full_pipeline(
     monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeSource())
     repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
     result = await process_contract(
-        repo, target="addr1demo", target_type="address",
-        max_txs=None, reprocess=True, job_id="job-1",
+        repo,
+        target="addr1demo",
+        target_type="address",
+        max_txs=None,
+        reprocess=True,
+        job_id="job-1",
     )
     assert result["tx_count"] == 8
     assert result["cluster_run_id"]
@@ -206,8 +211,12 @@ async def test_process_contract_host_backed_skips_download(
     monkeypatch.setattr("app.service.pipeline.ingest", _boom)
     repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
     result = await process_contract(
-        repo, target="addr1demo", target_type="address",
-        max_txs=None, reprocess=False, job_id="job-host",
+        repo,
+        target="addr1demo",
+        target_type="address",
+        max_txs=None,
+        reprocess=False,
+        job_id="job-host",
     )
     assert result["tx_count"] == 8
     assert result["cluster_run_id"]
@@ -224,8 +233,12 @@ async def test_process_contract_sets_registry_label(
     # Minswap Order Contract script address (FakeSource ignores the value).
     addr = "addr1wxn9efv2f6w82hagxqtn62ju4m293tqvw0uhmdl64ch8uwc0h43gt"
     await process_contract(
-        repo, target=addr, target_type="address",
-        max_txs=None, reprocess=True, job_id="job-label",
+        repo,
+        target=addr,
+        target_type="address",
+        max_txs=None,
+        reprocess=True,
+        job_id="job-label",
     )
     assert repo.contracts[-1]["label"] == "Minswap Order Contract"
 
@@ -240,8 +253,12 @@ async def test_process_contract_preserves_preset_label(
     addr = "addr1wxn9efv2f6w82hagxqtn62ju4m293tqvw0uhmdl64ch8uwc0h43gt"  # Minswap order
     repo.contracts.append({"target": addr, "label": "My Custom Name"})
     await process_contract(
-        repo, target=addr, target_type="address",
-        max_txs=None, reprocess=True, job_id="job-preset",
+        repo,
+        target=addr,
+        target_type="address",
+        max_txs=None,
+        reprocess=True,
+        job_id="job-preset",
     )
     assert repo.contracts[-1]["label"] == "My Custom Name"  # not "Minswap Order Contract"
 
@@ -252,8 +269,12 @@ async def test_process_contract_skips_analysis_under_three_txs(
     monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeSource())
     repo = FakePipelineRepo(_shape_df(2), _addr_df(2))
     result = await process_contract(
-        repo, target="addr1demo", target_type="address",
-        max_txs=None, reprocess=True, job_id="job-2",
+        repo,
+        target="addr1demo",
+        target_type="address",
+        max_txs=None,
+        reprocess=True,
+        job_id="job-2",
     )
     assert "note" in result
     assert repo.cluster_runs == [] and repo.anomaly_runs == []
@@ -275,8 +296,12 @@ async def test_process_contract_rate_limited_download_fails_no_cluster(
     repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
     with pytest.raises(SourceRateLimited):
         await process_contract(
-            repo, target="addr1demo", target_type="address",
-            max_txs=100, reprocess=False, job_id="job-rl",
+            repo,
+            target="addr1demo",
+            target_type="address",
+            max_txs=100,
+            reprocess=False,
+            job_id="job-rl",
         )
     # Nothing clustered/scored, contract + job both failed (not done).
     assert repo.cluster_runs == [] and repo.anomaly_runs == []
@@ -293,8 +318,12 @@ async def test_process_contract_failure_marks_failed_and_raises(
     repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
     with pytest.raises(SourceNotFound):
         await process_contract(
-            repo, target="addr1missing", target_type="address",
-            max_txs=None, reprocess=True, job_id="job-3",
+            repo,
+            target="addr1missing",
+            target_type="address",
+            max_txs=None,
+            reprocess=True,
+            job_id="job-3",
         )
     assert repo.contracts[-1]["status"] == "failed"
     _job_id, changes = repo.job_updates[-1]

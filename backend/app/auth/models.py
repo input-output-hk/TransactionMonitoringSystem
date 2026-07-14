@@ -3,6 +3,7 @@
 Kept light: only the fields the API actually returns. Domain objects (DB
 row dicts) are passed around as plain dicts elsewhere in `app.auth`.
 """
+
 from __future__ import annotations
 
 from datetime import datetime

@@ -50,9 +50,7 @@ _DOS_ASSET_MIN = int(_CFG["dos_asset_min"])
 # per-output Value cap so the threshold tracks the protocol limit rather than a
 # bare byte count, and so a few long-named assets (high CBOR, low pair count)
 # cannot evade the pair-count branch of the gate.
-_DOS_VALUE_CBOR_MIN = _fraction_of_limit(
-    _CFG["dos_value_cbor_fraction"], "max_value_size_bytes"
-)
+_DOS_VALUE_CBOR_MIN = _fraction_of_limit(_CFG["dos_value_cbor_fraction"], "max_value_size_bytes")
 
 
 def _max_assets_per_policy(value: Dict[str, Any]) -> int:
@@ -178,9 +176,7 @@ class TokenDustScorer(BaseScorer):
                 # the scorer must be suppressed by config rather than logic.
                 continue
 
-            candidates.append(
-                self._score_utxo(out, addr, network, policy_count, token_count)
-            )
+            candidates.append(self._score_utxo(out, addr, network, policy_count, token_count))
 
         return reduce_to_best(candidates)
 
@@ -201,16 +197,28 @@ class TokenDustScorer(BaseScorer):
 
         # Resolve baselines (per-script -> global -> bootstrap)
         p50_cb, p99_cb, bl1 = _resolve(
-            "value_cbor_bytes", "per_script", address, network,
-            _BOOT, "value_cbor_bytes",
+            "value_cbor_bytes",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "value_cbor_bytes",
         )
         p50_ac, p99_ac, _ = _resolve(
-            "unique_token_count", "per_script", address, network,
-            _BOOT, "unique_token_count",
+            "unique_token_count",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "unique_token_count",
         )
         p50_ada, p99_ada, _ = _resolve(
-            "ada_amount", "per_script", address, network,
-            _BOOT, "ada_amount",
+            "ada_amount",
+            "per_script",
+            address,
+            network,
+            _BOOT,
+            "ada_amount",
         )
         bl_source = bl1
 

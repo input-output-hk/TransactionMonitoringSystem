@@ -100,7 +100,9 @@ def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBan
     if verdict not in _POSITIVE_VERDICTS:
         return _SCORE_MIN, RiskBand(score_to_band(_SCORE_MIN))
     floor = float(cfg["verdict_floors"][verdict])
-    consensus_term = float(consensus) * float(cfg["consensus_scale"]) if consensus is not None else 0.0
+    consensus_term = (
+        float(consensus) * float(cfg["consensus_scale"]) if consensus is not None else 0.0
+    )
     score = min(_SCORE_MAX, max(floor, consensus_term))
     return score, RiskBand(score_to_band(score))
 

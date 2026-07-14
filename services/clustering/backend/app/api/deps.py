@@ -30,9 +30,7 @@ def _get_analysis_semaphore() -> threading.Semaphore:
     if _analysis_semaphore is None:
         with _analysis_semaphore_lock:
             if _analysis_semaphore is None:
-                _analysis_semaphore = threading.Semaphore(
-                    get_settings().max_concurrent_analyses
-                )
+                _analysis_semaphore = threading.Semaphore(get_settings().max_concurrent_analyses)
     return _analysis_semaphore
 
 

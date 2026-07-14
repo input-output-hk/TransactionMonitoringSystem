@@ -152,9 +152,7 @@ async def test_max_txs_stops_early() -> None:
 
 async def test_resume_from_cursor_skips_done_pages() -> None:
     repo = FakeRepo()
-    repo._cursor = _cursor_row(
-        "addr1demo", "page:1", txs_seen=2, done=0, last_tx_hash="bb"
-    )
+    repo._cursor = _cursor_row("addr1demo", "page:1", txs_seen=2, done=0, last_tx_hash="bb")
     async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo")
 
@@ -168,13 +166,9 @@ async def test_from_tip_continues_past_done_cursor() -> None:
     # A fully-ingested address (done cursor at the last page). from_tip resumes at
     # that page rather than re-walking from page 1, picking up only new tail txs.
     repo = FakeRepo()
-    repo._cursor = _cursor_row(
-        "addr1demo", "page:2", txs_seen=3, done=1, last_tx_hash="cc"
-    )
+    repo._cursor = _cursor_row("addr1demo", "page:2", txs_seen=3, done=1, last_tx_hash="cc")
     async with _source() as source:
-        result = await ingest(
-            repo=repo, source=source, address="addr1demo", from_tip=True
-        )
+        result = await ingest(repo=repo, source=source, address="addr1demo", from_tip=True)
 
     # Re-fetches page 2 ([cc]) then page 3 (empty) — does NOT re-ingest page 1.
     assert result.status == "completed"
@@ -186,9 +180,7 @@ async def test_from_tip_continues_past_done_cursor() -> None:
 
 async def test_done_cursor_without_from_tip_restarts_from_page_one() -> None:
     repo = FakeRepo()
-    repo._cursor = _cursor_row(
-        "addr1demo", "page:2", txs_seen=3, done=1, last_tx_hash="cc"
-    )
+    repo._cursor = _cursor_row("addr1demo", "page:2", txs_seen=3, done=1, last_tx_hash="cc")
     async with _source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo")
 
@@ -295,7 +287,7 @@ async def test_anchored_cursor_catchup_is_bounded() -> None:
 
 
 async def test_recent_restart_with_raised_cap_widens_the_window() -> None:
-    """"Download more": re-onboarding a fully-ingested, anchored capped contract with a
+    """ "Download more": re-onboarding a fully-ingested, anchored capped contract with a
     larger max_txs must re-anchor LOWER to widen the recent window and pull the older
     txs it now spans — not re-walk the frozen window and ingest nothing. Here the prior
     onboard captured the 2 newest (anchor block 40); raising the cap to 4 re-anchors at
@@ -346,7 +338,11 @@ async def test_recent_on_policy_ingests_history_with_note() -> None:
     notes: list[str] = []
     async with _source() as source:
         result = await ingest(
-            repo=repo, source=source, policy_id="pol1", max_txs=2, recent=True,
+            repo=repo,
+            source=source,
+            policy_id="pol1",
+            max_txs=2,
+            recent=True,
             progress=notes.append,
         )
 
@@ -360,8 +356,12 @@ async def test_recent_rejects_explicit_block_range() -> None:
     async with _source() as source:
         with pytest.raises(ValueError, match="mutually exclusive"):
             await ingest(
-                repo=repo, source=source, address="addr1demo",
-                max_txs=2, recent=True, from_block="10",
+                repo=repo,
+                source=source,
+                address="addr1demo",
+                max_txs=2,
+                recent=True,
+                from_block="10",
             )
 
 
@@ -378,9 +378,7 @@ async def test_rate_limit_during_recent_prewalk_retries_the_prewalk() -> None:
     assert repo.txs == []
     assert (repo.cursors[-1]["cursor"], repo.cursors[-1]["done"]) == ("", False)
 
-    repo._cursor = _cursor_row(
-        "addr1desc402", "", txs_seen=0, done=0
-    )
+    repo._cursor = _cursor_row("addr1desc402", "", txs_seen=0, done=0)
     async with _source() as source:
         retry = await ingest(
             repo=repo, source=source, address="addr1desc402", max_txs=2, recent=True
@@ -401,9 +399,7 @@ async def test_explicit_from_block_overrides_and_drops_a_stored_anchor() -> None
         "addr1recent", "page:1;from:40", txs_seen=2, done=0, last_tx_hash="n2"
     )
     async with _source() as source:
-        result = await ingest(
-            repo=repo, source=source, address="addr1recent", from_block="30"
-        )
+        result = await ingest(repo=repo, source=source, address="addr1recent", from_block="30")
 
     # from=30 → [g3, n1, n2]; resume starts at page 2 of THAT set → [n2].
     assert result.status == "completed"
@@ -416,13 +412,9 @@ async def test_legacy_midwalk_cursor_ignores_recent_hint() -> None:
     mid-walk cursor; re-anchoring mid-walk would skip data, so the walk must
     continue unfiltered and keep producing anchor-less cursors."""
     repo = FakeRepo()
-    repo._cursor = _cursor_row(
-        "addr1demo", "page:1", txs_seen=2, done=0, last_tx_hash="bb"
-    )
+    repo._cursor = _cursor_row("addr1demo", "page:1", txs_seen=2, done=0, last_tx_hash="bb")
     async with _source() as source:
-        result = await ingest(
-            repo=repo, source=source, address="addr1demo", max_txs=3, recent=True
-        )
+        result = await ingest(repo=repo, source=source, address="addr1demo", max_txs=3, recent=True)
 
     assert [t.tx_hash for t in repo.txs] == ["cc"]
     assert result.cursor == "page:2"  # still anchor-less
@@ -442,43 +434,60 @@ def test_resolve_window_address_with_cap_is_recent() -> None:
 
 
 def test_resolve_window_without_recent_or_cap_is_history() -> None:
-    assert _resolve_window(address="addr1demo", recent=False, max_txs=5, progress=_noop) == "history"
+    assert (
+        _resolve_window(address="addr1demo", recent=False, max_txs=5, progress=_noop) == "history"
+    )
     # recent but uncapped (max_txs falsy) can't window either — both 0 and None.
     assert _resolve_window(address="addr1demo", recent=True, max_txs=0, progress=_noop) == "history"
-    assert _resolve_window(address="addr1demo", recent=True, max_txs=None, progress=_noop) == "history"
+    assert (
+        _resolve_window(address="addr1demo", recent=True, max_txs=None, progress=_noop) == "history"
+    )
 
 
 def test_resolve_window_policy_falls_back_to_history_with_note() -> None:
     notes: list[str] = []
-    assert (
-        _resolve_window(address=None, recent=True, max_txs=5, progress=notes.append) == "history"
-    )
+    assert _resolve_window(address=None, recent=True, max_txs=5, progress=notes.append) == "history"
     assert any("can't window to recent" in n for n in notes)
 
 
 def test_discovery_max_items_policy_caps_on_full_target() -> None:
     # Policy always re-walks from the start, so it sizes to the full cap (or None).
-    assert _discovery_max_items(
-        address=None, max_txs=50, remaining=10, window="history", mode="restart"
-    ) == 50
-    assert _discovery_max_items(
-        address=None, max_txs=None, remaining=None, window="history", mode="restart"
-    ) is None
+    assert (
+        _discovery_max_items(
+            address=None, max_txs=50, remaining=10, window="history", mode="restart"
+        )
+        == 50
+    )
+    assert (
+        _discovery_max_items(
+            address=None, max_txs=None, remaining=None, window="history", mode="restart"
+        )
+        is None
+    )
 
 
 def test_discovery_max_items_recent_restart_passes_full_cap() -> None:
     # The load-bearing invariant: a recent restart must re-anchor to the FULL cap,
     # not the remaining count, or the widened window under-fetches older history.
-    assert _discovery_max_items(
-        address="addr1demo", max_txs=50, remaining=10, window="recent", mode="restart"
-    ) == 50
+    assert (
+        _discovery_max_items(
+            address="addr1demo", max_txs=50, remaining=10, window="recent", mode="restart"
+        )
+        == 50
+    )
 
 
 def test_discovery_max_items_address_resume_uses_remaining() -> None:
     # Forward resume (and any non-recent / non-restart address walk) only needs what's left.
-    assert _discovery_max_items(
-        address="addr1demo", max_txs=50, remaining=10, window="history", mode="resume"
-    ) == 10
-    assert _discovery_max_items(
-        address="addr1demo", max_txs=50, remaining=10, window="recent", mode="resume"
-    ) == 10
+    assert (
+        _discovery_max_items(
+            address="addr1demo", max_txs=50, remaining=10, window="history", mode="resume"
+        )
+        == 10
+    )
+    assert (
+        _discovery_max_items(
+            address="addr1demo", max_txs=50, remaining=10, window="recent", mode="resume"
+        )
+        == 10
+    )

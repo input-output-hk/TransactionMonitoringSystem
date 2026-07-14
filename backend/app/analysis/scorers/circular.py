@@ -122,8 +122,12 @@ class CircularScorer(BaseScorer):
         # Sub-score 2: cycle_recurrence
         recurrence = cycle.get("recurrence_count", 0)
         p50_r, p99_r, bl1 = _resolve(
-            "cycle_recurrence", "per_cluster", origin, network,
-            _BOOT, "attacker_recurrence",
+            "cycle_recurrence",
+            "per_cluster",
+            origin,
+            network,
+            _BOOT,
+            "attacker_recurrence",
         )
         s_recurrence = normalise(recurrence, p50=p50_r, p99=p99_r)
 
@@ -177,9 +181,7 @@ class CircularScorer(BaseScorer):
         # low recipient entropy and/or tight temporal concentration and is not
         # structural-only, so it is unaffected. Floor tunable via
         # circular.structural_corroboration_floor.
-        structural_only = (
-            s_entropy + s_auxiliary + s_speed
-        ) < _STRUCTURAL_CORROBORATION_FLOOR
+        structural_only = (s_entropy + s_auxiliary + s_speed) < _STRUCTURAL_CORROBORATION_FLOOR
         if structural_only:
             # Recall-first escape: recipient_entropy is INVERTED (low == recycled
             # nodes), so AML layering that launders through many FRESH

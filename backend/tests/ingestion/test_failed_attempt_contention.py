@@ -18,9 +18,9 @@ from app.ingestion.mempool_monitor import MempoolMonitor
 from app.models.transaction import NormalizedTransaction, TransactionInput
 from tests.ingestion.conftest import run_async as _run
 
-ATTEMPT_HASH = "a7" * 32      # the failed double-sat attempt
-WINNER_HASH = "b8" * 32       # the legitimate tx that won the contested UTxO
-CONTESTED_REF = ("c9" * 32, 1)   # the script UTxO both txs raced for
+ATTEMPT_HASH = "a7" * 32  # the failed double-sat attempt
+WINNER_HASH = "b8" * 32  # the legitimate tx that won the contested UTxO
+CONTESTED_REF = ("c9" * 32, 1)  # the script UTxO both txs raced for
 COLLATERAL_REF = ("d0" * 32, 0)  # the attempt's collateral input
 
 
@@ -52,15 +52,24 @@ def _attempted_input(ref, address="addr_test1qattacker"):
     # Regular input of a phase-2-failed tx: referenced but NOT consumed by
     # the ledger; persisted flagged so the attempt target stays visible.
     return TransactionInput(
-        tx_hash=ref[0], index=ref[1], address=address, amount=0,
-        is_reference=False, is_collateral=False, is_unspent_attempt=True,
+        tx_hash=ref[0],
+        index=ref[1],
+        address=address,
+        amount=0,
+        is_reference=False,
+        is_collateral=False,
+        is_unspent_attempt=True,
     )
 
 
 def _collateral_input(ref, address="addr_test1qattacker"):
     return TransactionInput(
-        tx_hash=ref[0], index=ref[1], address=address, amount=5_000_000,
-        is_reference=False, is_collateral=True,
+        tx_hash=ref[0],
+        index=ref[1],
+        address=address,
+        amount=5_000_000,
+        is_reference=False,
+        is_collateral=True,
     )
 
 
@@ -69,9 +78,9 @@ class TestConsumedRefsForFailedAttempt:
         # Ledger semantics: phase-2 failure spends the collateral; the
         # attempted regular inputs stay live (the victim can still be hit).
         tx = _confirmed_tx(
-            ATTEMPT_HASH, script_valid=False,
-            inputs=[_attempted_input(CONTESTED_REF),
-                    _collateral_input(COLLATERAL_REF)],
+            ATTEMPT_HASH,
+            script_valid=False,
+            inputs=[_attempted_input(CONTESTED_REF), _collateral_input(COLLATERAL_REF)],
         )
         assert MempoolMonitor._consumed_refs(tx) == {COLLATERAL_REF}
 
@@ -79,13 +88,11 @@ class TestConsumedRefsForFailedAttempt:
         # The pre-fix parser DROPPED a failed tx's regular inputs, blinding
         # every contention reader to what the attack targeted.
         tx = _confirmed_tx(
-            ATTEMPT_HASH, script_valid=False,
-            inputs=[_attempted_input(CONTESTED_REF),
-                    _collateral_input(COLLATERAL_REF)],
+            ATTEMPT_HASH,
+            script_valid=False,
+            inputs=[_attempted_input(CONTESTED_REF), _collateral_input(COLLATERAL_REF)],
         )
-        attempted = [
-            (i.tx_hash, i.index) for i in tx.inputs if i.is_unspent_attempt
-        ]
+        attempted = [(i.tx_hash, i.index) for i in tx.inputs if i.is_unspent_attempt]
         assert attempted == [CONTESTED_REF]
 
 
@@ -99,18 +106,26 @@ class TestFailedAttemptDisplacementSignal:
         seen_at = datetime.now(timezone.utc)
         attempt_mempool_data = {
             "inputs": [
-                {"transaction": {"id": CONTESTED_REF[0]},
-                 "index": CONTESTED_REF[1],
-                 "address": "addr_test1qattacker"},
+                {
+                    "transaction": {"id": CONTESTED_REF[0]},
+                    "index": CONTESTED_REF[1],
+                    "address": "addr_test1qattacker",
+                },
             ],
         }
         winner = _confirmed_tx(
-            WINNER_HASH, script_valid=True,
-            inputs=[TransactionInput(
-                tx_hash=CONTESTED_REF[0], index=CONTESTED_REF[1],
-                address="addr_test1qbuyer", amount=10_000_000,
-                is_reference=False, is_collateral=False,
-            )],
+            WINNER_HASH,
+            script_valid=True,
+            inputs=[
+                TransactionInput(
+                    tx_hash=CONTESTED_REF[0],
+                    index=CONTESTED_REF[1],
+                    address="addr_test1qbuyer",
+                    amount=10_000_000,
+                    is_reference=False,
+                    is_collateral=False,
+                )
+            ],
         )
         insert_collision = AsyncMock()
         outcome = AsyncMock()
@@ -118,23 +133,28 @@ class TestFailedAttemptDisplacementSignal:
         async def scenario():
             # Mempool side: the attempt registers its attempted refs.
             await client._record_mempool_collisions(
-                ATTEMPT_HASH, attempt_mempool_data, seen_at,
+                ATTEMPT_HASH,
+                attempt_mempool_data,
+                seen_at,
             )
             # Chain side: the winner confirms, consuming the contested ref.
             await client.record_displacements(
-                [winner], datetime.now(timezone.utc),
+                [winner],
+                datetime.now(timezone.utc),
             )
 
-        with patch("app.ingestion.mempool_monitor.postgres.insert_mempool_collision",
-                   insert_collision), \
-             patch("app.ingestion.mempool_monitor.postgres.update_collision_outcome",
-                   outcome):
+        with (
+            patch(
+                "app.ingestion.mempool_monitor.postgres.insert_mempool_collision", insert_collision
+            ),
+            patch("app.ingestion.mempool_monitor.postgres.update_collision_outcome", outcome),
+        ):
             _run(scenario())
 
         insert_collision.assert_awaited_once()
         kwargs = insert_collision.await_args.kwargs
-        assert kwargs["tx_a"] == ATTEMPT_HASH       # the displaced attempt
-        assert kwargs["tx_b"] == WINNER_HASH        # the confirmed winner
+        assert kwargs["tx_a"] == ATTEMPT_HASH  # the displaced attempt
+        assert kwargs["tx_b"] == WINNER_HASH  # the confirmed winner
         assert kwargs["shared_inputs"] == [list(CONTESTED_REF)]
         outcome.assert_awaited_once_with(WINNER_HASH, client.network)
 
@@ -147,25 +167,32 @@ class TestFailedAttemptDisplacementSignal:
         seen_at = datetime.now(timezone.utc)
         # A pending tx wanting the contested ref the attempt failed to take.
         client._pending.track(
-            "e1" * 32, ({CONTESTED_REF}, seen_at, 180_000, "addr_test1qv", 0),
+            "e1" * 32,
+            ({CONTESTED_REF}, seen_at, 180_000, "addr_test1qv", 0),
         )
         # A pending tx wanting the attempt's collateral UTxO (consumed).
         client._pending.track(
-            "f2" * 32, ({COLLATERAL_REF}, seen_at, 180_000, "addr_test1qw", 0),
+            "f2" * 32,
+            ({COLLATERAL_REF}, seen_at, 180_000, "addr_test1qw", 0),
         )
         failed_attempt = _confirmed_tx(
-            ATTEMPT_HASH, script_valid=False,
-            inputs=[_attempted_input(CONTESTED_REF),
-                    _collateral_input(COLLATERAL_REF)],
+            ATTEMPT_HASH,
+            script_valid=False,
+            inputs=[_attempted_input(CONTESTED_REF), _collateral_input(COLLATERAL_REF)],
         )
         insert_collision = AsyncMock()
-        with patch("app.ingestion.mempool_monitor.postgres.insert_mempool_collision",
-                   insert_collision), \
-             patch("app.ingestion.mempool_monitor.postgres.update_collision_outcome",
-                   AsyncMock()):
-            _run(client.record_displacements(
-                [failed_attempt], datetime.now(timezone.utc),
-            ))
+        with (
+            patch(
+                "app.ingestion.mempool_monitor.postgres.insert_mempool_collision", insert_collision
+            ),
+            patch("app.ingestion.mempool_monitor.postgres.update_collision_outcome", AsyncMock()),
+        ):
+            _run(
+                client.record_displacements(
+                    [failed_attempt],
+                    datetime.now(timezone.utc),
+                )
+            )
 
         insert_collision.assert_awaited_once()
         kwargs = insert_collision.await_args.kwargs

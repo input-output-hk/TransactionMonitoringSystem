@@ -57,9 +57,7 @@ def identify_target(target: str = Query(min_length=1, max_length=256)) -> dict[s
 
 
 @router.post("/contracts", response_model=JobAck)
-def create_contract(
-    req: ContractRequest, request: Request, repo: Repo = RepoDep
-) -> dict[str, Any]:
+def create_contract(req: ContractRequest, request: Request, repo: Repo = RepoDep) -> dict[str, Any]:
     """Register a contract and enqueue the canonical onboarding pipeline."""
     # Canonical casing on write AND on every {target} path read below — half-applied
     # normalization would make POST and GET disagree about the same policy id.
@@ -184,6 +182,4 @@ def list_latest_interactions(
     verdict is recomputed against each cluster's current label state, so a relabel is
     reflected at once."""
     target = normalize_target(target)
-    return latest_interactions_with_verdicts(
-        repo, target, feature_set, limit=limit, offset=offset
-    )
+    return latest_interactions_with_verdicts(repo, target, feature_set, limit=limit, offset=offset)

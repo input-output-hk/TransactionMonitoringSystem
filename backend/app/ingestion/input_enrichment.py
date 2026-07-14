@@ -46,9 +46,9 @@ def _flow_addresses(script_valid: bool, inputs: List[TransactionInput]) -> Set[s
     collateral only for a failed tx, where the collateral payer is the
     consumed party. Reference inputs are read-only, never involved."""
     return {
-        i.address for i in inputs
-        if i.address and not i.is_reference
-        and (not i.is_collateral or not script_valid)
+        i.address
+        for i in inputs
+        if i.address and not i.is_reference and (not i.is_collateral or not script_valid)
     }
 
 
@@ -85,11 +85,13 @@ def _resolve_tx_inputs(
         resolved = lookup.get((inp.tx_hash, inp.index))
         if resolved:
             addr, amt, assets = resolved
-            inp = inp.model_copy(update={
-                "address": addr,
-                "amount": int(amt),
-                "assets": assets if assets is not None else inp.assets,
-            })
+            inp = inp.model_copy(
+                update={
+                    "address": addr,
+                    "amount": int(amt),
+                    "assets": assets if assets is not None else inp.assets,
+                }
+            )
             changed = True
             if inp.consumed_by_ledger(tx.script_valid):
                 total += int(amt)
@@ -133,17 +135,16 @@ def apply_resolved_inputs(
     withdrawals fold into the total for validated txs.
     """
     lookup: Dict[tuple, ResolvedRef] = {
-        ref: (u["address"], u["amount"], u.get("assets"))
-        for ref, u in resolved.items()
+        ref: (u["address"], u["amount"], u.get("assets")) for ref, u in resolved.items()
     }
     new_inputs, total, _ = _resolve_tx_inputs(tx, lookup)
-    return tx.model_copy(update={
-        "inputs": new_inputs,
-        "total_input_value": total if total > 0 else None,
-        "addresses": list(
-            set(tx.addresses) | _flow_addresses(tx.script_valid, new_inputs)
-        ),
-    })
+    return tx.model_copy(
+        update={
+            "inputs": new_inputs,
+            "total_input_value": total if total > 0 else None,
+            "addresses": list(set(tx.addresses) | _flow_addresses(tx.script_valid, new_inputs)),
+        }
+    )
 
 
 async def resolve_input_amounts(
@@ -190,15 +191,12 @@ async def resolve_input_amounts(
     # Batch fetch from ClickHouse
     ch_resolved: Dict[tuple, tuple] = {}
     if cross_block_refs:
-        ch_resolved = await clickhouse.get_outputs_for_refs_async(
-            cross_block_refs, network
-        )
+        ch_resolved = await clickhouse.get_outputs_for_refs_async(cross_block_refs, network)
 
     # Merge: intra-block takes priority over ClickHouse. assets=None keeps
     # each input's own (parser-fresh inputs carry none).
     lookup: Dict[tuple, ResolvedRef] = {
-        ref: (addr, amt, None)
-        for ref, (addr, amt) in {**ch_resolved, **intra_block}.items()
+        ref: (addr, amt, None) for ref, (addr, amt) in {**ch_resolved, **intra_block}.items()
     }
 
     result = []
@@ -208,12 +206,14 @@ async def resolve_input_amounts(
         # withdrawn rewards are consumed value the tx provably moved (the
         # stored value is a lower bound; see the model field description).
         if changed or _withdrawal_total(tx) > 0:
-            tx = tx.model_copy(update={
-                "inputs": new_inputs,
-                "total_input_value": total if total > 0 else None,
-                "addresses": list(
-                    set(tx.addresses) | _flow_addresses(tx.script_valid, new_inputs)
-                ),
-            })
+            tx = tx.model_copy(
+                update={
+                    "inputs": new_inputs,
+                    "total_input_value": total if total > 0 else None,
+                    "addresses": list(
+                        set(tx.addresses) | _flow_addresses(tx.script_valid, new_inputs)
+                    ),
+                }
+            )
         result.append(tx)
     return result

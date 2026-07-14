@@ -29,6 +29,7 @@ def get_cbor2():
     global _cbor2
     if _cbor2 is None:
         import cbor2
+
         _cbor2 = cbor2
     return _cbor2
 
@@ -36,6 +37,7 @@ def get_cbor2():
 # ---------------------------------------------------------------------------
 # Address classification
 # ---------------------------------------------------------------------------
+
 
 def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
     """True if the tx has at least one spend-purpose redeemer (Plutus input).
@@ -86,8 +88,14 @@ def has_spend_redeemer(raw_data: Dict[str, Any]) -> bool:
 # Type 2 ('y') is payment-KEY + script-stake and is deliberately excluded:
 # the spending credential is a key, so script-targeted attacks do not apply.
 SCRIPT_ADDRESS_PREFIXES = (
-    "addr1w", "addr1z", "addr1x", "addr12",
-    "addr_test1w", "addr_test1z", "addr_test1x", "addr_test12",
+    "addr1w",
+    "addr1z",
+    "addr1x",
+    "addr12",
+    "addr_test1w",
+    "addr_test1z",
+    "addr_test1x",
+    "addr_test12",
 )
 
 # Cardano protocol constant: 1 ADA = 1,000,000 lovelace (CIP-9 / ledger spec).
@@ -111,6 +119,7 @@ def is_script_address(address: str) -> bool:
 # ---------------------------------------------------------------------------
 # UTxO-level feature extraction
 # ---------------------------------------------------------------------------
+
 
 def extract_lovelace(value: Any) -> int:
     """Lovelace out of an Ogmios value dict, handling both schema versions.
@@ -308,9 +317,7 @@ def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
             if key in ("lovelace", "ada"):
                 continue
             if isinstance(val, dict):
-                assets[key.encode()] = {
-                    aname.encode(): int(qty) for aname, qty in val.items()
-                }
+                assets[key.encode()] = {aname.encode(): int(qty) for aname, qty in val.items()}
             else:
                 assets[key.encode()] = int(val)
 
@@ -320,7 +327,6 @@ def _estimate_value_cbor_bytes(value: Dict[str, Any]) -> int:
     except Exception:
         # Fallback: rough estimate based on JSON size
         return len(json.dumps(value).encode())
-
 
 
 def _nonzero_qty(q: Any) -> bool:
@@ -358,7 +364,8 @@ def count_assets(value: Dict[str, Any]) -> Tuple[int, int]:
 
 
 def _extract_datum_info(
-    output: Dict[str, Any], datums: Optional[Dict[str, Any]] = None,
+    output: Dict[str, Any],
+    datums: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, int]:
     """Extract datum presence flag and byte size from an Ogmios output.
 
@@ -582,32 +589,33 @@ def extract_utxo_features(
         policy_count, token_count = count_assets(value)
         datum_flag, datum_bytes = _extract_datum_info(out, datums)
 
-        utxo_total = estimate_utxo_total_bytes(
-            address, value_cbor, datum_bytes, out.get("script")
-        )
+        utxo_total = estimate_utxo_total_bytes(address, value_cbor, datum_bytes, out.get("script"))
         datum_ratio = datum_ratio_of(datum_bytes, utxo_total)
 
-        rows.append((
-            tx_hash,
-            network,
-            idx,
-            address,
-            1 if is_script_address(address) else 0,
-            int(ada_amount),
-            value_cbor,
-            policy_count,
-            token_count,
-            datum_flag,
-            datum_bytes,
-            round(datum_ratio, 4),
-            utxo_total,
-        ))
+        rows.append(
+            (
+                tx_hash,
+                network,
+                idx,
+                address,
+                1 if is_script_address(address) else 0,
+                int(ada_amount),
+                value_cbor,
+                policy_count,
+                token_count,
+                datum_flag,
+                datum_bytes,
+                round(datum_ratio, 4),
+                utxo_total,
+            )
+        )
     return rows
 
 
 # ---------------------------------------------------------------------------
 # Transaction-level script feature extraction
 # ---------------------------------------------------------------------------
+
 
 def _redeemer_exunits(entry: Any) -> Tuple[int, int]:
     """(memory, cpu) execution units of one redeemer entry.
@@ -678,11 +686,13 @@ def extract_tx_script_features(
             for policy_id, assets in mint.items():
                 if isinstance(assets, dict):
                     for asset_name, qty in assets.items():
-                        entries.append({
-                            "policy_id": policy_id,
-                            "asset_name": asset_name,
-                            "quantity": int(qty),
-                        })
+                        entries.append(
+                            {
+                                "policy_id": policy_id,
+                                "asset_name": asset_name,
+                                "quantity": int(qty),
+                            }
+                        )
             mint_entries_json = json.dumps(entries) if entries else ""
 
     # Only store a row if there's script activity worth recording

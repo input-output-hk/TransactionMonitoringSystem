@@ -34,13 +34,9 @@ def _band_label(band: str) -> str:
 def _render_immediate(payload) -> Tuple[str, str]:
     """(subject, plain-text body) for an immediate alert."""
     band = _band_label(payload.risk_band)
-    subject = (
-        f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
-    )
+    subject = f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
     if payload.contributing_features:
-        feats = "\n".join(
-            f"    - {k}: {v:.2f}" for k, v in payload.contributing_features.items()
-        )
+        feats = "\n".join(f"    - {k}: {v:.2f}" for k, v in payload.contributing_features.items())
     else:
         feats = "    (none)"
     body = (
@@ -71,9 +67,10 @@ def _render_report(payload) -> Tuple[str, str]:
         f"{_band_label(b)}={s.alerts_by_band.get(b, 0)}"
         for b in ("Critical", "High", "Moderate", "Informational")
     )
-    classes = "\n".join(
-        f"    - {cls}: {n}" for cls, n in s.alerts_by_class.items() if n
-    ) or "    (none in window)"
+    classes = (
+        "\n".join(f"    - {cls}: {n}" for cls, n in s.alerts_by_class.items() if n)
+        or "    (none in window)"
+    )
     if payload.top_alerts:
         tops = "\n".join(
             f"    {i + 1:>2}. {_band_label(a.risk_band):<13} {a.risk_score:6.2f}  "
@@ -142,6 +139,4 @@ class EmailChannel(NotificationChannel):
                 filename=att.filename,
             )
         ok = await send_smtp(msg)
-        return NotificationResult(
-            self.name, ok=ok, detail="sent" if ok else "smtp send failed"
-        )
+        return NotificationResult(self.name, ok=ok, detail="sent" if ok else "smtp send failed")

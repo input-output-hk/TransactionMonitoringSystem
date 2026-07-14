@@ -158,7 +158,9 @@ def _recommend(grid: list[dict[str, Any]], knee_eps: float, base_ms: int) -> dic
 
 def evaluate(ci: ClusteringInput) -> dict[str, Any]:
     n = len(ci.tx_hashes)
-    n_features = int(ci.data.shape[1]) if (ci.metric != "precomputed" and ci.data.ndim == 2) else None
+    n_features = (
+        int(ci.data.shape[1]) if (ci.metric != "precomputed" and ci.data.ndim == 2) else None
+    )
     if n < MIN_POINTS:
         return {
             "feature_set": ci.feature_set,

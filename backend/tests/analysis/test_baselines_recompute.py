@@ -77,9 +77,11 @@ class TestMultipleSatPerScriptBaselines:
             compute_multiple_sat_per_script_baselines,
             _MULTIPLE_SAT_PER_SCRIPT_FEATURES,
         )
+
         mock_ch.query_multiple_sat_extraction_percentiles.return_value = [
             {
-                "script": "addrA", "sample_count": 300,
+                "script": "addrA",
+                "sample_count": 300,
                 "net_value_out_of_script": (5_000_000.0, 50_000_000.0),
                 "n_assets_out_of_script": (2.0, 4.0),
                 "exunits_per_script_input": (1_000_000.0, 2_000_000.0),
@@ -93,9 +95,9 @@ class TestMultipleSatPerScriptBaselines:
         # One row per feature, all per_script, all for addrA.
         assert len(rows) == len(_MULTIPLE_SAT_PER_SCRIPT_FEATURES)
         assert {r[3] for r in rows} == set(_MULTIPLE_SAT_PER_SCRIPT_FEATURES)
-        assert all(r[1] == "per_script" for r in rows)   # scope_type
-        assert all(r[2] == "addrA" for r in rows)        # scope_id
-        assert all(r[6] == 300 for r in rows)            # sample_count
+        assert all(r[1] == "per_script" for r in rows)  # scope_type
+        assert all(r[2] == "addrA" for r in rows)  # scope_id
+        assert all(r[6] == 300 for r in rows)  # sample_count
         # Never global: the whole point.
         assert not any(r[1] == "global" for r in rows)
         mock_ch.insert_baselines.assert_called_once()
@@ -103,6 +105,7 @@ class TestMultipleSatPerScriptBaselines:
     @patch("app.analysis.baselines.clickhouse")
     def test_no_qualifying_scripts_writes_nothing(self, mock_ch):
         from app.analysis.baselines import compute_multiple_sat_per_script_baselines
+
         mock_ch.query_multiple_sat_extraction_percentiles.return_value = []
         rows = compute_multiple_sat_per_script_baselines("preprod")
         assert rows == []
@@ -118,6 +121,7 @@ class TestExtractionPercentilesReshape:
             query_multiple_sat_extraction_percentiles,
             _MULTIPLE_SAT_EVIDENCE_KEYS,
         )
+
         client = MagicMock()
         mock_get_client.return_value = client
         # script, cnt, then (p50, p99) per feature in _MULTIPLE_SAT_EVIDENCE_KEYS order.
@@ -131,7 +135,9 @@ class TestExtractionPercentilesReshape:
         assert rec["sample_count"] == 300
         # Only the value axis is calibrated per-script.
         assert {f for f, _k in _MULTIPLE_SAT_EVIDENCE_KEYS} == {
-            "net_value_out_of_script", "n_assets_out_of_script"}
+            "net_value_out_of_script",
+            "n_assets_out_of_script",
+        }
         # First feature in the allowlist gets the first (p50, p99) pair.
         first_feature = _MULTIPLE_SAT_EVIDENCE_KEYS[0][0]
         assert rec[first_feature] == (5_000_000.0, 50_000_000.0)
@@ -146,29 +152,38 @@ class TestDriftGuard:
 
     def _row(self, p99, feature="value_cbor_bytes", p50=5.0):
         from datetime import datetime, timezone
+
         now = datetime.now(timezone.utc)
         return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
     @patch("app.analysis.baselines.clickhouse")
     def test_drift_holds_previous_baseline(self, mock_ch):
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 10.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 10.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         kept = _filter_drifted([self._row(p99=100.0)])  # 9x jump
         assert kept == []
         mock_ch.insert_baseline_drift_event.assert_called_once()
         args = mock_ch.insert_baseline_drift_event.call_args.args
-        assert args[4] == 10.0   # old_p99
+        assert args[4] == 10.0  # old_p99
         assert args[5] == 100.0  # new_p99
 
     @patch("app.analysis.baselines.clickhouse")
     def test_small_change_inserts_normally(self, mock_ch):
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 10.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 10.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         rows = [self._row(p99=12.0)]  # 20% < 50% threshold
         assert _filter_drifted(rows) == rows
@@ -177,6 +192,7 @@ class TestDriftGuard:
     @patch("app.analysis.baselines.clickhouse")
     def test_first_baseline_always_passes(self, mock_ch):
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = None
         rows = [self._row(p99=1_000_000.0)]
         assert _filter_drifted(rows) == rows
@@ -191,10 +207,14 @@ class TestDriftGuard:
         # pure-normalise feature: inverted-consumer features hold both
         # directions (see TestDriftGuardInvertedConsumers).
         from app.analysis.baselines import _filter_drifted
+
         assert "datum_bytes" not in INVERTED_CONSUMER_FEATURES
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 100.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 100.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         rows = [self._row(p99=10.0, feature="datum_bytes")]  # 90% narrowing
         assert _filter_drifted(rows) == rows
@@ -207,9 +227,13 @@ class TestDriftGuard:
         # A p99=0 prior is rejected as unusable at resolution time, so it
         # protects nothing; its first positive recompute must apply.
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 0.0, "p99": 0.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 0.0,
+            "p99": 0.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         rows = [self._row(p99=5.0, p50=0.0)]
         assert _filter_drifted(rows) == rows
@@ -219,9 +243,13 @@ class TestDriftGuard:
         # Median poisoning: normalise() subtracts p50 first, so raising it
         # de-sensitises the axis exactly like widening p99.
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 10.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 10.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         kept = _filter_drifted([self._row(p99=11.0, p50=20.0)])
         assert kept == []
@@ -234,9 +262,13 @@ class TestDriftGuard:
         # Pure-normalise feature: a falling median is strictly more
         # sensitive, so the recompute applies.
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 10.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 10.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         rows = [self._row(p99=10.0, p50=1.0, feature="datum_bytes")]
         assert _filter_drifted(rows) == rows
@@ -246,9 +278,13 @@ class TestDriftGuard:
         # Unlike p99=0 (unusable baseline), a p50=0 prior is fully usable
         # and maximally sensitive; holding the rise keeps it that way.
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 0.0, "p99": 10.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 0.0,
+            "p99": 10.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         kept = _filter_drifted([self._row(p99=10.0, p50=2.0)])
         assert kept == []
@@ -264,16 +300,21 @@ class TestDriftGuardInvertedConsumers:
 
     def _row(self, feature, p50, p99):
         from datetime import datetime, timezone
+
         now = datetime.now(timezone.utc)
         return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
     @patch("app.analysis.baselines.clickhouse")
     def test_downward_p99_drift_on_inverted_feature_held(self, mock_ch):
         from app.analysis.baselines import _filter_drifted
+
         assert "value_cbor_bytes" in INVERTED_CONSUMER_FEATURES
         mock_ch.get_baseline.return_value = {
-            "p50": 100.0, "p99": 1500.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 100.0,
+            "p99": 1500.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         # p99 collapses 1500 -> 400 (ratio 0.73 > threshold), p50 stable.
         kept = _filter_drifted([self._row("value_cbor_bytes", p50=100.0, p99=400.0)])
@@ -285,15 +326,17 @@ class TestDriftGuardInvertedConsumers:
     @patch("app.analysis.baselines.clickhouse")
     def test_downward_p50_drift_on_inverted_feature_held(self, mock_ch):
         from app.analysis.baselines import _filter_drifted
+
         assert "ada_amount" in INVERTED_CONSUMER_FEATURES
         mock_ch.get_baseline.return_value = {
-            "p50": 1_200_000.0, "p99": 2_000_000.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 1_200_000.0,
+            "p99": 2_000_000.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         # p50 falls 1.2M -> 0.5M (ratio 0.58 > threshold), p99 stable.
-        kept = _filter_drifted(
-            [self._row("ada_amount", p50=500_000.0, p99=1_900_000.0)]
-        )
+        kept = _filter_drifted([self._row("ada_amount", p50=500_000.0, p99=1_900_000.0)])
         assert kept == []
         kwargs = mock_ch.insert_baseline_drift_event.call_args.kwargs
         assert kwargs["axis"] == "p50"
@@ -304,10 +347,14 @@ class TestDriftGuardInvertedConsumers:
         # The recall-safe direction still applies for plain-normalise
         # features; only inverted-consumer features get the symmetric hold.
         from app.analysis.baselines import _filter_drifted
+
         assert "datum_bytes" not in INVERTED_CONSUMER_FEATURES
         mock_ch.get_baseline.return_value = {
-            "p50": 1_200_000.0, "p99": 2_000_000.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 1_200_000.0,
+            "p99": 2_000_000.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         rows = [self._row("datum_bytes", p50=500_000.0, p99=600_000.0)]
         assert _filter_drifted(rows) == rows
@@ -330,8 +377,11 @@ class TestDriftGuardInvertedConsumers:
         anchors = sc.get("token_dust")["bootstrap_anchors"]
         honest_p50, honest_p99 = sc.anchor(anchors, "ada_amount")
         honest = {
-            "p50": honest_p50, "p99": honest_p99, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": honest_p50,
+            "p99": honest_p99,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         # Attacker's downward recompute: percentiles dragged far below the
         # honest window by a low-ADA output flood.
@@ -339,9 +389,7 @@ class TestDriftGuardInvertedConsumers:
 
         # 1. The poisoned recompute is HELD (prior row stays active).
         mock_ch.get_baseline.return_value = dict(honest)
-        kept = _filter_drifted(
-            [self._row("ada_amount", p50=poisoned_p50, p99=poisoned_p99)]
-        )
+        kept = _filter_drifted([self._row("ada_amount", p50=poisoned_p50, p99=poisoned_p99)])
         assert kept == []
 
         # 2. With the surviving baseline, the dust bundle still fires.
@@ -355,10 +403,13 @@ class TestDriftGuardInvertedConsumers:
         for i in range(20):
             dust_value[f"policy{i:03d}" + "0" * 50] = {"tok": 1}
         features = {
-            "tx_hash": "dust_poison", "network": "preprod",
-            "raw_data": {"outputs": [
-                {"address": "addr_test1wz5fxvalex", "value": dust_value},
-            ]},
+            "tx_hash": "dust_poison",
+            "network": "preprod",
+            "raw_data": {
+                "outputs": [
+                    {"address": "addr_test1wz5fxvalex", "value": dust_value},
+                ]
+            },
         }
         result = TokenDustScorer().score(features)
         assert result.sub_scores["lovelace_inverted"] == 1.0
@@ -366,9 +417,14 @@ class TestDriftGuardInvertedConsumers:
 
         # 3. Counterfactual: had the poisoned window applied, the inverted
         # axis would have been zeroed; this is the recall the hold preserves.
-        assert normalise_inverted(
-            honest_p50, p50=poisoned_p50, p99=poisoned_p99,
-        ) == 0.0
+        assert (
+            normalise_inverted(
+                honest_p50,
+                p50=poisoned_p50,
+                p99=poisoned_p99,
+            )
+            == 0.0
+        )
 
 
 class TestHeldDriftWarning:
@@ -379,6 +435,7 @@ class TestHeldDriftWarning:
 
     def _row(self, feature, p50, p99):
         from datetime import datetime, timezone
+
         now = datetime.now(timezone.utc)
         return ("preprod", "per_script", "addrA", feature, p50, p99, 300, now, 90)
 
@@ -386,9 +443,13 @@ class TestHeldDriftWarning:
     def test_warning_names_causal_axis_only(self, mock_ch, caplog):
         import logging
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 100.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 100.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         # p99 narrows 100 -> 10 (drifted, applied-safe for a pure-normalise
         # feature); p50 rises 5 -> 20 (the hold cause).
@@ -404,9 +465,13 @@ class TestHeldDriftWarning:
     def test_warning_names_both_axes_when_both_cause_hold(self, mock_ch, caplog):
         import logging
         from app.analysis.baselines import _filter_drifted
+
         mock_ch.get_baseline.return_value = {
-            "p50": 5.0, "p99": 10.0, "sample_count": 300,
-            "computed_at": None, "window_days": 90,
+            "p50": 5.0,
+            "p99": 10.0,
+            "sample_count": 300,
+            "computed_at": None,
+            "window_days": 90,
         }
         with caplog.at_level(logging.WARNING, logger="app.analysis.baselines"):
             kept = _filter_drifted([self._row("datum_bytes", p50=20.0, p99=100.0)])
@@ -424,6 +489,7 @@ class TestChainTimeWindows:
     @patch("app.db.clickhouse._get_client")
     def test_percentile_query_uses_chain_time_and_exact(self, mock_get_client):
         from app.analysis.baselines import _query_percentiles
+
         client = MagicMock()
         mock_get_client.return_value = client
         client.execute.return_value = [(10.0, 99.0, 500)]
@@ -440,6 +506,7 @@ class TestChainTimeWindows:
         # The per-script window is a config knob (baselines.windows), not a
         # bare SQL literal; tuning it in detection.yaml must reach the query.
         from app.analysis import baselines
+
         client = MagicMock()
         mock_get_client.return_value = client
         client.execute.return_value = []
@@ -454,6 +521,7 @@ class TestChainTimeWindows:
     @patch("app.analysis.baselines.clickhouse")
     def test_global_window_days_from_config(self, mock_ch, mock_qp):
         from app.analysis import baselines
+
         mock_ch.get_baseline.return_value = None
         mock_qp.return_value = (1.0, 9.0, 500)
         rows = baselines.compute_global_baselines("preprod")

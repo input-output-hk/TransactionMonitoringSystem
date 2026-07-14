@@ -42,9 +42,9 @@ from app.models.transaction import AttackClass, RiskBand  # noqa: E402
 from app.notifications import dispatcher, triggers  # noqa: E402
 from app.notifications.payloads import build_immediate_alert  # noqa: E402
 
-_DEFAULT_BAND = RiskBand.CRITICAL.value          # Critical/High are the default-routed bands
+_DEFAULT_BAND = RiskBand.CRITICAL.value  # Critical/High are the default-routed bands
 _DEFAULT_CLASS = AttackClass.MULTIPLE_SAT.value  # a representative attack class
-_DEFAULT_SCORE = 91.5                            # comfortably inside the Critical band for the demo
+_DEFAULT_SCORE = 91.5  # comfortably inside the Critical band for the demo
 
 # In --include-all-channels mode the dedup claim signals completion; it is written
 # only AFTER a channel delivered. Poll for it up to the dispatch ceiling + margin.
@@ -52,7 +52,9 @@ _CLAIM_POLL_INTERVAL_SECONDS = 0.25
 _CLAIM_WRITE_MARGIN_SECONDS = 2.0
 
 
-def _synthetic_result(tx_hash: str, network: str, band: str, attack_class: str, score: float) -> dict:
+def _synthetic_result(
+    tx_hash: str, network: str, band: str, attack_class: str, score: float
+) -> dict:
     """A score dict shaped like engine._score_transaction's output for the fields
     the notification path reads (build_immediate_alert + on_new_scores)."""
     return {
@@ -75,7 +77,9 @@ async def _run(network, band, attack_class, score, tx_hash, include_all_channels
     notifications.build_channels()
 
     dispatches = triggers.resolve_dispatch(band, attack_class)
-    print(f"resolve_dispatch(band={band!r}, class={attack_class!r}) -> {dispatches or '[] (nothing routed)'}")
+    print(
+        f"resolve_dispatch(band={band!r}, class={attack_class!r}) -> {dispatches or '[] (nothing routed)'}"
+    )
     if not any(d.channel == "webhook" for d in dispatches):
         print(
             "\nWebhook is NOT in the resolved dispatch. Fix one of:\n"
@@ -102,9 +106,14 @@ async def _run(network, band, attack_class, score, tx_hash, include_all_channels
     if include_all_channels:
         # Full fidelity: the exact hook the engine calls (dedup + every routed
         # channel). WILL email if the band routes to email.
-        print(f"[all-channels] firing on_new_scores for tx {tx_hash} on {network} (this WILL email routed recipients) ...")
+        print(
+            f"[all-channels] firing on_new_scores for tx {tx_hash} on {network} (this WILL email routed recipients) ..."
+        )
         await asyncio.get_running_loop().run_in_executor(
-            None, notifications.on_new_scores, [result], network,
+            None,
+            notifications.on_new_scores,
+            [result],
+            network,
         )
         deadline = settings.NOTIFY_SEND_TIMEOUT_SECONDS + _CLAIM_WRITE_MARGIN_SECONDS
         waited = 0.0
@@ -135,22 +144,36 @@ async def _run(network, band, attack_class, score, tx_hash, include_all_channels
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fire one alert through the real engine emit pipeline.")
+    parser = argparse.ArgumentParser(
+        description="Fire one alert through the real engine emit pipeline."
+    )
     parser.add_argument("--network", default=settings.CARDANO_NETWORK)
     parser.add_argument("--band", default=_DEFAULT_BAND, choices=[b.value for b in RiskBand])
-    parser.add_argument("--attack-class", default=_DEFAULT_CLASS, choices=[c.value for c in AttackClass])
+    parser.add_argument(
+        "--attack-class", default=_DEFAULT_CLASS, choices=[c.value for c in AttackClass]
+    )
     parser.add_argument("--score", type=float, default=_DEFAULT_SCORE)
     parser.add_argument("--tx", default=None, help="tx_hash (default: unique engine-test-<uuid>)")
     parser.add_argument(
-        "--include-all-channels", action="store_true",
+        "--include-all-channels",
+        action="store_true",
         help="use the full on_new_scores path and deliver to EVERY routed channel (WILL email)",
     )
     args = parser.parse_args()
 
     tx_hash = args.tx or f"engine-test-{uuid.uuid4().hex}"
-    sys.exit(asyncio.run(
-        _run(args.network, args.band, args.attack_class, args.score, tx_hash, args.include_all_channels)
-    ))
+    sys.exit(
+        asyncio.run(
+            _run(
+                args.network,
+                args.band,
+                args.attack_class,
+                args.score,
+                tx_hash,
+                args.include_all_channels,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

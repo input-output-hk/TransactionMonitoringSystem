@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 class ExponentialBackoff:
     """Exponential backoff with jitter for reconnection"""
 
-    def __init__(self, base_delay: float = 1.0, max_delay: float = 60.0, jitter_factor: float = 0.3):
+    def __init__(
+        self, base_delay: float = 1.0, max_delay: float = 60.0, jitter_factor: float = 0.3
+    ):
         self.base_delay = base_delay
         self.max_delay = max_delay
         self.jitter_factor = jitter_factor
@@ -24,7 +26,7 @@ class ExponentialBackoff:
 
     async def wait(self):
         """Wait with exponential backoff + jitter, then increment attempt"""
-        delay = min(self.base_delay * (2 ** self.attempt), self.max_delay)
+        delay = min(self.base_delay * (2**self.attempt), self.max_delay)
         jitter = random.uniform(0, delay * self.jitter_factor)
         total = delay + jitter
         logger.info(f"Backoff: waiting {total:.1f}s (attempt {self.attempt + 1})")
@@ -45,8 +47,9 @@ class CircuitState(str, Enum):
 class CircuitBreaker:
     """Circuit breaker to prevent resource exhaustion during extended outages"""
 
-    def __init__(self, failure_threshold: int = 5, failure_window: float = 300.0,
-                 cooldown: float = 120.0):
+    def __init__(
+        self, failure_threshold: int = 5, failure_window: float = 300.0, cooldown: float = 120.0
+    ):
         self.failure_threshold = failure_threshold
         self.failure_window = failure_window  # seconds
         self.cooldown = cooldown  # seconds
@@ -80,7 +83,9 @@ class CircuitBreaker:
             self.state = CircuitState.OPEN
             self._opened_at = now
         elif len(self._failures) >= self.failure_threshold:
-            logger.warning(f"Circuit breaker: CLOSED → OPEN ({len(self._failures)} failures in window)")
+            logger.warning(
+                f"Circuit breaker: CLOSED → OPEN ({len(self._failures)} failures in window)"
+            )
             self.state = CircuitState.OPEN
             self._opened_at = now
 
@@ -117,7 +122,9 @@ def _reset_if_stable(
     if ran >= stable_reset_seconds:
         logger.info(
             "Ogmios [%s]: session ran %.0fs before error; treating as a "
-            "transient blip, resetting breaker/backoff", name, ran,
+            "transient blip, resetting breaker/backoff",
+            name,
+            ran,
         )
         breaker.record_success()
         backoff.reset()
@@ -170,7 +177,11 @@ async def run_with_reconnect(
             logger.warning("Ogmios [%s]: connection lost: %s", name, e)
             on_connected(False)
             self_healed = _reset_if_stable(
-                name, breaker, backoff, session_start, stable_reset_seconds,
+                name,
+                breaker,
+                backoff,
+                session_start,
+                stable_reset_seconds,
             )
             if not self_healed:
                 breaker.record_failure()
@@ -179,7 +190,11 @@ async def run_with_reconnect(
             logger.error("Ogmios [%s]: unexpected error: %s", name, e)
             on_connected(False)
             self_healed = _reset_if_stable(
-                name, breaker, backoff, session_start, stable_reset_seconds,
+                name,
+                breaker,
+                backoff,
+                session_start,
+                stable_reset_seconds,
             )
             if not self_healed:
                 breaker.record_failure()

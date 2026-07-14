@@ -58,7 +58,8 @@ class TestSpendRedeemerPayloads:
             "mint:0": {"redeemer": "d8799fffff", "executionUnits": {"memory": 1, "cpu": 1}},
         }
         assert _spend_redeemer_payloads({"redeemers": redeemers}) == [
-            "d8799f00ff", "d8799f01ff",
+            "d8799f00ff",
+            "d8799f01ff",
         ]
 
     def test_v5_uniform_payloads_collapse_to_one(self):
@@ -245,14 +246,24 @@ class TestScore:
         # Buyer gets both NFTs; seller gets one underpayment. No NFT returns to script.
         outputs = [
             {"address": "addr_test1seller", "value": {"ada": {"lovelace": 50_000_000}}},
-            {"address": WALLET, "value": {"ada": {"lovelace": 9_949_536_255},
-                                          policy_a: {nft_a: 1}, policy_b: {nft_b: 1}}},
+            {
+                "address": WALLET,
+                "value": {
+                    "ada": {"lovelace": 9_949_536_255},
+                    policy_a: {nft_a: 1},
+                    policy_b: {nft_b: 1},
+                },
+            },
         ]
         redeemers = [
-            {"validator": {"index": 0, "purpose": "spend"},
-             "executionUnits": {"memory": 76_719, "cpu": 23_209_173}},
-            {"validator": {"index": 1, "purpose": "spend"},
-             "executionUnits": {"memory": 76_719, "cpu": 23_209_173}},
+            {
+                "validator": {"index": 0, "purpose": "spend"},
+                "executionUnits": {"memory": 76_719, "cpu": 23_209_173},
+            },
+            {
+                "validator": {"index": 1, "purpose": "spend"},
+                "executionUnits": {"memory": 76_719, "cpu": 23_209_173},
+            },
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["n_assets_out_of_script"] == 2.0
@@ -277,8 +288,10 @@ class TestScore:
         ]
         outputs = [
             {"address": "addr_test1seller", "value": {"ada": {"lovelace": 50_000_000}}},
-            {"address": WALLET, "value": {"ada": {"lovelace": 9_000_000_000},
-                                          policy: {nft_a: 1, nft_b: 1}}},
+            {
+                "address": WALLET,
+                "value": {"ada": {"lovelace": 9_000_000_000}, policy: {nft_a: 1, nft_b: 1}},
+            },
         ]
         result = scorer.score(_features(inputs, outputs))
         # Two distinct (policy, name) pairs leaving the script.
@@ -288,13 +301,9 @@ class TestScore:
 
     def test_high_n_inputs_same_script_scores_high(self, scorer):
         """Many inputs from the same script should push s_inputs toward 1.0."""
-        inputs = [
-            {"address": SCRIPT, "value": {"lovelace": 5_000_000}}
-            for _ in range(10)
-        ]
+        inputs = [{"address": SCRIPT, "value": {"lovelace": 5_000_000}} for _ in range(10)]
         redeemers = {
-            f"spend:{i}": {"executionUnits": {"memory": 50_000, "cpu": 100_000}}
-            for i in range(10)
+            f"spend:{i}": {"executionUnits": {"memory": 50_000, "cpu": 100_000}} for i in range(10)
         }
         result = scorer.score(_features(inputs, redeemers=redeemers))
         # n_inputs=10 with bootstrap anchors (2, 10) → s_inputs normalised to 1.0
@@ -303,10 +312,7 @@ class TestScore:
 
     def test_low_exunits_per_input_scores_high(self, scorer):
         """Many script inputs with very low total CPU → s_exunits_inv near 1.0."""
-        inputs = [
-            {"address": SCRIPT, "value": {"lovelace": 5_000_000}}
-            for _ in range(5)
-        ]
+        inputs = [{"address": SCRIPT, "value": {"lovelace": 5_000_000}} for _ in range(5)]
         # Total CPU 1000 across 5 inputs = 200 CPU/input, well below bootstrap p50=100_000
         redeemers = {
             "spend:0": {"executionUnits": {"memory": 100, "cpu": 1000}},
@@ -327,10 +333,7 @@ class TestScore:
     def test_allowlisted_script_reduces_extraction_weight(self, scorer):
         """Allowlisted scripts neutralise s_extraction; weight redistributes."""
         batch_addr = "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq_full"
-        inputs = [
-            {"address": batch_addr, "value": {"lovelace": 100_000_000}}
-            for _ in range(3)
-        ]
+        inputs = [{"address": batch_addr, "value": {"lovelace": 100_000_000}} for _ in range(3)]
         outputs = [{"address": WALLET, "value": {"lovelace": 290_000_000}}]
         redeemers = {"spend:0": {"executionUnits": {"memory": 50000, "cpu": 100000}}}
         result = scorer.score(_features(inputs, outputs, redeemers, network="mainnet"))
@@ -341,10 +344,7 @@ class TestScore:
     def test_allowlist_is_network_scoped(self, scorer):
         """A mainnet allowlist entry must not suppress an identical tx on preprod."""
         batch_addr = "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq_full"
-        inputs = [
-            {"address": batch_addr, "value": {"lovelace": 100_000_000}}
-            for _ in range(3)
-        ]
+        inputs = [{"address": batch_addr, "value": {"lovelace": 100_000_000}} for _ in range(3)]
         outputs = [{"address": WALLET, "value": {"lovelace": 290_000_000}}]
         redeemers = {"spend:0": {"executionUnits": {"memory": 50000, "cpu": 100000}}}
         result = scorer.score(_features(inputs, outputs, redeemers, network="preprod"))
@@ -355,13 +355,9 @@ class TestScore:
         allow_addr = "addr1w9zsmyfc5tg49ng9gqaetm8qheyheemxakq47x7qfwnq5wq_full"
         non_allow = "addr_test1wSOME_OTHER_SCRIPT_addr_12345"
         inputs_allow = [
-            {"address": allow_addr, "value": {"lovelace": 500_000_000}}
-            for _ in range(3)
+            {"address": allow_addr, "value": {"lovelace": 500_000_000}} for _ in range(3)
         ]
-        inputs_non = [
-            {"address": non_allow, "value": {"lovelace": 500_000_000}}
-            for _ in range(3)
-        ]
+        inputs_non = [{"address": non_allow, "value": {"lovelace": 500_000_000}} for _ in range(3)]
         outputs_allow = [{"address": WALLET, "value": {"lovelace": 1_490_000_000}}]
         outputs_non = [{"address": WALLET, "value": {"lovelace": 1_490_000_000}}]
         redeemers = {"spend:0": {"executionUnits": {"memory": 50000, "cpu": 100000}}}
@@ -381,14 +377,13 @@ class TestLazyValidatorBandFloor:
         # 4 same-script inputs, minimal CPU per redeemer (< p50=100k).
         # Without the floor this would score ~32 (Moderate); with the floor
         # it must reach at least the High band threshold (60).
-        inputs = [
-            {"address": SCRIPT, "value": {"lovelace": 2_700_000}}
-            for _ in range(4)
-        ]
+        inputs = [{"address": SCRIPT, "value": {"lovelace": 2_700_000}} for _ in range(4)]
         outputs = [{"address": WALLET, "value": {"lovelace": 10_000_000}}]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(4)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -409,14 +404,20 @@ class TestLazyValidatorBandFloor:
         ]
         outputs = [
             {"address": "addr_test1seller", "value": {"ada": {"lovelace": 50_000_000}}},
-            {"address": WALLET, "value": {"ada": {"lovelace": 9_000_000_000},
-                                          policy: {nft_a: 1, nft_b: 1}}},
+            {
+                "address": WALLET,
+                "value": {"ada": {"lovelace": 9_000_000_000}, policy: {nft_a: 1, nft_b: 1}},
+            },
         ]
         redeemers = [
-            {"validator": {"index": 0, "purpose": "spend"},
-             "executionUnits": {"memory": 76_719, "cpu": 23_209_173}},
-            {"validator": {"index": 1, "purpose": "spend"},
-             "executionUnits": {"memory": 76_719, "cpu": 23_209_173}},
+            {
+                "validator": {"index": 0, "purpose": "spend"},
+                "executionUnits": {"memory": 76_719, "cpu": 23_209_173},
+            },
+            {
+                "validator": {"index": 1, "purpose": "spend"},
+                "executionUnits": {"memory": 76_719, "cpu": 23_209_173},
+            },
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.sub_scores["s_exunits_inv"] == 0.0
@@ -428,17 +429,17 @@ class TestLazyValidatorBandFloor:
         # DEX settlement script that aggregates orders); the floor must not
         # punish them just because s_exunits_inv saturates.
         from app.analysis.scorers.multiple_sat import _ALLOWLIST
+
         mainnet_prefixes = _ALLOWLIST.get("mainnet", ())
         assert mainnet_prefixes, "test requires at least one mainnet allowlist entry"
         allowlisted_addr = mainnet_prefixes[0]
-        inputs = [
-            {"address": allowlisted_addr, "value": {"lovelace": 5_000_000}}
-            for _ in range(4)
-        ]
+        inputs = [{"address": allowlisted_addr, "value": {"lovelace": 5_000_000}} for _ in range(4)]
         outputs = [{"address": WALLET, "value": {"lovelace": 20_000_000}}]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(4)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers, network="mainnet"))
@@ -509,10 +510,11 @@ class TestWeights:
         import yaml
 
         here = pathlib.Path(__file__).resolve()
-        cfg_path = next(
-            p for p in here.parents
-            if (p / "config" / "detection.yaml").exists()
-        ) / "config" / "detection.yaml"
+        cfg_path = (
+            next(p for p in here.parents if (p / "config" / "detection.yaml").exists())
+            / "config"
+            / "detection.yaml"
+        )
         with open(cfg_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         w = data["scorers"]["multiple_sat"]["weights"]
@@ -539,7 +541,8 @@ class TestWeights:
         assert (bonus_inputs + bonus_recurrence) == pytest.approx(_W_EXTRACTION, abs=1e-9)
         # And their ratio must match the original 0.16 / 0.14.
         assert (bonus_inputs / bonus_recurrence) == pytest.approx(
-            _W_INPUTS / _W_RECURRENCE, abs=1e-9,
+            _W_INPUTS / _W_RECURRENCE,
+            abs=1e-9,
         )
 
 
@@ -555,9 +558,11 @@ _SWEEP_SCRIPT = (
 
 def _uniform_spend_redeemers(n: int, payload: str = "d87980"):
     return [
-        {"validator": {"index": i, "purpose": "spend"},
-         "redeemer": payload,
-         "executionUnits": {"memory": 600, "cpu": 100}}
+        {
+            "validator": {"index": i, "purpose": "spend"},
+            "redeemer": payload,
+            "executionUnits": {"memory": 600, "cpu": 100},
+        }
         for i in range(n)
     ]
 
@@ -577,10 +582,7 @@ class TestUniformSweepGuard:
         # double satisfaction; it is now suppressed entirely (no finding, -1),
         # not merely band-capped.
         n = 12  # > min_inputs=10
-        inputs = [
-            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
-            for _ in range(n)
-        ]
+        inputs = [{"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}} for _ in range(n)]
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -593,10 +595,7 @@ class TestUniformSweepGuard:
         # floor test; the sweep guard must not engage and the floor
         # behaviour must be preserved.
         n = 4
-        inputs = [
-            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_700_000}}
-            for _ in range(n)
-        ]
+        inputs = [{"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_700_000}} for _ in range(n)]
         outputs = [{"address": WALLET, "value": {"lovelace": 10_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -605,16 +604,15 @@ class TestUniformSweepGuard:
 
     def test_distinct_redeemer_payloads_do_not_engage_guard(self, scorer):
         n = 12
-        inputs = [
-            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
-            for _ in range(n)
-        ]
+        inputs = [{"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}} for _ in range(n)]
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         # Two distinct payloads → not a uniform sweep.
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": "d87980" if i % 2 == 0 else "d87a80",
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": "d87980" if i % 2 == 0 else "d87a80",
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(n)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -626,10 +624,7 @@ class TestUniformSweepGuard:
         # not a sweep (the script still has state); fall back to normal
         # scoring including the lazy-validator floor.
         n = 12
-        inputs = [
-            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
-            for _ in range(n)
-        ]
+        inputs = [{"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}} for _ in range(n)]
         outputs = [
             {"address": _SWEEP_SCRIPT, "value": {"lovelace": 5_000_000}},
             {"address": WALLET, "value": {"lovelace": 20_000_000}},
@@ -662,8 +657,10 @@ class TestLazyValidatorExtractionGate:
         ]
         outputs = [{"address": SCRIPT, "value": {"lovelace": 9_500_000}}]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(2)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -676,14 +673,13 @@ class TestLazyValidatorExtractionGate:
         # validator was tricked into approving a small extraction with
         # near-zero CPU. Even a tiny positive s_extraction must keep the
         # floor active so CTF-05-shaped exploits land in High.
-        inputs = [
-            {"address": SCRIPT, "value": {"lovelace": 2_700_000}}
-            for _ in range(4)
-        ]
+        inputs = [{"address": SCRIPT, "value": {"lovelace": 2_700_000}} for _ in range(4)]
         outputs = [{"address": WALLET, "value": {"lovelace": 10_000_000}}]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(4)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -711,15 +707,14 @@ class TestUniformSweepGuardAndAllowlistInteraction:
         # Inject the sweep script into the preprod allowlist for the
         # duration of this test so the reweight path activates.
         from app.analysis.scorers import multiple_sat as ms_mod
+
         monkeypatch.setattr(
-            ms_mod, "_ALLOWLIST",
+            ms_mod,
+            "_ALLOWLIST",
             {**ms_mod._ALLOWLIST, "preprod": (_SWEEP_SCRIPT,)},
         )
         n = 12  # > min_inputs=10
-        inputs = [
-            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
-            for _ in range(n)
-        ]
+        inputs = [{"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}} for _ in range(n)]
         outputs = [{"address": WALLET, "value": {"lovelace": 25_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -747,11 +742,17 @@ def _two_asset_extraction_features():
         {"address": _EXTRACT_SCRIPT, "value": {"lovelace": 5_000_000, "pol1": {"nft1": 1}}},
         {"address": _EXTRACT_SCRIPT, "value": {"lovelace": 5_000_000, "pol2": {"nft2": 1}}},
     ]
-    outputs = [{"address": WALLET, "value": {
-        "lovelace": 9_500_000, "pol1": {"nft1": 1}, "pol2": {"nft2": 1}}}]
+    outputs = [
+        {
+            "address": WALLET,
+            "value": {"lovelace": 9_500_000, "pol1": {"nft1": 1}, "pol2": {"nft2": 1}},
+        }
+    ]
     redeemers = [
-        {"validator": {"index": i, "purpose": "spend"},
-         "executionUnits": {"memory": 5_000_000, "cpu": 10_000_000}}
+        {
+            "validator": {"index": i, "purpose": "spend"},
+            "executionUnits": {"memory": 5_000_000, "cpu": 10_000_000},
+        }
         for i in range(2)
     ]
     return _features(inputs, outputs, redeemers)
@@ -787,6 +788,7 @@ class TestPerScriptExtractionBaseline:
 
     def test_ctf01_rare_script_stays_on_bootstrap(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+
         # No baselines at all -> bootstrap (n_assets p99=2): a 2-asset
         # extraction saturates -> Moderate. This is the CTF-01 recall anchor.
         _plant_baselines(monkeypatch, {})
@@ -797,11 +799,13 @@ class TestPerScriptExtractionBaseline:
 
     def test_global_baseline_ignored_for_extraction(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+
         # A usable GLOBAL n_assets baseline (p99=5) exists that WOULD
         # de-saturate a 2-asset extraction to Low if consulted. The per_script
         # restriction must skip it, so the score stays Moderate on bootstrap.
-        rows = {("global", "n_assets_out_of_script"):
-                {"p50": 1.0, "p99": 5.0, "sample_count": 5000}}
+        rows = {
+            ("global", "n_assets_out_of_script"): {"p50": 1.0, "p99": 5.0, "sample_count": 5000}
+        }
         calls = []
         _plant_baselines(monkeypatch, rows, calls)
         result = scorer.score(_two_asset_extraction_features())
@@ -812,14 +816,17 @@ class TestPerScriptExtractionBaseline:
 
     def test_per_script_baseline_desaturates_high_volume(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+
         # A high-volume contract's own baseline: 2 assets / 10 ADA is its norm,
         # so its routine spend de-saturates below Moderate. A genuine spike
         # above its own p99 would still fire.
         rows = {
-            ("per_script", "n_assets_out_of_script"):
-                {"p50": 2.0, "p99": 4.0, "sample_count": 300},
-            ("per_script", "net_value_out_of_script"):
-                {"p50": 10_000_000.0, "p99": 100_000_000.0, "sample_count": 300},
+            ("per_script", "n_assets_out_of_script"): {"p50": 2.0, "p99": 4.0, "sample_count": 300},
+            ("per_script", "net_value_out_of_script"): {
+                "p50": 10_000_000.0,
+                "p99": 100_000_000.0,
+                "sample_count": 300,
+            },
         }
         _plant_baselines(monkeypatch, rows)
         result = scorer.score(_two_asset_extraction_features())
@@ -828,6 +835,7 @@ class TestPerScriptExtractionBaseline:
         # so a routine 2-asset spend keeps a small residual signal. It must
         # stay far below the reason threshold and below the Moderate band.
         import app.analysis.scorer_config as sc_mod
+
         reason_t = float(sc_mod.get("multiple_sat")["reason_threshold"])
         assert result.sub_scores["s_extraction"] < reason_t / 2
         assert result.score < BAND_MODERATE_THRESHOLD
@@ -849,8 +857,10 @@ def _extraction_features(n_assets, lovelace_in_per_input=2_400_000, cpu=10_000_0
     out_value = {"lovelace": int(lovelace_in_per_input * 2 * 0.95), **assets}
     outputs = [{"address": WALLET, "value": out_value}]
     redeemers = [
-        {"validator": {"index": i, "purpose": "spend"},
-         "executionUnits": {"memory": 5_000_000, "cpu": cpu}}
+        {
+            "validator": {"index": i, "purpose": "spend"},
+            "executionUnits": {"memory": 5_000_000, "cpu": cpu},
+        }
         for i in range(2)
     ]
     return _features(inputs, outputs, redeemers)
@@ -859,7 +869,11 @@ def _extraction_features(n_assets, lovelace_in_per_input=2_400_000, cpu=10_000_0
 # Established-contract baseline: normal extraction is 2-3 assets / ~4.8-9.6 ADA.
 _EST_BASELINES = {
     ("per_script", "n_assets_out_of_script"): {"p50": 2.0, "p99": 3.0, "sample_count": 1893},
-    ("per_script", "net_value_out_of_script"): {"p50": 4_800_000.0, "p99": 9_600_000.0, "sample_count": 1893},
+    ("per_script", "net_value_out_of_script"): {
+        "p50": 4_800_000.0,
+        "p99": 9_600_000.0,
+        "sample_count": 1893,
+    },
 }
 
 
@@ -871,16 +885,18 @@ class TestPerScriptExtractionHeadroom:
 
     def test_per_script_normal_upper_desaturates(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+
         _plant_baselines(monkeypatch, _EST_BASELINES)
         # 3 assets == the contract's p99 (its common upper-normal value). With
         # headroom (anchor 2 + (3-2)*3 = 5) this no longer saturates.
         result = scorer.score(_extraction_features(3))
         assert result.sub_scores["s_extraction_assets"] < 1.0
-        assert result.score < BAND_MODERATE_THRESHOLD   # Informational, not an alert
+        assert result.score < BAND_MODERATE_THRESHOLD  # Informational, not an alert
         assert result.baseline_source == "per_script"
 
     def test_per_script_anomaly_still_fires(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+
         _plant_baselines(monkeypatch, _EST_BASELINES)
         # 8 assets is well above the contract's norm (p99=3) -> saturates -> fires.
         result = scorer.score(_extraction_features(8))
@@ -889,6 +905,7 @@ class TestPerScriptExtractionHeadroom:
 
     def test_bootstrap_unaffected_by_headroom(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
+
         # No per-script baseline -> bootstrap (n_assets p99=2). The 2-asset
         # CTF-01 shape must still saturate; headroom must NOT touch bootstrap.
         _plant_baselines(monkeypatch, {})
@@ -929,20 +946,24 @@ class TestSuppressionEscape:
         # returns exactly 1 lovelace to the script to trigger the
         # state-continuation suppression. Previously: no finding (-1).
         inputs = [
-            {"address": SCRIPT, "value": {"lovelace": 5_000_000, **self._nft(i)}}
-            for i in range(2)
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000, **self._nft(i)}} for i in range(2)
         ]
         outputs = [
-            {"address": WALLET, "value": {
-                "lovelace": 9_500_000,
-                _NFT_POLICY: {("00" * 4): 1, ("01" * 4): 1},
-            }},
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 9_500_000,
+                    _NFT_POLICY: {("00" * 4): 1, ("01" * 4): 1},
+                },
+            },
             {"address": SCRIPT, "value": {"lovelace": 1}},
         ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"payload{i}",
-             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"payload{i}",
+                "executionUnits": {"memory": 600, "cpu": 9_000_000},
+            }
             for i in range(2)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -960,15 +981,17 @@ class TestSuppressionEscape:
         # escape keeps the finding at the top of Moderate.
         n = 12
         inputs = [
-            {"address": _SWEEP_SCRIPT,
-             "value": {"lovelace": 2_600_000, **self._nft(i)}}
+            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000, **self._nft(i)}}
             for i in range(n)
         ]
         outputs = [
-            {"address": WALLET, "value": {
-                "lovelace": 31_000_000,
-                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n)},
-            }},
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 31_000_000,
+                    _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n)},
+                },
+            },
         ]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -982,10 +1005,7 @@ class TestSuppressionEscape:
         # the 5M/500M bootstrap anchor ~= 0.053): the benign suppression
         # must keep winning.
         n = 12
-        inputs = [
-            {"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}}
-            for _ in range(n)
-        ]
+        inputs = [{"address": _SWEEP_SCRIPT, "value": {"lovelace": 2_600_000}} for _ in range(n)]
         outputs = [{"address": WALLET, "value": {"lovelace": 31_000_000}}]
         redeemers = _uniform_spend_redeemers(n)
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -999,20 +1019,24 @@ class TestSuppressionEscape:
         # strict > comparison silenced exactly this single-NFT drain.
         inputs = [
             {"address": SCRIPT, "value": {"lovelace": 5_000_000}},
-            {"address": SCRIPT,
-             "value": {"lovelace": 5_000_000, **self._nft(0)}},
+            {"address": SCRIPT, "value": {"lovelace": 5_000_000, **self._nft(0)}},
         ]
         outputs = [
-            {"address": WALLET, "value": {
-                "lovelace": 9_500_000,
-                _NFT_POLICY: {("00" * 4): 1},
-            }},
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 9_500_000,
+                    _NFT_POLICY: {("00" * 4): 1},
+                },
+            },
             {"address": SCRIPT, "value": {"lovelace": 1}},
         ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"payload{i}",
-             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"payload{i}",
+                "executionUnits": {"memory": 600, "cpu": 9_000_000},
+            }
             for i in range(2)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -1022,36 +1046,43 @@ class TestSuppressionEscape:
         assert BAND_MODERATE_THRESHOLD <= result.score <= BAND_MODERATE_MAX
         assert "extraction_escape_moderate_cap" in result.reasons
 
-    def test_small_nft_drain_under_capped_poisoned_baseline_not_silenced(
-        self, scorer, monkeypatch
-    ):
+    def test_small_nft_drain_under_capped_poisoned_baseline_not_silenced(self, scorer, monkeypatch):
         # ATTACK-MUST-FIRE under poisoning: a per-script n_assets baseline
         # poisoned wide is capped at 5x the bootstrap anchor (p99=10), so a
         # 4-NFT drain floors at normalise(4, 2, 10) = 0.25 >= 0.10 and the
         # escape fires; with the old 0.5 threshold it was silenced.
-        _plant_baselines(monkeypatch, {
-            ("per_script", "n_assets_out_of_script"): {
-                "p50": 2.0, "p99": 1e6, "sample_count": 500,
-                "computed_at": None, "window_days": 90,
+        _plant_baselines(
+            monkeypatch,
+            {
+                ("per_script", "n_assets_out_of_script"): {
+                    "p50": 2.0,
+                    "p99": 1e6,
+                    "sample_count": 500,
+                    "computed_at": None,
+                    "window_days": 90,
+                },
             },
-        })
+        )
         n = 4
         inputs = [
-            {"address": SCRIPT,
-             "value": {"lovelace": 2_700_000, **self._nft(i)}}
-            for i in range(n)
+            {"address": SCRIPT, "value": {"lovelace": 2_700_000, **self._nft(i)}} for i in range(n)
         ]
         outputs = [
-            {"address": WALLET, "value": {
-                "lovelace": 10_000_000,
-                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n)},
-            }},
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 10_000_000,
+                    _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n)},
+                },
+            },
             {"address": SCRIPT, "value": {"lovelace": 1}},
         ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"payload{i}",
-             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"payload{i}",
+                "executionUnits": {"memory": 600, "cpu": 9_000_000},
+            }
             for i in range(n)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -1081,36 +1112,44 @@ class TestSuppressionEscape:
         # The drain sits between the NEW p50 bound and the old one (and
         # under the p99 cap): the silenced-yesterday, must-fire-today case.
         n_drain = math.floor(old_bound)
-        new_bound = anchor_p50 + sc_mod._P50_CAP_SPREAD_FRACTION * (
-            anchor_p99 - anchor_p50
-        )
+        new_bound = anchor_p50 + sc_mod._P50_CAP_SPREAD_FRACTION * (anchor_p99 - anchor_p50)
         assert new_bound < n_drain < cap
         # Regression statement: under the old resolved pair this exact
         # drain normalised to 0 on the asset axis (silenced).
         assert normalise(n_drain, p50=old_bound, p99=cap) == 0.0
 
-        _plant_baselines(monkeypatch, {
-            ("per_script", "n_assets_out_of_script"): {
-                "p50": old_bound, "p99": cap * 1e5, "sample_count": 500,
-                "computed_at": None, "window_days": 90,
+        _plant_baselines(
+            monkeypatch,
+            {
+                ("per_script", "n_assets_out_of_script"): {
+                    "p50": old_bound,
+                    "p99": cap * 1e5,
+                    "sample_count": 500,
+                    "computed_at": None,
+                    "window_days": 90,
+                },
             },
-        })
+        )
         inputs = [
-            {"address": SCRIPT,
-             "value": {"lovelace": 2_700_000, **self._nft(i)}}
+            {"address": SCRIPT, "value": {"lovelace": 2_700_000, **self._nft(i)}}
             for i in range(n_drain)
         ]
         outputs = [
-            {"address": WALLET, "value": {
-                "lovelace": 2_700_000 * n_drain - 300_000,
-                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n_drain)},
-            }},
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 2_700_000 * n_drain - 300_000,
+                    _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n_drain)},
+                },
+            },
             {"address": SCRIPT, "value": {"lovelace": 1}},
         ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"payload{i}",
-             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"payload{i}",
+                "executionUnits": {"memory": 600, "cpu": 9_000_000},
+            }
             for i in range(n_drain)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -1125,15 +1164,25 @@ class TestSuppressionEscape:
         import app.analysis.scorers.multiple_sat as ms_mod
 
         axes = ms_mod._ScriptAxes(
-            lovelace_in=1, lovelace_out=1, net_value=0, n_assets_out=0,
-            exunits_per_input=9e6, s_extraction_lov=0.0,
-            s_extraction_assets=0.0, s_extraction=0.0,
+            lovelace_in=1,
+            lovelace_out=1,
+            net_value=0,
+            n_assets_out=0,
+            exunits_per_input=9e6,
+            s_extraction_lov=0.0,
+            s_extraction_assets=0.0,
+            s_extraction=0.0,
             s_extraction_floor=ms_mod._SUPP_ESCAPE_FLOOR_MIN,
-            s_exunits_inv=0.0, s_inputs=0.0, s_recurrence=0.0,
+            s_exunits_inv=0.0,
+            s_inputs=0.0,
+            s_recurrence=0.0,
             bl_source="bootstrap",
         )
         suppressed, escaped = ms_mod._suppression_outcome(
-            axes, allowlisted=False, uniform_sweep=False, floored=False,
+            axes,
+            allowlisted=False,
+            uniform_sweep=False,
+            floored=False,
         )
         assert (suppressed, escaped) == (False, True)
 
@@ -1146,21 +1195,22 @@ class TestSuppressionEscape:
         from app.analysis.normalise import score_to_band
 
         monkeypatch.setattr(
-            ms_mod, "_suppression_outcome", lambda *a, **k: (False, True),
+            ms_mod,
+            "_suppression_outcome",
+            lambda *a, **k: (False, True),
         )
         # Low-extraction state-continuation shape: tiny weighted score.
-        inputs = [
-            {"address": SCRIPT, "value": {"lovelace": 5_000_000}}
-            for _ in range(2)
-        ]
+        inputs = [{"address": SCRIPT, "value": {"lovelace": 5_000_000}} for _ in range(2)]
         outputs = [
             {"address": WALLET, "value": {"lovelace": 100_000}},
             {"address": SCRIPT, "value": {"lovelace": 9_700_000}},
         ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"payload{i}",
-             "executionUnits": {"memory": 600, "cpu": 9_000_000}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"payload{i}",
+                "executionUnits": {"memory": 600, "cpu": 9_000_000},
+            }
             for i in range(2)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -1178,32 +1228,48 @@ class TestBaselinePoisoningResistance:
         poisoned = {
             # Wide spread (passes the min-spread usability guard), huge p99.
             ("per_script", "net_value_out_of_script"): {
-                "p50": 5_000_000.0, "p99": 1e15, "sample_count": 500,
-                "computed_at": None, "window_days": 90,
+                "p50": 5_000_000.0,
+                "p99": 1e15,
+                "sample_count": 500,
+                "computed_at": None,
+                "window_days": 90,
             },
             ("per_script", "n_assets_out_of_script"): {
-                "p50": 0.0, "p99": 1000.0, "sample_count": 500,
-                "computed_at": None, "window_days": 90,
+                "p50": 0.0,
+                "p99": 1000.0,
+                "sample_count": 500,
+                "computed_at": None,
+                "window_days": 90,
             },
         }
         _plant_baselines(monkeypatch, poisoned)
         n = 4
         nft_policy = "d" * 56
         inputs = [
-            {"address": SCRIPT,
-             "value": {"lovelace": 2_700_000,
-                       nft_policy: {f"{i:02d}" * 4: 1 for i in range(i * 3, i * 3 + 3)}}}
+            {
+                "address": SCRIPT,
+                "value": {
+                    "lovelace": 2_700_000,
+                    nft_policy: {f"{i:02d}" * 4: 1 for i in range(i * 3, i * 3 + 3)},
+                },
+            }
             for i in range(n)
         ]
-        outputs = [{
-            "address": WALLET,
-            "value": {"lovelace": 10_000_000,
-                      nft_policy: {f"{i:02d}" * 4: 1 for i in range(12)}},
-        }]
+        outputs = [
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 10_000_000,
+                    nft_policy: {f"{i:02d}" * 4: 1 for i in range(12)},
+                },
+            }
+        ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"p{i}",
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"p{i}",
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(n)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))
@@ -1221,33 +1287,49 @@ class TestBaselinePoisoningResistance:
         # alive and the lazy-validator floor fires.
         poisoned = {
             ("per_script", "net_value_out_of_script"): {
-                "p50": 1e14, "p99": 1e15, "sample_count": 500,
-                "computed_at": None, "window_days": 90,
+                "p50": 1e14,
+                "p99": 1e15,
+                "sample_count": 500,
+                "computed_at": None,
+                "window_days": 90,
             },
             ("per_script", "n_assets_out_of_script"): {
-                "p50": 500.0, "p99": 1000.0, "sample_count": 500,
-                "computed_at": None, "window_days": 90,
+                "p50": 500.0,
+                "p99": 1000.0,
+                "sample_count": 500,
+                "computed_at": None,
+                "window_days": 90,
             },
         }
         _plant_baselines(monkeypatch, poisoned)
         n = 4
         nft_policy = "d" * 56
         inputs = [
-            {"address": SCRIPT,
-             "value": {"lovelace": 2_700_000,
-                       nft_policy: {f"{i:02d}" * 4: 1 for i in range(i * 3, i * 3 + 3)}}}
+            {
+                "address": SCRIPT,
+                "value": {
+                    "lovelace": 2_700_000,
+                    nft_policy: {f"{i:02d}" * 4: 1 for i in range(i * 3, i * 3 + 3)},
+                },
+            }
             for i in range(n)
         ]
         outputs = [
-            {"address": WALLET,
-             "value": {"lovelace": 10_000_000,
-                       nft_policy: {f"{i:02d}" * 4: 1 for i in range(12)}}},
+            {
+                "address": WALLET,
+                "value": {
+                    "lovelace": 10_000_000,
+                    nft_policy: {f"{i:02d}" * 4: 1 for i in range(12)},
+                },
+            },
             {"address": SCRIPT, "value": {"lovelace": 1}},
         ]
         redeemers = [
-            {"validator": {"index": i, "purpose": "spend"},
-             "redeemer": f"p{i}",
-             "executionUnits": {"memory": 600, "cpu": 100}}
+            {
+                "validator": {"index": i, "purpose": "spend"},
+                "redeemer": f"p{i}",
+                "executionUnits": {"memory": 600, "cpu": 100},
+            }
             for i in range(n)
         ]
         result = scorer.score(_features(inputs, outputs, redeemers))

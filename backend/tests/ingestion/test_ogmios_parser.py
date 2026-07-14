@@ -86,9 +86,7 @@ class TestValidV6Transaction:
         # from TransactionInput.consumed_by_ledger; this pins that the
         # count really is the predicate's cardinality for both outcomes.
         tx = parse_ogmios_transaction(_v6_tx(spends=spends))
-        assert tx.input_count == sum(
-            1 for i in tx.inputs if i.consumed_by_ledger(tx.script_valid)
-        )
+        assert tx.input_count == sum(1 for i in tx.inputs if i.consumed_by_ledger(tx.script_valid))
 
     def test_collateral_return_not_created_when_valid(self):
         # A validated tx never creates the collateralReturn output.
@@ -121,9 +119,9 @@ class TestFailedV6Transaction:
         # Regular inputs are persisted as ATTEMPTED spends (what a failed
         # attack tried to consume is signal), never as consumed flows.
         consumed = [
-            i for i in tx.inputs
-            if not i.is_collateral and not i.is_reference
-            and not i.is_unspent_attempt
+            i
+            for i in tx.inputs
+            if not i.is_collateral and not i.is_reference and not i.is_unspent_attempt
         ]
         assert consumed == []
         attempted = [i for i in tx.inputs if i.is_unspent_attempt]
@@ -202,9 +200,7 @@ class TestV5Shapes:
 
     def test_v5_inline_input_reference(self):
         # v5 encodes the input's source tx as a bare string, not a dict.
-        tx = parse_ogmios_transaction(
-            _v6_tx(inputs=[{"transaction": "cd" * 32, "index": 3}])
-        )
+        tx = parse_ogmios_transaction(_v6_tx(inputs=[{"transaction": "cd" * 32, "index": 3}]))
         assert tx.inputs[0].tx_hash == "cd" * 32
         assert tx.inputs[0].index == 3
 
@@ -268,15 +264,11 @@ class TestMalformedPayloads:
 
     def test_metadata_without_labels_wrapper_passes_through(self):
         # v5 puts the label map at the top level with no "labels" key.
-        tx = parse_ogmios_transaction(
-            _v6_tx(metadata={"674": {"json": {"msg": ["x"]}}})
-        )
+        tx = parse_ogmios_transaction(_v6_tx(metadata={"674": {"json": {"msg": ["x"]}}}))
         assert tx.metadata == {"674": {"msg": ["x"]}}
 
     def test_metadata_scalar_label_content_kept_raw(self):
-        tx = parse_ogmios_transaction(
-            _v6_tx(metadata={"labels": {"674": "raw-string"}})
-        )
+        tx = parse_ogmios_transaction(_v6_tx(metadata={"labels": {"674": "raw-string"}}))
         assert tx.metadata == {"674": "raw-string"}
 
     def test_garbage_deposit_degrades_to_zero(self):
@@ -297,16 +289,12 @@ class TestMalformedPayloads:
         assert tx.output_count == 2
 
     def test_failed_tx_with_null_collateral_return(self):
-        tx = parse_ogmios_transaction(
-            _v6_tx(spends="collaterals", collateralReturn=None)
-        )
+        tx = parse_ogmios_transaction(_v6_tx(spends="collaterals", collateralReturn=None))
         assert tx.script_valid is False
         assert tx.output_count == 0
 
     def test_input_missing_index_defaults_to_zero(self):
-        tx = parse_ogmios_transaction(
-            _v6_tx(inputs=[{"transaction": {"id": "cd" * 32}}])
-        )
+        tx = parse_ogmios_transaction(_v6_tx(inputs=[{"transaction": {"id": "cd" * 32}}]))
         assert tx.inputs[0].index == 0
 
     def test_input_missing_transaction_yields_empty_hash(self):
@@ -333,8 +321,7 @@ class TestWithdrawals:
         # The parser stamps the RAW declared total; the script_valid gate
         # (a failed tx's withdrawal never applied) lives in enrichment.
         tx = parse_ogmios_transaction(
-            _v6_tx(spends="collaterals",
-                   withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
+            _v6_tx(spends="collaterals", withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
         )
         assert tx.withdrawal_total == 1_000
 
@@ -346,14 +333,14 @@ class TestWithdrawals:
         # The ledger never applied it, but what a failed attack TRIED to
         # withdraw is signal, like its is_unspent_attempt inputs.
         tx = parse_ogmios_transaction(
-            _v6_tx(spends="collaterals",
-                   withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
+            _v6_tx(spends="collaterals", withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
         )
         assert tx.script_valid is False
         assert "stake1xyz" in tx.addresses
 
     @pytest.mark.parametrize(
-        "bad", ["nope", 12, ["stake1x"], None],
+        "bad",
+        ["nope", 12, ["stake1x"], None],
         ids=["string", "int", "list", "none"],
     )
     def test_malformed_withdrawals_tolerated(self, bad):
@@ -371,26 +358,18 @@ class TestIgnoredFields:
     """
 
     def test_mint_and_burn_ignored(self):
-        minted = parse_ogmios_transaction(
-            _v6_tx(mint={POLICY: {"544f4b454e": 5}})
-        )
-        burned = parse_ogmios_transaction(
-            _v6_tx(mint={POLICY: {"544f4b454e": -5}})
-        )
+        minted = parse_ogmios_transaction(_v6_tx(mint={POLICY: {"544f4b454e": 5}}))
+        burned = parse_ogmios_transaction(_v6_tx(mint={POLICY: {"544f4b454e": -5}}))
         # Preserved verbatim in raw_data for the feature extractor.
         assert minted.raw_data["mint"] == {POLICY: {"544f4b454e": 5}}
         assert burned.raw_data["mint"] == {POLICY: {"544f4b454e": -5}}
 
     def test_certificates_ignored(self):
-        tx = parse_ogmios_transaction(
-            _v6_tx(certificates=[{"type": "stakeDelegation"}])
-        )
+        tx = parse_ogmios_transaction(_v6_tx(certificates=[{"type": "stakeDelegation"}]))
         assert tx.tx_hash == "ab" * 32
 
     def test_unknown_keys_ignored(self):
-        tx = parse_ogmios_transaction(
-            _v6_tx(votingProcedures={"x": 1}, proposals=[{"y": 2}])
-        )
+        tx = parse_ogmios_transaction(_v6_tx(votingProcedures={"x": 1}, proposals=[{"y": 2}]))
         assert tx.tx_hash == "ab" * 32
 
 
@@ -401,16 +380,12 @@ class TestHostilePayloadsRaise:
     TestMalformedPayloads rather than deleting it.
     """
 
-    @pytest.mark.parametrize(
-        "bad_id", [{"weird": 1}, 12345], ids=["dict", "int"]
-    )
+    @pytest.mark.parametrize("bad_id", [{"weird": 1}, 12345], ids=["dict", "int"])
     def test_non_string_id_raises(self, bad_id):
         with pytest.raises(Exception):
             parse_ogmios_transaction(_v6_tx(id=bad_id))
 
-    @pytest.mark.parametrize(
-        "field", ["inputs", "outputs", "references", "collaterals"]
-    )
+    @pytest.mark.parametrize("field", ["inputs", "outputs", "references", "collaterals"])
     def test_explicit_null_collection_raises(self, field):
         # JSON null (as opposed to an absent key) defeats the .get(...)
         # defaults and the parser iterates None.
@@ -419,9 +394,7 @@ class TestHostilePayloadsRaise:
 
     def test_null_input_entry_fields_raise(self):
         with pytest.raises(Exception):
-            parse_ogmios_transaction(
-                _v6_tx(inputs=[{"transaction": {"id": None}, "index": None}])
-            )
+            parse_ogmios_transaction(_v6_tx(inputs=[{"transaction": {"id": None}, "index": None}]))
 
     def test_non_dict_output_entry_raises(self):
         with pytest.raises(AttributeError):

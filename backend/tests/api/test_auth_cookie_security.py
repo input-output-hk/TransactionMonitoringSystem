@@ -22,9 +22,7 @@ from app.main import app
 
 
 def _request(scheme="http", headers=None, client=("203.0.113.9", 12345)):
-    raw_headers = [
-        (k.lower().encode(), v.encode()) for k, v in (headers or [])
-    ]
+    raw_headers = [(k.lower().encode(), v.encode()) for k, v in (headers or [])]
     scope = {
         "type": "http",
         "method": "GET",
@@ -44,7 +42,9 @@ def _request(scheme="http", headers=None, client=("203.0.113.9", 12345)):
 def proxy_enabled(monkeypatch):
     monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
     monkeypatch.setattr(
-        settings, "TRUSTED_PROXY_CIDRS", "127.0.0.1/32,10.0.0.0/8",
+        settings,
+        "TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,10.0.0.0/8",
     )
 
 
@@ -106,7 +106,8 @@ class TestCSRFCookieIssuance:
         assert f"{CSRF_COOKIE_NAME}=" in cookies
         # The CSRF cookie must NOT be HttpOnly — the SPA needs to read it.
         csrf_line = next(
-            line for line in response.headers.getlist("set-cookie")
+            line
+            for line in response.headers.getlist("set-cookie")
             if line.startswith(f"{CSRF_COOKIE_NAME}=")
         )
         assert "HttpOnly" not in csrf_line

@@ -16,6 +16,7 @@ import yaml
 
 def _sc():
     import app.analysis.scorer_config as sc
+
     return sc
 
 
@@ -71,9 +72,7 @@ def _minimal_config():
     sc = _sc()
     cfg = {
         "protocol_limits": {k: 5000 for k in sc._REQUIRED_PROTOCOL_LIMITS},
-        "composite_corroboration": {
-            k: 40.0 for k in sc._REQUIRED_COMPOSITE_CORROBORATION
-        },
+        "composite_corroboration": {k: 40.0 for k in sc._REQUIRED_COMPOSITE_CORROBORATION},
         # Top-level contract_anomaly projection block, built from the loader's
         # own declared requirements so a new required key auto-appears here.
         "contract_anomaly": _expand_dotted(sc._REQUIRED_CONTRACT_ANOMALY, 40.0),
@@ -96,16 +95,15 @@ def _minimal_config():
     for scorer, keys in sc._REQUIRED_KEYS.items():
         section = _expand_dotted(keys, 1)
         section["weights"] = _expand_dotted(
-            sc._SCORER_WEIGHT_NAMES[scorer], 0.25,
+            sc._SCORER_WEIGHT_NAMES[scorer],
+            0.25,
         )
         section["bootstrap_anchors"] = {
-            name: {"p50": 0, "p99": 1}
-            for name in sc._SCORER_BOOTSTRAP_ANCHOR_NAMES[scorer]
+            name: {"p50": 0, "p99": 1} for name in sc._SCORER_BOOTSTRAP_ANCHOR_NAMES[scorer]
         }
         if sc._SCORER_FIXED_ANCHOR_NAMES.get(scorer):
             section["fixed_anchors"] = {
-                name: {"p50": 0, "p99": 1}
-                for name in sc._SCORER_FIXED_ANCHOR_NAMES[scorer]
+                name: {"p50": 0, "p99": 1} for name in sc._SCORER_FIXED_ANCHOR_NAMES[scorer]
             }
         cfg["scorers"][scorer] = section
     # Band-constrained values (caps/floors that must land in a specific band)
@@ -197,15 +195,14 @@ class TestValidation:
         with pytest.raises(RuntimeError, match="top-level 'contract_anomaly' mapping"):
             _reload_module(monkeypatch, tmp_path, cfg)
 
-    def test_missing_contract_anomaly_floor_raises_with_path(
-        self, tmp_path, monkeypatch
-    ):
+    def test_missing_contract_anomaly_floor_raises_with_path(self, tmp_path, monkeypatch):
         # A missing verdict floor must fail fast with its full dotted path, so a
         # mis-edited projection cannot silently score every verdict at 0.
         cfg = _minimal_config()
         del cfg["contract_anomaly"]["verdict_floors"]["malicious"]
         with pytest.raises(
-            RuntimeError, match=r"contract_anomaly\.verdict_floors\.malicious",
+            RuntimeError,
+            match=r"contract_anomaly\.verdict_floors\.malicious",
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
@@ -216,7 +213,8 @@ class TestValidation:
         cfg = _minimal_config()
         cfg["scorers"]["front_running"]["high_band_cap"] = 10.0
         with pytest.raises(
-            RuntimeError, match=r"high_band_cap.*violates its band contract",
+            RuntimeError,
+            match=r"high_band_cap.*violates its band contract",
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
@@ -231,9 +229,7 @@ class TestValidation:
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
-    def test_missing_baselines_drift_leaf_raises_with_path(
-        self, tmp_path, monkeypatch
-    ):
+    def test_missing_baselines_drift_leaf_raises_with_path(self, tmp_path, monkeypatch):
         # Leaf validation: a missing nested tunable must fail fast with its
         # full dotted path, not a raw KeyError at first use.
         cfg = _minimal_config()
@@ -241,17 +237,13 @@ class TestValidation:
         with pytest.raises(RuntimeError, match=r"baselines\.drift\.p99_threshold"):
             _reload_module(monkeypatch, tmp_path, cfg)
 
-    def test_missing_baselines_windows_raises_with_path(
-        self, tmp_path, monkeypatch
-    ):
+    def test_missing_baselines_windows_raises_with_path(self, tmp_path, monkeypatch):
         cfg = _minimal_config()
         del cfg["baselines"]["windows"]["global_days"]
         with pytest.raises(RuntimeError, match=r"baselines\.windows\.global_days"):
             _reload_module(monkeypatch, tmp_path, cfg)
 
-    def test_missing_p50_cap_spread_fraction_raises_with_path(
-        self, tmp_path, monkeypatch
-    ):
+    def test_missing_p50_cap_spread_fraction_raises_with_path(self, tmp_path, monkeypatch):
         # The p50-bound knob must flow through the validated loader, so its
         # absence is an import-time failure, never a silent default.
         cfg = _minimal_config()
@@ -262,9 +254,7 @@ class TestValidation:
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
-    def test_missing_asset_name_carrier_enabled_raises_with_path(
-        self, tmp_path, monkeypatch
-    ):
+    def test_missing_asset_name_carrier_enabled_raises_with_path(self, tmp_path, monkeypatch):
         cfg = _minimal_config()
         cfg["scorers"]["phishing"]["asset_name_carrier"] = {}
         with pytest.raises(
@@ -308,7 +298,8 @@ class TestUnknownKeyRejection:
         # unknown-key walk must not reject their entries.
         cfg = _minimal_config()
         cfg["scorers"]["multiple_sat"]["allowlist_prefixes"] = {
-            "mainnet": ["addr1qexample"], "preprod": [],
+            "mainnet": ["addr1qexample"],
+            "preprod": [],
         }
         sc = _reload_module(monkeypatch, tmp_path, cfg)
         assert "multiple_sat" in sc._CFG["scorers"]
@@ -366,10 +357,9 @@ class TestAnchorWeightNameValidation:
         # minimal fixture loaded.
         sc = _reload_shipped(monkeypatch)
         import app.analysis.scorers.multiple_sat as ms
+
         spec_features = {feature for feature, _allowed in ms._BASELINE_SPECS}
-        assert spec_features == set(
-            sc._SCORER_BOOTSTRAP_ANCHOR_NAMES["multiple_sat"]
-        )
+        assert spec_features == set(sc._SCORER_BOOTSTRAP_ANCHOR_NAMES["multiple_sat"])
 
 
 class TestGet:
@@ -400,41 +390,60 @@ class TestPerScriptP99Cap:
     def test_resolved_p99_capped(self, monkeypatch):
         sc = _sc()
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (0.0, 1_000_000.0, "per_script"),
         )
         bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
         p50, p99, source = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         assert source == "per_script"
         assert p99 == sc._P99_CAP_MULTIPLIER * 2.0
         # A canonical attack value (2 = the anchor p99) still normalises
         # above zero against the capped saturation point.
         from app.analysis.normalise import normalise
+
         assert normalise(2.0, p50=p50, p99=p99) > 0.0
 
     def test_uncapped_when_below_cap(self, monkeypatch):
         sc = _sc()
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (0.0, 5.0, "per_script"),
         )
         bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
         _, p99, _ = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         assert p99 == 5.0
 
     def test_bootstrap_path_not_capped(self, monkeypatch):
         sc = _sc()
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (0.0, 1.0, "missing"),
         )
         bootstrap = {"feat": {"p50": 1.0, "p99": 9.0}}
         p50, p99, source = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         assert (p50, p99, source) == (1.0, 9.0, "bootstrap")
 
@@ -449,13 +458,19 @@ class TestPerScriptP50Cap:
     def test_poisoned_p50_clamped_to_anchor_relative_bound(self, monkeypatch):
         sc = _sc()
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (1e12, 1e15, "per_script"),
         )
         anchor_p50, anchor_p99 = 0.0, 2.0
         bootstrap = {"feat": {"p50": anchor_p50, "p99": anchor_p99}}
         p50, p99, _ = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         cap = sc._P99_CAP_MULTIPLIER * anchor_p99
         assert p99 == cap
@@ -465,6 +480,7 @@ class TestPerScriptP50Cap:
         # The axis is not dead: an attack at the anchor p99 still normalises
         # positive instead of scoring 0 against the poisoned pair.
         from app.analysis.normalise import normalise
+
         assert normalise(anchor_p99, p50=p50, p99=p99) > 0.0
 
     def test_p50_below_bound_unchanged(self, monkeypatch):
@@ -473,12 +489,18 @@ class TestPerScriptP50Cap:
         bound = anchor_p50 + sc._P50_CAP_SPREAD_FRACTION * (anchor_p99 - anchor_p50)
         learned_p50 = bound * 0.6  # strictly inside the bound
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (learned_p50, 5.0, "per_script"),
         )
         bootstrap = {"feat": {"p50": anchor_p50, "p99": anchor_p99}}
         p50, p99, _ = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         assert (p50, p99) == (learned_p50, 5.0)
 
@@ -487,19 +509,23 @@ class TestPerScriptP50Cap:
         # n_assets case), so it can never collapse the clamp to zero.
         sc = _sc()
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (1e6, 1e6, "per_script"),
         )
         bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
         p50, p99, _ = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         assert p50 > 0.0
         assert p50 < p99
 
-    def test_oversized_fraction_still_keeps_usable_spread(
-        self, tmp_path, monkeypatch
-    ):
+    def test_oversized_fraction_still_keeps_usable_spread(self, tmp_path, monkeypatch):
         # Degenerate-pair protection: even a misconfigured K (here 10x the
         # anchor spread) cannot push the p50 bound to or above the p99 cap;
         # the min_spread_ratio term keeps the capped pair non-degenerate.
@@ -507,12 +533,18 @@ class TestPerScriptP50Cap:
         cfg["baselines"]["per_script_p50_cap_spread_fraction"] = 10.0
         sc = _reload_module(monkeypatch, tmp_path, cfg)
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (1e6, 1e9, "per_script"),
         )
         bootstrap = {"feat": {"p50": 0.0, "p99": 2.0}}
         p50, p99, _ = sc.resolved_or_bootstrap(
-            "feat", "per_script", "addrA", "preprod", bootstrap, "feat",
+            "feat",
+            "per_script",
+            "addrA",
+            "preprod",
+            bootstrap,
+            "feat",
         )
         cap = sc._P99_CAP_MULTIPLIER * 2.0
         assert p99 == cap
@@ -527,18 +559,22 @@ class TestPerScriptP50Cap:
         # suppression-escape floor. Every value here comes from the shipped
         # config, so retuning any knob re-runs this arithmetic.
         from app.analysis.normalise import normalise
+
         sc = _reload_shipped(monkeypatch)
         boot = sc.get("multiple_sat")["bootstrap_anchors"]
         anchor_p50, anchor_p99 = sc.anchor(boot, "n_assets_out_of_script")
-        floor_min = float(
-            sc.get("multiple_sat")["suppression_escape"]["extraction_floor_min"]
-        )
+        floor_min = float(sc.get("multiple_sat")["suppression_escape"]["extraction_floor_min"])
         monkeypatch.setattr(
-            sc, "resolve_baseline",
+            sc,
+            "resolve_baseline",
             lambda *a, **k: (1e9, 1e12, "per_script"),
         )
         p50, p99, _ = sc.resolved_or_bootstrap(
-            "n_assets_out_of_script", "per_script", "addrA", "preprod",
-            boot, "n_assets_out_of_script",
+            "n_assets_out_of_script",
+            "per_script",
+            "addrA",
+            "preprod",
+            boot,
+            "n_assets_out_of_script",
         )
         assert normalise(anchor_p99, p50=p50, p99=p99) >= floor_min

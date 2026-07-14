@@ -50,12 +50,16 @@ class TestScore:
     def test_small_delta_boosts_score(self, scorer):
         """200ms delta should produce high mempool_delta_inv sub-score."""
         fast = {
-            "shared_inputs": 1, "delta_ms": 200.0,
-            "outcome": "TX1_FAILS_UTXO_SPENT", "attacker_win_count": 1,
+            "shared_inputs": 1,
+            "delta_ms": 200.0,
+            "outcome": "TX1_FAILS_UTXO_SPENT",
+            "attacker_win_count": 1,
         }
         slow = {
-            "shared_inputs": 1, "delta_ms": 5000.0,
-            "outcome": "TX1_FAILS_UTXO_SPENT", "attacker_win_count": 1,
+            "shared_inputs": 1,
+            "delta_ms": 5000.0,
+            "outcome": "TX1_FAILS_UTXO_SPENT",
+            "attacker_win_count": 1,
         }
         r_fast = scorer.score(_features(collision=fast))
         r_slow = scorer.score(_features(collision=slow))
@@ -64,9 +68,11 @@ class TestScore:
     def test_recurrence_cap(self, scorer):
         """Low win_count + high raw score should be capped at 79."""
         collision = {
-            "shared_inputs": 3, "delta_ms": 100.0,
+            "shared_inputs": 3,
+            "delta_ms": 100.0,
             "outcome": "TX1_FAILS_UTXO_SPENT",
-            "counterpart_fee": 200_000, "counterpart_ttl": 500,
+            "counterpart_fee": 200_000,
+            "counterpart_ttl": 500,
             "shares_change_address": True,
             "attacker_win_count": 1,  # below minimum 3
         }

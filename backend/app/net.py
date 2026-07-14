@@ -132,8 +132,7 @@ def client_ip(conn: Optional[HTTPConnection]) -> Optional[str]:
     candidate = parse_ip(entries[idx])
     if candidate is None:
         logger.warning(
-            "Malformed X-Forwarded-For entry from trusted proxy; "
-            "falling back to direct peer"
+            "Malformed X-Forwarded-For entry from trusted proxy; falling back to direct peer"
         )
         return direct
     return candidate

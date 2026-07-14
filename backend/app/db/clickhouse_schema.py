@@ -83,7 +83,9 @@ SCHEMA_DDL: Dict[str, str] = {
             INDEX idx_slot slot TYPE minmax GRANULARITY 1,
             INDEX idx_block_height block_height TYPE minmax GRANULARITY 1,
             INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1,
-            PROJECTION p_by_time_v2 (""" + _TX_PROJECTION_SELECT + """)
+            PROJECTION p_by_time_v2 ("""
+    + _TX_PROJECTION_SELECT
+    + """)
         ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
         ORDER BY (network, tx_hash)
         SETTINGS deduplicate_merge_projection_mode = 'rebuild',
@@ -287,10 +289,7 @@ def stale_count_columns(client: Client, table: str) -> List[str]:
         {"t": table},
     )
     live = dict(rows)
-    return sorted(
-        col for col, want in expected.items()
-        if col in live and live[col] != want
-    )
+    return sorted(col for col, want in expected.items() if col in live and live[col] != want)
 
 
 def assert_no_legacy_schema(client: Client) -> None:
@@ -319,7 +318,8 @@ def assert_no_legacy_schema(client: Client) -> None:
         {"tables": list(DEDUP_TABLE_KEYS)},
     )
     legacy = sorted(
-        name for name, engine, engine_full in rows
+        name
+        for name, engine, engine_full in rows
         if engine != "ReplacingMergeTree" or "PARTITION BY" in (engine_full or "")
     )
     if legacy:
@@ -361,9 +361,7 @@ _RETENTION_TABLE_KNOBS: Tuple[Tuple[str, str], ...] = (
 # detection inputs, not just history. Loud warning, not a hard refusal: an
 # operator may intentionally run a shorter horizon on a constrained box.
 _RETENTION_BASELINE_COUPLING: Dict[str, str] = {
-    "CH_RETENTION_DAYS_FEATURES": (
-        "baselines will be computed from a truncated population"
-    ),
+    "CH_RETENTION_DAYS_FEATURES": ("baselines will be computed from a truncated population"),
     "CH_RETENTION_DAYS_TRANSACTIONS": (
         "the baseline percentile queries INNER JOIN transactions for "
         "chain-time windowing, so feature rows older than this silently "
@@ -426,20 +424,16 @@ def apply_retention_ttls(client: Client) -> None:
         if days <= 0:
             _remove_table_ttl(client, table)
             continue
-        if (
-            knob in _RETENTION_BASELINE_COUPLING
-            and days < window_days
-            and knob not in warned_knobs
-        ):
+        if knob in _RETENTION_BASELINE_COUPLING and days < window_days and knob not in warned_knobs:
             warned_knobs.add(knob)
             logger.warning(
                 "%s=%d is below the %d-day global baseline window; %s.",
-                knob, days, window_days, _RETENTION_BASELINE_COUPLING[knob],
+                knob,
+                days,
+                window_days,
+                _RETENTION_BASELINE_COUPLING[knob],
             )
-        client.execute(
-            f"ALTER TABLE {table} MODIFY TTL "
-            f"ingestion_timestamp + INTERVAL {days} DAY"
-        )
+        client.execute(f"ALTER TABLE {table} MODIFY TTL ingestion_timestamp + INTERVAL {days} DAY")
         logger.info("Retention TTL applied: %s expires after %d days", table, days)
 
 
@@ -474,7 +468,8 @@ def migrate_transactions_projection(client: Client) -> None:
     client.execute("ALTER TABLE transactions DROP PROJECTION IF EXISTS p_by_time")
     client.execute(
         "ALTER TABLE transactions ADD PROJECTION IF NOT EXISTS p_by_time_v2 ("
-        + _TX_PROJECTION_SELECT + ")"
+        + _TX_PROJECTION_SELECT
+        + ")"
     )
     # Async mutation; old parts gain the projection as it runs, new inserts
     # build it inline.
@@ -491,30 +486,30 @@ def _create_transactions(client: Client) -> None:
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
+        client.execute(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'"
+        )
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
     # Add block_index column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS block_index Nullable(UInt32)")
+        client.execute(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS block_index Nullable(UInt32)"
+        )
     except Exception as e:
         logger.debug(f"block_index column may already exist or migration not needed: {e}")
 
     # Migrate total_input_value from UInt64 (old default 0 = ambiguous) to
     # Nullable(UInt64) so that NULL = "unresolved" and 0 = "known zero".
     try:
-        client.execute(
-            "ALTER TABLE transactions MODIFY COLUMN total_input_value Nullable(UInt64)"
-        )
+        client.execute("ALTER TABLE transactions MODIFY COLUMN total_input_value Nullable(UInt64)")
     except Exception as e:
         logger.debug(f"total_input_value already Nullable or migration not needed: {e}")
 
     # Phase-2 validation outcome (migration for existing tables): DEFAULT 1
     # because historical rows predate failed-tx ingestion semantics.
-    client.execute(
-        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1"
-    )
+    client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1")
 
     # Serialized (CBOR) transaction byte size, consumed as a shape feature by the
     # optional clustering sidecar's HostBackedRepo. Additive and default-0 (a
@@ -535,14 +530,15 @@ def _create_transaction_io(client: Client) -> None:
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
+        client.execute(
+            "ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'"
+        )
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
     # Attempted-spend flag for failed txs (migration for existing tables).
     client.execute(
-        "ALTER TABLE transaction_inputs "
-        "ADD COLUMN IF NOT EXISTS is_unspent_attempt UInt8 DEFAULT 0"
+        "ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS is_unspent_attempt UInt8 DEFAULT 0"
     )
 
     # Transaction outputs table
@@ -550,7 +546,9 @@ def _create_transaction_io(client: Client) -> None:
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transaction_outputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
+        client.execute(
+            "ALTER TABLE transaction_outputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'"
+        )
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
@@ -633,8 +631,7 @@ def _create_detection_tables(client: Client) -> None:
     # Cross-class corroboration flag (additive; see engine.py). Existing
     # rows default to 0 / '' until re-scored.
     client.execute(
-        "ALTER TABLE tx_class_scores "
-        "ADD COLUMN IF NOT EXISTS corroboration_count UInt8 DEFAULT 0"
+        "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS corroboration_count UInt8 DEFAULT 0"
     )
     client.execute(
         "ALTER TABLE tx_class_scores "
@@ -709,12 +706,10 @@ def _create_baselines(client: Client) -> None:
     # axis = which percentile drifted (legacy old_p99/new_p99 columns carry
     # that axis's values); applied = recall-safe drift inserted anyway.
     client.execute(
-        "ALTER TABLE baseline_drift_events "
-        "ADD COLUMN IF NOT EXISTS axis String DEFAULT 'p99'"
+        "ALTER TABLE baseline_drift_events ADD COLUMN IF NOT EXISTS axis String DEFAULT 'p99'"
     )
     client.execute(
-        "ALTER TABLE baseline_drift_events "
-        "ADD COLUMN IF NOT EXISTS applied UInt8 DEFAULT 0"
+        "ALTER TABLE baseline_drift_events ADD COLUMN IF NOT EXISTS applied UInt8 DEFAULT 0"
     )
 
 

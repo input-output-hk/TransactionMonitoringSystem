@@ -32,10 +32,13 @@ class TestGate:
 class TestScore:
     def test_linked_attacker_high_score(self, scorer):
         sw = {
-            "tx_a": "a01", "tx_b": "b01",
-            "pool_id": "pool01", "asset_pair": "ADA/HOSKY",
+            "tx_a": "a01",
+            "tx_b": "b01",
+            "pool_id": "pool01",
+            "asset_pair": "ADA/HOSKY",
             "attacker_linked": True,
-            "swap_rate_victim": 0.85, "swap_rate_baseline": 1.0,
+            "swap_rate_victim": 0.85,
+            "swap_rate_baseline": 1.0,
             "price_impact_a": 0.03,
             "profit_b": 1_000_000,
             "attacker_sandwich_count": 4,
@@ -47,10 +50,13 @@ class TestScore:
 
     def test_unlinked_attacker_lower(self, scorer):
         sw = {
-            "tx_a": "a01", "tx_b": "b01",
-            "pool_id": "pool01", "asset_pair": "ADA/MIN",
+            "tx_a": "a01",
+            "tx_b": "b01",
+            "pool_id": "pool01",
+            "asset_pair": "ADA/MIN",
             "attacker_linked": False,
-            "swap_rate_victim": 0.95, "swap_rate_baseline": 1.0,
+            "swap_rate_victim": 0.95,
+            "swap_rate_baseline": 1.0,
             "price_impact_a": 0.01,
             "profit_b": 500_000,
             "attacker_sandwich_count": 1,
@@ -64,10 +70,13 @@ class TestScore:
         -1, no finding), not band-capped: a triple that extracts no material
         ADA is not a sandwich. Even with every structural signal saturated."""
         sw = {
-            "tx_a": "a01", "tx_b": "b01",
-            "pool_id": "pool01", "asset_pair": "ADA/SNEK",
+            "tx_a": "a01",
+            "tx_b": "b01",
+            "pool_id": "pool01",
+            "asset_pair": "ADA/SNEK",
             "attacker_linked": True,
-            "swap_rate_victim": 0.50, "swap_rate_baseline": 1.0,
+            "swap_rate_victim": 0.50,
+            "swap_rate_baseline": 1.0,
             "price_impact_a": 0.10,
             "profit_b": 100_000,  # below 200,000 floor
             "attacker_sandwich_count": 10,
@@ -82,10 +91,13 @@ class TestScore:
         """The dominant former false positive: a structural triple with no
         computed profit (the pre-fix default). Must yield no finding."""
         sw = {
-            "tx_a": "a01", "tx_b": "b01",
-            "pool_id": "pool01", "asset_pair": "unknown",
+            "tx_a": "a01",
+            "tx_b": "b01",
+            "pool_id": "pool01",
+            "asset_pair": "unknown",
             "attacker_linked": True,
-            "swap_rate_victim": 0.0, "swap_rate_baseline": 0.0,
+            "swap_rate_victim": 0.0,
+            "swap_rate_baseline": 0.0,
             "price_impact_a": 0.0,
             "profit_b": 0.0,
             "attacker_sandwich_count": 0,

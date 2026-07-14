@@ -84,6 +84,7 @@ from app.analysis.scorer_config import (
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
 from app.analysis import features as feat_mod
 from app.analysis.features import extract_lovelace as _extract_lovelace
+
 # Promoted to features.iter_assets (shared v5/v6 asset iteration); the
 # underscore alias is part of this module's test surface.
 from app.analysis.features import iter_assets as _iter_assets  # noqa: F401
@@ -130,7 +131,8 @@ _BASELINE_SPECS: Tuple[Tuple[str, Optional[Tuple[str, ...]]], ...] = (
 
 
 def _resolve_baselines(
-    representative_addr: str, network: str,
+    representative_addr: str,
+    network: str,
 ) -> Dict[str, Tuple[float, float, str]]:
     """Resolve every baseline in ``_BASELINE_SPECS`` for one script group.
 
@@ -139,8 +141,13 @@ def _resolve_baselines(
     """
     return {
         feature: _resolve(
-            feature, "per_script", representative_addr, network,
-            _BOOT, feature, scope_types_allowed=allowed,
+            feature,
+            "per_script",
+            representative_addr,
+            network,
+            _BOOT,
+            feature,
+            scope_types_allowed=allowed,
         )
         for feature, allowed in _BASELINE_SPECS
     }
@@ -264,7 +271,9 @@ def _group_inputs_by_script(raw_data: Dict) -> Dict[str, List[Dict]]:
 
 
 def _compute_lovelace_flow(
-    inputs: List[Dict], outputs: List[Dict], script_key: str,
+    inputs: List[Dict],
+    outputs: List[Dict],
+    script_key: str,
 ) -> Tuple[int, int]:
     """Return ``(lovelace_in_at_script, lovelace_out_at_script)``.
 
@@ -273,17 +282,21 @@ def _compute_lovelace_flow(
     """
     value_in = sum(
         _extract_lovelace(inp.get("value"))
-        for inp in inputs if _payment_credential(inp.get("address", "")) == script_key
+        for inp in inputs
+        if _payment_credential(inp.get("address", "")) == script_key
     )
     value_out = sum(
         _extract_lovelace(out.get("value"))
-        for out in outputs if _payment_credential(out.get("address", "")) == script_key
+        for out in outputs
+        if _payment_credential(out.get("address", "")) == script_key
     )
     return value_in, value_out
 
 
 def _compute_n_assets_out(
-    inputs: List[Dict], outputs: List[Dict], script_key: str,
+    inputs: List[Dict],
+    outputs: List[Dict],
+    script_key: str,
 ) -> int:
     """Count of distinct native-asset ``(policy, name)`` pairs with positive
     net flow out of the script address.
@@ -352,10 +365,7 @@ def _is_decoded_payment_credential(script_key: str) -> bool:
     cannot be trusted in that case (the raw fallback never matches a
     properly-decoded output's credential), so callers must gate on this.
     """
-    return (
-        len(script_key) == _PAYMENT_CRED_HEX_LEN
-        and all(c in _HEX_CHARS for c in script_key)
-    )
+    return len(script_key) == _PAYMENT_CRED_HEX_LEN and all(c in _HEX_CHARS for c in script_key)
 
 
 def _spend_redeemer_payloads(raw_data: Dict) -> List[str]:
@@ -434,10 +444,7 @@ def _is_uniform_sweep(
         # (the ledger guarantees one redeemer per script input across the
         # whole tx; below this count something exotic is happening and we
         # decline to suppress).
-        if (
-            len(spend_redeemer_payloads) < n_inputs
-            or len(set(spend_redeemer_payloads)) != 1
-        ):
+        if len(spend_redeemer_payloads) < n_inputs or len(set(spend_redeemer_payloads)) != 1:
             return False
     if _SWEEP_REQ_NO_RETURN:
         for out in outputs:
@@ -524,10 +531,14 @@ def _compute_axes(
     p50_rc, p99_rc, bl_rc = bl["sender_recurrence"]
 
     s_extraction_lov = normalise(
-        net_value, p50=p50_nv, p99=_extraction_anchor(p50_nv, p99_nv, bl_nv),
+        net_value,
+        p50=p50_nv,
+        p99=_extraction_anchor(p50_nv, p99_nv, bl_nv),
     )
     s_extraction_assets = normalise(
-        float(n_assets_out), p50=p50_na, p99=_extraction_anchor(p50_na, p99_na, bl_na),
+        float(n_assets_out),
+        p50=p50_na,
+        p99=_extraction_anchor(p50_na, p99_na, bl_na),
     )
     s_extraction_floor = max(
         normalise(net_value, p50=p50_nv, p99=p99_nv),
@@ -561,7 +572,8 @@ def _group_allowlisted(inputs: List[Dict], script_key: str, network: str) -> boo
     group must be allowlisted if any variant is.
     """
     group_addrs = {
-        inp.get("address", "") for inp in inputs
+        inp.get("address", "")
+        for inp in inputs
         if _payment_credential(inp.get("address", "")) == script_key
     }
     return any(_is_allowlisted(a, network) for a in group_addrs)
@@ -722,8 +734,14 @@ class MultipleSatScorer(BaseScorer):
             # payment credential.
             representative_addr = inps[0].get("address", script_key)
             result = self._score_script(
-                script_key, representative_addr, n_inputs, total_cpu,
-                raw_data, outputs, sender_recurrence, network,
+                script_key,
+                representative_addr,
+                n_inputs,
+                total_cpu,
+                raw_data,
+                outputs,
+                sender_recurrence,
+                network,
                 spend_payloads,
             )
             # >= (not >) so a suppressed group's no_finding result (score -1)
@@ -751,8 +769,14 @@ class MultipleSatScorer(BaseScorer):
         suppression/escape -> reasons/evidence) whose docstrings carry the
         detection rationale for each rule."""
         axes = _compute_axes(
-            representative_addr, script_key, n_inputs, total_cpu,
-            raw_data, outputs, sender_recurrence, network,
+            representative_addr,
+            script_key,
+            n_inputs,
+            total_cpu,
+            raw_data,
+            outputs,
+            sender_recurrence,
+            network,
         )
 
         # Allowlisted scripts: neutralise s_extraction and redistribute its
@@ -760,7 +784,9 @@ class MultipleSatScorer(BaseScorer):
         # only paths whose gates begin with `not allowlisted`, so it is
         # never consulted for an allowlisted script anyway.
         allowlisted = _group_allowlisted(
-            raw_data.get("inputs", []), script_key, network,
+            raw_data.get("inputs", []),
+            script_key,
+            network,
         )
         if allowlisted:
             w_ex, w_eu, w_ni, w_rc = _reweight_without_extraction()
@@ -782,7 +808,10 @@ class MultipleSatScorer(BaseScorer):
         final = finalise_score(raw)
 
         uniform_sweep = _is_uniform_sweep(
-            script_key, n_inputs, outputs, spend_redeemer_payloads,
+            script_key,
+            n_inputs,
+            outputs,
+            spend_redeemer_payloads,
         )
         floored = _floor_applies(axes, allowlisted, uniform_sweep)
         if floored:
@@ -799,7 +828,10 @@ class MultipleSatScorer(BaseScorer):
             final = min(final, BAND_MODERATE_MAX)
 
         suppressed, escaped = _suppression_outcome(
-            axes, allowlisted, uniform_sweep, floored,
+            axes,
+            allowlisted,
+            uniform_sweep,
+            floored,
         )
         if suppressed:
             return ScorerResult.no_finding(
@@ -839,7 +871,11 @@ class MultipleSatScorer(BaseScorer):
                 "n_assets_out_of_script": float(axes.n_assets_out),
             },
             reasons=_collect_reasons(
-                axes, floored, allowlisted, uniform_sweep, escaped,
+                axes,
+                floored,
+                allowlisted,
+                uniform_sweep,
+                escaped,
             ),
             baseline_source=axes.bl_source,
             evidence={
@@ -859,9 +895,7 @@ class MultipleSatScorer(BaseScorer):
                 # assets while the script's lovelace position barely moves;
                 # those show ``lovelace_full_drain=False`` but
                 # ``n_assets_extracted > 0``. The UI should reference both.
-                "lovelace_full_drain": bool(
-                    axes.lovelace_out == 0 and axes.lovelace_in > 0
-                ),
+                "lovelace_full_drain": bool(axes.lovelace_out == 0 and axes.lovelace_in > 0),
                 "allowlisted": bool(allowlisted),
                 "uniform_sweep": bool(uniform_sweep),
             },

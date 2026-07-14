@@ -30,6 +30,7 @@ class LifecycleStatus(str, Enum):
                    resubmitted, confirmed on a fork that was not observed, or simply
                    delayed beyond the monitoring window.
     """
+
     PENDING = "PENDING"
     CONFIRMED = "CONFIRMED"
     ROLLED_BACK = "ROLLED_BACK"
@@ -41,10 +42,11 @@ class RiskBand(str, Enum):
 
     Scores are continuous 0-100; bands guide analyst workflow and alerting.
     """
+
     INFORMATIONAL = "Informational"  # 0-30: no action, scored-but-not-alerting baseline
-    MODERATE = "Moderate"            # 31-59: flagged for periodic review
-    HIGH = "High"                    # 60-79: queued for analyst review
-    CRITICAL = "Critical"            # 80-100: immediate alert
+    MODERATE = "Moderate"  # 31-59: flagged for periodic review
+    HIGH = "High"  # 60-79: queued for analyst review
+    CRITICAL = "Critical"  # 80-100: immediate alert
 
     @classmethod
     def _missing_(cls, value: object) -> "RiskBand | None":
@@ -73,6 +75,7 @@ class AttackClass(str, Enum):
     It is deliberately absent from the per-tx write path so the host scoring
     engine can never write or clobber it.
     """
+
     TOKEN_DUST = "token_dust"
     LARGE_VALUE = "large_value"
     LARGE_DATUM = "large_datum"
@@ -87,6 +90,7 @@ class AttackClass(str, Enum):
 
 class TransactionLifecycleEvent(BaseModel):
     """Transaction lifecycle state"""
+
     tx_id: str
     network: str = "preprod"
     status: LifecycleStatus
@@ -104,6 +108,7 @@ class TransactionLifecycleEvent(BaseModel):
 
 class LifecycleSummaryStats(BaseModel):
     """Aggregate lifecycle statistics"""
+
     total_tracked: int = 0
     pending_count: int = 0
     confirmed_count: int = 0
@@ -115,12 +120,15 @@ class LifecycleSummaryStats(BaseModel):
 
 class TransactionInput(BaseModel):
     """Transaction input (consumed UTxO)"""
+
     tx_hash: str
     index: int
     address: str
     amount: int
     assets: Optional[Dict[str, int]] = None
-    is_reference: bool = Field(default=False, description="True if this is a reference input (read-only)")
+    is_reference: bool = Field(
+        default=False, description="True if this is a reference input (read-only)"
+    )
     is_collateral: bool = Field(default=False, description="True if this is a collateral input")
     is_unspent_attempt: bool = Field(
         default=False,
@@ -150,10 +158,13 @@ class TransactionInput(BaseModel):
 
 class TransactionOutput(BaseModel):
     """Transaction output (new UTxO)"""
+
     address: str
     amount: int
     assets: Optional[Dict[str, int]] = None
-    is_collateral: bool = Field(default=False, description="True if this is a collateral return output")
+    is_collateral: bool = Field(
+        default=False, description="True if this is a collateral return output"
+    )
     output_index: Optional[int] = Field(
         default=None,
         description=(
@@ -164,7 +175,6 @@ class TransactionOutput(BaseModel):
     )
 
 
-
 class ClassScoreResult(BaseModel):
     """Multi-class scoring output produced by the Analysis Engine.
 
@@ -172,6 +182,7 @@ class ClassScoreResult(BaseModel):
     attack class.  A score of -1 means the class was not applicable (gate
     condition failed).
     """
+
     tx_hash: str
     network: str
     scores: Dict[str, float] = Field(
@@ -235,15 +246,23 @@ class ClassScoreResult(BaseModel):
 
 class NormalizedTransaction(BaseModel):
     """Normalized transaction event format"""
+
     tx_hash: str = Field(..., description="Transaction hash")
-    network: Optional[str] = Field(None, description="Network: mainnet, preprod, preview, or testnet")
+    network: Optional[str] = Field(
+        None, description="Network: mainnet, preprod, preview, or testnet"
+    )
     slot: Optional[int] = Field(None, description="Slot number")
     block_height: Optional[int] = Field(None, description="Block height")
     block_hash: Optional[str] = Field(None, description="Block hash")
-    block_index: Optional[int] = Field(None, description="Transaction index within its block (0-based)")
+    block_index: Optional[int] = Field(
+        None, description="Transaction index within its block (0-based)"
+    )
     timestamp: datetime = Field(..., description="Transaction timestamp")
     fee: int = Field(..., description="Transaction fee in lovelace")
-    deposit: Optional[int] = Field(None, description="Deposit amount (positive for deposits, negative for withdrawals) in lovelace")
+    deposit: Optional[int] = Field(
+        None,
+        description="Deposit amount (positive for deposits, negative for withdrawals) in lovelace",
+    )
     inputs: List[TransactionInput] = Field(default_factory=list)
     outputs: List[TransactionOutput] = Field(default_factory=list)
     input_count: int = Field(0, description="Number of inputs")

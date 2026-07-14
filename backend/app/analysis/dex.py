@@ -57,9 +57,7 @@ def _count_attacker_history(
     front leg of a potential sandwich (2+ txs at the same script address
     within a slot window, before the current slot)."""
     prefixes = _network_script_prefixes(network)
-    like_clause = " OR ".join(
-        f"o.address LIKE %(script_prefix_{i})s" for i in range(len(prefixes))
-    )
+    like_clause = " OR ".join(f"o.address LIKE %(script_prefix_{i})s" for i in range(len(prefixes)))
     params: Dict[str, Any] = {
         "network": network,
         "addr": attacker_addr,
@@ -209,7 +207,9 @@ def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: 
 
 
 def _first_input_addresses(
-    client: Any, tx_hashes: List[str], network: str,
+    client: Any,
+    tx_hashes: List[str],
+    network: str,
 ) -> Dict[str, str]:
     """Map each tx to its first-input address (the address-cluster proxy)."""
     rows = client.execute(
@@ -268,8 +268,8 @@ def _bracketing_legs(
     after = sorted(p for p in cluster_pos if p[0] > victim_pos)
     if not before or not after:
         return None
-    front_pos, tx_a = before[-1]   # last leg before the victim
-    back_pos, tx_b = after[0]      # first leg after the victim
+    front_pos, tx_a = before[-1]  # last leg before the victim
+    back_pos, tx_b = after[0]  # first leg after the victim
     return tx_a, tx_b, abs(back_pos[0] - front_pos[0])
 
 

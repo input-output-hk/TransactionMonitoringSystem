@@ -13,6 +13,7 @@ The legacy module path ``app.auth`` re-exports the API-key helpers so
 existing imports (``from app.auth import verify_api_key``) keep working
 unchanged while new auth flows live in submodules.
 """
+
 from app.auth.api_key import (
     _dev_mode,
     api_key_header,

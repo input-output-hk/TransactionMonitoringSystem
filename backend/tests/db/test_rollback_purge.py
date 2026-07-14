@@ -34,9 +34,7 @@ def _delete_calls(mock):
 
 class TestLightweightDeleteSettings:
     def test_every_delete_carries_projection_mode(self, client):
-        client.execute.side_effect = [[("aa" * 32,)]] + [None] * len(
-            _ROLLBACK_CLEANUP_TABLES
-        )
+        client.execute.side_effect = [[("aa" * 32,)]] + [None] * len(_ROLLBACK_CLEANUP_TABLES)
         delete_rolled_back_txs("preprod", 100)
         deletes = _delete_calls(client)
         assert len(deletes) == len(_ROLLBACK_CLEANUP_TABLES)
@@ -46,10 +44,7 @@ class TestLightweightDeleteSettings:
     def test_projection_mode_is_rebuild(self):
         # 'drop' would silently degrade reads on mutated parts; 'rebuild'
         # keeps the list-endpoint projection correct on surviving rows.
-        assert (
-            _LIGHTWEIGHT_DELETE_SETTINGS["lightweight_mutation_projection_mode"]
-            == "rebuild"
-        )
+        assert _LIGHTWEIGHT_DELETE_SETTINGS["lightweight_mutation_projection_mode"] == "rebuild"
 
 
 class TestPurgeStructure:
@@ -66,13 +61,10 @@ class TestPurgeStructure:
         assert _ROLLBACK_CLEANUP_TABLES[-2] == "tx_class_scores"
 
     def test_deletes_issued_in_declared_order(self, client):
-        client.execute.side_effect = [[("aa" * 32,)]] + [None] * len(
-            _ROLLBACK_CLEANUP_TABLES
-        )
+        client.execute.side_effect = [[("aa" * 32,)]] + [None] * len(_ROLLBACK_CLEANUP_TABLES)
         delete_rolled_back_txs("preprod", 100)
         deleted_tables = [
-            c.args[0].split("DELETE FROM ")[1].split(" ")[0]
-            for c in _delete_calls(client)
+            c.args[0].split("DELETE FROM ")[1].split(" ")[0] for c in _delete_calls(client)
         ]
         assert deleted_tables == list(_ROLLBACK_CLEANUP_TABLES)
 
@@ -88,16 +80,11 @@ class TestPurgeStructure:
         with pytest.raises(RuntimeError):
             delete_rolled_back_txs("preprod", 100)
         # The transactions DELETE was never reached: the hash source survives.
-        assert not any(
-            "DELETE FROM transactions" in c.args[0]
-            for c in _delete_calls(client)
-        )
+        assert not any("DELETE FROM transactions" in c.args[0] for c in _delete_calls(client))
 
         # Retry: the source still yields the hashes; every table is purged.
         client.execute.reset_mock()
-        client.execute.side_effect = [hashes] + [None] * len(
-            _ROLLBACK_CLEANUP_TABLES
-        )
+        client.execute.side_effect = [hashes] + [None] * len(_ROLLBACK_CLEANUP_TABLES)
         assert delete_rolled_back_txs("preprod", 100) == ["aa" * 32]
         assert len(_delete_calls(client)) == len(_ROLLBACK_CLEANUP_TABLES)
 
@@ -136,10 +123,7 @@ class TestClusteringPurge:
 
     def test_purges_both_sidecar_tables(self, client):
         delete_clustering_rows("preprod", ["aa" * 32])
-        targets = [
-            c.args[0].split("DELETE FROM ")[1].split(" ")[0]
-            for c in _delete_calls(client)
-        ]
+        targets = [c.args[0].split("DELETE FROM ")[1].split(" ")[0] for c in _delete_calls(client)]
         assert targets == [
             "tms_clustering.tx_contract_anomaly",
             "tms_clustering.tx_classifications",
@@ -160,10 +144,7 @@ class TestClusteringPurge:
         # hashes, so the match must go through toString() (mirrors the read
         # path) or padding-sensitive comparison silently misses rows.
         delete_clustering_rows("preprod", ["aa" * 32])
-        classif = next(
-            c for c in _delete_calls(client)
-            if "tx_classifications" in c.args[0]
-        )
+        classif = next(c for c in _delete_calls(client) if "tx_classifications" in c.args[0])
         assert "toString(tx_hash)" in classif.args[0]
 
     def test_best_effort_swallows_missing_tables(self, client):

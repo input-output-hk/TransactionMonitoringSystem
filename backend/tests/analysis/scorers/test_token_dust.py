@@ -107,7 +107,8 @@ class TestScore:
         """Score should be the max across multiple eligible outputs."""
         low = _make_output(SCRIPT_ADDR, lovelace=50_000_000, policies={"p": {"t": 1}})
         high = _make_output(
-            SCRIPT_ADDR, lovelace=1_200_000,
+            SCRIPT_ADDR,
+            lovelace=1_200_000,
             policies={f"p{i}": {f"t{j}": 1 for j in range(5)} for i in range(4)},
         )
         result = scorer.score(_features([low, high]))
@@ -155,6 +156,7 @@ class TestNetworkScopedAllowlist:
 
     def _patch_allowlist(self, monkeypatch, policies=None, prefixes=None):
         from app.analysis.scorers import token_dust as tdm
+
         if policies is not None:
             monkeypatch.setattr(tdm, "_ALLOWLIST_POLICIES", policies)
         if prefixes is not None:
@@ -166,7 +168,8 @@ class TestNetworkScopedAllowlist:
             policies={"preprod": frozenset({"protocol_policy"})},
         )
         out = _make_output(
-            SCRIPT_ADDR, lovelace=2_000_000,
+            SCRIPT_ADDR,
+            lovelace=2_000_000,
             policies={"protocol_policy": {"tok1": 1, "tok2": 1, "tok3": 1}},
         )
         result = scorer.score(_features([out]))
@@ -182,7 +185,8 @@ class TestNetworkScopedAllowlist:
             policies={"mainnet": frozenset({"protocol_policy"})},
         )
         out = _make_output(
-            SCRIPT_ADDR, lovelace=2_000_000,
+            SCRIPT_ADDR,
+            lovelace=2_000_000,
             policies={"protocol_policy": {"tok1": 1, "tok2": 1, "tok3": 1}},
         )
         result = scorer.score(_features([out]))
@@ -198,7 +202,8 @@ class TestNetworkScopedAllowlist:
             policies={"preprod": frozenset({"protocol_policy"})},
         )
         out = _make_output(
-            SCRIPT_ADDR, lovelace=2_000_000,
+            SCRIPT_ADDR,
+            lovelace=2_000_000,
             policies={
                 "protocol_policy": {"tok1": 1, "tok2": 1},
                 "attacker_policy": {"dust_a": 1, "dust_b": 1, "dust_c": 1},
@@ -226,7 +231,8 @@ class TestDosAssetThresholdDiscriminator:
         # Use 1_200_000 (the bootstrap p50) so lovelace_inverted saturates.
         many_names = {f"asset{i:03d}": 1 for i in range(80)}
         out = _make_output(
-            SCRIPT_ADDR, lovelace=1_200_000,
+            SCRIPT_ADDR,
+            lovelace=1_200_000,
             policies={"oneshot_dos_policy": many_names},
         )
         result = scorer.score(_features([out]))
@@ -253,7 +259,8 @@ class TestDosAssetThresholdDiscriminator:
         # band capped at Moderate. Low ADA so the other axes saturate
         # and prove the cap is what stops the band (not weak signals).
         out = _make_output(
-            SCRIPT_ADDR, lovelace=1_200_000,
+            SCRIPT_ADDR,
+            lovelace=1_200_000,
             policies={
                 "policy_a": {"offer_nft": 1, "ref_nft": 1},
                 "policy_b": {"loan_token": 1},

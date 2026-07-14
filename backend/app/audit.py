@@ -93,7 +93,10 @@ async def record(
     except Exception:
         logger.exception(
             "AUDIT WRITE FAILED for %s/%s on %s:%s (action still applied)",
-            event_type, action, entity_type, entity_id,
+            event_type,
+            action,
+            entity_type,
+            entity_id,
         )
 
 
@@ -125,7 +128,10 @@ async def record_fail_closed(
     except Exception as e:
         logger.exception(
             "AUDIT WRITE FAILED for %s/%s on %s:%s (action REFUSED)",
-            event_type, action, entity_type, entity_id,
+            event_type,
+            action,
+            entity_type,
+            entity_id,
         )
         raise AuditUnavailableError(str(e)) from e
 

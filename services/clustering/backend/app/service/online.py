@@ -109,7 +109,10 @@ def _classify_result(
     trailing window (not just the current batch) so the signal is stable and
     recovers as fresh traffic is scored — see Repo.online_noise_rate."""
     drift_score, drift_n = repo.online_noise_rate(
-        target, "shape", model_id, window=get_settings().online_noise_window,
+        target,
+        "shape",
+        model_id,
+        window=get_settings().online_noise_window,
     )
     return {
         "target": target,
@@ -127,7 +130,11 @@ def classify_new_transactions(repo: Repo, target: str) -> dict[str, Any]:
     no DBSCAN re-run."""
     model_row = ensure_shape_model(repo, target)
     if model_row is None:
-        return {"target": target, "n_new": 0, "note": "no cluster model yet; run full analysis first"}
+        return {
+            "target": target,
+            "n_new": 0,
+            "note": "no cluster model yet; run full analysis first",
+        }
 
     model_id = model_row["model_id"]
     new_hashes = repo.unclassified_tx_hashes(
@@ -147,8 +154,16 @@ def classify_new_transactions(repo: Repo, target: str) -> dict[str, Any]:
         repo.save_tx_classifications(
             [
                 (
-                    target, c.tx_hash, "shape", model_id, c.cluster_id,
-                    c.iso_score, c.lof_score, c.votes, c.consensus, c.verdict,
+                    target,
+                    c.tx_hash,
+                    "shape",
+                    model_id,
+                    c.cluster_id,
+                    c.iso_score,
+                    c.lof_score,
+                    c.votes,
+                    c.consensus,
+                    c.verdict,
                 )
                 for c in classifications
             ]
@@ -241,9 +256,7 @@ async def update_contract(
         logger.exception("update_contract failed for %s", target)
         if job_id is not None:
             try:
-                repo.update_job(
-                    job_id, status="failed", error=_safe_error(exc)[:_MAX_ERROR_DETAIL]
-                )
+                repo.update_job(job_id, status="failed", error=_safe_error(exc)[:_MAX_ERROR_DETAIL])
             except Exception:  # pragma: no cover
                 pass
         raise

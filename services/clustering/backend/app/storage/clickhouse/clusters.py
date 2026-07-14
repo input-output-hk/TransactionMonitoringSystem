@@ -9,8 +9,18 @@ from typing import Any
 from .base import _RepoBase, _row_to_dict
 
 _RUN_OUT_KEYS = [
-    "run_id", "target", "feature_set", "eps", "min_samples", "metric",
-    "n_points", "n_clusters", "n_noise", "silhouette", "origin", "created_at",
+    "run_id",
+    "target",
+    "feature_set",
+    "eps",
+    "min_samples",
+    "metric",
+    "n_points",
+    "n_clusters",
+    "n_noise",
+    "silhouette",
+    "origin",
+    "created_at",
 ]
 _RUN_INT_KEYS = ("min_samples", "n_points", "n_clusters", "n_noise")
 
@@ -56,9 +66,7 @@ class _ClusterMixin(_RepoBase):
     def list_runs(self, target: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE target = {t:String}" if target else ""
         sql = self._RUN_SELECT.format(db=self._db, where=where) + " ORDER BY created_at DESC"
-        rows = self.client.query(
-            sql, parameters={"t": target} if target else None
-        ).result_rows
+        rows = self.client.query(sql, parameters={"t": target} if target else None).result_rows
         return [self._run_row_to_dict(r) for r in rows]
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
@@ -69,8 +77,11 @@ class _ClusterMixin(_RepoBase):
     @staticmethod
     def _run_row_to_dict(r: Sequence[Any]) -> dict[str, Any]:
         return _row_to_dict(
-            _RUN_OUT_KEYS, r, int_keys=_RUN_INT_KEYS,
-            float_keys=("eps",), nan_none_keys=("silhouette",),
+            _RUN_OUT_KEYS,
+            r,
+            int_keys=_RUN_INT_KEYS,
+            float_keys=("eps",),
+            nan_none_keys=("silhouette",),
         )
 
     def latest_cluster_run(
@@ -120,9 +131,7 @@ class _ClusterMixin(_RepoBase):
             self._RUN_SELECT.format(db=self._db, where=where)
             + " ORDER BY created_at DESC, run_id DESC LIMIT 1"
         )
-        rows = self.client.query(
-            sql, parameters={"t": target, "f": feature_set}
-        ).result_rows
+        rows = self.client.query(sql, parameters={"t": target, "f": feature_set}).result_rows
         return self._run_row_to_dict(rows[0]) if rows else None
 
     def cluster_summary(self, run_id: str, target: str) -> list[dict[str, Any]]:

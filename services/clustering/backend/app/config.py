@@ -82,13 +82,17 @@ class Settings(BaseSettings):
     # send_receive_timeout: socket ceiling for a wedged query. Generous so a
     # legitimately large windowed read never trips it.
     clickhouse_send_receive_timeout_seconds: int = Field(
-        default=300, ge=1, alias="CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS",
+        default=300,
+        ge=1,
+        alias="CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS",
     )
     # max_memory_usage: per-query server memory cap. 0 = unset (use the server
     # default). Sized below the container mem_limit so a runaway query aborts
     # instead of OOM-killing the ClickHouse container.
     clickhouse_max_memory_usage_bytes: int = Field(
-        default=0, ge=0, alias="CLICKHOUSE_MAX_MEMORY_USAGE_BYTES",
+        default=0,
+        ge=0,
+        alias="CLICKHOUSE_MAX_MEMORY_USAGE_BYTES",
     )
 
     # Host-backed integration (CHAIN_SOURCE=host_ch). When the engine runs as

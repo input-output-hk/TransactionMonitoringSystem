@@ -82,14 +82,18 @@ class TestFrontRunningScore:
             "shares_change_address": False,
             "attacker_win_count": 5,
         }
-        far = scorer.score(_features(
-            collision=dict(base),
-            raw_data={"validityInterval": {"invalidAfter": 50_000}},
-        ))
-        near = scorer.score(_features(
-            collision=dict(base),
-            raw_data={"validityInterval": {"invalidAfter": 1000}},
-        ))
+        far = scorer.score(
+            _features(
+                collision=dict(base),
+                raw_data={"validityInterval": {"invalidAfter": 50_000}},
+            )
+        )
+        near = scorer.score(
+            _features(
+                collision=dict(base),
+                raw_data={"validityInterval": {"invalidAfter": 1000}},
+            )
+        )
         assert near.score > far.score
 
     def test_recurrence_cap(self, scorer):

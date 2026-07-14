@@ -12,6 +12,7 @@ Redacting just this query param is narrower than disabling the access log
 outright (``access_log=False`` in run.py), which would lose request-level
 operational visibility for every endpoint, not only this one.
 """
+
 from __future__ import annotations
 
 import logging
@@ -39,9 +40,7 @@ class _RedactTokenFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.args:
             record.args = tuple(
-                _TOKEN_QS_RE.sub(r"\1<redacted>", arg)
-                if isinstance(arg, str)
-                else arg
+                _TOKEN_QS_RE.sub(r"\1<redacted>", arg) if isinstance(arg, str) else arg
                 for arg in record.args
             )
         if isinstance(record.msg, str):

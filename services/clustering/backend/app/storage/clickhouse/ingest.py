@@ -32,8 +32,16 @@ TX_CONTEXT_SELECT = (
     "t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count"
 )
 TX_CONTEXT_KEYS = [
-    "block_time", "fees", "size", "total_input_lovelace", "total_output_lovelace",
-    "net_lovelace", "input_count", "output_count", "distinct_assets", "redeemer_count",
+    "block_time",
+    "fees",
+    "size",
+    "total_input_lovelace",
+    "total_output_lovelace",
+    "net_lovelace",
+    "input_count",
+    "output_count",
+    "distinct_assets",
+    "redeemer_count",
 ]
 
 
@@ -63,8 +71,14 @@ class _IngestMixin(_RepoBase):
         if not rows:
             return None
         keys = [
-            "target", "target_type", "cursor", "source", "last_page", "last_tx_hash",
-            "txs_seen", "done",
+            "target",
+            "target_type",
+            "cursor",
+            "source",
+            "last_page",
+            "last_tx_hash",
+            "txs_seen",
+            "done",
         ]
         row = self._rows_to_dicts(keys, rows)[0]
         # Legacy shim: rows written before 006_cursor.sql carry only the page
@@ -90,10 +104,17 @@ class _IngestMixin(_RepoBase):
         self._insert(
             "ingest_cursor",
             ["target", "target_type", "cursor", "source", "last_tx_hash", "txs_seen", "done"],
-            [[
-                target, target_type, cursor, self.settings.chain_source,
-                last_tx_hash, txs_seen, int(done),
-            ]],
+            [
+                [
+                    target,
+                    target_type,
+                    cursor,
+                    self.settings.chain_source,
+                    last_tx_hash,
+                    txs_seen,
+                    int(done),
+                ]
+            ],
         )
 
     # --- Targets ---------------------------------------------------------------
@@ -104,9 +125,7 @@ class _IngestMixin(_RepoBase):
             f"count(DISTINCT tx_hash) AS tx_count "
             f"FROM {self._db}.transactions GROUP BY target ORDER BY tx_count DESC"
         ).result_rows
-        return [
-            {"target": t, "target_type": tt, "tx_count": int(c)} for (t, tt, c) in rows
-        ]
+        return [{"target": t, "target_type": tt, "tx_count": int(c)} for (t, tt, c) in rows]
 
     # --- Feature extraction ----------------------------------------------------
 

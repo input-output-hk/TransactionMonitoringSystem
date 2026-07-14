@@ -34,8 +34,12 @@ async def main():
         logger.info("✅ ClickHouse schema created")
 
         logger.info("\n🎉 All databases initialized successfully!")
-        logger.info(f"PostgreSQL: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}")
-        logger.info(f"ClickHouse: {settings.CLICKHOUSE_HOST}:{settings.CLICKHOUSE_PORT}/{settings.CLICKHOUSE_DB}")
+        logger.info(
+            f"PostgreSQL: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        )
+        logger.info(
+            f"ClickHouse: {settings.CLICKHOUSE_HOST}:{settings.CLICKHOUSE_PORT}/{settings.CLICKHOUSE_DB}"
+        )
 
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")

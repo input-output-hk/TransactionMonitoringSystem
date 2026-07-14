@@ -23,6 +23,7 @@ from app.routers import websocket as ws_mod
 @pytest.fixture
 def dev_mode(monkeypatch):
     from app.routers import websocket
+
     monkeypatch.setattr(websocket, "_dev_mode", True)
 
 
@@ -32,7 +33,8 @@ def fresh_handshake_limiter(monkeypatch):
     client IP ('testclient' for every test here), so connects would
     accumulate across tests and trip the shared window."""
     monkeypatch.setattr(
-        ws_mod, "_handshake_limiter",
+        ws_mod,
+        "_handshake_limiter",
         RateLimiter(max_requests=100, window_seconds=60),
     )
 
@@ -40,6 +42,7 @@ def fresh_handshake_limiter(monkeypatch):
 @pytest.fixture
 def client():
     from app.main import app
+
     return TestClient(app)
 
 
@@ -75,9 +78,7 @@ class TestSenderFailureCleanup:
         try:
             asyncio.run(run())
             assert fake_ws not in ws_mod._client_queues
-            fake_ws.close.assert_awaited_once_with(
-                code=ws_mod.WS_CLOSE_INTERNAL_ERROR
-            )
+            fake_ws.close.assert_awaited_once_with(code=ws_mod.WS_CLOSE_INTERNAL_ERROR)
         finally:
             ws_mod._client_queues.pop(fake_ws, None)
 
@@ -98,7 +99,8 @@ class TestSenderFailureCleanup:
 class TestHandshakeRateLimit:
     def test_third_connect_rejected(self, client, dev_mode, monkeypatch):
         monkeypatch.setattr(
-            ws_mod, "_handshake_limiter",
+            ws_mod,
+            "_handshake_limiter",
             RateLimiter(max_requests=2, window_seconds=60),
         )
         for _ in range(2):
@@ -112,18 +114,14 @@ class TestHandshakeRateLimit:
 class TestAuthCloseCode:
     def test_invalid_key_forbidden(self, client, monkeypatch):
         monkeypatch.setattr(ws_mod, "_dev_mode", False)
-        assert_rejected_after_accept(
-            client, "/ws?api_key=wrong", ws_mod.WS_CLOSE_FORBIDDEN
-        )
+        assert_rejected_after_accept(client, "/ws?api_key=wrong", ws_mod.WS_CLOSE_FORBIDDEN)
 
     def test_rejected_socket_is_never_registered(self, client, monkeypatch):
         """Accept-first must not leak the rejected socket into the broadcast
         registry: it gets no queue and no active_connections slot."""
         monkeypatch.setattr(ws_mod, "_dev_mode", False)
         before = len(ws_mod.active_connections)
-        assert_rejected_after_accept(
-            client, "/ws?api_key=wrong", ws_mod.WS_CLOSE_FORBIDDEN
-        )
+        assert_rejected_after_accept(client, "/ws?api_key=wrong", ws_mod.WS_CLOSE_FORBIDDEN)
         assert len(ws_mod.active_connections) == before
         assert len(ws_mod._client_queues) == 0
 
@@ -136,22 +134,19 @@ class TestOriginCheck:
     @pytest.fixture
     def restrictive_origins(self, monkeypatch):
         from app.config import settings
-        monkeypatch.setattr(
-            settings, "CORS_ALLOW_ORIGINS", "http://dashboard.example"
-        )
 
-    def test_disallowed_origin_rejected(
-        self, client, dev_mode, restrictive_origins
-    ):
+        monkeypatch.setattr(settings, "CORS_ALLOW_ORIGINS", "http://dashboard.example")
+
+    def test_disallowed_origin_rejected(self, client, dev_mode, restrictive_origins):
         assert_rejected_after_accept(
-            client, "/ws", ws_mod.WS_CLOSE_POLICY_VIOLATION,
+            client,
+            "/ws",
+            ws_mod.WS_CLOSE_POLICY_VIOLATION,
             headers={"Origin": "http://evil.example"},
         )
 
     def test_allowed_origin_accepted(self, client, dev_mode, restrictive_origins):
-        with client.websocket_connect(
-            "/ws", headers={"Origin": "http://dashboard.example"}
-        ) as ws:
+        with client.websocket_connect("/ws", headers={"Origin": "http://dashboard.example"}) as ws:
             ws.send_text("ping")
             assert ws.receive_json()["type"] == "pong"
 
@@ -164,9 +159,8 @@ class TestOriginCheck:
 
     def test_wildcard_cors_accepts_any_origin(self, client, dev_mode, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "CORS_ALLOW_ORIGINS", "*")
-        with client.websocket_connect(
-            "/ws", headers={"Origin": "http://anywhere.example"}
-        ) as ws:
+        with client.websocket_connect("/ws", headers={"Origin": "http://anywhere.example"}) as ws:
             ws.send_text("ping")
             assert ws.receive_json()["type"] == "pong"

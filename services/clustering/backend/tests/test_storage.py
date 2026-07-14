@@ -123,6 +123,7 @@ def _tx() -> TxRecord:
 
 # --- Inserts ---------------------------------------------------------------
 
+
 def test_insert_transactions_builds_aligned_rows() -> None:
     repo, fake = _repo()
     repo.insert_transactions([_tx()])
@@ -155,7 +156,9 @@ def test_insert_empty_is_noop() -> None:
 
 def test_upsert_cursor_converts_done_to_int() -> None:
     repo, fake = _repo()
-    repo.upsert_cursor("addr", "address", cursor="page:2", last_tx_hash="bb", txs_seen=10, done=True)
+    repo.upsert_cursor(
+        "addr", "address", cursor="page:2", last_tx_hash="bb", txs_seen=10, done=True
+    )
     table, data, cols = fake.inserts[0]
     assert table == "tms.ingest_cursor"
     assert cols == ["target", "target_type", "cursor", "source", "last_tx_hash", "txs_seen", "done"]
@@ -246,6 +249,7 @@ def test_save_cluster_run_fills_missing_with_none() -> None:
 
 # --- Query row-mapping -----------------------------------------------------
 
+
 def test_get_cursor_maps_row() -> None:
     repo, _ = _repo([("addr", "address", "page:1", "host_ch", 1, "bb", 10, 0)])
     cur = repo.get_cursor("addr")
@@ -312,7 +316,9 @@ def test_save_anomaly_run_and_scores() -> None:
             "top_quantile": 0.05,
         }
     )
-    repo.save_anomaly_scores("an1", [("aa", 0.7, 1.2, 1, 0.9, 3, 1), ("bb", 0.1, 0.9, 0, 0.2, 0, 2)])
+    repo.save_anomaly_scores(
+        "an1", [("aa", 0.7, 1.2, 1, 0.9, 3, 1), ("bb", 0.1, 0.9, 0, 0.2, 0, 2)]
+    )
     run_table, run_data, run_cols = fake.inserts[0]
     score_table, score_data, score_cols = fake.inserts[1]
     assert run_table == "tms.anomaly_runs"
@@ -330,10 +336,48 @@ def test_top_anomalies_maps_and_nan_iso() -> None:
     # size, total_input, total_output, net, in, out, assets, redeemers, hour, dow.
     repo, _ = _repo(
         [
-            (1, "aa", 0.95, 3, nan, 1.8, 1, "2024-01-01 00:00:00",
-             200000, 500, 2000000, 1800000, -200000, 8, 2, 1, 1, 0, 1),
-            (2, "bb", 0.40, 1, 0.5, 0.9, 0, "2024-01-02 00:00:00",
-             300000, 600, 1000000, 900000, -100000, 2, 2, 0, 0, 12, 2),
+            (
+                1,
+                "aa",
+                0.95,
+                3,
+                nan,
+                1.8,
+                1,
+                "2024-01-01 00:00:00",
+                200000,
+                500,
+                2000000,
+                1800000,
+                -200000,
+                8,
+                2,
+                1,
+                1,
+                0,
+                1,
+            ),
+            (
+                2,
+                "bb",
+                0.40,
+                1,
+                0.5,
+                0.9,
+                0,
+                "2024-01-02 00:00:00",
+                300000,
+                600,
+                1000000,
+                900000,
+                -100000,
+                2,
+                2,
+                0,
+                0,
+                12,
+                2,
+            ),
         ]
     )
     rows = repo.top_anomalies("an1", "addr", limit=10)
@@ -350,10 +394,22 @@ def test_latest_transactions_maps_rows_and_null_online() -> None:
     # LEFT JOIN to tx_classifications misses — join_use_nulls = 1).
     repo, _ = _repo(
         [
-            ("aa", "2024-01-02 00:00:00", 200000, 500, 2000000, 1800000, -200000,
-             1, 2, 1, 1, 0, 2),
-            ("bb", "2024-01-01 00:00:00", 300000, 600, 1000000, 900000, -100000,
-             1, 2, 0, 1, None, None),
+            ("aa", "2024-01-02 00:00:00", 200000, 500, 2000000, 1800000, -200000, 1, 2, 1, 1, 0, 2),
+            (
+                "bb",
+                "2024-01-01 00:00:00",
+                300000,
+                600,
+                1000000,
+                900000,
+                -100000,
+                1,
+                2,
+                0,
+                1,
+                None,
+                None,
+            ),
         ]
     )
     rows = repo.latest_transactions("addr", "shape", limit=10)
@@ -366,8 +422,21 @@ def test_latest_transactions_maps_rows_and_null_online() -> None:
 
 def test_get_anomaly_run_maps_row() -> None:
     repo, _ = _repo(
-        [("an1", "addr", "shape", "isolation_forest,lof,dbscan", 5000, 42, 1.56, 32, 0.05,
-          "custom", "2024-01-01 00:00:00")]
+        [
+            (
+                "an1",
+                "addr",
+                "shape",
+                "isolation_forest,lof,dbscan",
+                5000,
+                42,
+                1.56,
+                32,
+                0.05,
+                "custom",
+                "2024-01-01 00:00:00",
+            )
+        ]
     )
     run = repo.get_anomaly_run("an1")
     assert run is not None
@@ -379,8 +448,22 @@ def test_get_anomaly_run_maps_row() -> None:
 
 def test_get_run_nan_silhouette_becomes_none() -> None:
     repo, _ = _repo(
-        [("run1", "addr", "shape", 1.5, 5, "euclidean", 50, 2, 0, math.nan, "custom",
-          "2024-01-01 00:00:00")]
+        [
+            (
+                "run1",
+                "addr",
+                "shape",
+                1.5,
+                5,
+                "euclidean",
+                50,
+                2,
+                0,
+                math.nan,
+                "custom",
+                "2024-01-01 00:00:00",
+            )
+        ]
     )
     run = repo.get_run("run1")
     assert run is not None
@@ -390,6 +473,7 @@ def test_get_run_nan_silhouette_becomes_none() -> None:
 
 
 # --- Contracts -------------------------------------------------------------
+
 
 def test_save_contract_maps_exists_and_fills_defaults() -> None:
     repo, fake = _repo()
@@ -421,8 +505,20 @@ def test_list_contracts_maps_rows() -> None:
     repo, _ = _repo(
         [
             (
-                "addr1x", "address", "my label", 1, 1, "plutusV2", 5_000_000, 2,
-                '[{"name":"A"}]', "done", 500, "2026-06-05 10:00:00.000", 10, 0.42,
+                "addr1x",
+                "address",
+                "my label",
+                1,
+                1,
+                "plutusV2",
+                5_000_000,
+                2,
+                '[{"name":"A"}]',
+                "done",
+                500,
+                "2026-06-05 10:00:00.000",
+                10,
+                0.42,
             )
         ]
     )
@@ -436,6 +532,7 @@ def test_list_contracts_maps_rows() -> None:
 
 
 # --- Jobs ------------------------------------------------------------------
+
 
 def test_create_job_inserts_queued_row() -> None:
     repo, fake = _repo()
@@ -467,8 +564,18 @@ def test_get_job_maps_row() -> None:
     repo, _ = _repo(
         [
             (
-                "job-1", "addr1x", "address", 100, 0, "onboard", "done", "5000 txs", 5000, "",
-                "2026-06-05 10:00:00.000", "2026-06-05 10:05:00.000",
+                "job-1",
+                "addr1x",
+                "address",
+                100,
+                0,
+                "onboard",
+                "done",
+                "5000 txs",
+                5000,
+                "",
+                "2026-06-05 10:00:00.000",
+                "2026-06-05 10:05:00.000",
             )
         ]
     )
