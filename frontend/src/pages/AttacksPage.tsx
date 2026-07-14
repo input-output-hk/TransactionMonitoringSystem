@@ -36,7 +36,7 @@ import { copyToClipboard } from "@/lib/utils/clipboard";
 import { formatTimeAgo } from "@/lib/utils/dates";
 import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
-import { ATTACK_TYPES, type AttackType, type Severity } from "@/mocks/attacks";
+import { ATTACK_TYPES, type AttackType, type Severity } from "@/lib/attacks";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AlertCircle, ArrowUp, Copy } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
@@ -195,7 +195,7 @@ export function AttacksPage() {
 							return (
 								<TableRow
 									key={a.slug}
-									onClick={() => navigate(`/attacks/${a.slug}`)}
+									onClick={() => void navigate(`/attacks/${a.slug}`)}
 									className="cursor-pointer"
 								>
 									<TableCell>
@@ -209,7 +209,7 @@ export function AttacksPage() {
 													e.stopPropagation();
 													// Copy the FULL hash, not the short display id — the
 													// id is just the truncated render.
-													copyToClipboard(a.fullHash);
+													void copyToClipboard(a.fullHash);
 												}}
 											>
 												<Copy className="h-3.5 w-3.5" />
@@ -303,7 +303,7 @@ export function AttacksPage() {
 			<Dialog
 				open={!!detailId}
 				onOpenChange={(open) => {
-					if (!open) navigate("/dashboard");
+					if (!open) void navigate("/dashboard");
 				}}
 			>
 				<DialogContent
@@ -377,7 +377,7 @@ function CriticalAlertCard() {
 	return (
 		<div
 			className={cn(baseCls, interactiveCls)}
-			onClick={latest ? () => navigate(`/attacks/${latest.slug}`) : undefined}
+			onClick={latest ? () => void navigate(`/attacks/${latest.slug}`) : undefined}
 			role={latest ? "button" : undefined}
 			tabIndex={latest ? 0 : undefined}
 			onKeyDown={
@@ -385,7 +385,7 @@ function CriticalAlertCard() {
 					? (e) => {
 							if (e.key === "Enter" || e.key === " ") {
 								e.preventDefault();
-								navigate(`/attacks/${latest.slug}`);
+								void navigate(`/attacks/${latest.slug}`);
 							}
 						}
 					: undefined
@@ -416,7 +416,7 @@ function CriticalAlertCard() {
 						title="Copy"
 						onClick={(e) => {
 							e.stopPropagation();
-							copyToClipboard(latest.fullHash);
+							void copyToClipboard(latest.fullHash);
 						}}
 					>
 						<Copy className="h-3.5 w-3.5" />

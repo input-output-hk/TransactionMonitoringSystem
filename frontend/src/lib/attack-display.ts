@@ -10,7 +10,7 @@ import {
 	SandwichIcon,
 	TokenDustIcon,
 } from "@/components/attack-icons";
-import type { AttackType, Severity } from "@/mocks/attacks";
+import type { AttackType, Severity } from "@/lib/attacks";
 
 export const SEVERITY_VARIANT: Record<
 	Severity,
