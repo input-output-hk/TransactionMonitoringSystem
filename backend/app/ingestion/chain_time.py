@@ -20,8 +20,10 @@ Recall-first: a skewed timestamp must never block ingestion.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, List, Optional, Tuple
+
+from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,16 @@ class SlotTimeConverter:
     """Convert absolute slot numbers to UTC datetimes via era summaries."""
 
     def __init__(
-        self, system_start: datetime, eras: List[Tuple[int, float, float]]
+        self,
+        system_start: datetime,
+        eras: List[Tuple[int, float, float, Optional[int]]],
     ):
-        # eras: (start_slot, start_offset_seconds, slot_length_seconds),
-        # ascending by start_slot; offsets are relative to system_start.
+        # eras: (start_slot, start_offset_seconds, slot_length_seconds,
+        # end_slot or None), ascending by start_slot; offsets are relative
+        # to system_start. end_slot of the LAST era is the node's forecast
+        # horizon; None means unbounded.
         self._system_start = system_start
-        self._eras = sorted(eras)
+        self._eras = sorted(eras, key=lambda e: e[0])
 
     @classmethod
     def from_ogmios(
@@ -66,17 +72,28 @@ class SlotTimeConverter:
         if not era_summaries:
             return None
         try:
-            system_start = datetime.fromisoformat(start_time)
-            if system_start.tzinfo is None:
-                system_start = system_start.replace(tzinfo=timezone.utc)
-            eras: List[Tuple[int, float, float]] = []
+            # Naive-assumed-UTC + aware-to-UTC normalisation lives in the
+            # shared helper (Ogmios emits a Z-suffixed ISO string).
+            system_start = to_aware_utc(datetime.fromisoformat(start_time))
+            eras: List[Tuple[int, float, float, Optional[int]]] = []
             for summary in era_summaries:
                 start = summary["start"]
                 slot_length = _seconds_of(summary["parameters"]["slotLength"])
                 if slot_length <= 0:
                     return None
+                end = summary.get("end")
+                end_slot = (
+                    int(end["slot"])
+                    if isinstance(end, dict) and "slot" in end
+                    else None
+                )
                 eras.append(
-                    (int(start["slot"]), _seconds_of(start["time"]), slot_length)
+                    (
+                        int(start["slot"]),
+                        _seconds_of(start["time"]),
+                        slot_length,
+                        end_slot,
+                    )
                 )
             return cls(system_start, eras)
         except (KeyError, TypeError, ValueError) as e:
@@ -88,13 +105,16 @@ class SlotTimeConverter:
 
     def slot_to_utc(self, slot: Optional[int]) -> Optional[datetime]:
         """UTC wall time at which ``slot`` started, or None when the slot
-        precedes every known era (caller falls back to wall clock).
+        is outside the summaries' coverage (caller falls back to wall
+        clock and refetches).
 
-        Slots beyond the last summary's ``end`` (the node's forecast
-        horizon) extrapolate with the last era's slot length: a block that
-        EXISTS at that slot is by definition in the current era, whose
-        parameters only change at a hard fork, and the summaries are
-        refetched on every reconnect.
+        Slots at or beyond the LAST summary's ``end`` (the node's
+        forecast horizon) return None rather than extrapolating: the era
+        parameters there are not known yet, and a node still syncing an
+        earlier era reports only that era, so extrapolating with its slot
+        length (e.g. Byron's 20s) would drift the timestamp days into the
+        future per replayed day. A last era with no ``end`` converts
+        unbounded.
         """
         if slot is None or slot < 0:
             return None
@@ -106,7 +126,11 @@ class SlotTimeConverter:
                 break
         if era is None:
             return None
-        start_slot, offset_seconds, slot_length = era
+        start_slot, offset_seconds, slot_length, end_slot = era
+        # Contiguous summaries make end == next start for interior eras,
+        # so only the last era's end (the forecast horizon) can trigger.
+        if era is self._eras[-1] and end_slot is not None and slot >= end_slot:
+            return None
         return self._system_start + timedelta(
             seconds=offset_seconds + (slot - start_slot) * slot_length
         )
