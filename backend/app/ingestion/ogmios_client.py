@@ -18,6 +18,7 @@ import websockets
 
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
+from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.input_enrichment import (
     apply_resolved_inputs,
     resolve_input_amounts,
@@ -78,6 +79,10 @@ class OgmiosClient:
         # LocalStateQuery connection for UTxO input resolution (on-demand)
         self._query_ws = None
         self._query_lock = asyncio.Lock()
+
+        # Slot-to-UTC converter for chain-time block timestamps; fetched
+        # once per chain-sync session, None until then (wall-clock fallback).
+        self._slot_time: Optional[SlotTimeConverter] = None
 
         # Telemetry — used by /health and pipeline_state
         self._started_at: datetime = datetime.now(timezone.utc)
@@ -241,6 +246,10 @@ class OgmiosClient:
         # blocking re-scoring of a re-confirmed tx.
         await self._replay_pending_score_repurges()
 
+        # Chain-time source for transactions.timestamp; per-session so a
+        # hard fork's new era summary is picked up on the next reconnect.
+        await self._fetch_slot_time_converter(ws)
+
         sync_point = await postgres.get_sync_point(self.network)
 
         if sync_point:
@@ -280,6 +289,30 @@ class OgmiosClient:
                 await self._handle_roll_forward(result)
             elif direction == "backward":
                 await self._handle_roll_backward(result)
+
+    async def _fetch_slot_time_converter(self, ws) -> None:
+        """Fetch systemStart and era summaries to build the slot-to-UTC
+        converter for block timestamps.
+
+        Best-effort: on any failure the converter stays None and block
+        timestamps fall back to ingestion wall clock (the pre-converter
+        behavior). A degraded timestamp must never block chain sync.
+        """
+        try:
+            start_resp = await self._send_recv(ws, "queryNetwork/startTime")
+            eras_resp = await self._send_recv(ws, "queryLedgerState/eraSummaries")
+            self._slot_time = SlotTimeConverter.from_ogmios(
+                start_resp.get("result"), eras_resp.get("result"),
+            )
+        except Exception as e:
+            self._slot_time = None
+            logger.warning(f"Ogmios [chain]: slot-time queries failed: {e}")
+        if self._slot_time is None:
+            logger.warning(
+                "Ogmios [chain]: no slot-time converter available; block "
+                "timestamps fall back to ingestion wall clock (chain-time "
+                "baselines will skew during catch-up replay)"
+            )
 
     async def _handle_roll_forward(self, result: dict):
         """Process a new block (rollForward).
@@ -375,6 +408,16 @@ class OgmiosClient:
         a tx that fails to parse is logged and skipped, never fatal."""
         normalized_txs: List[NormalizedTransaction] = []
         confirmed_records: List[tuple] = []
+        # transactions.timestamp is CHAIN time: the baselines window on it
+        # (see baselines.py). At tip the slot-derived time agrees with wall
+        # clock within seconds; during catch-up replay it lands history at
+        # its true position instead of collapsing it into "now". Wall clock
+        # only when the converter is unavailable. Lifecycle records below
+        # keep `now`: confirmed_at is operational observation time.
+        block_time = (
+            self._slot_time.slot_to_utc(block_slot) if self._slot_time else None
+        )
+        tx_timestamp = block_time or now
         for block_index, tx_data in enumerate(transactions):
             try:
                 tx = parse_ogmios_transaction(
@@ -382,7 +425,7 @@ class OgmiosClient:
                     block_slot=block_slot,
                     block_hash=block_id,
                     block_height=block_height,
-                    timestamp=now,
+                    timestamp=tx_timestamp,
                     block_index=block_index,
                 )
                 tx.network = self.network
