@@ -10,11 +10,13 @@ indicators of datum-bloat rather than general value-field bloat.
 
 Scoring is per-UTxO; the transaction score is the max across all outputs.
 
-Sub-scores (Polimi Section 4.3.3):
-  datum_bytes          (0.40): absolute byte size, per-script baseline
-  datum_ratio          (0.35): datum_bytes / utxo_total_bytes, fixed anchors
-  value_cbor_bytes_inv (0.15): inverted; lean Value field = datum-bloat signature
-  sender_recurrence    (0.10): repeated bloated-datum deposits
+Sub-scores (Polimi Section 4.3.3; weights live in config/detection.yaml
+under large_datum.weights and are quoted here only for orientation):
+  datum_bytes    (0.50): absolute byte size, per-script baseline
+  datum_ratio    (0.35): datum_bytes / utxo_total_bytes, fixed anchors
+  value_cbor_inv (0.05): inverted; lean Value field = datum-bloat signature
+  recurrence     (0.10): repeated bloated-datum deposits (stubbed to 0 in
+                         code until entity clustering ships)
 """
 
 import logging
@@ -27,7 +29,12 @@ from app.analysis.scorer_config import (
     fraction_of_limit as _fraction_of_limit,
     resolved_or_bootstrap as _resolve,
 )
-from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
+from app.analysis.scorers.base import (
+    BaseScorer,
+    ScorerResult,
+    finalise_score,
+    reduce_to_best,
+)
 from app.analysis.scorers.multiple_sat import _payment_credential
 from app.analysis import features as feat_mod
 
@@ -184,11 +191,7 @@ class LargeDatumScorer(BaseScorer):
         per_script = _per_script_datum_bytes(outputs, datums)
         max_script_datum_bytes = max(per_script.values(), default=0)
 
-        best_score = 0.0
-        best_sub = {}
-        best_reasons = []
-        best_bl_source = "missing"
-        best_evidence: Dict[str, Any] = {}
+        candidates = []
 
         for out in outputs:
             addr = out.get("address", "")
@@ -198,24 +201,18 @@ class LargeDatumScorer(BaseScorer):
             if datum_flag == 0 or not _is_bloat_datum(out, datum_bytes):
                 continue
 
-            result = self._score_utxo(
-                out, addr, datum_bytes, datum_flag, network, max_script_datum_bytes,
+            candidates.append(
+                self._score_utxo(
+                    out, addr, datum_bytes, datum_flag, network, max_script_datum_bytes,
+                )
             )
-            if result.score > best_score:
-                best_score = result.score
-                best_sub = result.sub_scores
-                best_reasons = result.reasons
-                best_bl_source = result.baseline_source
-                best_evidence = result.evidence
 
-        if best_sub:
-            return ScorerResult(
-                score=best_score,
-                sub_scores=best_sub,
-                reasons=best_reasons,
-                baseline_source=best_bl_source,
-                evidence=best_evidence,
-            )
+        best = reduce_to_best(candidates)
+        # Deliberately keyed on sub_scores (not score) to preserve the
+        # historical contract: only a winner that produced a sub-score
+        # breakdown counts as a per-output finding.
+        if best.sub_scores:
+            return best
 
         # Aggregate-only / hash-only engagement path: gate fired because the
         # per-script aggregate crossed `aggregate_engagement_min` or a
