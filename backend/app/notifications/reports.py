@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 from urllib.parse import urlencode
 
+from app.analysis.features import LOVELACE_PER_ADA
 from app.config import settings
 from app.db import archive_queries, clickhouse_scores
 from app.models.transaction import AttackClass
@@ -27,8 +28,6 @@ logger = logging.getLogger(__name__)
 # Low -> high; a band "at or above" min_band is a suffix of this list.
 _BAND_ORDER = ["Informational", "Moderate", "High", "Critical"]
 _CLASS_NAMES = [c.value for c in AttackClass]
-
-_LOVELACE_PER_ADA = 1_000_000
 
 # CSV columns + order — must match the web interface's manual export
 # (frontend AlertCsvRow / toCsvRow) so the automated report is the same format.
@@ -264,7 +263,7 @@ def _alert_csv_row(r: Dict[str, Any]) -> Dict[str, Any]:
         "max_class": max_class,
         "max_score": r.get("max_score", 0.0),
         "risk_band": r.get("risk_band", ""),
-        "fee_ada": (fee / _LOVELACE_PER_ADA) if fee is not None else "",
+        "fee_ada": (fee / LOVELACE_PER_ADA) if fee is not None else "",
         "output_count": output_count if output_count is not None else "",
         "score_token_dust": r.get("token_dust", -1),
         "score_large_value": r.get("large_value", -1),
