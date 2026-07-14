@@ -3,8 +3,10 @@
 import os
 
 import pytest
-from app.analysis.normalise import BAND_CRITICAL_THRESHOLD
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, BAND_HIGH_THRESHOLD
 from app.analysis.scorers.large_datum import LargeDatumScorer, _MIN_DATUM_BYTES
+
+from tests.analysis.scorers.conftest import features_for_outputs as _features
 
 
 @pytest.fixture
@@ -33,10 +35,6 @@ def _low_entropy_datum(nbytes):
 def _high_entropy_datum(nbytes):
     """Structured/legit datum: bytes cycling 0x00-0xFF (entropy ~8 bits/byte)."""
     return bytes((i % 256) for i in range(nbytes)).hex()
-
-
-def _features(outputs):
-    return {"tx_hash": "ld01", "network": "preprod", "raw_data": {"outputs": outputs}}
 
 
 class TestGate:
@@ -152,7 +150,7 @@ class TestScore:
         # byte-only gate caused and the entropy discriminator fixes.
         out = _out(SCRIPT, lovelace=2_000_000, datum=_low_entropy_datum(7258))
         result = scorer.score(_features([out]))
-        assert result.score >= 60.0
+        assert result.score >= BAND_HIGH_THRESHOLD
 
     def test_high_entropy_large_datum_no_finding(self, scorer):
         # A large high-entropy (structured) datum is not bloat; scoring it

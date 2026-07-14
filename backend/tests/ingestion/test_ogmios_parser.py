@@ -3,7 +3,20 @@
 The parser had zero test coverage; the audit found three classes of bug
 (v6 value-shape misses, phase-2 validation ignored, inflated counts) that
 fixture tests would have caught. These encode the corrected semantics.
+
+Malformed-payload coverage is split into two tiers that pin today's
+behavior:
+
+- Tolerated shapes (TestMalformedPayloads, TestIgnoredFields): the parser
+  degrades to safe defaults (0 / None / empty) instead of raising.
+- Hostile shapes (TestHostilePayloadsRaise): the parser DOES raise. The
+  per-tx except-and-drop in ogmios_client (around the
+  parse_ogmios_transaction call) is what keeps ingestion alive for these,
+  so any change that removes either the raise or the catch must show up
+  here first.
 """
+
+import pytest
 
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
 
@@ -158,3 +171,190 @@ class TestV5Shapes:
         v6 = parse_ogmios_transaction(_v6_tx(deposit={"ada": {"lovelace": 2_000_000}}))
         assert v5.deposit == 2_000_000
         assert v6.deposit == 2_000_000
+
+    def test_v5_inline_input_reference(self):
+        # v5 encodes the input's source tx as a bare string, not a dict.
+        tx = parse_ogmios_transaction(
+            _v6_tx(inputs=[{"transaction": "cd" * 32, "index": 3}])
+        )
+        assert tx.inputs[0].tx_hash == "cd" * 32
+        assert tx.inputs[0].index == 3
+
+
+class TestMalformedPayloads:
+    """Shapes a flaky or hostile node could emit that the parser tolerates.
+
+    Every case must produce a NormalizedTransaction with safe defaults,
+    never an exception: a single bad tx must not require the client-level
+    drop path when the field-level degradation can absorb it.
+    """
+
+    def test_empty_payload(self):
+        tx = parse_ogmios_transaction({})
+        assert tx.tx_hash == ""
+        assert tx.fee == 0
+        assert tx.inputs == []
+        assert tx.outputs == []
+        assert tx.script_valid is True
+        assert tx.metadata is None
+
+    def test_missing_id_yields_empty_hash(self):
+        body = _v6_tx()
+        del body["id"]
+        tx = parse_ogmios_transaction(body)
+        assert tx.tx_hash == ""
+        # The rest of the tx still parses; only the identity is lost.
+        assert tx.fee == 200_000
+        assert tx.input_count == 2
+
+    @pytest.mark.parametrize(
+        "bad_fee",
+        ["lots", None, {}, {"ada": {"lovelace": "abc"}}, {"ada": "abc"}],
+        ids=["string", "none", "empty-dict", "non-numeric", "flat-garbage"],
+    )
+    def test_garbage_fee_degrades_to_zero(self, bad_fee):
+        tx = parse_ogmios_transaction(_v6_tx(fee=bad_fee))
+        assert tx.fee == 0
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        ["zilch", None, {}, {"ada": {"lovelace": "abc"}}],
+        ids=["string", "none", "empty-dict", "non-numeric"],
+    )
+    def test_garbage_output_value_degrades_to_zero(self, bad_value):
+        tx = parse_ogmios_transaction(
+            _v6_tx(outputs=[{"address": "addr_test1qq", "value": bad_value}])
+        )
+        assert tx.output_count == 1
+        assert tx.outputs[0].amount == 0
+        assert tx.outputs[0].assets is None
+        assert tx.total_output_value == 0
+
+    def test_non_dict_metadata_degrades_to_none(self):
+        tx = parse_ogmios_transaction(_v6_tx(metadata="not-a-dict"))
+        assert tx.metadata is None
+
+    def test_metadata_null_labels_degrades_to_none(self):
+        tx = parse_ogmios_transaction(_v6_tx(metadata={"labels": None}))
+        assert tx.metadata is None
+
+    def test_metadata_without_labels_wrapper_passes_through(self):
+        # v5 puts the label map at the top level with no "labels" key.
+        tx = parse_ogmios_transaction(
+            _v6_tx(metadata={"674": {"json": {"msg": ["x"]}}})
+        )
+        assert tx.metadata == {"674": {"msg": ["x"]}}
+
+    def test_metadata_scalar_label_content_kept_raw(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(metadata={"labels": {"674": "raw-string"}})
+        )
+        assert tx.metadata == {"674": "raw-string"}
+
+    def test_garbage_deposit_degrades_to_zero(self):
+        # Sentinel contract: an unparseable deposit becomes a known 0,
+        # while an absent deposit stays None (never observed).
+        garbage = parse_ogmios_transaction(_v6_tx(deposit="nope"))
+        body = _v6_tx()
+        body.pop("deposit", None)
+        absent = parse_ogmios_transaction(body)
+        assert garbage.deposit == 0
+        assert absent.deposit is None
+
+    def test_unknown_spends_value_treated_as_valid(self):
+        # Recall-first: an unrecognized validation marker must not divert
+        # the tx onto the failed-tx path where its outputs would vanish.
+        tx = parse_ogmios_transaction(_v6_tx(spends="banana"))
+        assert tx.script_valid is True
+        assert tx.output_count == 2
+
+    def test_failed_tx_with_null_collateral_return(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(spends="collaterals", collateralReturn=None)
+        )
+        assert tx.script_valid is False
+        assert tx.output_count == 0
+
+    def test_input_missing_index_defaults_to_zero(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(inputs=[{"transaction": {"id": "cd" * 32}}])
+        )
+        assert tx.inputs[0].index == 0
+
+    def test_input_missing_transaction_yields_empty_hash(self):
+        tx = parse_ogmios_transaction(_v6_tx(inputs=[{"index": 1}]))
+        assert tx.inputs[0].tx_hash == ""
+        assert tx.inputs[0].index == 1
+
+
+class TestIgnoredFields:
+    """Fields the parser deliberately does not read must never break it.
+
+    Mint/burn is consumed downstream from raw_data by the feature
+    extractor; withdrawals and certificates are unparsed today (tracked
+    as Ticket F). These pin that their presence is harmless.
+    """
+
+    def test_mint_and_burn_ignored(self):
+        minted = parse_ogmios_transaction(
+            _v6_tx(mint={POLICY: {"544f4b454e": 5}})
+        )
+        burned = parse_ogmios_transaction(
+            _v6_tx(mint={POLICY: {"544f4b454e": -5}})
+        )
+        # Preserved verbatim in raw_data for the feature extractor.
+        assert minted.raw_data["mint"] == {POLICY: {"544f4b454e": 5}}
+        assert burned.raw_data["mint"] == {POLICY: {"544f4b454e": -5}}
+
+    def test_withdrawals_ignored(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(withdrawals={"stake1xyz": {"ada": {"lovelace": 1_000}}})
+        )
+        assert tx.tx_hash == "ab" * 32
+        assert tx.total_output_value == 4_500_000
+
+    def test_certificates_ignored(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(certificates=[{"type": "stakeDelegation"}])
+        )
+        assert tx.tx_hash == "ab" * 32
+
+    def test_unknown_keys_ignored(self):
+        tx = parse_ogmios_transaction(
+            _v6_tx(votingProcedures={"x": 1}, proposals=[{"y": 2}])
+        )
+        assert tx.tx_hash == "ab" * 32
+
+
+class TestHostilePayloadsRaise:
+    """Shapes the parser does NOT absorb: it raises, and the per-tx
+    except-and-drop in ogmios_client is the safety net. If one of these
+    starts passing, the parser grew tolerance; move the case up to
+    TestMalformedPayloads rather than deleting it.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_id", [{"weird": 1}, 12345], ids=["dict", "int"]
+    )
+    def test_non_string_id_raises(self, bad_id):
+        with pytest.raises(Exception):
+            parse_ogmios_transaction(_v6_tx(id=bad_id))
+
+    @pytest.mark.parametrize(
+        "field", ["inputs", "outputs", "references", "collaterals"]
+    )
+    def test_explicit_null_collection_raises(self, field):
+        # JSON null (as opposed to an absent key) defeats the .get(...)
+        # defaults and the parser iterates None.
+        with pytest.raises(TypeError):
+            parse_ogmios_transaction(_v6_tx(**{field: None}))
+
+    def test_null_input_entry_fields_raise(self):
+        with pytest.raises(Exception):
+            parse_ogmios_transaction(
+                _v6_tx(inputs=[{"transaction": {"id": None}, "index": None}])
+            )
+
+    def test_non_dict_output_entry_raises(self):
+        with pytest.raises(AttributeError):
+            parse_ogmios_transaction(_v6_tx(outputs=["garbage"]))
