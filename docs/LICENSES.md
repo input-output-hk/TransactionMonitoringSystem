@@ -11,7 +11,7 @@ Licenses were resolved from installed package metadata, not inferred from names:
 - Python (backend and clustering sidecar): read from each installed distribution's metadata, preferring the PEP 639 `License-Expression` (SPDX), then `License ::` classifiers, then the `License` field, across the fully installed runtime and dev trees. Ambiguous or empty cases were confirmed against the bundled `LICENSE` file.
 - Frontend: resolved with `pnpm licenses list` over the installed `node_modules`, with the few `SEE LICENSE IN` and no-field packages confirmed from their bundled license text.
 
-Coverage: the backend `requirements.txt` plus `requirements-dev.txt` tree (56 installed distributions), the frontend `package.json` tree (573 packages, including the Vitest test harness), and the clustering sidecar's runtime plus `[dev]` tree (55 third-party packages). The sidecar's optional `[notebook]` extra (matplotlib, jupyter) is not shipped in any image and is not covered here: matplotlib and the jupyter metapackage are themselves permissive (BSD or PSF style), but their large transitive trees should be reviewed before that extra is ever shipped.
+Coverage: the backend `pyproject.toml` tree (runtime dependencies plus the dev group) (56 installed distributions), the frontend `package.json` tree (573 packages, including the Vitest test harness), and the clustering sidecar's runtime plus `[dev]` tree (55 third-party packages). The sidecar's optional `[notebook]` extra (matplotlib, jupyter) is not shipped in any image and is not covered here: matplotlib and the jupyter metapackage are themselves permissive (BSD or PSF style), but their large transitive trees should be reviewed before that extra is ever shipped.
 
 ## Weak-copyleft and attribution dependencies
 
@@ -20,17 +20,17 @@ These are the only dependencies not under Apache-2.0 or a more permissive licens
 | Dependency | License | Subsystem | Used at | How it is pulled in | Obligation impact |
 |---|---|---|---|---|---|
 | `certifi` | MPL-2.0 | backend, clustering | runtime | Transitive via httpx, requests, urllib3, clickhouse-connect. A bundle of CA certificates. | MPL-2.0 copyleft is per file and triggers only on modifying certifi's own files. It is used unmodified, so no obligation extends to this project. |
-| `pathspec` | MPL-2.0 | backend, clustering | dev only | Transitive via the `black` / `mypy` / `ruff` toolchain. Not present in any runtime image. | Same per-file copyleft, used unmodified, and not redistributed in the product. |
+| `pathspec` | MPL-2.0 | backend, clustering | dev only | Transitive via the `mypy` / `ruff` toolchain. Not present in any runtime image. | Same per-file copyleft, used unmodified, and not redistributed in the product. |
 | `lightningcss` (and its platform binary) | MPL-2.0 | frontend | build only | Transitive via Tailwind CSS v4 / Vite. A Rust CSS transformer run during the build. | Per-file copyleft, used unmodified. Runs at build time and is not part of the shipped JS bundle. |
 | `caniuse-lite` | CC-BY-4.0 | frontend | build only | Transitive via `browserslist` / autoprefixer. A browser-support dataset, not code. | CC-BY-4.0 requires attribution only. It is data consulted at build time, not redistributed as part of the app. |
 
 The external **Ogmios** service is MPL-2.0 as well; see [External services](#external-services).
 
-If a strict "100 percent Apache-2.0 or more permissive" bar is ever required, note that these are not cheaply removable: `pathspec` is a dependency of both `black` and `mypy`, so it remains as long as static type checking is kept, and `certifi` would have to be replaced by pointing the Python HTTP clients at the system trust store. `lightningcss` and `caniuse-lite` are intrinsic to the Tailwind v4 and browserslist build chains and are not practically removable. None of this is necessary for an Apache-2.0 release: MPL-2.0 and CC-BY-4.0 are OSI and FSF approved and are compatible with redistributing this project under Apache-2.0.
+If a strict "100 percent Apache-2.0 or more permissive" bar is ever required, note that these are not cheaply removable: `pathspec` is a dependency of `mypy`, so it remains as long as static type checking is kept, and `certifi` would have to be replaced by pointing the Python HTTP clients at the system trust store. `lightningcss` and `caniuse-lite` are intrinsic to the Tailwind v4 and browserslist build chains and are not practically removable. None of this is necessary for an Apache-2.0 release: MPL-2.0 and CC-BY-4.0 are OSI and FSF approved and are compatible with redistributing this project under Apache-2.0.
 
-## Backend Python libraries (`requirements.txt` and `requirements-dev.txt`)
+## Backend Python libraries (root `pyproject.toml`)
 
-Direct dependencies, with versions as pinned in the requirements files (the test and development tools live in `requirements-dev.txt` and are not installed in the production image):
+Direct dependencies, with versions as pinned in the root `pyproject.toml` (the test and development tools live in the `dev` dependency group and are not installed in the production image):
 
 | Package | Version | License | SPDX identifier | Category |
 |---|---|---|---|---|
@@ -52,7 +52,6 @@ Direct dependencies, with versions as pinned in the requirements files (the test
 | pytest | 9.1.1 | MIT | `MIT` | Test runner |
 | pytest-asyncio | 1.4.0 | Apache 2.0 | `Apache-2.0` | Async test support |
 | pytest-cov | 7.1.0 | MIT | `MIT` | Coverage reporting |
-| black | 26.5.1 | MIT | `MIT` | Code formatter |
 | ruff | 0.15.18 | MIT | `MIT` | Linter |
 | mypy | 2.1.0 | MIT | `MIT` | Static type checker |
 
@@ -142,7 +141,7 @@ These run as separate containers and are not linked or compiled into the product
 
 | Image | Version | License | Notes |
 |---|---|---|---|
-| `python` | 3.12-slim (backend), 3.13-slim (clustering) | PSF-2.0 | Permissive; equivalent to MIT for distribution purposes |
+| `python` | 3.13-slim (backend and clustering) | PSF-2.0 | Permissive; equivalent to MIT for distribution purposes |
 | `node` | 22-alpine (frontend build stage) | MIT | Node.js core is MIT; bundled OpenSSL etc. are permissive |
 | `postgres` | 18-alpine | PostgreSQL License | OSI-approved permissive (BSD-style, 2 clauses) |
 | `clickhouse/clickhouse-server` | 26.1.3 | Apache 2.0 | |

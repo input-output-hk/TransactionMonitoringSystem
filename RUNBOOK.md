@@ -84,13 +84,11 @@ docker compose up -d
 docker compose ps
 
 # Install Python dependencies (first time only)
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+uv sync
 
 # Start the application (defaults to preprod; port comes from .env.preprod)
 cd backend
-python run.py
+uv run python run.py
 
 # To run against preview instead (port comes from .env.preview):
 TMS_ENV=preview python run.py

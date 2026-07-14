@@ -24,19 +24,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+          python-version: "3.13"
+      - name: Sync dependencies
+        run: uv sync
       - name: Recall gate (attack-must-fire tests)
         # Run first and on its own so a recall regression is unambiguous.
         working-directory: backend
-        run: python -m pytest tests/analysis/ -q
+        run: uv run pytest tests/analysis/ -q
       - name: Full backend suite
         working-directory: backend
-        run: python -m pytest tests/ -q
+        run: uv run pytest tests/ -q
 
   live-db:
     # The hermetic suite mocks every CH/PG call, which has let ClickHouse
@@ -79,12 +81,14 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+          python-version: "3.13"
+      - name: Sync dependencies
+        run: uv sync
       - name: Live-DB tests (migrations + representative queries)
         working-directory: backend
         env:
@@ -96,7 +100,7 @@ jobs:
           POSTGRES_DB: tms_db
           CLICKHOUSE_HOST: localhost
           CLICKHOUSE_PORT: "9000"
-        run: python -m pytest tests/live_db/ -q
+        run: uv run pytest tests/live_db/ -q
 
   frontend:
     name: Frontend (lint + build)

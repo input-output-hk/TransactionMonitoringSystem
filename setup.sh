@@ -5,24 +5,16 @@ set -e
 
 echo "🔷 Setting up Cardano Transaction Monitor..."
 
-# Check Python version
-python_version=$(python3 --version 2>&1 | awk '{print $2}')
-echo "Python version: $python_version"
-
-# Create virtual environment
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
+# Check uv is available (manages the .venv and Python 3.13 toolchain)
+if ! command -v uv >/dev/null 2>&1; then
+    echo "❌ uv is required (https://docs.astral.sh/uv/). Install it, e.g.:"
+    echo "   brew install uv   # or: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
 fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install --upgrade pip
-pip install -r requirements.txt
+# Create .venv and install dependencies from uv.lock
+echo "Installing dependencies (uv sync)..."
+uv sync
 
 # Create .env file if it doesn't exist
 if [ ! -f ".env" ]; then
@@ -39,7 +31,6 @@ echo ""
 echo "✅ Setup complete!"
 echo ""
 echo "To run the application:"
-echo "  source venv/bin/activate"
 echo "  cd backend"
-echo "  python run.py"
+echo "  uv run python run.py"
 echo ""

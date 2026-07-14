@@ -7,7 +7,7 @@ Real-time transaction monitoring system for the Cardano blockchain. Ingests bloc
 ## Prerequisites
 
 - A running Cardano node + Ogmios v6: either external infrastructure (see [RUNBOOK.md §Prerequisites](RUNBOOK.md#prerequisites)) or the bundled local stack (see [Ingestion modes](#ingestion-modes) below)
-- Python 3.12+ (the optional clustering sidecar in `services/clustering/` requires Python 3.13+)
+- Python 3.13+ (managed via [uv](https://docs.astral.sh/uv/); the clustering sidecar uses the same version)
 - Docker and Docker Compose
 
 ## Ingestion modes
@@ -62,10 +62,9 @@ TMS_ENV=preview docker compose --profile app up -d    # preview, API on 8001
 For backend work you can run the API on the host against the Compose databases:
 
 ```bash
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+uv sync                                            # .venv from uv.lock (Python 3.13)
 docker compose up -d postgres clickhouse mailpit   # databases only
-cd backend && python run.py                         # or ./scripts/start.sh
+cd backend && uv run python run.py                 # or ./scripts/start.sh
 ```
 
 `run.py` binds uvicorn to `settings.API_PORT`. A direct `uvicorn app.main:app` invocation needs `--port` on the CLI, because uvicorn does not read pydantic settings.
