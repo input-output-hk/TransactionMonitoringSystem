@@ -1,12 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchWithAuth } from "./fetch";
 
-export type HealthState = "OK" | "DEGRADED" | "DOWN" | string;
+/**
+ * Known values first, but the backend may grow new states; `string & {}`
+ * keeps the union open for those without erasing the literals (a bare
+ * `| string` would swallow them, and the type-checked lint flags that).
+ */
+type OpenEnum<Known extends string> = Known | (string & {});
+
+export type HealthState = OpenEnum<"OK" | "DEGRADED" | "DOWN">;
 
 export type OgmiosHealth = {
 	pipeline_state: HealthState;
-	chain_sync: "connected" | "disconnected" | string;
-	mempool_monitor: "connected" | "disconnected" | string;
+	chain_sync: OpenEnum<"connected" | "disconnected">;
+	mempool_monitor: OpenEnum<"connected" | "disconnected">;
 	circuit_breaker_chain: string;
 	circuit_breaker_mempool: string;
 	last_processed_slot: number;
@@ -17,13 +24,13 @@ export type OgmiosHealth = {
 };
 
 export type ClusteringHealth = {
-	state: "ok" | "stale" | "absent" | "error" | string;
+	state: OpenEnum<"ok" | "stale" | "absent" | "error">;
 	last_scored_at: string | null;
 	age_seconds?: number;
 };
 
 export type HealthDetail = {
-	status: "healthy" | "degraded" | "down" | string;
+	status: OpenEnum<"healthy" | "degraded" | "down">;
 	network: string;
 	connections: number;
 	pipeline_state: HealthState;
@@ -60,7 +67,7 @@ export type SystemModule = { name: string; online: boolean };
 export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 	if (!h) return [];
 	const o = h.ogmios;
-	return [
+	const modules: SystemModule[] = [
 		{ name: "Pipeline", online: h.pipeline_state === "OK" },
 		{ name: "Chain Sync", online: o.chain_sync === "connected" },
 		{ name: "Mempool Monitor", online: o.mempool_monitor === "connected" },
@@ -71,4 +78,12 @@ export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 				o.circuit_breaker_mempool === "CLOSED",
 		},
 	];
+	// The row appears only when the sidecar module is enabled, so a plain
+	// deployment isn't cluttered with a permanently-offline entry. "stale",
+	// "absent" and "error" all render as offline: a sidecar that stopped
+	// scoring is exactly what this row exists to make visible.
+	if (h.clustering_enabled) {
+		modules.push({ name: "Clustering", online: h.clustering?.state === "ok" });
+	}
+	return modules;
 }
