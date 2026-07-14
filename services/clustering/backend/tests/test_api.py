@@ -679,3 +679,23 @@ def test_tx_label_routes_canonicalize_tx_hash_case() -> None:
     r = client.post(f"/api/contracts/addr1a/transactions/{lower_tx.upper()}/clear-label", json={})
     assert r.status_code == 200
     assert repo.clear_calls == [("addr1a", [lower_tx])]
+
+
+def test_wire_timestamps_are_z_suffixed_iso() -> None:
+    """UtcIsoStr contract: storage's 'YYYY-MM-DD HH:MM:SS' strings reach the
+    wire as Z-suffixed ISO, matching the host API's format, and an already
+    Z-suffixed value is not double-suffixed on re-validation."""
+    import re
+
+    repo = FakeApiRepo(jobs=[_job_row(job_id="j-z")])
+    client = _client(repo)
+    body = client.get("/api/v1/jobs").json()
+    z_iso = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+    assert z_iso.match(body["data"][0]["created_at"]), body["data"][0]["created_at"]
+    assert z_iso.match(body["data"][0]["updated_at"])
+
+    from app.api.schemas import _iso_z
+
+    assert _iso_z("2026-01-01 00:00:00") == "2026-01-01T00:00:00Z"
+    assert _iso_z("2026-01-01T00:00:00Z") == "2026-01-01T00:00:00Z"
+    assert _iso_z("2026-01-01T02:00:00+02:00") == "2026-01-01T02:00:00+02:00"

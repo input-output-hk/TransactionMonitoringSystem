@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.utils.datetime_utils import to_aware_utc
+from app.utils.datetime_utils import format_iso_utc
 
 # Decimal places for the normalised [0,1] feature values surfaced in a payload.
 # Shared by both alert builders so the two sources round contributing_features
@@ -30,7 +30,7 @@ def _utc_isoformat(dt: Any) -> str:
     alert sources (the scorer path is already offset-aware) and a consumer can't
     misread a bare naive string as local time. Non-datetimes stringify."""
     if isinstance(dt, datetime):
-        return to_aware_utc(dt).isoformat()
+        return format_iso_utc(dt) or ""
     return str(dt or "")
 
 

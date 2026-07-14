@@ -27,6 +27,7 @@ from app.ingestion.mempool_monitor import MempoolMonitor
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
 from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
+from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -730,7 +731,7 @@ class OgmiosClient:
             {
                 "eventType": "TX_ROLLED_BACK",
                 "network": self.network,
-                "observedAt": datetime.now(UTC).isoformat(),
+                "observedAt": format_iso_utc(datetime.now(UTC)),
                 "rollbackPoint": {"slot": rollback_slot, "id": rollback_id},
             }
         )
@@ -858,7 +859,7 @@ class OgmiosClient:
             "circuit_breaker_chain": self._circuit_breaker_chain.state.value,
             "circuit_breaker_mempool": self.mempool.circuit_state,
             "last_processed_slot": self._last_processed_slot,
-            "last_ogmios_msg_at": self._last_msg_at.isoformat() if self._last_msg_at else None,
+            "last_ogmios_msg_at": format_iso_utc(self._last_msg_at),
             "sync_lag_slots": sync_lag,
             # 1 slot ≈ 1 s on Cardano (mainnet, preprod, and preview all use 1s slot length)
             "sync_lag_seconds": sync_lag,

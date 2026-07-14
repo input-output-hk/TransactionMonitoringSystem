@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from app.auth import verify_api_key
 from app.config import DEFAULT_DEV_POSTGRES_PASSWORD, settings
 from app.csrf import CSRFMiddleware
-from app.utils.datetime_utils import to_aware_utc
+from app.utils.datetime_utils import format_iso_utc, to_aware_utc
 
 # Configure logging before importing modules that emit log records at import time
 # (e.g. app.analysis.scorer_config which logs the config file it loaded).
@@ -122,7 +122,7 @@ async def broadcast_lifecycle_event(event: dict):
         {
             "type": "lifecycle",
             "data": event,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": format_iso_utc(datetime.now(UTC)),
         }
     )
 

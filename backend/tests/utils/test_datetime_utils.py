@@ -35,3 +35,32 @@ def test_naive_and_aware_are_comparable_after_normalisation():
     naive = to_aware_utc(datetime(2026, 6, 1, 12, 0, 0))
     aware = to_aware_utc(datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC))
     assert aware < naive
+
+
+class TestUtcDateTime:
+    """The pydantic wire type: every serialization lands on '...Z'."""
+
+    def _dump(self, value):
+        from pydantic import BaseModel
+
+        from app.utils.datetime_utils import UtcDateTime
+
+        class M(BaseModel):
+            t: UtcDateTime | None = None
+
+        import json
+
+        return json.loads(M(t=value).model_dump_json())["t"]
+
+    def test_naive_assumed_utc(self):
+        assert self._dump(datetime(2026, 7, 15, 12, 30, 45)) == "2026-07-15T12:30:45Z"
+
+    def test_aware_utc(self):
+        assert self._dump(datetime(2026, 7, 15, 12, 30, 45, tzinfo=UTC)) == "2026-07-15T12:30:45Z"
+
+    def test_offset_converted(self):
+        plus2 = timezone(timedelta(hours=2))
+        assert self._dump(datetime(2026, 7, 15, 14, 30, 45, tzinfo=plus2)) == "2026-07-15T12:30:45Z"
+
+    def test_none_passes_through(self):
+        assert self._dump(None) is None
