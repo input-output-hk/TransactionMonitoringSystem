@@ -21,6 +21,7 @@ data model, API surface, and design.
 | [data-model.md](data-model.md) | The `tms_clustering` ClickHouse schema, table engines, `ReplacingMergeTree` + `FINAL` semantics, the cross-database feature read, timestamps, migrations, idempotency. |
 | [api.md](api.md) | The module's REST API reference (reached from the SPA via the `/api/clustering` proxy): every endpoint, request/response shapes, auth, error model, examples. |
 | [online-classification-design.md](online-classification-design.md) | The fit/score split that replaces batch-only DBSCAN, the re-fit/windowing strategy, and the multi-tenant execution model behind the scheduler's continuous classification. |
+| [operations.md](operations.md) | Running the module securely: enabling authentication (API key, signed model blobs, the REQUIRE_AUTH boot guard), CORS, and the auth-exempt health probes. |
 
 ## At a glance
 

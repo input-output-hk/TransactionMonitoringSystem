@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     # avoid an unbounded n x n distance-matrix allocation.
     max_graph_txs: int = Field(default=5000, alias="MAX_GRAPH_TXS")
 
+    # Sample cap for the silhouette quality score. Exact silhouette is O(n^2)
+    # in the scored points and runs once per grid config at every fit and
+    # evaluation, so an uncapped 50k-tx window (clustering_window_txs) would
+    # cost ~2.5e9 pairwise distances per config, times ~18 grid configs. Above
+    # this many non-noise points the score is estimated on a fixed-seed
+    # subsample (sklearn's sample_size): 2000 points keep each evaluation at
+    # ~4e6 distances while the sampling error stays far below the score gaps
+    # the parameter recommender discriminates. 0 disables sampling (exact
+    # score; small windows and tests).
+    silhouette_sample_size: int = Field(default=2000, ge=0, alias="SILHOUETTE_SAMPLE_SIZE")
+
     # Drift trigger for the online classifier. The "online-noise rate" is the
     # fraction of recently-classified txs that fall outside every frozen cluster
     # (cluster_id == -1). Above this the frozen model is treated as stale and the
