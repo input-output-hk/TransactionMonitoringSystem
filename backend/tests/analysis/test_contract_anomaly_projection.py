@@ -651,7 +651,7 @@ def test_list_filter_rejects_unknown_attack_class(client, monkeypatch):
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
     _bind_list_stubs(monkeypatch, page_rows=[], total=0, flagged={}, by_hashes=[])
     r = client.get("/api/v1/analysis/results?network=preprod&attack_class=not_a_class")
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 # --- Stats / timeseries contract_anomaly augmentation ------------------------

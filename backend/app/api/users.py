@@ -19,14 +19,16 @@ import logging
 import uuid
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, status
 
+from app.api._params import PageLimit, PageOffset
 from app.auth.deps import require_admin
 from app.auth.email import send_magic_link
 from app.auth.models import User, UserCreate
 from app.auth.sessions import delete_all_sessions_for_user
 from app.auth.tokens import issue_token
 from app.db.postgres import get_connection
+from app.models.common import ListResponse
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +72,16 @@ async def _issue_invite_email(
 # ── routes ──────────────────────────────────────────────────────────────
 
 
-@router.get("")
+@router.get("", response_model=ListResponse[User])
 async def list_users(
     _admin: dict = Depends(require_admin),
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
-) -> dict:
+    limit: PageLimit = 100,
+    offset: PageOffset = 0,
+):
     """Return paginated users, newest first.
 
-    Response shape matches the other listing endpoints (``/api/archive``,
-    ``/api/analysis/results``): ``{count, total, data}`` so the frontend
+    Response shape matches the other listing endpoints (``/api/v1/archive``,
+    ``/api/v1/analysis/results``): ``{count, total, data}`` so the frontend
     paginator can show "Total Users: N" alongside the current page.
     """
     async with get_connection() as conn:

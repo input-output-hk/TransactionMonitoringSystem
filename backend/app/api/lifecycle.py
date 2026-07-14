@@ -4,10 +4,11 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Security
 
-from app.api._params import NetworkParam
+from app.api._params import NetworkParam, PageLimit, PageOffset
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import postgres
+from app.models.common import ListResponse
 from app.models.transaction import (
     LifecycleStatus,
     LifecycleSummaryStats,
@@ -50,7 +51,11 @@ async def get_lifecycle(tx_id: str) -> TransactionLifecycleEvent:
     return TransactionLifecycleEvent(**row)
 
 
-@router.get("", dependencies=[Security(verify_api_key)])
+@router.get(
+    "",
+    dependencies=[Security(verify_api_key)],
+    response_model=ListResponse[TransactionLifecycleEvent],
+)
 async def list_lifecycles(
     status: LifecycleStatus | None = Query(
         None,
@@ -61,21 +66,23 @@ async def list_lifecycles(
         ),
     ),
     network: NetworkParam = None,
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
+    limit: PageLimit = 100,
+    offset: PageOffset = 0,
 ):
     """Query lifecycle records, optionally filtered by status. Returns all records when status is omitted."""
     query_network = network or settings.CARDANO_NETWORK
     try:
+        status_value = status.value if status else None
         if status:
             rows = await postgres.get_lifecycles_by_status(
-                status=status.value, network=query_network, limit=limit, offset=offset
+                status=status_value, network=query_network, limit=limit, offset=offset
             )
         else:
             rows = await postgres.get_all_lifecycles(
                 network=query_network, limit=limit, offset=offset
             )
-        return {"count": len(rows), "data": rows}
+        total = await postgres.count_lifecycles(status=status_value, network=query_network)
+        return {"count": len(rows), "total": total, "data": rows}
     except Exception as e:
         logger.error(f"Error querying lifecycles: {e}")
         raise HTTPException(status_code=500, detail="Failed to query lifecycles")

@@ -179,3 +179,27 @@ class TestBaselines:
 
         rows = baselines.compute_global_baselines(LIVE_NETWORK)
         assert isinstance(rows, list)
+
+
+class TestArchiveTimeWindow:
+    def test_to_bound_is_exclusive(self, ch):
+        # The API's shared [from, to) half-open window convention: a row
+        # archived exactly at the `to` instant must be EXCLUDED, so chained
+        # windows never double-count the boundary. Runs against the real
+        # server because the boundary comparison happens in ClickHouse SQL.
+        from app.db import archive_queries
+
+        tx_hash = uuid.uuid4().hex + uuid.uuid4().hex[:32]
+        boundary = _naive_utc_now().replace(microsecond=0)
+        archive_queries._archive_insert(
+            LIVE_NETWORK, tx_hash, "boundary probe", "live-db-test", boundary, "manual"
+        )
+
+        def _hashes(date_from, date_to):
+            rows = archive_queries._archive_list(LIVE_NETWORK, date_from, date_to, 1000, 0)
+            return {r["tx_hash"] for r in rows}
+
+        # Window ending exactly at the row's archived_at: excluded.
+        assert tx_hash not in _hashes(None, boundary)
+        # Window starting exactly there: included (from is inclusive).
+        assert tx_hash in _hashes(boundary, None)

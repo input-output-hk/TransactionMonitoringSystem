@@ -29,14 +29,16 @@ _MAX_STATE_BYTES = 10_000
 
 
 def _validate_entity_identifiers(entity_type: str, entity_id: str) -> None:
+    # 422 for malformed identifiers: the shared convention (FastAPI's own
+    # validation failures use it, and transactions/analysis already do).
     if not _ENTITY_TYPE_RE.match(entity_type):
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="entity_type must match [a-z][a-z0-9_-]{0,31}",
         )
     if not _ENTITY_ID_RE.match(entity_id):
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="entity_id must be 1-256 chars of [A-Za-z0-9_.:-]",
         )
 
@@ -72,7 +74,13 @@ async def get_entity_state(
         raise HTTPException(status_code=500, detail="Failed to query entity state")
 
 
-@router.put("/{entity_type}/{entity_id}")
+class EntityStateAck(BaseModel):
+    message: str
+    entity_type: str
+    entity_id: str
+
+
+@router.put("/{entity_type}/{entity_id}", response_model=EntityStateAck)
 async def set_entity_state(
     request: Request,
     entity_type: str,
@@ -91,7 +99,7 @@ async def set_entity_state(
     try:
         size = len(json.dumps(state, separators=(",", ":")))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="state must be JSON-serialisable")
+        raise HTTPException(status_code=422, detail="state must be JSON-serialisable")
     if size > _MAX_STATE_BYTES:
         raise HTTPException(
             status_code=413,

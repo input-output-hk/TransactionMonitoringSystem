@@ -189,7 +189,10 @@ def _archive_list(
         conditions.append("a.archived_at >= %(date_from)s")
         params["date_from"] = date_from
     if date_to is not None:
-        conditions.append("a.archived_at <= %(date_to)s")
+        # Exclusive upper bound: the API's shared [from, to) half-open window
+        # convention (app.api._params), so chained windows never double-count
+        # a row archived exactly at the boundary instant.
+        conditions.append("a.archived_at < %(date_to)s")
         params["date_to"] = date_to
     where = " AND ".join(conditions)
     # LEFT JOIN onto tx_class_scores so imported entries with no local
