@@ -96,18 +96,24 @@ async def send_smtp(msg: EmailMessage) -> bool:
         return False
 
 
+# How many local-part characters survive redaction: enough to correlate a
+# user's support report against the logs, few enough to not reconstruct
+# the address.
+_REDACT_KEEP_CHARS = 2
+
+
 def _redact_email(address: str) -> str:
     """Log-safe form of a recipient address.
 
-    Keeps the first two characters of the local part plus the full domain:
+    Keeps the first characters of the local part plus the full domain:
     enough to correlate a user's support report against the logs without
     writing the full address (PII, and half of the magic-link credential
     pair) into them.
     """
     local, sep, domain = address.partition("@")
     if not sep:
-        return f"{local[:2]}***"
-    return f"{local[:2]}***@{domain}"
+        return f"{local[:_REDACT_KEEP_CHARS]}***"
+    return f"{local[:_REDACT_KEEP_CHARS]}***@{domain}"
 
 
 async def send_magic_link(
