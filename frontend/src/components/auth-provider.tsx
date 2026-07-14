@@ -22,10 +22,8 @@
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, type ReactNode } from "react";
-import { fetchMe, logout as apiLogout } from "@/lib/api/auth";
+import { fetchMe, logout as apiLogout, ME_QUERY_KEY } from "@/lib/api/auth";
 import { AuthContext, type AuthContextValue } from "@/components/auth-context";
-
-const ME_QUERY_KEY = ["auth", "me"] as const;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const qc = useQueryClient();

@@ -37,12 +37,12 @@ import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/utils/clipboard";
 import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
-import type { RiskAlert } from "@/mocks/attacks";
+import type { RiskAlert } from "@/lib/attacks";
 import {
 	ARCHIVE_REASONS,
 	ATTACK_META,
 	SUB_SCORE_LABELS,
-} from "@/mocks/attacks";
+} from "@/lib/attacks";
 import {
 	AlertTriangle,
 	ArrowDown,
@@ -126,9 +126,9 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 			archived={archived}
 			// `/dashboard` (not -1) so the close button works even on direct
 			// deep-link / new-tab entry, where history.back() would do nothing.
-			onClose={() => navigate(archived ? "/archive" : "/dashboard")}
-			onArchived={() => navigate("/archive", { replace: true })}
-			onRestored={() => navigate("/dashboard", { replace: true })}
+			onClose={() => void navigate(archived ? "/archive" : "/dashboard")}
+			onArchived={() => void navigate("/archive", { replace: true })}
+			onRestored={() => void navigate("/dashboard", { replace: true })}
 		/>
 	);
 }
@@ -220,7 +220,7 @@ function DetailCard({
 						type="button"
 						className="text-muted-foreground hover:text-foreground"
 						title="Copy"
-						onClick={() => copyToClipboard(alert.fullHash)}
+						onClick={() => void copyToClipboard(alert.fullHash)}
 					>
 						<Copy className="h-3.5 w-3.5" />
 					</button>

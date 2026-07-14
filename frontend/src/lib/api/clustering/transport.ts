@@ -11,7 +11,7 @@ export async function get<T>(
 ): Promise<T> {
 	const res = await fetchWithAuth(`${BASE}${path}`);
 	if (!res.ok) throw new Error(`clustering ${path} failed: ${res.status}`);
-	const raw = await res.json();
+	const raw: unknown = await res.json();
 	return validate ? validate(raw) : (raw as T);
 }
 
@@ -28,6 +28,6 @@ export async function send<T>(
 	});
 	if (!res.ok)
 		throw new Error(`clustering ${method} ${path} failed: ${res.status}`);
-	const raw = await res.json();
+	const raw: unknown = await res.json();
 	return validate ? validate(raw) : (raw as T);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ATTACK_TYPES } from "@/mocks/attacks";
+import { ATTACK_TYPES } from "@/lib/attacks";
 import {
 	attackTypeFromSnake,
 	SNAKE_BY_ATTACK_TYPE,

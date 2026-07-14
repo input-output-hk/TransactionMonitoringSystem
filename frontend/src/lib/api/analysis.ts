@@ -4,7 +4,7 @@ import {
 	type AttackType,
 	type RiskAlert,
 	type Severity,
-} from "@/mocks/attacks";
+} from "@/lib/attacks";
 import { formatAnalyzedAt } from "@/lib/utils/dates";
 import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
@@ -71,7 +71,7 @@ const toSnake = (t: AttackType): string =>
 
 const ATTACK_CLASS_BY_SNAKE: Record<string, AttackType> = Object.fromEntries(
 	ATTACK_TYPES.map((t) => [toSnake(t), t]),
-) as Record<string, AttackType>;
+);
 
 /** Canonical snake_case -> display AttackType. Single source of truth so
  *  callers cannot re-derive it wrongly (a naive title-case turns
@@ -100,7 +100,7 @@ export const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntri
 export const SUPERVISED_ATTACK_CLASS_OPTIONS: { value: string; label: string }[] =
 	ATTACK_TYPES.filter((t) => t !== "Contract Anomaly").map((t) => ({
 		value: SNAKE_BY_ATTACK_TYPE[t],
-		label: t as string,
+		label: t,
 	}));
 
 function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
@@ -116,7 +116,7 @@ function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	for (const [k, v] of Object.entries(rawSub)) {
 		if (typeof v === "number" && Number.isFinite(v)) subScores[k] = v;
 	}
-	const evidence = (r.evidence?.[r.max_class] ?? {}) as Record<string, unknown>;
+	const evidence = r.evidence?.[r.max_class] ?? {};
 	return {
 		slug: r.tx_hash,
 		id: shortHash(r.tx_hash),

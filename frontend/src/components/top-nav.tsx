@@ -297,8 +297,10 @@ export function TopNav() {
 										disabled
 										className="text-muted-foreground gap-3 text-[11px]"
 									>
-										Network: {health.network} · Lag{" "}
-										{health.ogmios.sync_lag_seconds}s
+										Network: {health.network}
+										{health.ogmios && (
+											<> · Lag {health.ogmios.sync_lag_seconds}s</>
+										)}
 									</DropdownMenuItem>
 								</>
 							)}
@@ -329,14 +331,14 @@ export function TopNav() {
 							</DropdownMenuItem>
 							<DropdownMenuItem
 								className="gap-3"
-								onSelect={() => navigate("/import")}
+								onSelect={() => void navigate("/import")}
 							>
 								<UploadCloudIcon className="h-4 w-4" />
 								Import Archive
 							</DropdownMenuItem>
 							<DropdownMenuItem
 								className="gap-3"
-								onSelect={() => navigate("/archive")}
+								onSelect={() => void navigate("/archive")}
 							>
 								<ArchiveIcon className="h-4 w-4" />
 								Archive
@@ -345,7 +347,7 @@ export function TopNav() {
 							<DropdownMenuItem
 								onSelect={() => {
 									void logout();
-									navigate("/login", { replace: true });
+									void navigate("/login", { replace: true });
 								}}
 								className="justify-end gap-3"
 							>

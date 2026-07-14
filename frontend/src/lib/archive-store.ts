@@ -139,8 +139,8 @@ export function useArchiveMutation() {
 	return useMutation({
 		mutationFn: (input: ArchiveCreateRequest) => archiveApi.create(input),
 		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: ["archive"] });
-			qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
+			void qc.invalidateQueries({ queryKey: ["archive"] });
+			void qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
 		},
 	});
 }
@@ -158,8 +158,8 @@ export function useRestoreMutation() {
 		mutationFn: ({ txHash, network }: { txHash: string; network?: Network }) =>
 			archiveApi.remove(txHash, network),
 		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: ["archive"] });
-			qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
+			void qc.invalidateQueries({ queryKey: ["archive"] });
+			void qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
 		},
 	});
 }
@@ -184,8 +184,8 @@ export function useBulkImportMutation() {
 			sourceLabel: string;
 		}) => archiveApi.bulk(entries, sourceLabel),
 		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: ["archive"] });
-			qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
+			void qc.invalidateQueries({ queryKey: ["archive"] });
+			void qc.invalidateQueries({ queryKey: ANALYSIS_QUERY_PREFIX });
 		},
 	});
 }

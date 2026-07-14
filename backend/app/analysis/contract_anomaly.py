@@ -69,6 +69,9 @@ if _missing_positive_floors:
         "config/detection.yaml (or remove them from _POSITIVE_VERDICTS)."
     )
 
+# The malicious floor's band contract (must reach Critical) is enforced at
+# config load: scorer_config._BAND_INVARIANTS.
+
 
 def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBand]:
     """Map a clustering verdict + consensus onto ``(score, RiskBand)``.

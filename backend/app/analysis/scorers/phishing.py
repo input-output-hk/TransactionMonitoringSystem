@@ -27,7 +27,12 @@ from app.analysis.scorer_config import (
     anchor as _anchor,
     resolved_or_bootstrap as _resolve,
 )
-from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
+from app.analysis.scorers.base import (
+    BaseScorer,
+    FUZZ_RATIO_SCALE,
+    ScorerResult,
+    finalise_score,
+)
 from app.analysis import external
 from app.analysis.features import decode_hex_asset_name
 from app.analysis.url_extraction import (
@@ -499,7 +504,7 @@ class PhishingScorer(BaseScorer):
                 continue
             tx_brand_lc = tx_brand.lower()
             for _, legit_brand in legit_info:
-                sim = fuzz.ratio(tx_brand_lc, legit_brand.lower()) / 100.0
+                sim = fuzz.ratio(tx_brand_lc, legit_brand.lower()) / FUZZ_RATIO_SCALE
                 if float(_SIM_RANGE["lo"]) < sim < float(_SIM_RANGE["hi"]):
                     max_brand_sim = max(max_brand_sim, sim)
 

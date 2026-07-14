@@ -96,6 +96,26 @@ async def send_smtp(msg: EmailMessage) -> bool:
         return False
 
 
+# How many local-part characters survive redaction: enough to correlate a
+# user's support report against the logs, few enough to not reconstruct
+# the address.
+_REDACT_KEEP_CHARS = 2
+
+
+def _redact_email(address: str) -> str:
+    """Log-safe form of a recipient address.
+
+    Keeps the first characters of the local part plus the full domain:
+    enough to correlate a user's support report against the logs without
+    writing the full address (PII, and half of the magic-link credential
+    pair) into them.
+    """
+    local, sep, domain = address.partition("@")
+    if not sep:
+        return f"{local[:_REDACT_KEEP_CHARS]}***"
+    return f"{local[:_REDACT_KEEP_CHARS]}***@{domain}"
+
+
 async def send_magic_link(
     to_email: str, full_name: str, token: str, purpose: EmailPurpose,
 ) -> bool:
@@ -125,7 +145,7 @@ async def send_magic_link(
             logger.warning(
                 "SMTP disabled and not in dev mode — magic link for %s (%s) "
                 "was NOT delivered and is redacted from logs; configure SMTP.",
-                to_email, purpose,
+                _redact_email(to_email), purpose,
             )
         return False
 
@@ -138,8 +158,10 @@ async def send_magic_link(
     # Critical to swallow failures: the public endpoint must not leak whether
     # an email matched a real user via different timings or status codes.
     # send_smtp never raises and returns False on any error.
+    # Redacted on success AND failure: a recipient address at INFO level ends
+    # up in every log aggregator; the truncated form is enough to correlate.
     if await send_smtp(msg):
-        logger.info("Sent %s magic-link email to %s", purpose, to_email)
+        logger.info("Sent %s magic-link email to %s", purpose, _redact_email(to_email))
         return True
-    logger.error("SMTP send failed for %s (%s)", to_email, purpose)
+    logger.error("SMTP send failed for %s (%s)", _redact_email(to_email), purpose)
     return False

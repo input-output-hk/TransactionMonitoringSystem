@@ -45,6 +45,20 @@ function readCookie(name: string): string | null {
 }
 
 /**
+ * Thrown by {@link fetchWithAuth} when the backend answers 401 on an
+ * endpoint that expects an authenticated session. The QueryClient's
+ * cache-level `onError` (see `main.tsx`) catches this and flips the
+ * cached auth state to anonymous, so `RequireAuth` redirects to /login
+ * instead of leaving the page stuck on a failed query.
+ */
+export class UnauthorizedError extends Error {
+	constructor(url: string) {
+		super(`Unauthorized (401): ${url}`);
+		this.name = "UnauthorizedError";
+	}
+}
+
+/**
  * `fetch()` with `credentials: "include"` so the session cookie rides
  * on every request. Same-origin dev (Vite proxy) would send cookies
  * by default anyway, but being explicit insulates us from a future
@@ -52,19 +66,34 @@ function readCookie(name: string): string | null {
  * back as a header (the backend rejects a mismatch/missing header —
  * see app.csrf.CSRFMiddleware). Returns the raw `Response` — callers are
  * responsible for status checks and JSON parsing.
+ *
+ * A 401 response throws {@link UnauthorizedError} instead of returning,
+ * so an expired session surfaces as a typed error wherever it happens.
+ * Callers for which 401 is a normal domain outcome (only `fetchMe`,
+ * which maps it to "anonymous") opt out with `allow401: true`.
  */
-export function fetchWithAuth(
+export async function fetchWithAuth(
 	input: RequestInfo | URL,
 	init?: RequestInit,
+	opts?: { allow401?: boolean },
 ): Promise<Response> {
 	const method = (init?.method ?? "GET").toUpperCase();
-	if (!MUTATING_METHODS.has(method)) {
-		return fetch(input, { ...init, credentials: "include" });
-	}
-	const csrfToken = readCookie(CSRF_COOKIE_NAME);
 	const headers = new Headers(init?.headers);
-	if (csrfToken) {
-		headers.set(CSRF_HEADER_NAME, csrfToken);
+	if (MUTATING_METHODS.has(method)) {
+		const csrfToken = readCookie(CSRF_COOKIE_NAME);
+		if (csrfToken) {
+			headers.set(CSRF_HEADER_NAME, csrfToken);
+		}
 	}
-	return fetch(input, { ...init, headers, credentials: "include" });
+	const res = await fetch(input, { ...init, headers, credentials: "include" });
+	if (res.status === 401 && !opts?.allow401) {
+		const url =
+			typeof input === "string"
+				? input
+				: input instanceof URL
+					? input.href
+					: input.url;
+		throw new UnauthorizedError(url);
+	}
+	return res;
 }

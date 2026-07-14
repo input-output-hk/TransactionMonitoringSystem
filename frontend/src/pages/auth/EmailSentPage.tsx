@@ -64,7 +64,7 @@ export function EmailSentPage() {
 					<Button
 						type="button"
 						variant="outline"
-						onClick={onResend}
+						onClick={() => void onResend()}
 						disabled={resending || !emailFromState}
 						className="min-w-[140px]"
 					>

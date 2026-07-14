@@ -106,7 +106,7 @@ export function ArchivePage() {
 				<div className="ml-auto pt-[22px]">
 					<button
 						type="button"
-						onClick={handleExport}
+						onClick={() => void handleExport()}
 						disabled={exporting}
 						className={cn(
 							buttonVariants({ variant: "outline", size: "lg" }),
@@ -147,7 +147,7 @@ export function ArchivePage() {
 							return (
 								<TableRow
 									key={a.tx_hash}
-									onClick={() => navigate(`/archive/${a.tx_hash}`)}
+									onClick={() => void navigate(`/archive/${a.tx_hash}`)}
 									className="cursor-pointer"
 								>
 									<TableCell>
@@ -159,7 +159,7 @@ export function ArchivePage() {
 												title="Copy"
 												onClick={(e) => {
 													e.stopPropagation();
-													copyToClipboard(a.tx_hash);
+													void copyToClipboard(a.tx_hash);
 												}}
 											>
 												<Copy className="h-3.5 w-3.5" />
@@ -243,7 +243,7 @@ export function ArchivePage() {
 			<Dialog
 				open={!!detailId}
 				onOpenChange={(open) => {
-					if (!open) navigate("/archive");
+					if (!open) void navigate("/archive");
 				}}
 			>
 				<DialogContent

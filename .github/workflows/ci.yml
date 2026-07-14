@@ -29,7 +29,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
       - name: Recall gate (attack-must-fire tests)
         # Run first and on its own so a recall regression is unambiguous.
         working-directory: backend
@@ -84,7 +84,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
       - name: Live-DB tests (migrations + representative queries)
         working-directory: backend
         env:

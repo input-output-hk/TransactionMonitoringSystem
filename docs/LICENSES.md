@@ -11,7 +11,7 @@ Licenses were resolved from installed package metadata, not inferred from names:
 - Python (backend and clustering sidecar): read from each installed distribution's metadata, preferring the PEP 639 `License-Expression` (SPDX), then `License ::` classifiers, then the `License` field, across the fully installed runtime and dev trees. Ambiguous or empty cases were confirmed against the bundled `LICENSE` file.
 - Frontend: resolved with `pnpm licenses list` over the installed `node_modules`, with the few `SEE LICENSE IN` and no-field packages confirmed from their bundled license text.
 
-Coverage: the backend `requirements.txt` tree (56 installed distributions), the frontend `package.json` tree (495 packages), and the clustering sidecar's runtime plus `[dev]` tree (55 third-party packages). The sidecar's optional `[notebook]` extra (matplotlib, jupyter) is not shipped in any image and is not covered here: matplotlib and the jupyter metapackage are themselves permissive (BSD or PSF style), but their large transitive trees should be reviewed before that extra is ever shipped.
+Coverage: the backend `requirements.txt` plus `requirements-dev.txt` tree (56 installed distributions), the frontend `package.json` tree (573 packages, including the Vitest test harness), and the clustering sidecar's runtime plus `[dev]` tree (55 third-party packages). The sidecar's optional `[notebook]` extra (matplotlib, jupyter) is not shipped in any image and is not covered here: matplotlib and the jupyter metapackage are themselves permissive (BSD or PSF style), but their large transitive trees should be reviewed before that extra is ever shipped.
 
 ## Weak-copyleft and attribution dependencies
 
@@ -28,9 +28,9 @@ The external **Ogmios** service is MPL-2.0 as well; see [External services](#ext
 
 If a strict "100 percent Apache-2.0 or more permissive" bar is ever required, note that these are not cheaply removable: `pathspec` is a dependency of both `black` and `mypy`, so it remains as long as static type checking is kept, and `certifi` would have to be replaced by pointing the Python HTTP clients at the system trust store. `lightningcss` and `caniuse-lite` are intrinsic to the Tailwind v4 and browserslist build chains and are not practically removable. None of this is necessary for an Apache-2.0 release: MPL-2.0 and CC-BY-4.0 are OSI and FSF approved and are compatible with redistributing this project under Apache-2.0.
 
-## Backend Python libraries (`requirements.txt`)
+## Backend Python libraries (`requirements.txt` and `requirements-dev.txt`)
 
-Direct dependencies, with versions as pinned in `requirements.txt`:
+Direct dependencies, with versions as pinned in the requirements files (the test and development tools live in `requirements-dev.txt` and are not installed in the production image):
 
 | Package | Version | License | SPDX identifier | Category |
 |---|---|---|---|---|
@@ -42,7 +42,7 @@ Direct dependencies, with versions as pinned in `requirements.txt`:
 | clickhouse-driver | 0.2.10 | MIT | `MIT` | ClickHouse driver |
 | asyncpg | 0.31.0 | Apache 2.0 | `Apache-2.0` | PostgreSQL async driver |
 | httpx | 0.28.1 | BSD 3-Clause | `BSD-3-Clause` | HTTP client (clustering sidecar proxy) |
-| aiosmtplib | 3.0.2 | MIT | `MIT` | Async SMTP (magic-link mail) |
+| aiosmtplib | 5.1.2 | MIT | `MIT` | Async SMTP (magic-link mail) |
 | email-validator | 2.3.0 | Unlicense | `Unlicense` | Email validation (Pydantic `EmailStr`) |
 | python-dotenv | 1.2.2 | BSD 3-Clause | `BSD-3-Clause` | `.env` file loading |
 | PyYAML | 6.0.3 | MIT | `MIT` | YAML config loading |
@@ -98,12 +98,11 @@ Runtime dependencies that ship in the dashboard bundle (all permissive):
 | Package | Version | License | SPDX identifier |
 |---|---|---|---|
 | react / react-dom | 19.2.6 | MIT | `MIT` |
-| react-router-dom | 7.15.0 | MIT | `MIT` |
+| react-router-dom | 7.18.1 | MIT | `MIT` |
 | @tanstack/react-query | 5.100.10 | MIT | `MIT` |
-| zustand | 5.0.13 | MIT | `MIT` |
 | @radix-ui/react-* (avatar, dialog, dropdown-menu, select, separator, slot, tabs, tooltip) | 1.x–2.x | MIT | `MIT` |
 | recharts | 3.8.1 | MIT | `MIT` |
-| cytoscape | 3.30.2 | MIT | `MIT` |
+| cytoscape | 3.34.0 | MIT | `MIT` |
 | cytoscape-fcose | 2.2.0 | MIT | `MIT` |
 | plotly.js-dist-min | 3.6.0 | MIT | `MIT` |
 | react-plotly.js | 4.0.0 | MIT | `MIT` |
@@ -116,24 +115,26 @@ Runtime dependencies that ship in the dashboard bundle (all permissive):
 
 Build and dev dependencies (Vite, TypeScript, ESLint, Prettier, Tailwind toolchain and types) are all MIT, except `typescript` (Apache-2.0).
 
-Full-tree breakdown from `pnpm licenses list` (495 packages):
+Full-tree breakdown from `pnpm licenses list` (573 packages, including the Vitest / Testing Library dev harness):
 
 | License | Count | Permissive? |
 |---|---|---|
-| MIT | 379 | Yes |
-| ISC | 50 | Yes |
-| BSD-3-Clause | 26 | Yes |
-| Apache-2.0 | 16 | Yes |
-| BSD-2-Clause | 10 | Yes |
-| BlueOak-1.0.0 | 3 | Yes |
+| MIT | 446 | Yes |
+| ISC | 52 | Yes |
+| BSD-3-Clause | 27 | Yes |
+| Apache-2.0 | 19 | Yes |
+| BSD-2-Clause | 12 | Yes |
+| BlueOak-1.0.0 | 4 | Yes |
+| MIT-0 (`@csstools/*`) | 2 | Yes |
 | MPL-2.0 (`lightningcss` + platform binary) | 2 | Weak copyleft, build only (see above) |
 | MIT AND ISC (`victory-vendor`) | 1 | Yes |
 | Unlicense | 1 | Yes |
 | Zlib (`gl-mat4`) | 1 | Yes |
-| 0BSD | 1 | Yes |
+| 0BSD (`tslib`) | 1 | Yes |
+| CC0-1.0 (`mdn-data`) | 1 | Yes |
 | CC-BY-4.0 (`caniuse-lite`) | 1 | Attribution data, build only (see above) |
 
-Five packages report a non-SPDX or missing `license` field and were resolved from their bundled license text: `mapbox-gl` and `@plotly/mapbox-gl` are BSD-3-Clause, `stack-trace` is MIT, `@mapbox/jsonlint-lines-primitives` is MIT (inherited from upstream `zaach/jsonlint`; no explicit field in the fork). Everything is Apache-2.0 or more permissive except the `lightningcss` (MPL-2.0) and `caniuse-lite` (CC-BY-4.0) build-time dependencies documented above.
+Three packages report a non-SPDX or missing `license` field and were resolved from their bundled license text: `mapbox-gl` and `@plotly/mapbox-gl` are BSD-3-Clause, `stack-trace` is MIT. Everything is Apache-2.0 or more permissive except the `lightningcss` (MPL-2.0) and `caniuse-lite` (CC-BY-4.0) build-time dependencies documented above.
 
 ## Infrastructure: Docker images
 
@@ -180,4 +181,4 @@ The clustering module ships a point-in-time snapshot of the StricaHQ [cardano-co
 
 No GPL, LGPL, AGPL, SSPL, BUSL, EPL, CDDL, or other strong-copyleft license is present in any dependency tree. The four weak-copyleft and attribution dependencies are documented above and impose no obligation on this project's source.
 
-*Last updated: 2026-06-26. Resolved from installed package metadata (Python, via PEP 639 / classifiers) and `pnpm licenses list` (frontend). Re-verify when upgrading pinned versions.*
+*Last updated: 2026-07-14. Direct-dependency versions re-synced to the manifests and the frontend tree re-resolved with `pnpm licenses list`; the Python full-tree metadata audit dates from 2026-06-26. Re-verify when upgrading pinned versions.*

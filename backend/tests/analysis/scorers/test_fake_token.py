@@ -141,19 +141,19 @@ class TestConfusablesFold:
 
     NFKC does not fold Greek/Cyrillic characters that look identical to
     Latin letters but encode under different codepoints. The
-    `_normalize_token_name` helper applies a curated confusables table
+    `_normalise_token_name` helper applies a curated confusables table
     after NFKC so the gate's similarity comparison sees a folded form.
     """
 
     def test_normalize_folds_greek_capital_nu_to_latin_n(self):
         # Greek capital Nu (U+039D) looks identical to Latin N (U+004E).
-        from app.analysis.scorers.fake_token import _normalize_token_name
-        assert _normalize_token_name("ΝTX") == "NTX"
+        from app.analysis.scorers.fake_token import _normalise_token_name
+        assert _normalise_token_name("ΝTX") == "NTX"
 
     def test_normalize_folds_cyrillic_straight_u_to_latin_y(self):
         # Cyrillic capital Straight U (U+04AE) looks like Latin Y.
-        from app.analysis.scorers.fake_token import _normalize_token_name
-        assert _normalize_token_name("INDҮ") == "INDY"
+        from app.analysis.scorers.fake_token import _normalise_token_name
+        assert _normalise_token_name("INDҮ") == "INDY"
 
     def test_normalize_folds_full_forge_homoglyph(self):
         # The exact forge attack bytes for the INDY homoglyph:
@@ -161,9 +161,9 @@ class TestConfusablesFold:
         # Straight U). After fold, three of four chars match INDY; the
         # remaining `l` is an intra-Latin confusable for `I` not folded
         # here (would inflate FPs on legitimate lowercase-L tokens).
-        from app.analysis.scorers.fake_token import _normalize_token_name
+        from app.analysis.scorers.fake_token import _normalise_token_name
         homoglyph = bytes.fromhex("6cce9d44d2ae").decode("utf-8")
-        assert _normalize_token_name(homoglyph) == "lNDY"
+        assert _normalise_token_name(homoglyph) == "lNDY"
 
     def test_unicode_suspicion_fires_on_uppercase_greek(self):
         # Pre-fix, the homoglyph set was lowercase-Greek only and missed
