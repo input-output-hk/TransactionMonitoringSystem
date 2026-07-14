@@ -10,7 +10,7 @@ The system ingests all Cardano blockchain transactions into a queryable store. T
 
 ### Decision
 
-Use **ClickHouse** (MergeTree engine, daily partitions) as the append-only **Analytics Warehouse** for `transactions`, `transaction_inputs`, `transaction_outputs`, and `tx_class_scores`. ClickHouse holds structured, normalized facts derived from the raw payloads in the Data Lake (filesystem). See ADR-009 for the Data Lake layer.
+Use **ClickHouse** (MergeTree engine, deliberately unpartitioned; slot-ordered primary keys give the needed pruning at this scale, see `clickhouse_schema.py`) as the append-only **Analytics Warehouse** for `transactions`, `transaction_inputs`, `transaction_outputs`, and `tx_class_scores`. ClickHouse holds structured, normalized facts derived from the raw payloads in the Data Lake (filesystem). See ADR-009 for the Data Lake layer.
 
 ### Consequences
 
@@ -321,7 +321,7 @@ When moving to MinIO: replace `_write_sync` / `read_raw` in `backend/app/db/raw_
 
 ### Context
 
-The system spans data ingestion, storage integration, REST API serving, and (in future milestones) graph analysis and address clustering. The primary constraint is ecosystem availability for both Cardano tooling and data science libraries.
+The system spans data ingestion, storage integration, REST API serving, graph analysis (`analysis/graph.py`), and the clustering sidecar (`services/clustering/`). The primary constraint is ecosystem availability for both Cardano tooling and data science libraries.
 
 ### Decision
 
@@ -330,7 +330,7 @@ Implement the full backend in **Python 3.12+**.
 ### Consequences
 
 - Strong ecosystem support: `websockets`, `asyncpg`, `clickhouse-driver`, `fastapi`, `pydantic`; all well-maintained async Python libraries.
-- Future clustering and analysis milestones (scikit-learn, NetworkX, pandas) are native to the Python data science ecosystem.
+- The clustering and graph-analysis stack (scikit-learn, NetworkX, pandas; shipped in `services/clustering/` and `analysis/graph.py`) is native to the Python data science ecosystem.
 - No unusual runtime constraints at Preprod scale.
 - Python's GIL limits CPU-bound parallelism; this is not a concern for the I/O-bound ingestion pipeline but may become one for compute-intensive clustering at Mainnet scale.
 
