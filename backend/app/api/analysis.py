@@ -4,9 +4,10 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, Security
+from pydantic import BaseModel
 
 from app.analysis.engine import _CLASS_NAMES
-from app.api._params import NetworkParam
+from app.api._params import NetworkParam, PageLimit, PageOffset, TimeFromParam, TimeToParam
 from app.api.contract_anomaly_read import (
     _CONTRACT_ANOMALY,
     _augment_stats_with_contract_anomaly,
@@ -20,6 +21,7 @@ from app.api.contract_anomaly_read import (
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import archive_queries, clickhouse, clustering_queries
+from app.models.common import ListResponse
 from app.models.transaction import ClassScoreResult, RiskBand
 from app.utils.datetime_utils import format_iso_utc
 
@@ -90,7 +92,11 @@ async def get_analysis_result(
     return result
 
 
-@router.get("/results", dependencies=[Security(verify_api_key)])
+@router.get(
+    "/results",
+    dependencies=[Security(verify_api_key)],
+    response_model=ListResponse[ClassScoreResult],
+)
 async def list_analysis_results(
     network: NetworkParam = None,
     risk_band: list[RiskBand] = Query(
@@ -117,25 +123,23 @@ async def list_analysis_results(
         ),
     ),
     sort: str = Query("score", description="Sort order: 'score' or 'date'"),
-    analyzed_from: datetime | None = Query(
-        None,
-        description="Only include results with analyzed_at >= this ISO timestamp (inclusive).",
-    ),
-    analyzed_to: datetime | None = Query(
-        None,
-        description="Only include results with analyzed_at < this ISO timestamp (exclusive).",
-    ),
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
+    analyzed_from: TimeFromParam = None,
+    analyzed_to: TimeToParam = None,
+    limit: PageLimit = 100,
+    offset: PageOffset = 0,
 ):
-    """List multi-class scoring results with optional filters."""
+    """List multi-class scoring results with optional filters.
+
+    The ``from``/``to`` window filters on ``analyzed_at`` with the shared
+    half-open [from, to) convention (see ``app.api._params``).
+    """
     if attack_class and attack_class not in _VALID_ATTACK_CLASSES:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail=f"Unknown attack class '{attack_class}'. Valid: {list(_VALID_ATTACK_CLASSES)}",
         )
     if sort not in ("score", "date"):
-        raise HTTPException(status_code=400, detail="sort must be 'score' or 'date'")
+        raise HTTPException(status_code=422, detail="sort must be 'score' or 'date'")
     query_network = network or settings.CARDANO_NETWORK
     try:
         # Normalize the enum list to plain strings, passing None when the
@@ -222,7 +226,25 @@ async def list_analysis_results(
         raise HTTPException(status_code=500, detail="Failed to list results")
 
 
-@router.get("/stats", dependencies=[Security(verify_api_key)])
+class PerClassStats(BaseModel):
+    scored_count: int
+    avg_score: float | None
+    max_score: float | None
+
+
+class AnalysisStatsOut(BaseModel):
+    total: int
+    critical_count: int
+    high_count: int
+    moderate_count: int
+    informational_count: int
+    avg_max_score: float | None
+    last_analyzed_at: datetime | None
+    per_class: dict[str, PerClassStats]
+    pending_count: int
+
+
+@router.get("/stats", dependencies=[Security(verify_api_key)], response_model=AnalysisStatsOut)
 async def analysis_stats(
     network: NetworkParam = None,
 ):

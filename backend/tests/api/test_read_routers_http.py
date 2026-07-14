@@ -67,7 +67,7 @@ class TestEntitiesGet:
     )
     def test_invalid_identifiers_rejected(self, client, auth_open, entity_type, entity_id):
         r = client.get(f"/api/v1/entities/{entity_type}/{entity_id}")
-        assert r.status_code == 400
+        assert r.status_code == 422
 
 
 class TestEntitiesPut:
@@ -103,7 +103,7 @@ class TestEntitiesPut:
     def test_invalid_identifiers_rejected(self, client, auth_open, seams):
         setter, _ = seams
         r = client.put("/api/v1/entities/WALLET/ok", json={})
-        assert r.status_code == 400
+        assert r.status_code == 422
         setter.assert_not_awaited()
 
 
@@ -161,26 +161,33 @@ class TestLifecycle:
         assert client.get(f"/api/v1/lifecycle/{VALID_HASH}").status_code == 404
 
     def test_list_with_status_filter(self, client, auth_open, monkeypatch):
-        by_status = AsyncMock(return_value=[{"tx_id": VALID_HASH, "status": "PENDING"}])
+        # A minimal but schema-complete row: the endpoint now validates against
+        # ListResponse[TransactionLifecycleEvent], so partial dicts 500.
+        row = {"tx_id": VALID_HASH, "network": "preprod", "status": "PENDING"}
+        by_status = AsyncMock(return_value=[row])
         all_rows = AsyncMock(return_value=[])
         monkeypatch.setattr(lifecycle_api.postgres, "get_lifecycles_by_status", by_status)
         monkeypatch.setattr(lifecycle_api.postgres, "get_all_lifecycles", all_rows)
+        monkeypatch.setattr(lifecycle_api.postgres, "count_lifecycles", AsyncMock(return_value=7))
 
         r = client.get("/api/v1/lifecycle?status=PENDING")
 
         assert r.status_code == 200, r.text
-        assert r.json()["count"] == 1
+        body = r.json()
+        assert body["count"] == 1
+        assert body["total"] == 7
         by_status.assert_awaited_once()
         all_rows.assert_not_awaited()
 
     def test_list_without_filter_uses_all(self, client, auth_open, monkeypatch):
         all_rows = AsyncMock(return_value=[])
         monkeypatch.setattr(lifecycle_api.postgres, "get_all_lifecycles", all_rows)
+        monkeypatch.setattr(lifecycle_api.postgres, "count_lifecycles", AsyncMock(return_value=0))
 
         r = client.get("/api/v1/lifecycle")
 
         assert r.status_code == 200
-        assert r.json() == {"count": 0, "data": []}
+        assert r.json() == {"count": 0, "total": 0, "data": []}
         all_rows.assert_awaited_once()
 
     def test_invalid_status_rejected(self, client, auth_open):
@@ -272,21 +279,36 @@ class TestAnalysisResults:
         assert body["data"][0]["tx_hash"] == VALID_HASH
 
     def test_unknown_attack_class_rejected(self, client, auth_open):
+        # 422: bad-value rejections share one code with FastAPI's own
+        # validation failures (the former 400 was the odd one out).
         r = client.get("/api/v1/analysis/results?attack_class=nonsense")
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     def test_unknown_sort_rejected(self, client, auth_open):
         r = client.get("/api/v1/analysis/results?sort=alphabetical")
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     def test_stats_passthrough(self, client, auth_open, monkeypatch):
+        stats = {
+            "total": 3,
+            "critical_count": 1,
+            "high_count": 1,
+            "moderate_count": 1,
+            "informational_count": 0,
+            "avg_max_score": 55.5,
+            "last_analyzed_at": None,
+            "per_class": {"token_dust": {"scored_count": 2, "avg_score": 40.0, "max_score": 80.0}},
+            "pending_count": 4,
+        }
         monkeypatch.setattr(
             analysis_api.clickhouse,
             "get_class_scores_stats_async",
-            AsyncMock(return_value={"total_analyzed": 3, "per_class": {}}),
+            AsyncMock(return_value=stats),
         )
 
         r = client.get("/api/v1/analysis/stats")
 
         assert r.status_code == 200, r.text
-        assert r.json()["total_analyzed"] == 3
+        body = r.json()
+        assert body["total"] == 3
+        assert body["per_class"]["token_dust"]["max_score"] == 80.0

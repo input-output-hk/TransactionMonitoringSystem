@@ -727,6 +727,23 @@ async def get_all_lifecycles(
         return [dict(r) for r in rows]
 
 
+async def count_lifecycles(status: str | None = None, network: str = "preprod") -> int:
+    """Count lifecycle records matching the list filters (for paging totals)."""
+    async with get_connection() as conn:
+        if status is not None:
+            row = await conn.fetchrow(
+                "SELECT count(*) AS total FROM tx_lifecycle WHERE status = $1 AND network = $2",
+                status,
+                network,
+            )
+        else:
+            row = await conn.fetchrow(
+                "SELECT count(*) AS total FROM tx_lifecycle WHERE network = $1",
+                network,
+            )
+        return int(row["total"]) if row else 0
+
+
 async def get_lifecycle_summary(network: str = "preprod") -> dict[str, Any]:
     """Get aggregate lifecycle statistics"""
     async with get_connection() as conn:

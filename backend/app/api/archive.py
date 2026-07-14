@@ -1,6 +1,6 @@
 """API endpoints for admin curation of false-positive flagged transactions.
 
-All routes are mounted under ``/api/archive`` and guarded by ``verify_api_key``.
+All routes are mounted under ``/api/v1/archive`` and guarded by ``verify_api_key``.
 See ``app.models.archive`` for request/response shapes and ``app.db.archive_queries``
 for the ClickHouse access layer.
 
@@ -13,13 +13,12 @@ captured by ``get_archived`` with ``tx_hash="export"`` and returns 404.
 import csv
 import io
 import logging
-from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, Security, status
+from fastapi import APIRouter, HTTPException, Path, Request, Response, Security
 from fastapi.responses import StreamingResponse
 
 from app import audit
-from app.api._params import NetworkParam
+from app.api._params import NetworkParam, PageLimit, PageOffset, TimeFromParam, TimeToParam
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import archive_queries
@@ -30,6 +29,7 @@ from app.models.archive import (
     BulkArchiveRequest,
     BulkArchiveResult,
 )
+from app.models.common import ListResponse
 from app.utils.datetime_utils import format_iso_utc, to_naive_utc
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ async def _audit_suppression_intent(
         )
     except audit.AuditUnavailableError:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=503,
             detail="Audit trail unavailable; alert suppression refused.",
         )
 
@@ -96,7 +96,7 @@ async def _audit_suppression_intent(
 
 @router.post(
     "",
-    status_code=status.HTTP_201_CREATED,
+    status_code=201,
 )
 async def archive_alert(
     entry: ArchiveEntry,
@@ -121,7 +121,7 @@ async def archive_alert(
         )
         if already:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=409,
                 detail="Transaction is already archived for this network.",
             )
     except HTTPException:
@@ -169,23 +169,23 @@ async def archive_alert(
     }
 
 
-@router.get("", dependencies=[Security(verify_api_key)])
+@router.get(
+    "",
+    dependencies=[Security(verify_api_key)],
+    response_model=ListResponse[ArchiveEntryEnriched],
+)
 async def list_archived(
     network: NetworkParam = None,
-    date_from: datetime | None = Query(
-        None,
-        alias="from",
-        description="ISO timestamp; lower bound on archived_at (inclusive)",
-    ),
-    date_to: datetime | None = Query(
-        None,
-        alias="to",
-        description="ISO timestamp; upper bound on archived_at (inclusive)",
-    ),
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
-) -> dict:
-    """List archived alerts enriched with the original detection record."""
+    date_from: TimeFromParam = None,
+    date_to: TimeToParam = None,
+    limit: PageLimit = 100,
+    offset: PageOffset = 0,
+):
+    """List archived alerts enriched with the original detection record.
+
+    The ``from``/``to`` window filters on ``archived_at`` with the shared
+    half-open [from, to) convention (see ``app.api._params``).
+    """
     query_network = network or settings.CARDANO_NETWORK
     try:
         from_naive = to_naive_utc(date_from)
@@ -261,11 +261,12 @@ async def bulk_import(
 @router.get("/export", dependencies=[Security(verify_api_key)])
 async def export_csv(
     network: NetworkParam = None,
-    date_from: datetime | None = Query(None, alias="from"),
-    date_to: datetime | None = Query(None, alias="to"),
+    date_from: TimeFromParam = None,
+    date_to: TimeToParam = None,
 ) -> StreamingResponse:
     """Download archive entries as RFC 4180 CSV. The output file is a valid
-    input to POST /api/archive/bulk on another TMS instance."""
+    input to POST /api/v1/archive/bulk on another TMS instance. The
+    ``from``/``to`` window is half-open, [from, to)."""
     query_network = network or settings.CARDANO_NETWORK
     try:
         rows = await archive_queries.archive_export_rows_async(
@@ -315,7 +316,7 @@ async def export_csv(
 
 @router.delete(
     "/{tx_hash}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    status_code=204,
 )
 async def restore_alert(
     request: Request,
@@ -372,7 +373,7 @@ async def restore_alert(
             status_code=404,
             detail=f"No archive entry found for {tx_hash} on {query_network}",
         )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return Response(status_code=204)
 
 
 @router.get(

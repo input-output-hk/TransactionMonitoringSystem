@@ -177,8 +177,8 @@ function buildResultsQuery(
 			qs.append("risk_band", SEVERITY_TO_RISK_BAND[s]);
 		}
 	}
-	if (p.analyzedFrom) qs.set("analyzed_from", p.analyzedFrom);
-	if (p.analyzedTo) qs.set("analyzed_to", p.analyzedTo);
+	if (p.analyzedFrom) qs.set("from", p.analyzedFrom);
+	if (p.analyzedTo) qs.set("to", p.analyzedTo);
 	return qs;
 }
 

@@ -44,20 +44,31 @@ class NotificationConfigUpdate(BaseModel):
     periodic_report: dict[str, Any] | None = None
 
 
-@router.get("/config")
-async def get_config(_admin: dict = Depends(require_admin)) -> dict:
+class SecretsStatusOut(BaseModel):
+    webhook_signing_secret_configured: bool
+    smtp_configured: bool
+
+
+class NotificationConfigOut(BaseModel):
+    config: dict[str, Any]
+    secrets_status: SecretsStatusOut
+    clustering_enabled: bool
+
+
+@router.get("/config", response_model=NotificationConfigOut)
+async def get_config(_admin: dict = Depends(require_admin)):
     """Return the current config document + read-only secret-status flags."""
     doc = await postgres.get_notification_config()
     if doc is None:
         doc = notif_config.load()  # safe default (also gets seeded at startup)
-    return {
-        "config": doc,
-        "secrets_status": {
-            "webhook_signing_secret_configured": bool(settings.WEBHOOK_SIGNING_SECRET),
-            "smtp_configured": bool(settings.SMTP_HOST) and settings.SMTP_ENABLED,
-        },
-        "clustering_enabled": settings.CLUSTERING_ENABLED,
-    }
+    return NotificationConfigOut(
+        config=doc,
+        secrets_status=SecretsStatusOut(
+            webhook_signing_secret_configured=bool(settings.WEBHOOK_SIGNING_SECRET),
+            smtp_configured=bool(settings.SMTP_HOST) and settings.SMTP_ENABLED,
+        ),
+        clustering_enabled=settings.CLUSTERING_ENABLED,
+    )
 
 
 @router.put("/config")
