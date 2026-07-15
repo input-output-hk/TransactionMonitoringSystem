@@ -1,4 +1,4 @@
-"""Unit tests for ``HostChainSource.metadata`` — the onboarding entry point.
+"""Unit tests for ``HostChainSource.metadata``: the onboarding entry point.
 
 These pin the client-facing behaviour of the zero-row path: the error must be
 marked ``client_safe`` (so ``_safe_error`` surfaces the real reason rather than
