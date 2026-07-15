@@ -6,7 +6,6 @@ so notification email can be unplugged without affecting sign-in emails.
 
 import logging
 from email.message import EmailMessage
-from typing import List, Optional, Tuple
 
 from app.auth.email import send_smtp
 from app.config import settings
@@ -31,16 +30,12 @@ def _band_label(band: str) -> str:
     return _BAND_DISPLAY.get(band, band)
 
 
-def _render_immediate(payload) -> Tuple[str, str]:
+def _render_immediate(payload) -> tuple[str, str]:
     """(subject, plain-text body) for an immediate alert."""
     band = _band_label(payload.risk_band)
-    subject = (
-        f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
-    )
+    subject = f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
     if payload.contributing_features:
-        feats = "\n".join(
-            f"    - {k}: {v:.2f}" for k, v in payload.contributing_features.items()
-        )
+        feats = "\n".join(f"    - {k}: {v:.2f}" for k, v in payload.contributing_features.items())
     else:
         feats = "    (none)"
     body = (
@@ -59,7 +54,7 @@ def _render_immediate(payload) -> Tuple[str, str]:
     return subject, body
 
 
-def _render_report(payload) -> Tuple[str, str]:
+def _render_report(payload) -> tuple[str, str]:
     """(subject, plain-text body) for a periodic report."""
     s = payload.summary
     win = payload.report_window
@@ -71,9 +66,10 @@ def _render_report(payload) -> Tuple[str, str]:
         f"{_band_label(b)}={s.alerts_by_band.get(b, 0)}"
         for b in ("Critical", "High", "Moderate", "Informational")
     )
-    classes = "\n".join(
-        f"    - {cls}: {n}" for cls, n in s.alerts_by_class.items() if n
-    ) or "    (none in window)"
+    classes = (
+        "\n".join(f"    - {cls}: {n}" for cls, n in s.alerts_by_class.items() if n)
+        or "    (none in window)"
+    )
     if payload.top_alerts:
         tops = "\n".join(
             f"    {i + 1:>2}. {_band_label(a.risk_band):<13} {a.risk_score:6.2f}  "
@@ -96,7 +92,7 @@ def _render_report(payload) -> Tuple[str, str]:
     return subject, body
 
 
-def _render(payload) -> Tuple[str, str]:
+def _render(payload) -> tuple[str, str]:
     """Dispatch to the renderer for this payload's notification_type."""
     if getattr(payload, "notification_type", None) == "periodic_report":
         return _render_report(payload)
@@ -119,9 +115,9 @@ class EmailChannel(NotificationChannel):
     async def send(
         self,
         payload: NotificationPayload,
-        recipients: List[str],
-        target_url: Optional[str] = None,
-        attachments: Optional[List[Attachment]] = None,
+        recipients: list[str],
+        target_url: str | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> NotificationResult:
         if not recipients:
             return NotificationResult(
@@ -142,6 +138,4 @@ class EmailChannel(NotificationChannel):
                 filename=att.filename,
             )
         ok = await send_smtp(msg)
-        return NotificationResult(
-            self.name, ok=ok, detail="sent" if ok else "smtp send failed"
-        )
+        return NotificationResult(self.name, ok=ok, detail="sent" if ok else "smtp send failed")

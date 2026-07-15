@@ -4,27 +4,24 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import List, Optional
-
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Security
+from fastapi import APIRouter, FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import verify_api_key
+from app.config import DEFAULT_DEV_POSTGRES_PASSWORD, settings
 from app.csrf import CSRFMiddleware
-
-from app.config import settings, DEFAULT_DEV_POSTGRES_PASSWORD
-from app.utils.datetime_utils import to_aware_utc
+from app.utils.datetime_utils import format_iso_utc, to_aware_utc
 
 # Configure logging before importing modules that emit log records at import time
 # (e.g. app.analysis.scorer_config which logs the config file it loaded).
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -32,33 +29,50 @@ logger = logging.getLogger(__name__)
 # uvicorn's access log writes that live credential in plaintext for every
 # redemption (review finding).
 from app.logging_utils import configure_access_log_redaction
+
 configure_access_log_redaction()
 
+from app import leader, notifications
+from app.api import (
+    analysis,
+    archive,
+    entities,
+    lifecycle,
+    notifications_config,
+    transactions,
+)
+from app.api import (
+    auth as auth_api,
+)
+from app.api import (
+    clustering as clustering_api,
+)
+from app.api import (
+    users as users_api,
+)
+from app.db import clickhouse, postgres, raw_store
 from app.rate_limit import (
-    RateLimitMiddleware,
     RateLimiter,
+    RateLimitMiddleware,
     start_all_cleanups,
     stop_all_cleanups,
 )
-from app.db import postgres, clickhouse, raw_store
-from app import notifications, leader
-from app.api import transactions, entities, lifecycle, analysis, archive, auth as auth_api, users as users_api, clustering as clustering_api, notifications_config
+from app.routers import websocket
 from app.tasks import analysis as analysis_task
 from app.tasks import housekeeping as housekeeping_task
 from app.tasks import notifications as notifications_task
-from app.routers import ui, websocket
 
 # Global state
-active_connections: List = []
+active_connections: list = []
 ogmios_client = None
 # Strong references to the ingestion supervisor tasks. asyncio holds only weak
 # references to tasks, so a bare create_task() can be garbage-collected mid-run
 # (ingestion silently dies); keeping them here pins their lifetime and lets
 # shutdown await them. See lifespan().
-_ingestion_tasks: List[asyncio.Task] = []
+_ingestion_tasks: list[asyncio.Task] = []
 # The standby retry loop (app.leader guard), while this instance has not yet
 # become leader. None once promoted (or if it was never needed).
-_leader_standby_task: Optional[asyncio.Task] = None
+_leader_standby_task: asyncio.Task | None = None
 # Whether THIS process has started ingestion + the analysis engine — tracked
 # separately from leader.is_leader() so shutdown does the right thing whether
 # the guard is enabled or not (see _start_leader_duties / lifespan).
@@ -89,9 +103,7 @@ async def _supervised(label: str, coro_fn):
         except Exception as e:
             if loop.time() - started >= settings.SUPERVISOR_STABLE_RESET_SECONDS:
                 delay = settings.SUPERVISOR_BACKOFF_BASE_SECONDS
-            logger.error(
-                f"[supervisor] {label} crashed: {e!r} — restarting in {delay:.0f} s"
-            )
+            logger.error(f"[supervisor] {label} crashed: {e!r} — restarting in {delay:.0f} s")
             await asyncio.sleep(delay)
             delay = min(delay * 2, settings.SUPERVISOR_BACKOFF_MAX_SECONDS)
 
@@ -106,11 +118,13 @@ async def broadcast_lifecycle_event(event: dict):
     """
     if not active_connections:
         return
-    await websocket.broadcast({
-        "type": "lifecycle",
-        "data": event,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    await websocket.broadcast(
+        {
+            "type": "lifecycle",
+            "data": event,
+            "timestamp": format_iso_utc(datetime.now(UTC)),
+        }
+    )
 
 
 def _validate_startup_settings() -> None:
@@ -123,6 +137,7 @@ def _validate_startup_settings() -> None:
     it can live in the layered `.env` files, not just the shell env.
     """
     from app.auth import _dev_mode
+
     allow_dev_mode = (
         settings.TMS_ALLOW_DEV_MODE.strip() == "1"
         or os.environ.get("TMS_ALLOW_DEV_MODE", "").strip() == "1"
@@ -148,7 +163,9 @@ def _validate_startup_settings() -> None:
                 "Set CLICKHOUSE_PASSWORD (and the matching docker-compose "
                 "env) for production, or TMS_ALLOW_DEV_MODE=1 for local dev."
             )
-        logger.warning("CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)")
+        logger.warning(
+            "CLICKHOUSE_PASSWORD is empty — ClickHouse is unauthenticated (development mode)"
+        )
     # A baked-in default Postgres password is a guessable credential, never a
     # production posture. Same fail-fast as API_KEYS / CLICKHOUSE_PASSWORD:
     # refuse to start on the known dev default unless dev mode is explicit.
@@ -160,7 +177,9 @@ def _validate_startup_settings() -> None:
                 "the matching docker-compose env) for production, or "
                 "TMS_ALLOW_DEV_MODE=1 for local dev."
             )
-        logger.warning("POSTGRES_PASSWORD is the dev default — guessable credential (development mode)")
+        logger.warning(
+            "POSTGRES_PASSWORD is the dev default — guessable credential (development mode)"
+        )
     # Capped ClickHouse payloads make the raw store the ONLY full copy of
     # oversized (attack-shaped) transactions; running capped without the
     # store means those txs could never be scored at full fidelity.
@@ -187,7 +206,7 @@ def _validate_startup_settings() -> None:
     # message instead.
     if settings.TRUSTED_PROXY_ENABLED:
         try:
-            settings.trusted_proxy_networks
+            _ = settings.trusted_proxy_networks
         except ValueError as exc:
             raise RuntimeError(
                 f"TRUSTED_PROXY_CIDRS is malformed: {exc}. Fix the CIDR "
@@ -334,6 +353,7 @@ async def lifespan(app: FastAPI):
         # Magic-link auth tables (users, magic_link_tokens, user_sessions).
         # Idempotent + handles legacy `users` table migration.
         from app.auth.schema import execute_auth_schema
+
         await execute_auth_schema()
         clickhouse.init_client()
         clickhouse.execute_schema()
@@ -395,7 +415,7 @@ async def lifespan(app: FastAPI):
 # /docs, /redoc and /openapi.json enumerate the whole admin attack surface
 # and sit in the rate-limit exemption list, so they are exposed only in dev
 # mode or behind an explicit production opt-in.
-from app.auth import _dev_mode as _auth_dev_mode  # noqa: E402
+from app.auth import _dev_mode as _auth_dev_mode
 
 _docs_enabled = _auth_dev_mode or settings.TMS_API_DOCS_ENABLED
 
@@ -412,7 +432,7 @@ app = FastAPI(
     **Network Parameter**: All endpoints accept an optional `network` parameter.
     - Options: `mainnet`, `preprod`, or `preview`
     - Default: `preprod` (if not specified)
-    """
+    """,
 )
 
 # Middleware registration — Starlette applies middleware in LIFO order,
@@ -449,24 +469,27 @@ app.add_middleware(
 )
 
 # Register routers. When the built SPA is available at /app/frontend-dist
-# (produced by the Dockerfile's frontend-build stage), it owns "/" and the
-# legacy embedded UI router is skipped. Local dev without a build still
-# falls back to the embedded UI.
+# (produced by the Dockerfile's frontend-build stage), it owns "/"; local
+# dev runs the vite dev server (or a one-time `pnpm build`) instead.
 FRONTEND_DIST = Path("/app/frontend-dist")
 _spa_present = FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file()
 
-if not _spa_present:
-    app.include_router(ui.router)
 app.include_router(websocket.router)
-app.include_router(transactions.router)
-app.include_router(entities.router)
-app.include_router(lifecycle.router)
-app.include_router(analysis.router)
-app.include_router(archive.router)
-app.include_router(auth_api.router)
-app.include_router(users_api.router)
-app.include_router(clustering_api.router)
-app.include_router(notifications_config.router)
+
+# All REST resources mount under one versioned prefix. Health probes and /ws
+# deliberately stay at the root: they are infrastructure surfaces consumed by
+# load balancers and the WS handshake, not versioned API resources.
+api_v1 = APIRouter(prefix="/api/v1")
+api_v1.include_router(transactions.router)
+api_v1.include_router(entities.router)
+api_v1.include_router(lifecycle.router)
+api_v1.include_router(analysis.router)
+api_v1.include_router(archive.router)
+api_v1.include_router(auth_api.router)
+api_v1.include_router(users_api.router)
+api_v1.include_router(clustering_api.router)
+api_v1.include_router(notifications_config.router)
+app.include_router(api_v1)
 
 
 @app.get("/health")
@@ -531,19 +554,19 @@ async def _clustering_health() -> dict:
     unreachable/empty, ``stale`` when the newest verdict is older than the
     configured freshness window, else ``ok``.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.analysis.contract_anomaly import freshness_seconds
     from app.db import clustering_queries
 
     try:
         latest = await clustering_queries.latest_scored_at_async(settings.CARDANO_NETWORK)
-    except Exception:  # noqa: BLE001 - health probe never raises
+    except Exception:
         return {"state": "error", "last_scored_at": None}
     if latest is None:
         return {"state": "absent", "last_scored_at": None}
     window = freshness_seconds()
-    age = (datetime.now(timezone.utc) - to_aware_utc(latest)).total_seconds()
+    age = (datetime.now(UTC) - to_aware_utc(latest)).total_seconds()
     state = "stale" if (window and age > window) else "ok"
     return {"state": state, "last_scored_at": str(latest), "age_seconds": round(age)}
 
@@ -569,10 +592,6 @@ if _spa_present:
         # root before serving; anything else falls through to index.html so
         # client-side routing still works (no information leak on traversal).
         candidate = (_DIST_ROOT / full_path).resolve()
-        if (
-            full_path
-            and candidate.is_file()
-            and candidate.is_relative_to(_DIST_ROOT)
-        ):
+        if full_path and candidate.is_file() and candidate.is_relative_to(_DIST_ROOT):
             return FileResponse(candidate)
         return FileResponse(_DIST_ROOT / "index.html")

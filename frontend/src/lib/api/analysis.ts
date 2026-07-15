@@ -140,7 +140,7 @@ export type RiskAlertsParams = {
 	attackType?: AttackType;
 	/**
 	 * Severities to OR-match. Empty array or omitted means "no filter".
-	 * The backend `/api/analysis/results` accepts the `risk_band` query param
+	 * The backend `/api/v1/analysis/results` accepts the `risk_band` query param
 	 * repeated multiple times (e.g. `?risk_band=Critical&risk_band=High`) and
 	 * applies a SQL `IN` clause server-side.
 	 */
@@ -177,8 +177,8 @@ function buildResultsQuery(
 			qs.append("risk_band", SEVERITY_TO_RISK_BAND[s]);
 		}
 	}
-	if (p.analyzedFrom) qs.set("analyzed_from", p.analyzedFrom);
-	if (p.analyzedTo) qs.set("analyzed_to", p.analyzedTo);
+	if (p.analyzedFrom) qs.set("from", p.analyzedFrom);
+	if (p.analyzedTo) qs.set("to", p.analyzedTo);
 	return qs;
 }
 
@@ -190,7 +190,7 @@ async function fetchRiskAlertsPage(
 		limit: p.pageSize,
 		offset: p.page * p.pageSize,
 	});
-	const res = await fetchWithAuth(`/api/analysis/results?${qs.toString()}`);
+	const res = await fetchWithAuth(`/api/v1/analysis/results?${qs.toString()}`);
 	if (!res.ok) {
 		throw new Error(`Analysis results request failed: ${res.status}`);
 	}
@@ -285,7 +285,7 @@ export async function fetchAlertsForExport(
 
 	while (offset < total && all.length < hardCap) {
 		const qs = buildResultsQuery({ ...params, limit: pageSize, offset });
-		const res = await fetchWithAuth(`/api/analysis/results?${qs.toString()}`);
+		const res = await fetchWithAuth(`/api/v1/analysis/results?${qs.toString()}`);
 		if (!res.ok) {
 			throw new Error(`Export fetch failed: ${res.status}`);
 		}
@@ -308,7 +308,7 @@ export async function fetchAlertsForExport(
 
 async function fetchSingleResult(txHash: string): Promise<RiskAlert | null> {
 	const res = await fetchWithAuth(
-		`/api/analysis/results/${encodeURIComponent(txHash)}`,
+		`/api/v1/analysis/results/${encodeURIComponent(txHash)}`,
 	);
 	if (res.status === 404) return null;
 	if (!res.ok) {

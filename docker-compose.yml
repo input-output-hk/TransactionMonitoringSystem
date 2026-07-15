@@ -280,6 +280,12 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLUSTERING_DB:-tms_clustering}
       - HOST_CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
+      # Driver timeouts. Same env names as the host app but per-service values
+      # (CLUSTERING_-prefixed knobs): clickhouse-connect (HTTP) returns no bytes
+      # until a query finishes, so long fits need 300s where the host's native
+      # driver wants 120s; see services/clustering/docs/host-boundary.md.
+      - CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=${CLUSTERING_CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS:-300}
+      - CLICKHOUSE_CONNECT_TIMEOUT_SECONDS=${CLUSTERING_CLICKHOUSE_CONNECT_TIMEOUT_SECONDS:-10}
       # CARDANO_NETWORK comes from .env.${TMS_ENV}; one sidecar per network keeps
       # the engine single-network (no network column on its tables).
       # Scale / feed knobs (see engine Settings). Window bounds the fit memory.

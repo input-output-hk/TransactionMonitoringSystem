@@ -27,9 +27,7 @@ def zero_retention(monkeypatch):
 
 
 class TestRetentionWarnings:
-    def test_transactions_retention_below_window_warns(
-        self, zero_retention, monkeypatch, caplog
-    ):
+    def test_transactions_retention_below_window_warns(self, zero_retention, monkeypatch, caplog):
         monkeypatch.setattr(settings, "CH_RETENTION_DAYS_TRANSACTIONS", 90)
         with caplog.at_level(logging.WARNING):
             apply_retention_ttls(MagicMock())
@@ -46,19 +44,13 @@ class TestRetentionWarnings:
         warnings = [r for r in caplog.records if "CH_RETENTION_DAYS_IO" in r.getMessage()]
         assert len(warnings) == 1
 
-    def test_features_retention_below_window_warns(
-        self, zero_retention, monkeypatch, caplog
-    ):
+    def test_features_retention_below_window_warns(self, zero_retention, monkeypatch, caplog):
         monkeypatch.setattr(settings, "CH_RETENTION_DAYS_FEATURES", 30)
         with caplog.at_level(logging.WARNING):
             apply_retention_ttls(MagicMock())
-        assert any(
-            "CH_RETENTION_DAYS_FEATURES" in r.getMessage() for r in caplog.records
-        )
+        assert any("CH_RETENTION_DAYS_FEATURES" in r.getMessage() for r in caplog.records)
 
-    def test_retention_above_window_no_warning(
-        self, zero_retention, monkeypatch, caplog
-    ):
+    def test_retention_above_window_no_warning(self, zero_retention, monkeypatch, caplog):
         monkeypatch.setattr(settings, "CH_RETENTION_DAYS_TRANSACTIONS", 365)
         with caplog.at_level(logging.WARNING):
             apply_retention_ttls(MagicMock())
@@ -68,8 +60,6 @@ class TestRetentionWarnings:
         client = MagicMock()
         with caplog.at_level(logging.WARNING):
             apply_retention_ttls(client)
-        modify_calls = [
-            c for c in client.execute.call_args_list if "MODIFY TTL" in c.args[0]
-        ]
+        modify_calls = [c for c in client.execute.call_args_list if "MODIFY TTL" in c.args[0]]
         assert modify_calls == []
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

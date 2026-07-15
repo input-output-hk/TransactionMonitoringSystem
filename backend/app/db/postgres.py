@@ -3,17 +3,18 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Optional, List, Dict, Any
-import asyncpg
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any
+
+import asyncpg
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Global connection pool
-_pool: Optional[asyncpg.Pool] = None
+_pool: asyncpg.Pool | None = None
 # Serializes pool creation: without it two concurrent init_pool() callers could
 # both observe `_pool is None`, both create_pool(), and one pool would leak
 # (its connections never closed). asyncio.Lock() needs no running loop to
@@ -94,7 +95,7 @@ async def execute_schema():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS config (
                 key VARCHAR(255) PRIMARY KEY,
@@ -103,7 +104,7 @@ async def execute_schema():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS metadata (
                 id SERIAL PRIMARY KEY,
@@ -115,7 +116,7 @@ async def execute_schema():
                 UNIQUE(entity_type, entity_id, key)
             )
         """)
-        
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id SERIAL PRIMARY KEY,
@@ -129,7 +130,7 @@ async def execute_schema():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
             CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
@@ -379,7 +380,10 @@ _BAND_RANK = {"Informational": 0, "Moderate": 1, "High": 2, "Critical": 3}
 
 
 async def claim_notification(
-    network: str, tx_hash: str, band: str, source: str = "scorer",
+    network: str,
+    tx_hash: str,
+    band: str,
+    source: str = "scorer",
 ) -> bool:
     """Atomically claim the right to notify for (network, tx_hash, source) at ``band``.
 
@@ -401,7 +405,8 @@ async def claim_notification(
     if rank < 0:
         return False  # unknown band — never notify
     async with get_connection() as conn:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(
+            """
             INSERT INTO notified_alerts (network, tx_hash, source, band_rank)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (network, tx_hash, source) DO UPDATE
@@ -409,12 +414,20 @@ async def claim_notification(
                     notified_at = CURRENT_TIMESTAMP
                 WHERE notified_alerts.band_rank < EXCLUDED.band_rank
             RETURNING (xmax = 0) AS inserted
-        """, network, tx_hash, source, rank)
+        """,
+            network,
+            tx_hash,
+            source,
+            rank,
+        )
     return row is not None
 
 
 async def already_notified(
-    network: str, tx_hash: str, band: str, source: str = "scorer",
+    network: str,
+    tx_hash: str,
+    band: str,
+    source: str = "scorer",
 ) -> bool:
     """True if (network, tx_hash, source) was already notified at >= ``band``.
 
@@ -429,10 +442,16 @@ async def already_notified(
     if rank < 0:
         return True  # unknown band: matches claim_notification's never-notify
     async with get_connection() as conn:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(
+            """
             SELECT 1 FROM notified_alerts
             WHERE network = $1 AND tx_hash = $2 AND source = $3 AND band_rank >= $4
-        """, network, tx_hash, source, rank)
+        """,
+            network,
+            tx_hash,
+            source,
+            rank,
+        )
     return row is not None
 
 
@@ -453,34 +472,46 @@ async def prune_notified_alerts(older_than_days: int) -> int:
     the verdict (the poll no longer surfaces it).
     """
     async with get_connection() as conn:
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             DELETE FROM notified_alerts
             WHERE notified_at < NOW() - ($1 * INTERVAL '1 day')
               AND source = 'scorer'
-        """, older_than_days)
+        """,
+            older_than_days,
+        )
         return int(result.split()[1])
 
 
 async def get_report_state(
-    network: str, report_kind: str = "periodic",
-) -> Optional[Dict[str, Any]]:
+    network: str,
+    report_kind: str = "periodic",
+) -> dict[str, Any] | None:
     """Last-sent bookkeeping for the periodic report, or None if never sent."""
     async with get_connection() as conn:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(
+            """
             SELECT last_sent_at, last_window_start, last_window_end
             FROM notification_report_state
             WHERE network = $1 AND report_kind = $2
-        """, network, report_kind)
+        """,
+            network,
+            report_kind,
+        )
     return dict(row) if row else None
 
 
 async def mark_report_sent(
-    network: str, window_start: datetime, window_end: datetime,
-    sent_at: datetime, report_kind: str = "periodic",
+    network: str,
+    window_start: datetime,
+    window_end: datetime,
+    sent_at: datetime,
+    report_kind: str = "periodic",
 ) -> None:
     """Advance the report boundary after a successful send (idempotent upsert)."""
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO notification_report_state
                 (network, report_kind, last_sent_at, last_window_start, last_window_end)
             VALUES ($1, $2, $3, $4, $5)
@@ -488,17 +519,22 @@ async def mark_report_sent(
                 last_sent_at      = EXCLUDED.last_sent_at,
                 last_window_start = EXCLUDED.last_window_start,
                 last_window_end   = EXCLUDED.last_window_end
-        """, network, report_kind, sent_at, window_start, window_end)
+        """,
+            network,
+            report_kind,
+            sent_at,
+            window_start,
+            window_end,
+        )
 
 
 # --- Notification config document (admin-managed) ---
 
-async def get_notification_config() -> Optional[Dict[str, Any]]:
+
+async def get_notification_config() -> dict[str, Any] | None:
     """The stored notification config document, or None if never set."""
     async with get_connection() as conn:
-        row = await conn.fetchrow(
-            "SELECT config FROM notification_config WHERE id = TRUE"
-        )
+        row = await conn.fetchrow("SELECT config FROM notification_config WHERE id = TRUE")
     if not row:
         return None
     value = row["config"]
@@ -506,20 +542,25 @@ async def get_notification_config() -> Optional[Dict[str, Any]]:
     return json.loads(value) if isinstance(value, str) else value
 
 
-async def set_notification_config(doc: Dict[str, Any], updated_by: str) -> None:
+async def set_notification_config(doc: dict[str, Any], updated_by: str) -> None:
     """Upsert the single notification config row (JSONB)."""
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO notification_config (id, config, updated_by)
             VALUES (TRUE, $1::jsonb, $2)
             ON CONFLICT (id) DO UPDATE SET
                 config     = EXCLUDED.config,
                 updated_at = CURRENT_TIMESTAMP,
                 updated_by = EXCLUDED.updated_by
-        """, json.dumps(doc), updated_by)
+        """,
+            json.dumps(doc),
+            updated_by,
+        )
 
 
 # --- Transaction Lifecycle CRUD ---
+
 
 async def upsert_lifecycle_pending(tx_id: str, network: str, first_seen_at: datetime):
     """Insert a transaction as PENDING (first seen in mempool).
@@ -527,15 +568,21 @@ async def upsert_lifecycle_pending(tx_id: str, network: str, first_seen_at: date
     Raw payload is written to the local filesystem raw store (ADR-009), not here.
     """
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO tx_lifecycle (tx_id, network, status, first_seen_at)
             VALUES ($1, $2, 'PENDING', $3)
             ON CONFLICT (tx_id) DO NOTHING
-        """, tx_id, network, first_seen_at)
+        """,
+            tx_id,
+            network,
+            first_seen_at,
+        )
 
 
-async def upsert_lifecycle_confirmed(tx_id: str, network: str, confirmed_at: datetime,
-                                      block_hash: str, slot: int, height: int):
+async def upsert_lifecycle_confirmed(
+    tx_id: str, network: str, confirmed_at: datetime, block_hash: str, slot: int, height: int
+):
     """Mark a transaction as CONFIRMED, computing latency if previously PENDING.
 
     Single-row model: tx_id is the primary key.  If the transaction was previously
@@ -544,7 +591,8 @@ async def upsert_lifecycle_confirmed(tx_id: str, network: str, confirmed_at: dat
     previous rollback is no longer the canonical state of this transaction.
     """
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO tx_lifecycle (tx_id, network, status, confirmed_at, block_hash, slot, height)
             VALUES ($1, $2, 'CONFIRMED', $3, $4, $5, $6)
             ON CONFLICT (tx_id) DO UPDATE SET
@@ -560,10 +608,17 @@ async def upsert_lifecycle_confirmed(tx_id: str, network: str, confirmed_at: dat
                     ELSE NULL
                 END,
                 updated_at   = CURRENT_TIMESTAMP
-        """, tx_id, network, confirmed_at, block_hash, slot, height)
+        """,
+            tx_id,
+            network,
+            confirmed_at,
+            block_hash,
+            slot,
+            height,
+        )
 
 
-async def batch_upsert_lifecycle_confirmed(records: List[tuple]):
+async def batch_upsert_lifecycle_confirmed(records: list[tuple]):
     """Batch-upsert confirmed transactions in a single executemany call.
 
     Each record is (tx_id, network, confirmed_at, block_hash, slot, height).
@@ -573,7 +628,8 @@ async def batch_upsert_lifecycle_confirmed(records: List[tuple]):
     if not records:
         return
     async with get_connection() as conn:
-        await conn.executemany("""
+        await conn.executemany(
+            """
             INSERT INTO tx_lifecycle (tx_id, network, status, confirmed_at, block_hash, slot, height)
             VALUES ($1, $2, 'CONFIRMED', $3, $4, $5, $6)
             ON CONFLICT (tx_id) DO UPDATE SET
@@ -589,7 +645,9 @@ async def batch_upsert_lifecycle_confirmed(records: List[tuple]):
                     ELSE NULL
                 END,
                 updated_at     = CURRENT_TIMESTAMP
-        """, records)
+        """,
+            records,
+        )
 
 
 async def mark_lifecycle_rolled_back(rollback_slot: int, network: str):
@@ -605,7 +663,8 @@ async def mark_lifecycle_rolled_back(rollback_slot: int, network: str):
     reflects the current canonical state.
     """
     async with get_connection() as conn:
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             UPDATE tx_lifecycle
             SET status = 'ROLLED_BACK',
                 rolled_back_at = CURRENT_TIMESTAMP,
@@ -613,11 +672,14 @@ async def mark_lifecycle_rolled_back(rollback_slot: int, network: str):
             WHERE network = $1
               AND slot > $2
               AND status = 'CONFIRMED'
-        """, network, rollback_slot)
+        """,
+            network,
+            rollback_slot,
+        )
         return result
 
 
-async def get_lifecycle_by_tx_id(tx_id: str) -> Optional[Dict[str, Any]]:
+async def get_lifecycle_by_tx_id(tx_id: str) -> dict[str, Any] | None:
     """Get lifecycle record for a single transaction"""
     async with get_connection() as conn:
         row = await conn.fetchrow("SELECT * FROM tx_lifecycle WHERE tx_id = $1", tx_id)
@@ -626,36 +688,67 @@ async def get_lifecycle_by_tx_id(tx_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def get_lifecycles_by_status(status: str, network: str = "preprod",
-                                    limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+async def get_lifecycles_by_status(
+    status: str, network: str = "preprod", limit: int = 100, offset: int = 0
+) -> list[dict[str, Any]]:
     """Query lifecycle records by status"""
     async with get_connection() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(
+            """
             SELECT * FROM tx_lifecycle
             WHERE status = $1 AND network = $2
             ORDER BY created_at DESC
             LIMIT $3 OFFSET $4
-        """, status, network, limit, offset)
+        """,
+            status,
+            network,
+            limit,
+            offset,
+        )
         return [dict(r) for r in rows]
 
 
-async def get_all_lifecycles(network: str = "preprod",
-                              limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+async def get_all_lifecycles(
+    network: str = "preprod", limit: int = 100, offset: int = 0
+) -> list[dict[str, Any]]:
     """Query all lifecycle records regardless of status"""
     async with get_connection() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(
+            """
             SELECT * FROM tx_lifecycle
             WHERE network = $1
             ORDER BY created_at DESC
             LIMIT $2 OFFSET $3
-        """, network, limit, offset)
+        """,
+            network,
+            limit,
+            offset,
+        )
         return [dict(r) for r in rows]
 
 
-async def get_lifecycle_summary(network: str = "preprod") -> Dict[str, Any]:
+async def count_lifecycles(status: str | None = None, network: str = "preprod") -> int:
+    """Count lifecycle records matching the list filters (for paging totals)."""
+    async with get_connection() as conn:
+        if status is not None:
+            row = await conn.fetchrow(
+                "SELECT count(*) AS total FROM tx_lifecycle WHERE status = $1 AND network = $2",
+                status,
+                network,
+            )
+        else:
+            row = await conn.fetchrow(
+                "SELECT count(*) AS total FROM tx_lifecycle WHERE network = $1",
+                network,
+            )
+        return int(row["total"]) if row else 0
+
+
+async def get_lifecycle_summary(network: str = "preprod") -> dict[str, Any]:
     """Get aggregate lifecycle statistics"""
     async with get_connection() as conn:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(
+            """
             SELECT
                 COUNT(*) AS total_tracked,
                 COUNT(*) FILTER (WHERE status = 'PENDING')     AS pending_count,
@@ -665,7 +758,9 @@ async def get_lifecycle_summary(network: str = "preprod") -> Dict[str, Any]:
                 AVG(latency_ms) FILTER (WHERE latency_ms IS NOT NULL) AS avg_latency_ms
             FROM tx_lifecycle
             WHERE network = $1
-        """, network)
+        """,
+            network,
+        )
         result = dict(row)
         total = result["total_tracked"]
         result["rollback_rate"] = (result["rolled_back_count"] / total * 100) if total > 0 else 0.0
@@ -674,20 +769,26 @@ async def get_lifecycle_summary(network: str = "preprod") -> Dict[str, Any]:
 
 # --- Sync Checkpoint ---
 
+
 async def save_sync_point(network: str, slot: int, block_id: str):
     """Persist the last successfully processed chain sync point."""
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO sync_checkpoint (network, slot, block_id, updated_at)
             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
             ON CONFLICT (network) DO UPDATE SET
                 slot       = $2,
                 block_id   = $3,
                 updated_at = CURRENT_TIMESTAMP
-        """, network, slot, block_id)
+        """,
+            network,
+            slot,
+            block_id,
+        )
 
 
-async def get_sync_point(network: str) -> Optional[Dict[str, Any]]:
+async def get_sync_point(network: str) -> dict[str, Any] | None:
     """Return the last saved sync point for the given network, or None on first run."""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -700,7 +801,8 @@ async def get_sync_point(network: str) -> Optional[Dict[str, Any]]:
 
 # --- Pending score repurges (durable rollback second pass) ---
 
-async def add_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+
+async def add_pending_score_repurges(network: str, tx_hashes: list[str]) -> None:
     """Persist tx hashes awaiting the delayed tx_class_scores repurge.
 
     Written BEFORE the in-memory repurge task is scheduled so a restart or
@@ -711,14 +813,17 @@ async def add_pending_score_repurges(network: str, tx_hashes: List[str]) -> None
     if not tx_hashes:
         return
     async with get_connection() as conn:
-        await conn.executemany("""
+        await conn.executemany(
+            """
             INSERT INTO pending_score_repurges (network, tx_hash)
             VALUES ($1, $2)
             ON CONFLICT (network, tx_hash) DO NOTHING
-        """, [(network, h) for h in tx_hashes])
+        """,
+            [(network, h) for h in tx_hashes],
+        )
 
 
-async def get_pending_score_repurges(network: str) -> List[str]:
+async def get_pending_score_repurges(network: str) -> list[str]:
     """All tx hashes whose delayed score repurge has not completed yet."""
     async with get_connection() as conn:
         rows = await conn.fetch(
@@ -728,7 +833,7 @@ async def get_pending_score_repurges(network: str) -> List[str]:
         return [r["tx_hash"] for r in rows]
 
 
-async def clear_pending_score_repurges(network: str, tx_hashes: List[str]) -> None:
+async def clear_pending_score_repurges(network: str, tx_hashes: list[str]) -> None:
     """Remove hashes whose tx_class_scores repurge succeeded in ClickHouse.
 
     Called only AFTER delete_score_rows_async returns: clearing first would
@@ -737,39 +842,56 @@ async def clear_pending_score_repurges(network: str, tx_hashes: List[str]) -> No
     if not tx_hashes:
         return
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             DELETE FROM pending_score_repurges
             WHERE network = $1 AND tx_hash = ANY($2)
-        """, network, tx_hashes)
+        """,
+            network,
+            tx_hashes,
+        )
 
 
 # --- Entity State ---
 
-async def get_entity_state(entity_type: str, entity_id: str, network: str) -> Optional[Dict[str, Any]]:
+
+async def get_entity_state(entity_type: str, entity_id: str, network: str) -> dict[str, Any] | None:
     """Return the JSON state for a given entity, or None if not found."""
     async with get_connection() as conn:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(
+            """
             SELECT state FROM entity_state
             WHERE network = $1 AND entity_type = $2 AND entity_id = $3
-        """, network, entity_type, entity_id)
+        """,
+            network,
+            entity_type,
+            entity_id,
+        )
         if row:
             return json.loads(row["state"])
         return None
 
 
-async def set_entity_state(entity_type: str, entity_id: str, state: Dict[str, Any], network: str):
+async def set_entity_state(entity_type: str, entity_id: str, state: dict[str, Any], network: str):
     """Upsert the JSON state for a given entity."""
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO entity_state (network, entity_type, entity_id, state, updated_at)
             VALUES ($1, $2, $3, $4::jsonb, CURRENT_TIMESTAMP)
             ON CONFLICT (network, entity_type, entity_id) DO UPDATE SET
                 state      = $4::jsonb,
                 updated_at = CURRENT_TIMESTAMP
-        """, network, entity_type, entity_id, json.dumps(state))
+        """,
+            network,
+            entity_type,
+            entity_id,
+            json.dumps(state),
+        )
 
 
 # --- Lifecycle cleanup ---
+
 
 async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int:
     """Mark stale PENDING transactions as DROPPED.
@@ -781,7 +903,8 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
     Returns the number of rows updated.
     """
     async with get_connection() as conn:
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             UPDATE tx_lifecycle
             SET status     = 'DROPPED',
                 dropped_at = CURRENT_TIMESTAMP,
@@ -789,7 +912,10 @@ async def mark_dropped_pending_txs(network: str, older_than_seconds: int) -> int
             WHERE network       = $1
               AND status        = 'PENDING'
               AND first_seen_at < NOW() - ($2 * INTERVAL '1 second')
-        """, network, older_than_seconds)
+        """,
+            network,
+            older_than_seconds,
+        )
         return _affected_rows(result)
 
 
@@ -799,7 +925,7 @@ async def insert_audit_log(
     entity_type: str,
     entity_id: str,
     details: str,
-    ip_address: Optional[str],
+    ip_address: str | None,
 ) -> int:
     """Append one audit row and return its id. ``details`` is a JSON string;
     ``user_id`` stays NULL until server-side accounts exist (the actor is
@@ -812,20 +938,32 @@ async def insert_audit_log(
 
     ip_address = parse_ip(ip_address)
     async with get_connection() as conn:
-        return await conn.fetchval("""
+        return await conn.fetchval(
+            """
             INSERT INTO audit_logs (
                 event_type, entity_type, entity_id, action, details, ip_address
             ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::inet)
             RETURNING id
-        """, event_type, entity_type, entity_id, action, details, ip_address)
+        """,
+            event_type,
+            entity_type,
+            entity_id,
+            action,
+            details,
+            ip_address,
+        )
 
 
 async def update_audit_log_details(audit_id: int, outcome: str) -> None:
     """Merge ``outcome`` (a JSON object string) into an audit row's details."""
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             UPDATE audit_logs SET details = details || $2::jsonb WHERE id = $1
-        """, audit_id, outcome)
+        """,
+            audit_id,
+            outcome,
+        )
 
 
 async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
@@ -835,12 +973,16 @@ async def prune_terminal_lifecycle(network: str, older_than_days: int) -> int:
     is opt-in (LIFECYCLE_RETENTION_DAYS=0 keeps everything).
     """
     async with get_connection() as conn:
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             DELETE FROM tx_lifecycle
             WHERE network    = $1
               AND status IN ('DROPPED', 'ROLLED_BACK')
               AND updated_at < NOW() - ($2 * INTERVAL '1 day')
-        """, network, older_than_days)
+        """,
+            network,
+            older_than_days,
+        )
         return _affected_rows(result)
 
 
@@ -852,10 +994,13 @@ async def prune_audit_logs(older_than_days: int) -> int:
     everything (audit rows are the suppression accountability record).
     """
     async with get_connection() as conn:
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             DELETE FROM audit_logs
             WHERE created_at < NOW() - ($1 * INTERVAL '1 day')
-        """, older_than_days)
+        """,
+            older_than_days,
+        )
         return _affected_rows(result)
 
 
@@ -868,29 +1013,41 @@ async def prune_mempool_collisions(network: str, older_than_days: int) -> int:
     (MEMPOOL_COLLISION_RETENTION_DAYS=0 keeps everything).
     """
     async with get_connection() as conn:
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             DELETE FROM mempool_collisions
             WHERE network    = $1
               AND created_at < NOW() - ($2 * INTERVAL '1 day')
-        """, network, older_than_days)
+        """,
+            network,
+            older_than_days,
+        )
         return _affected_rows(result)
 
 
 # --- Mempool Collision Tracking (Front-Running Detection) ---
 
+
 async def insert_mempool_collision(
-    tx_a: str, tx_b: str, network: str,
-    shared_inputs: list, shared_count: int,
-    tx_a_seen_at: datetime, tx_b_seen_at: datetime,
+    tx_a: str,
+    tx_b: str,
+    network: str,
+    shared_inputs: list,
+    shared_count: int,
+    tx_a_seen_at: datetime,
+    tx_b_seen_at: datetime,
     delta_ms: float,
-    tx_a_fee: int = 0, tx_b_fee: int = 0,
+    tx_a_fee: int = 0,
+    tx_b_fee: int = 0,
     tx_a_first_input_addr: str = "",
     tx_b_first_input_addr: str = "",
-    tx_a_ttl: int = 0, tx_b_ttl: int = 0,
+    tx_a_ttl: int = 0,
+    tx_b_ttl: int = 0,
 ):
     """Record a mempool collision between two transactions sharing inputs."""
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             INSERT INTO mempool_collisions
                 (tx_a, tx_b, network, shared_inputs, shared_count,
                  tx_a_seen_at, tx_b_seen_at, delta_ms, tx_a_fee, tx_b_fee,
@@ -898,18 +1055,31 @@ async def insert_mempool_collision(
                  tx_a_ttl, tx_b_ttl)
             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10,
                     $11, $12, $13, $14)
-        """, tx_a, tx_b, network, json.dumps(shared_inputs), shared_count,
-            tx_a_seen_at, tx_b_seen_at, delta_ms, tx_a_fee, tx_b_fee,
-            tx_a_first_input_addr, tx_b_first_input_addr,
-            tx_a_ttl, tx_b_ttl)
+        """,
+            tx_a,
+            tx_b,
+            network,
+            json.dumps(shared_inputs),
+            shared_count,
+            tx_a_seen_at,
+            tx_b_seen_at,
+            delta_ms,
+            tx_a_fee,
+            tx_b_fee,
+            tx_a_first_input_addr,
+            tx_b_first_input_addr,
+            tx_a_ttl,
+            tx_b_ttl,
+        )
 
 
-async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dict[str, Any]]:
+async def get_collisions_for_txs(tx_hashes: list, network: str) -> dict[str, dict[str, Any]]:
     """Fetch collision data for a batch of tx hashes. Returns {tx_hash: collision_dict}."""
     if not tx_hashes:
         return {}
     async with get_connection() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(
+            """
             SELECT tx_a, tx_b, shared_count, delta_ms, outcome,
                    tx_a_fee, tx_b_fee,
                    tx_a_first_input_addr, tx_b_first_input_addr,
@@ -917,7 +1087,10 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
             FROM mempool_collisions
             WHERE network = $1
               AND (tx_a = ANY($2) OR tx_b = ANY($2))
-        """, network, tx_hashes)
+        """,
+            network,
+            tx_hashes,
+        )
 
     # Pre-compute attacker win counts for all counterpart addresses in one query
     counterpart_addrs = set()
@@ -926,8 +1099,8 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
         counterpart_addrs.add(r["tx_b_first_input_addr"])
     counterpart_addrs.discard("")
 
-    win_counts: Dict[str, int] = {}
-    win_counts_24h: Dict[str, int] = {}
+    win_counts: dict[str, int] = {}
+    win_counts_24h: dict[str, int] = {}
     if counterpart_addrs:
         async with get_connection() as conn:
             # Single query covers both the all-time count and the 24-hour
@@ -944,7 +1117,8 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
             # confirmation time instead would require an additional
             # ``confirmed_at`` column populated by
             # :func:`update_collision_outcome`.
-            win_rows = await conn.fetch("""
+            win_rows = await conn.fetch(
+                """
                 SELECT addr,
                        COUNT(*) AS cnt,
                        COUNT(*) FILTER (
@@ -962,17 +1136,22 @@ async def get_collisions_for_txs(tx_hashes: list, network: str) -> Dict[str, Dic
                       AND tx_b_first_input_addr = ANY($2)
                 ) sub
                 GROUP BY addr
-            """, network, list(counterpart_addrs))
+            """,
+                network,
+                list(counterpart_addrs),
+            )
             win_counts = {r["addr"]: r["cnt"] for r in win_rows}
             win_counts_24h = {r["addr"]: r["cnt_24h"] for r in win_rows}
 
-    result: Dict[str, Dict[str, Any]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for r in rows:
         for tx_hash in [r["tx_a"], r["tx_b"]]:
             if tx_hash in tx_hashes and tx_hash not in result:
                 is_a = tx_hash == r["tx_a"]
                 counterpart = r["tx_b"] if is_a else r["tx_a"]
-                counterpart_addr = r["tx_b_first_input_addr"] if is_a else r["tx_a_first_input_addr"]
+                counterpart_addr = (
+                    r["tx_b_first_input_addr"] if is_a else r["tx_a_first_input_addr"]
+                )
                 my_addr = r["tx_a_first_input_addr"] if is_a else r["tx_b_first_input_addr"]
                 counterpart_ttl = r["tx_b_ttl"] if is_a else r["tx_a_ttl"]
                 result[tx_hash] = {
@@ -998,7 +1177,8 @@ async def update_collision_outcome(confirmed_tx_hash: str, network: str):
     - TX_B_CONFIRMED if the confirmed tx is tx_b
     """
     async with get_connection() as conn:
-        await conn.execute("""
+        await conn.execute(
+            """
             UPDATE mempool_collisions
             SET outcome = CASE
                 WHEN tx_a = $1 THEN 'TX_A_CONFIRMED'
@@ -1007,4 +1187,7 @@ async def update_collision_outcome(confirmed_tx_hash: str, network: str):
             WHERE network = $2
               AND (tx_a = $1 OR tx_b = $1)
               AND outcome = 'BOTH_PENDING'
-        """, confirmed_tx_hash, network)
+        """,
+            confirmed_tx_hash,
+            network,
+        )

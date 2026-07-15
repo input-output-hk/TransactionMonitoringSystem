@@ -1,18 +1,18 @@
 /**
- * Auth API client. Talks to `/api/auth/*` and `/api/users` on the backend.
+ * Auth API client. Talks to `/api/v1/auth/*` and `/api/v1/users` on the backend.
  *
  * Session cookies (`tms_session`, HTTP-only) ride along automatically via
  * `fetchWithAuth({ credentials: "include" })` — the SPA never reads or
  * writes the cookie directly.
  *
- * The mapping below converts backend snake_case payloads
- * (``full_name``, ``created_at``) to the camelCase shape the rest of
- * the app expects. Keep it centralized so callers don't deal with both.
+ * Payloads stay snake_case end to end, matching the backend and every other
+ * API module (see lib/api/README.md): `User` mirrors the backend field names
+ * verbatim, so there is no per-module case-mapping layer to keep in sync.
  */
 import { fetchWithAuth } from "./fetch";
 
 /**
- * Cache key for the resolved `/api/auth/me` user. Shared between the
+ * Cache key for the resolved `/api/v1/auth/me` user. Shared between the
  * AuthProvider (which owns the query) and the QueryClient's global 401
  * handler in `main.tsx` (which resets it to anonymous).
  */
@@ -24,11 +24,11 @@ export type UserStatus = "pending" | "active" | "disabled";
 export type User = {
 	id: string;
 	email: string;
-	fullName: string;
+	full_name: string;
 	role: UserRole;
 	status: UserStatus;
-	createdAt: string;
-	lastLoginAt: string | null;
+	created_at: string;
+	last_login_at: string | null;
 };
 
 export type UsersListResponse = {
@@ -37,29 +37,7 @@ export type UsersListResponse = {
 	data: User[];
 };
 
-type ApiUser = {
-	id: string;
-	email: string;
-	full_name: string;
-	role: UserRole;
-	status: UserStatus;
-	created_at: string;
-	last_login_at: string | null;
-};
-
-function toUser(u: ApiUser): User {
-	return {
-		id: u.id,
-		email: u.email,
-		fullName: u.full_name,
-		role: u.role,
-		status: u.status,
-		createdAt: u.created_at,
-		lastLoginAt: u.last_login_at,
-	};
-}
-
-/* ---------- /api/auth/* ---------- */
+/* ---------- /api/v1/auth/* ---------- */
 
 /**
  * Ask the backend to email a magic-link login to `email`. Returns void
@@ -67,7 +45,7 @@ function toUser(u: ApiUser): User {
  * that signal. Throws only on network / 5xx errors.
  */
 export async function requestLink(email: string): Promise<void> {
-	const res = await fetchWithAuth("/api/auth/request-link", {
+	const res = await fetchWithAuth("/api/v1/auth/request-link", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ email }),
@@ -84,7 +62,7 @@ export async function requestLink(email: string): Promise<void> {
  */
 export async function verifyToken(token: string): Promise<User> {
 	const res = await fetchWithAuth(
-		`/api/auth/verify?token=${encodeURIComponent(token)}`,
+		`/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
 	);
 	if (!res.ok) {
 		const err = (await res.json().catch(() => null)) as
@@ -92,12 +70,12 @@ export async function verifyToken(token: string): Promise<User> {
 			| null;
 		throw new Error(err?.detail ?? `Verification failed (${res.status})`);
 	}
-	return toUser((await res.json()) as ApiUser);
+	return (await res.json()) as User;
 }
 
 /** Drops the current session server-side and clears the cookie. */
 export async function logout(): Promise<void> {
-	await fetchWithAuth("/api/auth/logout", { method: "POST" });
+	await fetchWithAuth("/api/v1/auth/logout", { method: "POST" });
 }
 
 /**
@@ -109,17 +87,17 @@ export async function fetchMe(): Promise<User | null> {
 	// allow401: anonymous is a normal outcome here, not a session expiry —
 	// mapping it to null (instead of UnauthorizedError) keeps the login
 	// page reachable.
-	const res = await fetchWithAuth("/api/auth/me", undefined, {
+	const res = await fetchWithAuth("/api/v1/auth/me", undefined, {
 		allow401: true,
 	});
 	if (res.status === 401) return null;
 	if (!res.ok) {
 		throw new Error(`me failed (${res.status})`);
 	}
-	return toUser((await res.json()) as ApiUser);
+	return (await res.json()) as User;
 }
 
-/* ---------- /api/users (admin) ---------- */
+/* ---------- /api/v1/users (admin) ---------- */
 
 export async function listUsers(
 	params: { limit?: number; offset?: number } = {},
@@ -127,38 +105,25 @@ export async function listUsers(
 	const qs = new URLSearchParams();
 	if (params.limit != null) qs.set("limit", String(params.limit));
 	if (params.offset != null) qs.set("offset", String(params.offset));
-	const url = `/api/users${qs.toString() ? `?${qs.toString()}` : ""}`;
+	const url = `/api/v1/users${qs.toString() ? `?${qs.toString()}` : ""}`;
 	const res = await fetchWithAuth(url);
 	if (!res.ok) {
 		throw new Error(`list users failed (${res.status})`);
 	}
-	const json = (await res.json()) as {
-		count: number;
-		total: number;
-		data: ApiUser[];
-	};
-	return {
-		count: json.count,
-		total: json.total,
-		data: json.data.map(toUser),
-	};
+	return (await res.json()) as UsersListResponse;
 }
 
 export type CreateUserPayload = {
 	email: string;
-	fullName: string;
+	full_name: string;
 	role: UserRole;
 };
 
 export async function createUser(payload: CreateUserPayload): Promise<User> {
-	const res = await fetchWithAuth("/api/users", {
+	const res = await fetchWithAuth("/api/v1/users", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			email: payload.email,
-			full_name: payload.fullName,
-			role: payload.role,
-		}),
+		body: JSON.stringify(payload),
 	});
 	if (!res.ok) {
 		const err = (await res.json().catch(() => null)) as
@@ -166,11 +131,11 @@ export async function createUser(payload: CreateUserPayload): Promise<User> {
 			| null;
 		throw new Error(err?.detail ?? `create user failed (${res.status})`);
 	}
-	return toUser((await res.json()) as ApiUser);
+	return (await res.json()) as User;
 }
 
 export async function deleteUser(id: string): Promise<void> {
-	const res = await fetchWithAuth(`/api/users/${encodeURIComponent(id)}`, {
+	const res = await fetchWithAuth(`/api/v1/users/${encodeURIComponent(id)}`, {
 		method: "DELETE",
 	});
 	// 204 No Content is the happy path (`res.ok` already covers it). Other
@@ -186,7 +151,7 @@ export async function deleteUser(id: string): Promise<void> {
 
 export async function resendInvite(id: string): Promise<void> {
 	const res = await fetchWithAuth(
-		`/api/users/${encodeURIComponent(id)}/resend-invite`,
+		`/api/v1/users/${encodeURIComponent(id)}/resend-invite`,
 		{ method: "POST" },
 	);
 	if (!res.ok) {

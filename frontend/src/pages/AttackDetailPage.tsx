@@ -24,7 +24,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useRiskAlert } from "@/lib/api/analysis";
-import { getNetwork } from "@/lib/api/fetch";
+import { getNetwork, type Network } from "@/lib/api/fetch";
 import {
 	useArchiveMeta,
 	useArchiveMutation,
@@ -36,7 +36,8 @@ import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/utils/clipboard";
-import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
+import { formatAdaExact } from "@/lib/utils/numbers";
+import { shortHash } from "@/lib/utils/strings";
 import type { RiskAlert } from "@/lib/attacks";
 import {
 	ARCHIVE_REASONS,
@@ -66,10 +67,7 @@ import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 
 /** Cardanoscan transaction URL for the given network (the testnets use the
  *  network subdomain). Used by the detail header's block-explorer button. */
-function txExplorerUrl(
-	txHash: string,
-	network: "mainnet" | "preprod" | "preview",
-): string {
+function txExplorerUrl(txHash: string, network: Network): string {
 	const host =
 		network === "mainnet" ? "cardanoscan.io" : `${network}.cardanoscan.io`;
 	return `https://${host}/transaction/${txHash}`;
@@ -374,7 +372,7 @@ function RestoreDialog({
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent
 				showClose={false}
-				className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+				className="max-w-xl gap-8 bg-dialog"
 			>
 				<DialogHeader>
 					<DialogTitle className="text-center text-base font-normal">
@@ -461,13 +459,12 @@ function fmtBytes(n: number | undefined): string {
 
 function fmtLovelaceAsAda(lov: number | undefined, digits = 2): string {
 	if (lov === undefined || !Number.isFinite(lov)) return EVIDENCE_PLACEHOLDER;
-	return `${(lov / LOVELACE_PER_ADA).toFixed(digits)} ADA`;
+	return `${formatAdaExact(lov, digits)} ADA`;
 }
 
 function fmtAddress(addr: string | undefined, head = 12, tail = 8): string {
 	if (!addr) return EVIDENCE_PLACEHOLDER;
-	if (addr.length <= head + tail + 3) return addr;
-	return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
+	return shortHash(addr, head, tail);
 }
 
 function fmtTxHash(hash: string | undefined): string {
@@ -1447,7 +1444,7 @@ function DeleteDialog({
 			    (#292929) so they read as recessed surfaces inside the frame. */}
 			<DialogContent
 				showClose={false}
-				className="max-w-sm bg-white dark:bg-[#373D3F]"
+				className="max-w-sm bg-dialog"
 			>
 				<DialogHeader>
 					<DialogTitle>Are you sure this is not an attack?</DialogTitle>

@@ -9,8 +9,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.deps import RepoDep, reject_if_target_busy
-from app.config import get_settings
 from app.api.schemas import (
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     ClassifyJobAck,
     ContractDeleteAck,
     ContractOut,
@@ -18,9 +19,11 @@ from app.api.schemas import (
     IdentifyOut,
     JobAck,
     LatestInteractionsPage,
+    ListPage,
     RenameRequest,
     TargetOut,
 )
+from app.config import get_settings
 from app.contracts import classify_target, normalize_target
 from app.ids import new_id
 from app.registry import lookup_label, script_hash_for
@@ -31,9 +34,14 @@ from app.storage.protocol import Repo
 router = APIRouter(tags=["contracts"])
 
 
-@router.get("/targets", response_model=list[TargetOut])
-def list_targets(repo: Repo = RepoDep) -> list[dict[str, Any]]:
-    return repo.list_targets()
+@router.get("/targets", response_model=ListPage[TargetOut])
+def list_targets(
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_targets(limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_targets(), "data": rows}
 
 
 @router.get("/registry/identify", response_model=IdentifyOut)
@@ -57,9 +65,7 @@ def identify_target(target: str = Query(min_length=1, max_length=256)) -> dict[s
 
 
 @router.post("/contracts", response_model=JobAck)
-def create_contract(
-    req: ContractRequest, request: Request, repo: Repo = RepoDep
-) -> dict[str, Any]:
+def create_contract(req: ContractRequest, request: Request, repo: Repo = RepoDep) -> dict[str, Any]:
     """Register a contract and enqueue the canonical onboarding pipeline."""
     # Canonical casing on write AND on every {target} path read below — half-applied
     # normalization would make POST and GET disagree about the same policy id.
@@ -107,9 +113,14 @@ def create_contract(
     return {"job_id": job_id, "target": target, "target_type": target_type}
 
 
-@router.get("/contracts", response_model=list[ContractOut])
-def list_contracts(repo: Repo = RepoDep) -> list[dict[str, Any]]:
-    return repo.list_contracts()
+@router.get("/contracts", response_model=ListPage[ContractOut])
+def list_contracts(
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_contracts(limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_contracts(), "data": rows}
 
 
 @router.get("/contracts/{target}", response_model=ContractOut)
@@ -184,6 +195,4 @@ def list_latest_interactions(
     verdict is recomputed against each cluster's current label state, so a relabel is
     reflected at once."""
     target = normalize_target(target)
-    return latest_interactions_with_verdicts(
-        repo, target, feature_set, limit=limit, offset=offset
-    )
+    return latest_interactions_with_verdicts(repo, target, feature_set, limit=limit, offset=offset)

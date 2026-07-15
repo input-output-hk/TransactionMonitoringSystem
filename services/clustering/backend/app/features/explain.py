@@ -21,16 +21,21 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from app import tunables
 from app.features.shape import apply_shape_features
+
+# Values live in config/clustering.yaml (section `explain`), validated at
+# import by app.tunables; the constant names below are unchanged.
+_EXPLAIN = tunables.get("explain")
 
 # Below this robust-z (IQR units) a feature is not "standing out". RobustScaler
 # scales by the IQR, so |z| >= 2 sits well outside the central 50%.
-_Z_THRESHOLD = 2.0
+_Z_THRESHOLD: float = float(_EXPLAIN["z_threshold"])
 # Magnitude (robust z-units) at which a deviation is described as "far" vs "well"
 # above/below typical in the human-readable explanation.
-_BAND_FAR_Z = 4.0
-_BAND_WELL_Z = 2.75
-_TOP_K = 3
+_BAND_FAR_Z: float = float(_EXPLAIN["band_far_z"])
+_BAND_WELL_Z: float = float(_EXPLAIN["band_well_z"])
+_TOP_K: int = int(_EXPLAIN["top_k"])
 
 # Map the raw model columns to human concepts. The two cyclical pairs collapse to
 # one concept each (see _CYCLICAL); everything else is 1:1.
@@ -73,9 +78,7 @@ def _band(magnitude: float, *, high: bool) -> str:
 _COMBINATION = Deviation("unusual combination", "combo", "no single feature is extreme")
 
 
-def _candidate_deviations(
-    z: np.ndarray, idx: dict[str, int]
-) -> list[tuple[float, Deviation]]:
+def _candidate_deviations(z: np.ndarray, idx: dict[str, int]) -> list[tuple[float, Deviation]]:
     """``(magnitude, Deviation)`` for every concept, unfiltered: each log feature by its
     signed robust-z (direction high/low), each cyclical pair by the magnitude of its
     2-vector (direction "unusual")."""

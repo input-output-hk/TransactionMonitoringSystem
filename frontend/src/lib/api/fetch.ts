@@ -8,22 +8,26 @@
  *   reads or writes the session cookie itself.
  * - {@link getNetwork} returns the active Cardano network (default `preprod`).
  *
- * Historical note: this module used to also inject a `TMS-API-Key`
+ * Historical note: this module used to also inject an API-key
  * header taken from the `VITE_TMS_API_KEY` build env. That key was
  * baked into the public JS bundle — anyone opening DevTools could read
- * it and call `/api/*` without going through the magic-link auth.
+ * it and call `/api/v1/*` without going through the magic-link auth.
  * Removed once session cookies became the canonical browser credential.
  * The backend's `verify_api_key` still accepts an `API_KEYS` env for
  * server-to-server callers (CLI, integrations), but the SPA no longer
  * sends one.
  */
 
-export const DEFAULT_NETWORK: "mainnet" | "preprod" | "preview" =
-	(import.meta.env.VITE_NETWORK as "mainnet" | "preprod" | "preview") ??
-	"preprod";
+/** The Cardano networks the dashboard can target. Single source of truth for
+ *  this union; other modules import it from here (or the re-export in
+ *  lib/api/archive) rather than re-spelling the literals. */
+export type Network = "mainnet" | "preprod" | "preview";
+
+export const DEFAULT_NETWORK: Network =
+	(import.meta.env.VITE_NETWORK as Network) ?? "preprod";
 
 /** Active Cardano network for all backend calls. */
-export function getNetwork(): "mainnet" | "preprod" | "preview" {
+export function getNetwork(): Network {
 	return DEFAULT_NETWORK;
 }
 

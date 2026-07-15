@@ -15,6 +15,10 @@ WORKDIR /app
 # duplicated here (they used to drift).
 COPY pyproject.toml ./
 COPY app ./app
+# Algorithm tunables: app/tunables.py resolves config/clustering.yaml by walking
+# up from the app package, so the config must sit next to it in every stage that
+# runs the code (the dev stage inherits this copy).
+COPY config ./config
 RUN uv pip install --system .
 
 # ---- dev: builder + dev tooling (pytest/ruff/mypy). Used by docker-compose for
@@ -37,6 +41,8 @@ COPY --from=builder /usr/local /usr/local
 
 WORKDIR /app
 COPY app ./app
+# The tunables loader walks up from /app/app to find /app/config/clustering.yaml.
+COPY config ./config
 
 # Run as an unprivileged user.
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app

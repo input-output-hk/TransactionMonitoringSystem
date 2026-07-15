@@ -30,8 +30,8 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from app.config import settings
 
@@ -41,7 +41,7 @@ _PREFIX_CONFIRMED = "confirmed"
 _PREFIX_MEMPOOL = "mempool"
 _PREFIX_PARSE_FAILED = "parse_failed"
 
-_executor: Optional[ThreadPoolExecutor] = None
+_executor: ThreadPoolExecutor | None = None
 
 
 def init_store():
@@ -92,8 +92,7 @@ def _build_path(prefix: str, network: str, tx_hash: str, date: datetime) -> str:
     return os.path.join(dir_path, f"{tx_hash}.json.gz")
 
 
-def _write_sync(prefix: str, network: str, tx_hash: str,
-                data: Dict[str, Any], ts: datetime):
+def _write_sync(prefix: str, network: str, tx_hash: str, data: dict[str, Any], ts: datetime):
     """Atomic gzip write via temp-file + rename. Runs in the thread pool.
 
     Writes to a .tmp sibling first, then os.replace() atomically renames it to
@@ -122,8 +121,7 @@ def _write_sync(prefix: str, network: str, tx_hash: str,
         raise
 
 
-async def _write_async(prefix: str, network: str, tx_hash: str,
-                       data: Dict[str, Any], ts: datetime):
+async def _write_async(prefix: str, network: str, tx_hash: str, data: dict[str, Any], ts: datetime):
     """Non-blocking write: submits _write_sync to the thread pool."""
     if not settings.RAW_STORE_ENABLED:
         return
@@ -136,20 +134,17 @@ async def _write_async(prefix: str, network: str, tx_hash: str,
     await loop.run_in_executor(_executor, _write_sync, prefix, network, tx_hash, data, ts)
 
 
-async def write_confirmed(network: str, tx_hash: str,
-                          raw_data: Dict[str, Any], ts: datetime):
+async def write_confirmed(network: str, tx_hash: str, raw_data: dict[str, Any], ts: datetime):
     """Write a confirmed transaction's full Ogmios payload."""
     await _write_async(_PREFIX_CONFIRMED, network, tx_hash, raw_data, ts)
 
 
-async def write_mempool(network: str, tx_hash: str,
-                        tx_data: Dict[str, Any], ts: datetime):
+async def write_mempool(network: str, tx_hash: str, tx_data: dict[str, Any], ts: datetime):
     """Write a mempool-observed transaction's full Ogmios payload."""
     await _write_async(_PREFIX_MEMPOOL, network, tx_hash, tx_data, ts)
 
 
-async def write_parse_failed(network: str, tx_hash: str,
-                             tx_data: Dict[str, Any], ts: datetime):
+async def write_parse_failed(network: str, tx_hash: str, tx_data: dict[str, Any], ts: datetime):
     """Write the pristine payload of a confirmed tx OUR parser raised on.
 
     The tx really did confirm on-chain — parsing (not consensus) failed — so
@@ -172,8 +167,9 @@ async def write_parse_failed(network: str, tx_hash: str,
             json.dumps(tx_data, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         logger.warning(
-            "parse_failed payload has invalid tx id %r; storing under content "
-            "hash %s", str(tx_hash)[:20], digest,
+            "parse_failed payload has invalid tx id %r; storing under content hash %s",
+            str(tx_hash)[:20],
+            digest,
         )
         tx_hash = digest
     await _write_async(_PREFIX_PARSE_FAILED, network, tx_hash, tx_data, ts)
@@ -194,6 +190,7 @@ def prune_old_days(retention_days: int) -> int:
     if retention_days <= 0:
         return 0
     from app.config import settings as _settings
+
     if _settings.RAW_DATA_MAX_BYTES > 0:
         logger.warning(
             "Raw-store retention skipped: RAW_DATA_MAX_BYTES > 0 makes the "
@@ -203,10 +200,8 @@ def prune_old_days(retention_days: int) -> int:
         )
         return 0
     import shutil
-    from datetime import timezone as _tz
-    cutoff = int(
-        (datetime.now(_tz.utc) - timedelta(days=retention_days)).strftime("%Y%m%d")
-    )
+
+    cutoff = int((datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y%m%d"))
     removed = 0
     for prefix in (_PREFIX_CONFIRMED, _PREFIX_MEMPOOL):
         prefix_dir = os.path.join(settings.RAW_STORE_PATH, prefix)
@@ -229,7 +224,7 @@ def prune_old_days(retention_days: int) -> int:
     return removed
 
 
-def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[str, Any]]:
+def read_confirmed(network: str, tx_hash: str, ts: datetime) -> dict[str, Any] | None:
     """Read back a transaction's full Ogmios payload from the raw store.
 
     ``ts`` is the transaction row's ``timestamp`` (chain time): the
@@ -253,7 +248,9 @@ def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[st
         for day_offset in (0, -1, 1):
             candidates.append(
                 _build_path(
-                    prefix, network, tx_hash,
+                    prefix,
+                    network,
+                    tx_hash,
                     ts + timedelta(days=day_offset),
                 )
             )
@@ -266,5 +263,3 @@ def read_confirmed(network: str, tx_hash: str, ts: datetime) -> Optional[Dict[st
         except (OSError, json.JSONDecodeError, EOFError) as e:
             logger.warning(f"Raw store read failed for {path}: {e}")
     return None
-
-

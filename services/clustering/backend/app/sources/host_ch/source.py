@@ -141,8 +141,12 @@ class HostChainSource:
                     GROUP BY tx_hash
                 ) ORDER BY max_slot, tx_hash LIMIT {{lim:UInt32}}
                 """,
-                parameters={"net": self._network, "addr": address,
-                            "from_slot": from_slot, "lim": _PAGE},
+                parameters={
+                    "net": self._network,
+                    "addr": address,
+                    "from_slot": from_slot,
+                    "lim": _PAGE,
+                },
             ).result_rows
             if not rows:
                 return

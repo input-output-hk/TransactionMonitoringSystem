@@ -53,7 +53,7 @@ export function UsersPage() {
 	const [pendingRemove, setPendingRemove] = useState<ApiUser | null>(null);
 	const qc = useQueryClient();
 
-	// Server-side pagination via `/api/users?limit&offset` — see backend
+	// Server-side pagination via `/api/v1/users?limit&offset` — see backend
 	// list_users for the {count,total,data} shape.
 	const { data, isPending, isError } = useQuery({
 		queryKey: [...USERS_QUERY_KEY, page, pageSize],
@@ -136,9 +136,9 @@ export function UsersPage() {
 								<TableCell>
 									<div className="flex items-center gap-3">
 										<Avatar>
-											<AvatarFallback>{initials(u.fullName, 1)}</AvatarFallback>
+											<AvatarFallback>{initials(u.full_name, 1)}</AvatarFallback>
 										</Avatar>
-										<span className="text-foreground">{u.fullName}</span>
+										<span className="text-foreground">{u.full_name}</span>
 									</div>
 								</TableCell>
 								<TableCell className="text-foreground">{u.email}</TableCell>
@@ -262,7 +262,7 @@ function AddUserFlow({
 		mutationFn: () =>
 			createUser({
 				email: draft.email.trim(),
-				fullName: draft.fullName.trim(),
+				full_name: draft.fullName.trim(),
 				role: draft.role,
 			}),
 		onSuccess: () => {
@@ -295,7 +295,7 @@ function AddUserFlow({
 		>
 			<DialogContent
 				showClose={false}
-				className="max-w-md bg-white dark:bg-[#373D3F]"
+				className="max-w-md bg-dialog"
 				aria-describedby={undefined}
 			>
 				{step === "form" ? (
@@ -394,7 +394,7 @@ function InvitationSentStep({
 	draft: AddDraft;
 	onSend: () => void;
 }) {
-	// Confirmation screen after `POST /api/users` succeeded. The backend
+	// Confirmation screen after `POST /api/v1/users` succeeded. The backend
 	// has already emailed the invite — the admin doesn't need to copy a
 	// link manually. We keep a single "Done" affordance instead of the
 	// old fake "Send invitation" button.
@@ -461,7 +461,7 @@ function RemoveUserDialog({
 			    Attack, Add User). Title centered, two equal-width buttons. */}
 			<DialogContent
 				showClose={false}
-				className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+				className="max-w-xl gap-8 bg-dialog"
 			>
 				<DialogHeader>
 					<DialogTitle className="text-center text-base font-normal">

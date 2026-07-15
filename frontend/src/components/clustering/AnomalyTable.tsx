@@ -15,10 +15,12 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { TableFooter } from "@/components/ui/table-footer";
+import { EmptyText, ErrorText, LoadingText } from "@/components/ui/status-text";
 import { type AnomalyCandidate, useTopAnomalies } from "@/lib/api/clustering";
 import { cn } from "@/lib/utils";
 import { CopyHash, VerdictBadge } from "./cells";
-import { WEEKDAYS, formatAda, formatInt } from "./format";
+import { WEEKDAYS, formatInt } from "./format";
+import { formatAdaExact } from "@/lib/utils/numbers";
 import { ReasonChips } from "./ReasonChips";
 import { TxLabelControl } from "./TxLabelControl";
 
@@ -35,20 +37,16 @@ export function AnomalyTable({ runId, target }: Props) {
 	const [page, setPage] = useState(0);
 
 	if (isLoading)
-		return <p className="text-muted-foreground text-sm">Loading anomalies…</p>;
+		return <LoadingText>Loading anomalies…</LoadingText>;
 	if (isError)
 		return (
-			<p className="text-destructive text-sm">
-				Failed to load anomalies for this run.
-			</p>
+			<ErrorText>Failed to load anomalies for this run.</ErrorText>
 		);
 
 	const rows = data?.candidates ?? [];
 	if (!rows.length)
 		return (
-			<p className="text-muted-foreground text-sm">
-				No flagged transactions in this run.
-			</p>
+			<EmptyText>No flagged transactions in this run.</EmptyText>
 		);
 
 	const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
@@ -165,7 +163,7 @@ export function AnomalyTable({ runId, target }: Props) {
 								/>
 							</TableCell>
 							<TableCell className="text-right tabular-nums">
-								{formatAda(a.fees, 0)}
+								{formatAdaExact(a.fees, 0)}
 							</TableCell>
 							{showAll && (
 								<TableCell className="text-right tabular-nums">
@@ -174,15 +172,15 @@ export function AnomalyTable({ runId, target }: Props) {
 							)}
 							{showAll && (
 								<TableCell className="text-right tabular-nums">
-									{formatAda(a.total_input_lovelace, 0)}
+									{formatAdaExact(a.total_input_lovelace, 0)}
 								</TableCell>
 							)}
 							<TableCell className="text-right tabular-nums">
-								{formatAda(a.total_output_lovelace, 0)}
+								{formatAdaExact(a.total_output_lovelace, 0)}
 							</TableCell>
 							{showAll && (
 								<TableCell className="text-right tabular-nums">
-									{formatAda(a.net_lovelace, 0)}
+									{formatAdaExact(a.net_lovelace, 0)}
 								</TableCell>
 							)}
 							<TableCell className="text-right tabular-nums">

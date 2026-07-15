@@ -24,7 +24,7 @@ import copy
 import ipaddress
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -54,7 +54,7 @@ _GROUP_PREFIX = "group:"
 # Shipped-safe default document, seeded into the DB on first boot: email on,
 # webhook off, Critical/High page on all channels, Moderate/Informational
 # silent, no periodic report. Operators tune it from here via the admin UI.
-_DEFAULT_CONFIG: Dict[str, Any] = {
+_DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "channels": {
         "email": {"enabled": True, "recipients": ["ops@example.com"]},
@@ -78,12 +78,24 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
 # camelCase / snake_case / kebab spellings of the same secret are all caught
 # (e.g. ``smtpPassword``, ``webhook_signing_secret``, ``api-key``).
 _FORBIDDEN_KEY_NORMS = {
-    "password", "passwd", "pass",
-    "secret", "secretkey", "signingsecret", "webhooksigningsecret",
+    "password",
+    "passwd",
+    "pass",
+    "secret",
+    "secretkey",
+    "signingsecret",
+    "webhooksigningsecret",
     "smtppassword",
-    "apikey", "apitoken", "accesstoken", "authtoken", "token",
-    "credential", "credentials", "creds",
-    "privatekey", "privkey",
+    "apikey",
+    "apitoken",
+    "accesstoken",
+    "authtoken",
+    "token",
+    "credential",
+    "credentials",
+    "creds",
+    "privatekey",
+    "privkey",
 }
 
 
@@ -100,10 +112,10 @@ def _looks_like_secret(key: str) -> bool:
 # place), so a sync accessor running on the ClickHouse executor thread observes
 # either the whole old document or the whole new one — never a torn read.
 # Accessors return references into this dict and MUST treat it as read-only.
-_config: Optional[Dict[str, Any]] = None
+_config: dict[str, Any] | None = None
 
 
-async def refresh_from_db() -> Dict[str, Any]:
+async def refresh_from_db() -> dict[str, Any]:
     """Load the stored config from Postgres into the in-process cache.
 
     Seeds the safe default on first boot. Validates BEFORE caching so a
@@ -112,6 +124,7 @@ async def refresh_from_db() -> Dict[str, Any]:
     """
     global _config
     from app.db import postgres  # late import: keep the module import tree flat
+
     doc = await postgres.get_notification_config()
     if doc is None:
         doc = copy.deepcopy(_DEFAULT_CONFIG)
@@ -123,7 +136,7 @@ async def refresh_from_db() -> Dict[str, Any]:
     return _config
 
 
-def load(force: bool = False) -> Dict[str, Any]:
+def load(force: bool = False) -> dict[str, Any]:
     """Return the in-memory config cache — NO I/O, safe from any thread.
 
     The cache is populated by :func:`refresh_from_db` at startup and after each
@@ -150,22 +163,19 @@ def _reject_secret_keys(source: str, node: Any, path: str = "config") -> None:
             _reject_secret_keys(source, item, f"{path}[{i}]")
 
 
-def _validate(source: str, data: Dict[str, Any]) -> None:
+def _validate(source: str, data: dict[str, Any]) -> None:
     # ── no smuggled secrets ──
     _reject_secret_keys(source, data)
     # ── version ── (forward-compat guard: only schema v1 is understood)
     version = data.get("version", 1)
     if version != 1:
         raise RuntimeError(
-            f"{source}: unsupported config version {version!r} (this build "
-            "understands version 1)."
+            f"{source}: unsupported config version {version!r} (this build understands version 1)."
         )
     # ── channels ──
     channels = data.get("channels")
     if not isinstance(channels, dict) or not channels:
-        raise RuntimeError(
-            f"{source} must contain a non-empty 'channels' mapping."
-        )
+        raise RuntimeError(f"{source} must contain a non-empty 'channels' mapping.")
     for name, spec in channels.items():
         if not isinstance(spec, dict):
             raise RuntimeError(f"{source}: channels.{name} must be a mapping.")
@@ -198,10 +208,9 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
         for r in recips:
             if not isinstance(r, str):
                 raise RuntimeError(f"{source}: {ref} entries must be strings.")
-            if r.startswith(_GROUP_PREFIX) and r[len(_GROUP_PREFIX):] not in groups:
+            if r.startswith(_GROUP_PREFIX) and r[len(_GROUP_PREFIX) :] not in groups:
                 raise RuntimeError(
-                    f"{source}: {ref} references undefined group "
-                    f"'{r[len(_GROUP_PREFIX):]}'."
+                    f"{source}: {ref} references undefined group '{r[len(_GROUP_PREFIX) :]}'."
                 )
 
     def _check_webhook_url(ref: str, url: Any) -> None:
@@ -210,9 +219,7 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
         # Empty means "no URL"; otherwise require an http(s) scheme so a stored
         # doc can't smuggle file://, gopher://, etc. into the egress path.
         if url and not url.startswith(("http://", "https://")):
-            raise RuntimeError(
-                f"{source}: {ref} must be an http(s) URL (got {url!r})."
-            )
+            raise RuntimeError(f"{source}: {ref} must be an http(s) URL (got {url!r}).")
         if url and is_internal_webhook_target(url) and not settings.WEBHOOK_ALLOW_INTERNAL:
             raise RuntimeError(
                 f"{source}: {ref} points at a loopback/private/link-local "
@@ -293,9 +300,7 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
             )
         wd = report.get("window_days", 7)
         if not isinstance(wd, int) or isinstance(wd, bool) or wd <= 0:
-            raise RuntimeError(
-                f"{source}: periodic_report.window_days must be a positive integer."
-            )
+            raise RuntimeError(f"{source}: periodic_report.window_days must be a positive integer.")
         _check_channel_list("periodic_report.channels", report.get("channels", []))
         if "recipients" in report:
             _check_recipients("periodic_report.recipients", report["recipients"])
@@ -322,11 +327,12 @@ def _validate(source: str, data: Dict[str, Any]) -> None:
 
 # ── Accessors (sync, cache-only — never do I/O here) ───────────────────
 
-def channels_config() -> Dict[str, Any]:
+
+def channels_config() -> dict[str, Any]:
     return load().get("channels", {})
 
 
-def triggers_config() -> Dict[str, Any]:
+def triggers_config() -> dict[str, Any]:
     return load().get("triggers", {})
 
 
@@ -335,7 +341,7 @@ def channel_enabled(name: str) -> bool:
     return bool(spec and spec.get("enabled"))
 
 
-def channel_recipients(name: str) -> List[str]:
+def channel_recipients(name: str) -> list[str]:
     """Global default recipients for a channel, with group aliases expanded."""
     spec = channels_config().get(name) or {}
     return resolve_recipients(spec.get("recipients", []))
@@ -346,7 +352,7 @@ def webhook_default_url() -> str:
     return spec.get("default_url", "") or ""
 
 
-def webhook_signing_secret() -> Optional[str]:
+def webhook_signing_secret() -> str | None:
     """The HMAC-SHA256 key used to sign webhook request bodies.
 
     Read from the ``WEBHOOK_SIGNING_SECRET`` setting, which pydantic loads from
@@ -355,17 +361,13 @@ def webhook_signing_secret() -> Optional[str]:
     return settings.WEBHOOK_SIGNING_SECRET or None
 
 
-def resolve_recipients(recipients: List[str]) -> List[str]:
+def resolve_recipients(recipients: list[str]) -> list[str]:
     """Expand ``group:<alias>`` references and dedupe, preserving order."""
     groups = load().get("groups", {}) or {}
-    out: List[str] = []
+    out: list[str] = []
     seen: set = set()
     for r in recipients or []:
-        members = (
-            groups.get(r[len(_GROUP_PREFIX):], [])
-            if r.startswith(_GROUP_PREFIX)
-            else [r]
-        )
+        members = groups.get(r[len(_GROUP_PREFIX) :], []) if r.startswith(_GROUP_PREFIX) else [r]
         for m in members:
             if m not in seen:
                 seen.add(m)
@@ -373,7 +375,7 @@ def resolve_recipients(recipients: List[str]) -> List[str]:
     return out
 
 
-def periodic_report_config() -> Dict[str, Any]:
+def periodic_report_config() -> dict[str, Any]:
     """The periodic_report block with defaults applied.
 
     Returns a deep copy so a caller may read/mutate the result freely without
@@ -390,7 +392,11 @@ def report_enabled() -> bool:
 # Public webhook inspectors — fine for testing, never a destination for real
 # alert payloads (full tx data egresses in plaintext to a third party).
 _PUBLIC_INSPECTOR_HOSTS = (
-    "webhook.site", "requestbin", "pipedream.net", "beeceptor.com", "hookbin.com",
+    "webhook.site",
+    "requestbin",
+    "pipedream.net",
+    "beeceptor.com",
+    "hookbin.com",
 )
 
 

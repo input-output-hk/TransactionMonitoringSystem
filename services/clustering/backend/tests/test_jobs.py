@@ -55,8 +55,9 @@ def test_run_job_success(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = FakeJobRepo()
     repo.create_job("job-1", "addr1x", "address", 100, 0)
 
-    async def stub(r: Any, *, target: str, target_type: str, max_txs: Any,
-                   reprocess: bool, job_id: str) -> None:
+    async def stub(
+        r: Any, *, target: str, target_type: str, max_txs: Any, reprocess: bool, job_id: str
+    ) -> None:
         assert max_txs == 100  # 100 passed through unchanged
         r.update_job(job_id, status="done", txs_done=42)
 
@@ -71,8 +72,9 @@ def test_run_job_exception_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None
     repo = FakeJobRepo()
     repo.create_job("job-2", "addrbad", "address", 0, 0)
 
-    async def boom(r: Any, *, target: str, target_type: str, max_txs: Any,
-                   reprocess: bool, job_id: str) -> None:
+    async def boom(
+        r: Any, *, target: str, target_type: str, max_txs: Any, reprocess: bool, job_id: str
+    ) -> None:
         assert max_txs is None  # 0 (unbounded) becomes None
         raise RuntimeError("address not found")
 

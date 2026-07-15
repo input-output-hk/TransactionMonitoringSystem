@@ -21,7 +21,7 @@ Recall-first: a skewed timestamp must never block ingestion.
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 from app.utils.datetime_utils import to_aware_utc
 
@@ -49,7 +49,7 @@ class SlotTimeConverter:
     def __init__(
         self,
         system_start: datetime,
-        eras: List[Tuple[int, float, float, Optional[int]]],
+        eras: list[tuple[int, float, float, int | None]],
     ):
         # eras: (start_slot, start_offset_seconds, slot_length_seconds,
         # end_slot or None), ascending by start_slot; offsets are relative
@@ -59,9 +59,7 @@ class SlotTimeConverter:
         self._eras = sorted(eras, key=lambda e: e[0])
 
     @classmethod
-    def from_ogmios(
-        cls, start_time: Any, era_summaries: Any
-    ) -> Optional["SlotTimeConverter"]:
+    def from_ogmios(cls, start_time: Any, era_summaries: Any) -> Optional["SlotTimeConverter"]:
         """Build a converter from the raw Ogmios query results.
 
         Returns None on any unexpected shape; the caller keeps the
@@ -75,18 +73,14 @@ class SlotTimeConverter:
             # Naive-assumed-UTC + aware-to-UTC normalisation lives in the
             # shared helper (Ogmios emits a Z-suffixed ISO string).
             system_start = to_aware_utc(datetime.fromisoformat(start_time))
-            eras: List[Tuple[int, float, float, Optional[int]]] = []
+            eras: list[tuple[int, float, float, int | None]] = []
             for summary in era_summaries:
                 start = summary["start"]
                 slot_length = _seconds_of(summary["parameters"]["slotLength"])
                 if slot_length <= 0:
                     return None
                 end = summary.get("end")
-                end_slot = (
-                    int(end["slot"])
-                    if isinstance(end, dict) and "slot" in end
-                    else None
-                )
+                end_slot = int(end["slot"]) if isinstance(end, dict) and "slot" in end else None
                 eras.append(
                     (
                         int(start["slot"]),
@@ -97,13 +91,10 @@ class SlotTimeConverter:
                 )
             return cls(system_start, eras)
         except (KeyError, TypeError, ValueError) as e:
-            logger.warning(
-                f"Unusable era summaries / start time for slot-time "
-                f"conversion: {e}"
-            )
+            logger.warning(f"Unusable era summaries / start time for slot-time conversion: {e}")
             return None
 
-    def slot_to_utc(self, slot: Optional[int]) -> Optional[datetime]:
+    def slot_to_utc(self, slot: int | None) -> datetime | None:
         """UTC wall time at which ``slot`` started, or None when the slot
         is outside the summaries' coverage (caller falls back to wall
         clock and refetches).

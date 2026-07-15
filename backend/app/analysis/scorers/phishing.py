@@ -14,32 +14,44 @@ Gate condition: at least one URL extracted from any carrier (relevant
 metadata label, inline datum, or decoded asset name).
 """
 
-import re
 import logging
-from typing import Any, Dict, List, Tuple
+import re
+from typing import Any
 
 from rapidfuzz import fuzz
 
+from app.analysis import external
+from app.analysis.features import decode_hex_asset_name
 from app.analysis.normalise import normalise
 from app.analysis.plutus_text import decode_datum_strings
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import (
-    BaseScorer,
     FUZZ_RATIO_SCALE,
+    BaseScorer,
     ScorerResult,
     finalise_score,
 )
-from app.analysis import external
-from app.analysis.features import decode_hex_asset_name
 from app.analysis.url_extraction import (
     brand as _brand,
+)
+from app.analysis.url_extraction import (
     has_phishing_prone_tld as _has_phishing_prone_tld,
+)
+from app.analysis.url_extraction import (
     registrable_domain as _registrable_domain,
+)
+from app.analysis.url_extraction import (
     url_candidates as _url_candidates,
+)
+from app.analysis.url_extraction import (
     validate_candidates as _validate_candidates,
 )
 
@@ -71,7 +83,8 @@ _MIN_DECODED_STR_LEN = int(_CFG["min_decoded_string_len"])
 # legitimate shape while making the walk always terminate.
 _MAX_METADATA_FLATTEN_DEPTH = 32
 
-def _decode_datum_strings(datum: Any) -> List[str]:
+
+def _decode_datum_strings(datum: Any) -> list[str]:
     """Datum text spans for the URL / social-engineering scans.
 
     Thin delegate to :func:`app.analysis.plutus_text.decode_datum_strings`
@@ -81,7 +94,7 @@ def _decode_datum_strings(datum: Any) -> List[str]:
     return decode_datum_strings(datum, _MIN_DECODED_STR_LEN)
 
 
-def _decode_asset_name_strings(raw_data: Any) -> List[str]:
+def _decode_asset_name_strings(raw_data: Any) -> list[str]:
     """Collect decoded (hex -> UTF-8) native-asset names from a tx's mint map
     and output value bundles.
 
@@ -99,7 +112,7 @@ def _decode_asset_name_strings(raw_data: Any) -> List[str]:
     """
     if not isinstance(raw_data, dict):
         return []
-    names: List[str] = []
+    names: list[str] = []
     seen: set = set()
 
     def _collect(bundle: Any) -> None:
@@ -123,7 +136,7 @@ def _decode_asset_name_strings(raw_data: Any) -> List[str]:
     return names
 
 
-def _sender_addresses(features: Dict[str, Any]) -> List[str]:
+def _sender_addresses(features: dict[str, Any]) -> list[str]:
     """Resolved input (sender) addresses for this tx, taken from the enriched
     raw payload (``enrich_inputs_with_resolved_addresses`` writes the resolved
     sender into ``inputs[i]["address"]``).
@@ -138,7 +151,7 @@ def _sender_addresses(features: Dict[str, Any]) -> List[str]:
     raw_data = features.get("raw_data")
     if not isinstance(raw_data, dict):
         return []
-    senders: List[str] = []
+    senders: list[str] = []
     for inp in raw_data.get("inputs", []) or []:
         if isinstance(inp, dict):
             addr = inp.get("address")
@@ -150,7 +163,7 @@ def _sender_addresses(features: Dict[str, Any]) -> List[str]:
 class PhishingScorer(BaseScorer):
     name = "phishing"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Fire when phishing URLs appear in tx-level metadata (CIP-20 label
         674 / CIP-25 label 721), in an output's inline datum (CIP-68
         reference-NFT pattern and similar datum-carried payloads), or in a
@@ -179,7 +192,7 @@ class PhishingScorer(BaseScorer):
         s_social, _ = self._classify_social_engineering(features)
         return s_social > 0.0
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         metadata = features.get("metadata") or {}
         urls = self._extract_urls(features)
         # Sub-score 1c computed up front: it is also the gate's URL-less
@@ -193,7 +206,8 @@ class PhishingScorer(BaseScorer):
         # reason flag and evidence panel. Always a subset of ``urls``.
         asset_name_urls = (
             _validate_candidates(self._asset_name_candidates(features))
-            if _ASSET_CARRIER_ENABLED else []
+            if _ASSET_CARRIER_ENABLED
+            else []
         )
 
         # ----- Content sub-pipeline (weight = 0.65) -----
@@ -224,22 +238,22 @@ class PhishingScorer(BaseScorer):
         network = features.get("network", "")
         raw_data_field = features.get("raw_data")
         raw_outputs = (
-            raw_data_field.get("outputs") or []
-            if isinstance(raw_data_field, dict)
-            else []
+            raw_data_field.get("outputs") or [] if isinstance(raw_data_field, dict) else []
         )
-        distinct_recipients = len({
-            o.get("address", "")
-            for o in raw_outputs
-            if isinstance(o, dict) and o.get("address")
-        })
+        distinct_recipients = len(
+            {o.get("address", "") for o in raw_outputs if isinstance(o, dict) and o.get("address")}
+        )
         # Fall back to output_count when raw_data isn't a dict (e.g. some
         # ingestion paths persist it as JSON string before normalisation),
         # so we never score zero recipients on a tx with real outputs.
         recipient_count = distinct_recipients or int(features.get("output_count", 0) or 0)
         p50, p99, bl_source = _resolve(
-            "recipient_count", "global", "__global__", network,
-            _BOOT, "recipient_count",
+            "recipient_count",
+            "global",
+            "__global__",
+            network,
+            _BOOT,
+            "recipient_count",
         )
         s_recipients = normalise(recipient_count, p50=p50, p99=p99)
 
@@ -286,9 +300,7 @@ class PhishingScorer(BaseScorer):
         # don't live in these TLDs; a URL on one of them paired with Tier-2
         # text is very high-signal, so this bonus stacks on top of the URL
         # combo. Magnitude tunable via phishing.social_engineering.
-        if s_social >= float(_REASON_T["social"]) and any(
-            _has_phishing_prone_tld(u) for u in urls
-        ):
+        if s_social >= float(_REASON_T["social"]) and any(_has_phishing_prone_tld(u) for u in urls):
             raw += _PHISHING_TLD_BONUS
 
         final_score = finalise_score(raw)
@@ -327,9 +339,9 @@ class PhishingScorer(BaseScorer):
             severity = "SOCIAL_ENGINEERING"
 
         blacklist_patterns = external.get_phishing_patterns()
-        metadata_labels = sorted(
-            {str(k) for k in (metadata or {}).keys()}
-        ) if isinstance(metadata, dict) else []
+        metadata_labels = (
+            sorted({str(k) for k in (metadata or {}).keys()}) if isinstance(metadata, dict) else []
+        )
 
         url_records = []
         for url in urls:
@@ -341,11 +353,13 @@ class PhishingScorer(BaseScorer):
                 url_severity = "SUSPICIOUS"
             else:
                 url_severity = "NORMAL"
-            url_records.append({
-                "url": url,
-                "severity": url_severity,
-                "phishing_tld": phishing_tld,
-            })
+            url_records.append(
+                {
+                    "url": url,
+                    "severity": url_severity,
+                    "phishing_tld": phishing_tld,
+                }
+            )
 
         return ScorerResult(
             score=final_score,
@@ -368,7 +382,7 @@ class PhishingScorer(BaseScorer):
     # Internal helpers
     # -----------------------------------------------------------------
 
-    def _extract_urls(self, features: Dict[str, Any]) -> List[str]:
+    def _extract_urls(self, features: dict[str, Any]) -> list[str]:
         """Extract URL candidates from every known carrier and validate that
         each one has a real public-suffix TLD.
 
@@ -387,7 +401,7 @@ class PhishingScorer(BaseScorer):
         scheme-prefixed URLs in every carrier, then filtered through the PSL
         snapshot so bare-word matches like ``3.14`` don't survive.
         """
-        candidates: List[str] = []
+        candidates: list[str] = []
 
         # --- Carrier 1: tx-level metadata labels ------------------------
         metadata = features.get("metadata") or {}
@@ -424,9 +438,9 @@ class PhishingScorer(BaseScorer):
 
         return _validate_candidates(candidates)
 
-    def _asset_name_candidates(self, features: Dict[str, Any]) -> List[str]:
+    def _asset_name_candidates(self, features: dict[str, Any]) -> list[str]:
         """Raw URL/domain regex hits inside decoded asset names (un-validated)."""
-        hits: List[str] = []
+        hits: list[str] = []
         for name in _decode_asset_name_strings(features.get("raw_data") or {}):
             hits.extend(_url_candidates(name))
         return hits
@@ -460,7 +474,7 @@ class PhishingScorer(BaseScorer):
             return " ".join(parts)
         return str(obj) if obj is not None else ""
 
-    def _score_blacklist(self, urls: List[str]) -> float:
+    def _score_blacklist(self, urls: list[str]) -> float:
         """Score URLs against phishing domain patterns."""
         patterns = external.get_phishing_patterns()
         max_score = 0.0
@@ -470,7 +484,7 @@ class PhishingScorer(BaseScorer):
                     max_score = max(max_score, 1.0)
         return max_score
 
-    def _score_domain_suspicion(self, urls: List[str]) -> float:
+    def _score_domain_suspicion(self, urls: list[str]) -> float:
         """Composite domain suspicion: brand similarity to known protocols.
 
         Uses tldextract to isolate the registrable domain (`api.andamio.io` ->
@@ -485,10 +499,7 @@ class PhishingScorer(BaseScorer):
         known_domains = external.get_protocol_domains()
         # Precompute legit (registrable_domain, brand) once per call. Cached
         # module-level would be better but the list may refresh via external.
-        legit_info = [
-            (_registrable_domain(d), _brand(d))
-            for d in known_domains
-        ]
+        legit_info = [(_registrable_domain(d), _brand(d)) for d in known_domains]
         legit_info = [(r, b) for r, b in legit_info if r and b]
         max_brand_sim = 0.0
 
@@ -516,7 +527,7 @@ class PhishingScorer(BaseScorer):
         # Until then, use brand similarity as the sole domain suspicion signal.
         return s_brand
 
-    def _score_social_engineering(self, features: Dict[str, Any]) -> float:
+    def _score_social_engineering(self, features: dict[str, Any]) -> float:
         """Score tx-level metadata AND inline-datum text for social
         engineering patterns. Thin wrapper that discards the tier label;
         the actual classification lives in ``_classify_social_engineering``
@@ -526,8 +537,9 @@ class PhishingScorer(BaseScorer):
         return score
 
     def _classify_social_engineering(
-        self, features: Dict[str, Any],
-    ) -> Tuple[float, str]:
+        self,
+        features: dict[str, Any],
+    ) -> tuple[float, str]:
         """Return ``(normalised_score, tier_label)`` from the social-engineering
         text scan. The tier label names the highest matching tier and is
         surfaced in evidence so operators see "Tier 1: Credential harvesting"
@@ -580,10 +592,11 @@ class PhishingScorer(BaseScorer):
                 return 1.0, "Tier 1: Credential harvesting"
 
         score = 0.0
-        tiers_hit: List[str] = []
+        tiers_hit: list[str] = []
 
         urgency_matches = sum(
-            1 for pattern in external.TIER2_URGENCY_PATTERNS
+            1
+            for pattern in external.TIER2_URGENCY_PATTERNS
             if re.search(pattern, text, re.IGNORECASE)
         )
         if urgency_matches > 0:
@@ -593,10 +606,7 @@ class PhishingScorer(BaseScorer):
             )
             tiers_hit.append("Tier 2: Urgency language")
 
-        brand_matches = sum(
-            1 for brand in external.TIER3_BRAND_NAMES
-            if brand.lower() in text
-        )
+        brand_matches = sum(1 for brand in external.TIER3_BRAND_NAMES if brand.lower() in text)
         if brand_matches > 0:
             score += min(
                 float(_SE["brand_cap"]),

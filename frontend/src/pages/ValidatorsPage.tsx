@@ -15,6 +15,7 @@ import { latestJobForTarget } from "@/components/clustering/jobStage";
 import { useContracts, useJobs } from "@/lib/api/clustering";
 import type { Contract } from "@/lib/api/clustering";
 import { useHealth } from "@/lib/api/health";
+import { LoadingText } from "@/components/ui/status-text";
 
 /**
  * Stable display order for the card grid. The watchlist API orders by
@@ -37,7 +38,7 @@ export function ValidatorsPage() {
 	const health = useHealth();
 	// Hold the clustering polls until health confirms the module is on, so a
 	// disabled deployment (or the brief pre-health window) never hits
-	// /api/clustering/*. `undefined` keeps each hook's default poll interval.
+	// /api/v1/clustering/*. `undefined` keeps each hook's default poll interval.
 	const clusteringEnabled = health.data?.clustering_enabled === true;
 	const {
 		data: contracts,
@@ -76,7 +77,7 @@ export function ValidatorsPage() {
 			<AddContractForm enabled={clusteringEnabled} />
 
 			{isLoading ? (
-				<p className="text-muted-foreground text-sm">Loading watchlist…</p>
+				<LoadingText>Loading watchlist…</LoadingText>
 			) : isError ? (
 				<p className="text-destructive text-sm">
 					Could not load the watchlist. The clustering service may be

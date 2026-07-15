@@ -29,6 +29,7 @@ from app.config import Settings
 from app.ids import new_id
 from app.jobs import JobManager, RepoFactory
 from app.service._common import target_in_jobs
+from app.storage.protocol import iter_all_rows
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,10 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
     try:
         busy = {j["target"] for j in repo.nonterminal_jobs()}
         cap = settings.feed_max_contracts_per_tick
-        for contract in repo.list_contracts():
+        # Page through the WHOLE registry (list_contracts now paginates with a
+        # default page of 100): a watched contract beyond the first page must
+        # still be scored, or its attacks would silently go unwatched.
+        for contract in iter_all_rows(repo.list_contracts):
             if enqueued >= cap:
                 break
             target = contract["target"]
@@ -74,8 +78,12 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
                     continue
                 job_id = new_id("job")
                 repo.create_job(
-                    job_id, target, contract.get("target_type", "address"),
-                    0, reprocess, kind=kind,
+                    job_id,
+                    target,
+                    contract.get("target_type", "address"),
+                    0,
+                    reprocess,
+                    kind=kind,
                 )
                 manager.enqueue(job_id)
             enqueued += 1
@@ -86,7 +94,10 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
 
 
 async def run_feed(
-    *, manager: JobManager, repo_factory: RepoFactory, settings: Settings,
+    *,
+    manager: JobManager,
+    repo_factory: RepoFactory,
+    settings: Settings,
     stop_event: asyncio.Event,
 ) -> None:
     """Poll-and-enqueue loop until ``stop_event`` is set. Each tick's errors are
@@ -94,7 +105,8 @@ async def run_feed(
     interval = settings.feed_poll_interval_seconds
     logger.info(
         "clustering feed started: interval=%ds, max_per_tick=%d",
-        interval, settings.feed_max_contracts_per_tick,
+        interval,
+        settings.feed_max_contracts_per_tick,
     )
     while not stop_event.is_set():
         try:

@@ -28,7 +28,6 @@ cannot drift from what create_all() builds on a fresh install.
 """
 
 import logging
-from typing import Dict, List, Tuple
 
 from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
@@ -50,7 +49,7 @@ _TX_PROJECTION_SELECT = (
     "ORDER BY network, timestamp"
 )
 
-SCHEMA_DDL: Dict[str, str] = {
+SCHEMA_DDL: dict[str, str] = {
     # Main transactions table. ORDER BY (network, tx_hash) is the dedup key;
     # the p_by_time_v2 projection re-sorts by (network, timestamp) so the list
     # endpoint's top-N-by-time query stays a tail read instead of a full sort.
@@ -83,7 +82,9 @@ SCHEMA_DDL: Dict[str, str] = {
             INDEX idx_slot slot TYPE minmax GRANULARITY 1,
             INDEX idx_block_height block_height TYPE minmax GRANULARITY 1,
             INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1,
-            PROJECTION p_by_time_v2 (""" + _TX_PROJECTION_SELECT + """)
+            PROJECTION p_by_time_v2 ("""
+    + _TX_PROJECTION_SELECT
+    + """)
         ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
         ORDER BY (network, tx_hash)
         SETTINGS deduplicate_merge_projection_mode = 'rebuild',
@@ -240,7 +241,7 @@ SCHEMA_DDL: Dict[str, str] = {
 # ReplacingMergeTree (dedup key columns, version column) per v2 table. Used by
 # scripts/migrate_dedup_schema.py to build the argMax() collapse queries; kept
 # adjacent to SCHEMA_DDL so the two cannot drift.
-DEDUP_TABLE_KEYS: Dict[str, Tuple[Tuple[str, ...], str]] = {
+DEDUP_TABLE_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
     "transactions": (("network", "tx_hash"), "ingestion_timestamp"),
     "transaction_inputs": (("network", "tx_hash", "input_index"), "ingestion_timestamp"),
     "transaction_outputs": (("network", "tx_hash", "output_index"), "ingestion_timestamp"),
@@ -263,14 +264,14 @@ _MIGRATION_SCRIPT = "backend/scripts/migrate_dedup_schema.py"
 # columns sit in ORDER BY keys and the transactions projection, so they
 # cannot be widened with ALTER MODIFY COLUMN — a mismatch requires the same
 # rebuild-and-exchange migration as a legacy engine.
-WIDE_COUNT_COLUMNS: Dict[str, Dict[str, str]] = {
+WIDE_COUNT_COLUMNS: dict[str, dict[str, str]] = {
     "transactions": {"input_count": "UInt16", "output_count": "UInt16"},
     "transaction_inputs": {"input_index": "UInt16", "input_index_in_tx": "UInt16"},
     "transaction_outputs": {"output_index": "UInt16"},
 }
 
 
-def stale_count_columns(client: Client, table: str) -> List[str]:
+def stale_count_columns(client: Client, table: str) -> list[str]:
     """Return WIDE_COUNT_COLUMNS entries whose live type mismatches the DDL.
 
     Empty list for tables that don't exist (created fresh from SCHEMA_DDL)
@@ -287,10 +288,7 @@ def stale_count_columns(client: Client, table: str) -> List[str]:
         {"t": table},
     )
     live = dict(rows)
-    return sorted(
-        col for col, want in expected.items()
-        if col in live and live[col] != want
-    )
+    return sorted(col for col, want in expected.items() if col in live and live[col] != want)
 
 
 def assert_no_legacy_schema(client: Client) -> None:
@@ -319,7 +317,8 @@ def assert_no_legacy_schema(client: Client) -> None:
         {"tables": list(DEDUP_TABLE_KEYS)},
     )
     legacy = sorted(
-        name for name, engine, engine_full in rows
+        name
+        for name, engine, engine_full in rows
         if engine != "ReplacingMergeTree" or "PARTITION BY" in (engine_full or "")
     )
     if legacy:
@@ -345,7 +344,7 @@ def assert_no_legacy_schema(client: Client) -> None:
 # table -> the settings knob holding its retention window in days.
 # tx_class_scores, archived_alerts, and baselines are deliberately absent:
 # they are the product (O(1) per tx) and are never expired.
-_RETENTION_TABLE_KNOBS: Tuple[Tuple[str, str], ...] = (
+_RETENTION_TABLE_KNOBS: tuple[tuple[str, str], ...] = (
     ("transactions", "CH_RETENTION_DAYS_TRANSACTIONS"),
     ("transaction_inputs", "CH_RETENTION_DAYS_IO"),
     ("transaction_outputs", "CH_RETENTION_DAYS_IO"),
@@ -360,10 +359,8 @@ _RETENTION_TABLE_KNOBS: Tuple[Tuple[str, str], ...] = (
 # spend arbitrarily old UTxOs), so retention on these tables degrades
 # detection inputs, not just history. Loud warning, not a hard refusal: an
 # operator may intentionally run a shorter horizon on a constrained box.
-_RETENTION_BASELINE_COUPLING: Dict[str, str] = {
-    "CH_RETENTION_DAYS_FEATURES": (
-        "baselines will be computed from a truncated population"
-    ),
+_RETENTION_BASELINE_COUPLING: dict[str, str] = {
+    "CH_RETENTION_DAYS_FEATURES": ("baselines will be computed from a truncated population"),
     "CH_RETENTION_DAYS_TRANSACTIONS": (
         "the baseline percentile queries INNER JOIN transactions for "
         "chain-time windowing, so feature rows older than this silently "
@@ -426,20 +423,16 @@ def apply_retention_ttls(client: Client) -> None:
         if days <= 0:
             _remove_table_ttl(client, table)
             continue
-        if (
-            knob in _RETENTION_BASELINE_COUPLING
-            and days < window_days
-            and knob not in warned_knobs
-        ):
+        if knob in _RETENTION_BASELINE_COUPLING and days < window_days and knob not in warned_knobs:
             warned_knobs.add(knob)
             logger.warning(
                 "%s=%d is below the %d-day global baseline window; %s.",
-                knob, days, window_days, _RETENTION_BASELINE_COUPLING[knob],
+                knob,
+                days,
+                window_days,
+                _RETENTION_BASELINE_COUPLING[knob],
             )
-        client.execute(
-            f"ALTER TABLE {table} MODIFY TTL "
-            f"ingestion_timestamp + INTERVAL {days} DAY"
-        )
+        client.execute(f"ALTER TABLE {table} MODIFY TTL ingestion_timestamp + INTERVAL {days} DAY")
         logger.info("Retention TTL applied: %s expires after %d days", table, days)
 
 
@@ -474,7 +467,8 @@ def migrate_transactions_projection(client: Client) -> None:
     client.execute("ALTER TABLE transactions DROP PROJECTION IF EXISTS p_by_time")
     client.execute(
         "ALTER TABLE transactions ADD PROJECTION IF NOT EXISTS p_by_time_v2 ("
-        + _TX_PROJECTION_SELECT + ")"
+        + _TX_PROJECTION_SELECT
+        + ")"
     )
     # Async mutation; old parts gain the projection as it runs, new inserts
     # build it inline.
@@ -491,30 +485,30 @@ def _create_transactions(client: Client) -> None:
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
+        client.execute(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'"
+        )
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
     # Add block_index column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS block_index Nullable(UInt32)")
+        client.execute(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS block_index Nullable(UInt32)"
+        )
     except Exception as e:
         logger.debug(f"block_index column may already exist or migration not needed: {e}")
 
     # Migrate total_input_value from UInt64 (old default 0 = ambiguous) to
     # Nullable(UInt64) so that NULL = "unresolved" and 0 = "known zero".
     try:
-        client.execute(
-            "ALTER TABLE transactions MODIFY COLUMN total_input_value Nullable(UInt64)"
-        )
+        client.execute("ALTER TABLE transactions MODIFY COLUMN total_input_value Nullable(UInt64)")
     except Exception as e:
         logger.debug(f"total_input_value already Nullable or migration not needed: {e}")
 
     # Phase-2 validation outcome (migration for existing tables): DEFAULT 1
     # because historical rows predate failed-tx ingestion semantics.
-    client.execute(
-        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1"
-    )
+    client.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS script_valid UInt8 DEFAULT 1")
 
     # Serialized (CBOR) transaction byte size, consumed as a shape feature by the
     # optional clustering sidecar's HostBackedRepo. Additive and default-0 (a
@@ -535,14 +529,15 @@ def _create_transaction_io(client: Client) -> None:
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
+        client.execute(
+            "ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'"
+        )
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
     # Attempted-spend flag for failed txs (migration for existing tables).
     client.execute(
-        "ALTER TABLE transaction_inputs "
-        "ADD COLUMN IF NOT EXISTS is_unspent_attempt UInt8 DEFAULT 0"
+        "ALTER TABLE transaction_inputs ADD COLUMN IF NOT EXISTS is_unspent_attempt UInt8 DEFAULT 0"
     )
 
     # Transaction outputs table
@@ -550,7 +545,9 @@ def _create_transaction_io(client: Client) -> None:
 
     # Add network column if it doesn't exist (migration for existing tables)
     try:
-        client.execute("ALTER TABLE transaction_outputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'")
+        client.execute(
+            "ALTER TABLE transaction_outputs ADD COLUMN IF NOT EXISTS network String DEFAULT 'preprod'"
+        )
     except Exception as e:
         logger.debug(f"Network column may already exist or migration not needed: {e}")
 
@@ -633,8 +630,7 @@ def _create_detection_tables(client: Client) -> None:
     # Cross-class corroboration flag (additive; see engine.py). Existing
     # rows default to 0 / '' until re-scored.
     client.execute(
-        "ALTER TABLE tx_class_scores "
-        "ADD COLUMN IF NOT EXISTS corroboration_count UInt8 DEFAULT 0"
+        "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS corroboration_count UInt8 DEFAULT 0"
     )
     client.execute(
         "ALTER TABLE tx_class_scores "
@@ -709,12 +705,10 @@ def _create_baselines(client: Client) -> None:
     # axis = which percentile drifted (legacy old_p99/new_p99 columns carry
     # that axis's values); applied = recall-safe drift inserted anyway.
     client.execute(
-        "ALTER TABLE baseline_drift_events "
-        "ADD COLUMN IF NOT EXISTS axis String DEFAULT 'p99'"
+        "ALTER TABLE baseline_drift_events ADD COLUMN IF NOT EXISTS axis String DEFAULT 'p99'"
     )
     client.execute(
-        "ALTER TABLE baseline_drift_events "
-        "ADD COLUMN IF NOT EXISTS applied UInt8 DEFAULT 0"
+        "ALTER TABLE baseline_drift_events ADD COLUMN IF NOT EXISTS applied UInt8 DEFAULT 0"
     )
 
 

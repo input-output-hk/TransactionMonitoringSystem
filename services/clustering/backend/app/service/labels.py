@@ -31,12 +31,16 @@ def _sync_host_projection(repo: Repo, target: str) -> None:
         from app.service.publish import publish_contract_anomaly
 
         publish_contract_anomaly(
-            repo, target, network=get_settings().cardano_network,
+            repo,
+            target,
+            network=get_settings().cardano_network,
         )
-    except Exception:  # noqa: BLE001 - projection sync is best-effort
+    except Exception:
         logger.warning(
             "host contract_anomaly projection sync failed for %s; "
-            "the next publish will reconcile it", target[:24], exc_info=True,
+            "the next publish will reconcile it",
+            target[:24],
+            exc_info=True,
         )
 
 
@@ -64,9 +68,7 @@ def label_cluster_members(
     return {"run_id": run_id, "cluster_id": cluster_id, "verdict": verdict, "labeled": n}
 
 
-def clear_cluster_members(
-    repo: Repo, run_id: str, target: str, cluster_id: int
-) -> dict[str, Any]:
+def clear_cluster_members(repo: Repo, run_id: str, target: str, cluster_id: int) -> dict[str, Any]:
     """Remove the explicit labels from a cluster's current members (tombstone).
     Rejects the noise bucket (``cluster_id < 0``) for symmetry with labelling."""
     if cluster_id < 0:
@@ -93,9 +95,7 @@ def label_transaction(
     return {"target": target, "tx_hash": tx_hash, "verdict": verdict, "labeled": n}
 
 
-def clear_transaction_label(
-    repo: Repo, target: str, tx_hash: str
-) -> dict[str, Any]:
+def clear_transaction_label(repo: Repo, target: str, tx_hash: str) -> dict[str, Any]:
     """Remove a single transaction's manual label (tombstone). No-op if it had none."""
     n = repo.clear_tx_labels(target, [tx_hash])
     _sync_host_projection(repo, target)

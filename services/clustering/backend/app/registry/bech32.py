@@ -8,6 +8,10 @@ bech32 (not bech32m), so no checksum-variant handling is required.
 
 Vendored from the BIP-0173 reference implementation (public domain), trimmed to
 the decode path. Pure stdlib, no third-party dependency.
+
+PAIRED COPY: backend/app/utils/bech32.py carries the same validating core for
+the host detection scorers (the two packages deliberately cannot import each
+other; keep the decode logic textually in sync when either side changes).
 """
 
 from __future__ import annotations

@@ -37,7 +37,7 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 // `enabled` mirrors the page's clustering-enabled gate so the config fetch (like
-// the watchlist/jobs polls) never hits /api/clustering/* until health confirms
+// the watchlist/jobs polls) never hits /api/v1/clustering/* until health confirms
 // the module is on.
 export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 	const add = useAddContract();

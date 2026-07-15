@@ -54,8 +54,7 @@ def _guard_schema() -> None:
     if missing:
         raise RuntimeError(
             "ClickHouse schema is behind the code; run "
-            "`docker exec <backend> python -m app.cli migrate`. Missing: "
-            + ", ".join(missing)
+            "`docker exec <backend> python -m app.cli migrate`. Missing: " + ", ".join(missing)
         )
 
 
@@ -117,8 +116,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         repo_factory = manager._repo_factory  # same factory the worker uses
         feed_stop = asyncio.Event()
         feed_task = asyncio.create_task(
-            run_feed(manager=manager, repo_factory=repo_factory,
-                     settings=settings, stop_event=feed_stop)
+            run_feed(
+                manager=manager, repo_factory=repo_factory, settings=settings, stop_event=feed_stop
+            )
         )
         app.state.feed_stop = feed_stop
     try:
@@ -147,9 +147,7 @@ app.add_middleware(
 
 # Exact probe paths (both mounts) — matched exactly, not by suffix, so a future
 # route that merely ends in /ready (e.g. a target named "ready") is still logged.
-_PROBE_PATHS = frozenset(
-    {"/api/health", "/api/ready", "/api/v1/health", "/api/v1/ready"}
-)
+_PROBE_PATHS = frozenset({"/api/health", "/api/ready", "/api/v1/health", "/api/v1/ready"})
 
 _access_logger = logging.getLogger("app.api.access")
 
@@ -185,6 +183,7 @@ async def _log_requests(request: Request, call_next: Any) -> Any:
                 }
             },
         )
+
 
 _authed = [Depends(verify_api_key)]
 

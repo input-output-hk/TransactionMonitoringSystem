@@ -23,13 +23,20 @@ JOB_COLUMNS = [
     "created_at",
 ]
 _TERMINAL_JOB_STATUSES = ("done", "failed")
-# Cap on the jobs list: retries/re-analyze/classify accrue rows over time, and the
-# UI re-fetches + re-renders the whole list on every poll.
-_JOBS_LIST_LIMIT = 200
 
 _JOB_OUT_KEYS = [
-    "job_id", "target", "target_type", "max_txs", "reprocess", "kind", "status",
-    "stage_detail", "txs_done", "error", "created_at", "updated_at",
+    "job_id",
+    "target",
+    "target_type",
+    "max_txs",
+    "reprocess",
+    "kind",
+    "status",
+    "stage_detail",
+    "txs_done",
+    "error",
+    "created_at",
+    "updated_at",
 ]
 _JOB_INT_KEYS = ("max_txs", "reprocess", "txs_done")
 
@@ -92,12 +99,19 @@ class _JobMixin(_RepoBase):
         rows = self.client.query(sql, parameters={"j": job_id}).result_rows
         return self._job_to_dict(rows[0]) if rows else None
 
-    def list_jobs(self) -> list[dict[str, Any]]:
-        sql = (
-            self._JOB_SELECT.format(db=self._db, where="")
-            + f" ORDER BY created_at DESC LIMIT {_JOBS_LIST_LIMIT}"
+    def list_jobs(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        sql = self._JOB_SELECT.format(db=self._db, where="") + (
+            " ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}"
         )
-        return [self._job_to_dict(r) for r in self.client.query(sql).result_rows]
+        rows = self.client.query(sql, parameters={"lim": limit, "off": offset}).result_rows
+        return [self._job_to_dict(r) for r in rows]
+
+    def count_jobs(self) -> int:
+        """Full (unpaginated) job count backing the list envelope's ``total``.
+        ``count() AS total`` is safe under the 26.x alias rule: single aggregate,
+        and ``jobs`` has no ``total`` source column."""
+        rows = self.client.query(f"SELECT count() AS total FROM {self._db}.jobs FINAL").result_rows
+        return int(rows[0][0]) if rows else 0
 
     def nonterminal_jobs(self) -> list[dict[str, Any]]:
         statuses = ", ".join(f"'{s}'" for s in _TERMINAL_JOB_STATUSES)

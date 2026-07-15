@@ -1,9 +1,8 @@
 """Unit tests for the transfer graph cycle detection module."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from app.analysis.graph import detect_cycle, _build_cycle_result
+from app.analysis.graph import _build_cycle_result, detect_cycle
 
 
 class TestBuildCycleResult:

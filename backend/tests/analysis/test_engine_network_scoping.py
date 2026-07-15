@@ -37,19 +37,19 @@ def _make_rows(network: str):
 def captured_queries(monkeypatch):
     """Patch clickhouse._get_client to capture every execute() call."""
     from app.db import clickhouse
+
     captured = []
 
     fake_client = MagicMock()
-    fake_client.execute.side_effect = (
-        lambda sql, params=None: (captured.append((sql, params)) or [])
-    )
+    fake_client.execute.side_effect = lambda sql, params=None: captured.append((sql, params)) or []
     monkeypatch.setattr(clickhouse, "_get_client", lambda: fake_client)
     return captured
 
 
 class TestEnrichmentQueriesAreNetworkScoped:
     def test_transaction_inputs_query_includes_network(
-        self, captured_queries,
+        self,
+        captured_queries,
     ):
         """First enrichment read (transaction_inputs) must filter by network."""
         from app.analysis.engine import _enrich_inputs_with_resolved_addresses
@@ -63,7 +63,8 @@ class TestEnrichmentQueriesAreNetworkScoped:
         assert params["network"] == "preview"
 
     def test_transactions_fallback_query_includes_network(
-        self, captured_queries,
+        self,
+        captured_queries,
     ):
         """Second enrichment read (transactions, for ref UTxO outputs)
         must filter by network."""
@@ -74,9 +75,7 @@ class TestEnrichmentQueriesAreNetworkScoped:
         # Expect at least two queries: the input-address lookup, then the
         # referenced-tx-output lookup (only if there are ref tx hashes).
         fallback = [
-            (sql, params)
-            for (sql, params) in captured_queries
-            if "FROM transactions" in sql
+            (sql, params) for (sql, params) in captured_queries if "FROM transactions" in sql
         ]
         assert fallback, "expected the ref-outputs query to fire"
         sql, params = fallback[0]

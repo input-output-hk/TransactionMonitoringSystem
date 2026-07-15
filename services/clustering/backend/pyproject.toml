@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "typer>=0.12",
+    # Algorithm tunables config (config/clustering.yaml via app/tunables.py).
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +27,9 @@ dev = [
     "httpx>=0.27",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "ruff>=0.6",
+    # Keep in lockstep with the root pyproject ruff pin: format --check runs
+    # over both trees in CI, and formatter output differs across versions.
+    "ruff>=0.15.18",
     "mypy>=1.11",
 ]
 
@@ -46,6 +50,11 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Set-algebra comments (e.g. the union symbol) describe the reconciliation
+# math; the "ambiguous unicode" is deliberate notation, not a typo.
+"tests/test_publish.py" = ["RUF003"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's parameter helpers are the idiomatic way to declare defaults.

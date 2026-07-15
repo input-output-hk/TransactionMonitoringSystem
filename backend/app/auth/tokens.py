@@ -19,13 +19,14 @@ Two purposes share the same table:
 A user's outstanding tokens are revoked on each new issue so a forwarded
 old email can't beat a fresh request.
 """
+
 from __future__ import annotations
 
 import hashlib
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from app.config import settings
@@ -60,7 +61,7 @@ async def issue_token(user_id: UUID, purpose: TokenPurpose) -> str:
     """
     token = secrets.token_urlsafe(_TOKEN_BYTES)
     token_hash = _hash_token(token)
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.now(UTC) + timedelta(
         minutes=settings.MAGIC_LINK_TTL_MINUTES,
     )
 
@@ -99,7 +100,7 @@ async def issue_token(user_id: UUID, purpose: TokenPurpose) -> str:
 async def consume_token(
     token: str,
     expected_purpose: TokenPurpose | None = None,
-) -> Optional[UUID]:
+) -> UUID | None:
     """Atomically decrement a token's redemption counter and return the
     associated ``user_id``, or ``None`` if the token can't be redeemed.
 
@@ -194,7 +195,8 @@ async def claim_session_token(session_id: str, token_hash: str) -> int:
             "claim_session_token: revoked %d sibling session(s) for a "
             "magic-link token (hash prefix %s…) — the link was evidently "
             "redeemed by more than one party",
-            revoked, token_hash[:12],
+            revoked,
+            token_hash[:12],
         )
     return revoked
 

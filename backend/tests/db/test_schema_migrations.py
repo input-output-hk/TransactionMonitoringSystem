@@ -5,6 +5,7 @@ MATERIALIZE PROJECTION, a part-rewriting mutation that must run once per
 deployment, not on every boot. The gate is the live CREATE TABLE text.
 """
 
+from datetime import UTC
 from unittest.mock import MagicMock
 
 from app.db.clickhouse_schema import migrate_transactions_projection
@@ -12,9 +13,7 @@ from app.db.clickhouse_schema import migrate_transactions_projection
 
 def _client_with_ddl(ddl: str) -> MagicMock:
     client = MagicMock()
-    client.execute.side_effect = lambda q, *a, **k: (
-        [(ddl,)] if "system.tables" in q else None
-    )
+    client.execute.side_effect = lambda q, *a, **k: [(ddl,)] if "system.tables" in q else None
     return client
 
 
@@ -84,8 +83,7 @@ class TestCreateAllMigrationOrder:
 
         statements = [c.args[0] for c in client.execute.call_args_list]
         idx_projection = next(
-            i for i, s in enumerate(statements)
-            if "ADD PROJECTION IF NOT EXISTS p_by_time_v2" in s
+            i for i, s in enumerate(statements) if "ADD PROJECTION IF NOT EXISTS p_by_time_v2" in s
         )
         for needle in (
             "ADD COLUMN IF NOT EXISTS network",
@@ -94,12 +92,11 @@ class TestCreateAllMigrationOrder:
             "ADD COLUMN IF NOT EXISTS script_valid",
         ):
             idx_col = next(
-                i for i, s in enumerate(statements)
+                i
+                for i, s in enumerate(statements)
                 if s.startswith("ALTER TABLE transactions ") and needle in s
             )
-            assert idx_col < idx_projection, (
-                f"'{needle}' must run before the projection migration"
-            )
+            assert idx_col < idx_projection, f"'{needle}' must run before the projection migration"
 
 
 class TestRetentionTtlRemoval:
@@ -109,9 +106,7 @@ class TestRetentionTtlRemoval:
 
     def _client(self, ddl: str) -> MagicMock:
         client = MagicMock()
-        client.execute.side_effect = lambda q, *a, **k: (
-            [(ddl,)] if "system.tables" in q else None
-        )
+        client.execute.side_effect = lambda q, *a, **k: [(ddl,)] if "system.tables" in q else None
         return client
 
     def test_stale_ttl_removed_when_knob_zero(self, monkeypatch):
@@ -129,10 +124,7 @@ class TestRetentionTtlRemoval:
             "TTL ingestion_timestamp + INTERVAL 30 DAY ..."
         )
         apply_retention_ttls(client)
-        removes = [
-            c.args[0] for c in client.execute.call_args_list
-            if "REMOVE TTL" in c.args[0]
-        ]
+        removes = [c.args[0] for c in client.execute.call_args_list if "REMOVE TTL" in c.args[0]]
         assert removes  # every zeroed knob with a live TTL clause clears it
 
     def test_no_remove_when_table_never_had_ttl(self, monkeypatch):
@@ -147,14 +139,11 @@ class TestRetentionTtlRemoval:
             monkeypatch.setattr(settings, knob, 0)
         client = self._client("CREATE TABLE transactions (...) ENGINE = ReplacingMergeTree ...")
         apply_retention_ttls(client)
-        assert not any(
-            "REMOVE TTL" in c.args[0] for c in client.execute.call_args_list
-        )
+        assert not any("REMOVE TTL" in c.args[0] for c in client.execute.call_args_list)
 
     def test_remove_ttl_failure_does_not_block_startup(self, monkeypatch):
         from clickhouse_driver.errors import Error as ClickHouseError
 
-        from app.config import settings
         from app.db.clickhouse_schema import _remove_table_ttl
 
         client = MagicMock()
@@ -172,11 +161,13 @@ class TestInsertShape:
     """The writer must persist the new failed-tx columns."""
 
     def test_insert_includes_script_valid_and_attempt_flags(self, monkeypatch):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from app.db import clickhouse
         from app.models.transaction import (
-            NormalizedTransaction, TransactionInput, TransactionOutput,
+            NormalizedTransaction,
+            TransactionInput,
+            TransactionOutput,
         )
 
         client = MagicMock()
@@ -184,25 +175,32 @@ class TestInsertShape:
         tx = NormalizedTransaction(
             tx_hash="ff" * 32,
             network="preprod",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fee=0,
             script_valid=False,
             inputs=[
                 TransactionInput(
-                    tx_hash="aa" * 32, index=0, address="", amount=0,
+                    tx_hash="aa" * 32,
+                    index=0,
+                    address="",
+                    amount=0,
                     is_unspent_attempt=True,
                 ),
             ],
             outputs=[
                 TransactionOutput(
-                    address="addr_test1x", amount=5, is_collateral=True,
+                    address="addr_test1x",
+                    amount=5,
+                    is_collateral=True,
                     output_index=3,
                 ),
             ],
             raw_data={},
         )
         clickhouse.insert_transactions_batch([tx])
-        statements = {c.args[0]: c.args[1] for c in client.execute.call_args_list if len(c.args) > 1}
+        statements = {
+            c.args[0]: c.args[1] for c in client.execute.call_args_list if len(c.args) > 1
+        }
         tx_insert = next(q for q in statements if "INSERT INTO transactions" in q)
         assert "script_valid" in tx_insert
         in_insert = next(q for q in statements if "INSERT INTO transaction_inputs" in q)
@@ -244,11 +242,14 @@ class TestWideCountColumnGuard:
 
     def test_narrow_input_count_refuses_startup(self):
         import pytest
+
         from app.db.clickhouse_schema import assert_no_legacy_schema
 
-        client = self._client({
-            "transactions": {"input_count": "UInt8", "output_count": "UInt16"},
-        })
+        client = self._client(
+            {
+                "transactions": {"input_count": "UInt8", "output_count": "UInt16"},
+            }
+        )
         with pytest.raises(RuntimeError, match="transactions.input_count"):
             assert_no_legacy_schema(client)
 
@@ -277,6 +278,4 @@ class TestWideCountColumnGuard:
         for table, cols in WIDE_COUNT_COLUMNS.items():
             ddl = SCHEMA_DDL[table]
             for col, want in cols.items():
-                assert f"{col} {want}" in ddl, (
-                    f"{table}.{col}: DDL does not declare {want}"
-                )
+                assert f"{col} {want}" in ddl, f"{table}.{col}: DDL does not declare {want}"

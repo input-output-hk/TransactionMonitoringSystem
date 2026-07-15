@@ -1,4 +1,4 @@
-"""HTTP tests for the admin user-management router (app/api/users.py).
+"""HTTP tests for the admin user-management router (app/api/v1/users.py).
 
 Covers the full Admin CRUD surface plus the two auth failure classes
 (anonymous 401, non-admin 403) and the route guardrails: self-delete,
@@ -9,7 +9,7 @@ stubbed at _issue_invite_email (which is best-effort by design).
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -29,7 +29,7 @@ def _user_row(role="Reviewer", status="active", user_id=None, email=None):
         "full_name": "Test User",
         "role": role,
         "status": status,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "last_login_at": None,
     }
 
@@ -80,7 +80,7 @@ class TestListUsers:
         conn.fetch.return_value = [_user_row(), _user_row(role="Admin")]
         conn.fetchval.return_value = 7
 
-        r = client.get("/api/users")
+        r = client.get("/api/v1/users")
 
         assert r.status_code == 200, r.text
         body = r.json()
@@ -89,8 +89,8 @@ class TestListUsers:
         assert {u["role"] for u in body["data"]} == {"Reviewer", "Admin"}
 
     def test_limit_bounds_rejected(self, client, as_admin, conn):
-        assert client.get("/api/users?limit=0").status_code == 422
-        assert client.get("/api/users?limit=1001").status_code == 422
+        assert client.get("/api/v1/users?limit=0").status_code == 422
+        assert client.get("/api/v1/users?limit=1001").status_code == 422
 
 
 class TestCreateUser:
@@ -101,7 +101,7 @@ class TestCreateUser:
         conn.fetchrow.return_value = created
 
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={
                 "email": "new@example.com",
                 "full_name": "New Person",
@@ -118,7 +118,7 @@ class TestCreateUser:
         conn.fetchval.return_value = 1  # duplicate probe hit
 
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={
                 "email": "dup@example.com",
                 "full_name": "Dup",
@@ -140,50 +140,46 @@ class TestCreateUser:
         ids=["bad-email", "blank-name", "bad-role", "missing-email"],
     )
     def test_invalid_payload_rejected(self, client, as_admin, conn, payload):
-        assert client.post("/api/users", json=payload).status_code == 422
+        assert client.post("/api/v1/users", json=payload).status_code == 422
 
 
 class TestDeleteUser:
     def test_cannot_delete_self(self, client, as_admin, conn):
-        r = client.delete(f"/api/users/{ADMIN_ID}")
+        r = client.delete(f"/api/v1/users/{ADMIN_ID}")
         assert r.status_code == 400
         assert "own account" in r.json()["detail"]
 
     def test_missing_user_404(self, client, as_admin, conn):
         conn.fetchrow.return_value = None
-        assert client.delete(f"/api/users/{uuid.uuid4()}").status_code == 404
+        assert client.delete(f"/api/v1/users/{uuid.uuid4()}").status_code == 404
 
     def test_cannot_delete_last_active_admin(self, client, as_admin, conn):
         conn.fetchrow.return_value = {"role": "Admin", "status": "active"}
         conn.fetchval.return_value = 0
 
-        r = client.delete(f"/api/users/{uuid.uuid4()}")
+        r = client.delete(f"/api/v1/users/{uuid.uuid4()}")
 
         assert r.status_code == 400
         assert "last active Admin" in r.json()["detail"]
 
-    def test_admin_deletable_when_another_remains(
-        self, client, as_admin, conn, monkeypatch
-    ):
+    def test_admin_deletable_when_another_remains(self, client, as_admin, conn, monkeypatch):
         conn.fetchrow.return_value = {"role": "Admin", "status": "active"}
         conn.fetchval.return_value = 1
         revoke = AsyncMock(return_value=2)
         monkeypatch.setattr(users_api, "delete_all_sessions_for_user", revoke)
 
-        r = client.delete(f"/api/users/{uuid.uuid4()}")
+        r = client.delete(f"/api/v1/users/{uuid.uuid4()}")
 
         assert r.status_code == 204
         revoke.assert_awaited_once()
 
-    def test_reviewer_deleted_with_sessions_revoked(
-        self, client, as_admin, conn, monkeypatch
-    ):
+    def test_reviewer_deleted_with_sessions_revoked(self, client, as_admin, conn, monkeypatch):
         conn.fetchrow.return_value = {"role": "Reviewer", "status": "active"}
         revoke = AsyncMock(return_value=0)
         monkeypatch.setattr(users_api, "delete_all_sessions_for_user", revoke)
 
         target = uuid.uuid4()
-        r = client.delete(f"/api/users/{target}")
+        r = client.delete(f"/api/v1/users/{target}")
 
         assert r.status_code == 204
         delete_sql, delete_arg = conn.execute.await_args.args
@@ -194,7 +190,7 @@ class TestDeleteUser:
 class TestResendInvite:
     def test_missing_user_404(self, client, as_admin, conn, invite_email):
         conn.fetchrow.return_value = None
-        r = client.post(f"/api/users/{uuid.uuid4()}/resend-invite")
+        r = client.post(f"/api/v1/users/{uuid.uuid4()}/resend-invite")
         assert r.status_code == 404
         invite_email.assert_not_awaited()
 
@@ -204,7 +200,7 @@ class TestResendInvite:
             "full_name": "A",
             "status": "active",
         }
-        r = client.post(f"/api/users/{uuid.uuid4()}/resend-invite")
+        r = client.post(f"/api/v1/users/{uuid.uuid4()}/resend-invite")
         assert r.status_code == 400
         invite_email.assert_not_awaited()
 
@@ -214,7 +210,7 @@ class TestResendInvite:
             "full_name": "P",
             "status": "pending",
         }
-        r = client.post(f"/api/users/{uuid.uuid4()}/resend-invite")
+        r = client.post(f"/api/v1/users/{uuid.uuid4()}/resend-invite")
         assert r.status_code == 200
         assert r.json() == {"status": "ok"}
         invite_email.assert_awaited_once()
@@ -242,13 +238,13 @@ class TestAccessControl:
         app.dependency_overrides.pop(current_user, None)
 
     def test_reviewer_forbidden(self, client, as_reviewer, conn):
-        assert client.get("/api/users").status_code == 403
-        assert client.delete(f"/api/users/{uuid.uuid4()}").status_code == 403
+        assert client.get("/api/v1/users").status_code == 403
+        assert client.delete(f"/api/v1/users/{uuid.uuid4()}").status_code == 403
 
     def test_anonymous_unauthorized(self, client, conn):
-        assert client.get("/api/users").status_code == 401
+        assert client.get("/api/v1/users").status_code == 401
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={
                 "email": "x@example.com",
                 "full_name": "X",

@@ -28,7 +28,7 @@ A healthy Ogmios returns a JSON object with `"networkSynchronization": 1` (or cl
 ### 2. Local machine
 
 - Docker and Docker Compose
-- Python 3.12+
+- Python 3.13+ (managed via uv)
 
 
 ## First-time setup
@@ -84,13 +84,11 @@ docker compose up -d
 docker compose ps
 
 # Install Python dependencies (first time only)
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+uv sync
 
 # Start the application (defaults to preprod; port comes from .env.preprod)
 cd backend
-python run.py
+uv run python run.py
 
 # To run against preview instead (port comes from .env.preview):
 TMS_ENV=preview python run.py
@@ -125,7 +123,7 @@ For the operational detail (pipeline state, Ogmios sync lag, connection
 count), call the authenticated `/health/detail` endpoint:
 
 ```bash
-curl -H "TMS-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
+curl -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
 Expected response when connected to Ogmios:
@@ -157,10 +155,10 @@ Open `http://localhost:8000/` in a browser. The dashboard shows a live feed of i
 
 ```bash
 # No key needed when running with empty API_KEYS + TMS_ALLOW_DEV_MODE=1
-curl "http://localhost:8000/api/transactions/?limit=5&network=preprod"
+curl "http://localhost:8000/api/v1/transactions?limit=5&network=preprod"
 
 # With a key
-curl -H "TMS-API-Key: your-key" "http://localhost:8000/api/transactions/?limit=5&network=preprod"
+curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/transactions?limit=5&network=preprod"
 ```
 
 If the system is running and connected, this returns the most recent confirmed transactions within a few seconds of startup.
@@ -419,7 +417,7 @@ ConnectionRefusedError / WebSocket connection failed
 ### `pipeline_state` is DEGRADED or DOWN
 
 ```bash
-curl -H "TMS-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
+curl -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
 Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempool`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
@@ -500,37 +498,38 @@ Deployments created before the ReplacingMergeTree schema must run the one-shot m
 ## API quick reference
 
 All endpoints accept `?network=preprod`, `?network=mainnet`, or `?network=preview`; defaults to the instance's `CARDANO_NETWORK`.
-All endpoints require `TMS-API-Key: <key>`. For open-API dev mode, boot with empty `API_KEYS` **and** `TMS_ALLOW_DEV_MODE=1`.
+All endpoints require `X-API-Key: <key>`. For open-API dev mode, boot with empty `API_KEYS` **and** `TMS_ALLOW_DEV_MODE=1`.
+Migration note: the header was renamed from `TMS-API-Key` and all REST paths moved from `/api/...` to `/api/v1/...` in the v1 versioning cut. Out-of-repo callers still sending the old header can bridge with `API_KEY_HEADER=TMS-API-Key` in the environment; there is no path bridge.
 
 ```bash
 BASE=http://localhost:8000
-KEY="TMS-API-Key: your-key"
+KEY="X-API-Key: your-key"
 
 # Recent transactions
-curl -H "$KEY" "$BASE/api/transactions/?limit=20"
+curl -H "$KEY" "$BASE/api/v1/transactions?limit=20"
 
 # Single transaction
-curl -H "$KEY" "$BASE/api/transactions/<tx_hash>"
+curl -H "$KEY" "$BASE/api/v1/transactions/<tx_hash>"
 
 # All transactions for an address
-curl -H "$KEY" "$BASE/api/transactions/address/<addr>"
+curl -H "$KEY" "$BASE/api/v1/transactions/address/<addr>"
 
 # Pending (mempool) transactions
-curl -H "$KEY" "$BASE/api/lifecycle?status=PENDING"
+curl -H "$KEY" "$BASE/api/v1/lifecycle?status=PENDING"
 
 # Transaction lifecycle state
-curl -H "$KEY" "$BASE/api/lifecycle/<tx_hash>"
+curl -H "$KEY" "$BASE/api/v1/lifecycle/<tx_hash>"
 
 # Risk analysis results
-curl -H "$KEY" "$BASE/api/analysis/results?risk_band=High&limit=50"
+curl -H "$KEY" "$BASE/api/v1/analysis/results?risk_band=High&limit=50"
 
 # Analysis result for a single transaction
-curl -H "$KEY" "$BASE/api/analysis/results/<tx_hash>"
+curl -H "$KEY" "$BASE/api/v1/analysis/results/<tx_hash>"
 
 # Aggregate stats
-curl -H "$KEY" "$BASE/api/transactions/stats/summary"
-curl -H "$KEY" "$BASE/api/lifecycle/stats/summary"
-curl -H "$KEY" "$BASE/api/analysis/stats"
+curl -H "$KEY" "$BASE/api/v1/transactions/stats/summary"
+curl -H "$KEY" "$BASE/api/v1/lifecycle/stats/summary"
+curl -H "$KEY" "$BASE/api/v1/analysis/stats"
 
 # Health (no key required)
 curl "$BASE/health"

@@ -29,9 +29,7 @@ def make_block(slot=100, txs=1):
                     "spends": "inputs",
                     "fee": {"ada": {"lovelace": 200_000}},
                     "inputs": [{"transaction": {"id": "11" * 32}, "index": 0}],
-                    "outputs": [
-                        {"address": "addr_test1qq", "value": {"ada": {"lovelace": 1}}}
-                    ],
+                    "outputs": [{"address": "addr_test1qq", "value": {"ada": {"lovelace": 1}}}],
                 }
                 for i in range(txs)
             ],
@@ -67,7 +65,5 @@ def persistence_patches(insert=None, save_sync=None, raw_write=None):
         ),
     ]
     if raw_write is not None:
-        patches.append(
-            patch("app.ingestion.ogmios_client.raw_store.write_confirmed", raw_write)
-        )
+        patches.append(patch("app.ingestion.ogmios_client.raw_store.write_confirmed", raw_write))
     return patches

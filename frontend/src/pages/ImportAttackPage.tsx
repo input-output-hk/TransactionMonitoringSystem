@@ -228,7 +228,7 @@ export function ImportAttackPage() {
 			>
 				<DialogContent
 					showClose={false}
-					className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+					className="max-w-xl gap-8 bg-dialog"
 				>
 					<DialogHeader>
 						<DialogTitle className="text-center text-base font-normal">

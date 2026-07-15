@@ -23,15 +23,15 @@ touched; both are cleaned up on every run. Exits non-zero on any failure.
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from clickhouse_driver import Client  # noqa: E402
+from clickhouse_driver import Client
 
-from app.config import settings  # noqa: E402
-from app.db import clickhouse, clickhouse_schema  # noqa: E402
-from app.models.transaction import NormalizedTransaction  # noqa: E402
+from app.config import settings
+from app.db import clickhouse, clickhouse_schema
+from app.models.transaction import NormalizedTransaction
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("verify_rollback_purge")
@@ -102,7 +102,7 @@ def _verify_current_schema_purge(client) -> int:
         slot=_VERIFY_SLOT,
         block_height=1,
         block_hash="aa" * 32,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fee=0,
         raw_data={},
     )
@@ -113,8 +113,7 @@ def _verify_current_schema_purge(client) -> int:
         purged = clickhouse.delete_rolled_back_txs(_VERIFY_NETWORK, _ROLLBACK_SLOT)
     except Exception:
         logger.exception(
-            "FAIL: rollback purge raised on a real server, so the crash-loop "
-            "bug is NOT fixed"
+            "FAIL: rollback purge raised on a real server, so the crash-loop bug is NOT fixed"
         )
         return 1
     if len(purged) != 1:
@@ -162,17 +161,12 @@ def _verify_legacy_migration_purge(admin_client) -> int:
         for table in clickhouse._ROLLBACK_CLEANUP_TABLES:
             if table == "transactions":
                 continue
-            legacy_client.execute(
-                clickhouse_schema.SCHEMA_DDL[table].format(table=table)
-            )
+            legacy_client.execute(clickhouse_schema.SCHEMA_DDL[table].format(table=table))
         legacy_client.execute(
-            "INSERT INTO transactions (tx_hash, network, slot, timestamp, fee)"
-            " VALUES",
-            [(_VERIFY_TX_HASH, _VERIFY_NETWORK, _VERIFY_SLOT,
-              datetime.now(timezone.utc), 0)],
+            "INSERT INTO transactions (tx_hash, network, slot, timestamp, fee) VALUES",
+            [(_VERIFY_TX_HASH, _VERIFY_NETWORK, _VERIFY_SLOT, datetime.now(UTC), 0)],
         )
-        logger.info("Built legacy (pre-projection) sentinel deployment in %s",
-                    _LEGACY_DB)
+        logger.info("Built legacy (pre-projection) sentinel deployment in %s", _LEGACY_DB)
 
         clickhouse_schema.migrate_transactions_projection(legacy_client)
 
@@ -181,16 +175,16 @@ def _verify_legacy_migration_purge(admin_client) -> int:
             "WHERE database = currentDatabase() AND name = 'transactions'"
         )[0][0]
         failures = [
-            witness for witness in (
+            witness
+            for witness in (
                 "p_by_time_v2",
                 "deduplicate_merge_projection_mode",
                 "lightweight_mutation_projection_mode",
-            ) if witness not in ddl
+            )
+            if witness not in ddl
         ]
         if failures:
-            logger.error(
-                "FAIL: legacy migration left the table without %s", failures
-            )
+            logger.error("FAIL: legacy migration left the table without %s", failures)
             return 1
         logger.info("OK: legacy migration added the projection and table settings")
 
@@ -200,9 +194,7 @@ def _verify_legacy_migration_purge(admin_client) -> int:
         original = getattr(clickhouse._thread_local, "client", None)
         clickhouse._thread_local.client = legacy_client
         try:
-            purged = clickhouse.delete_rolled_back_txs(
-                _VERIFY_NETWORK, _ROLLBACK_SLOT
-            )
+            purged = clickhouse.delete_rolled_back_txs(_VERIFY_NETWORK, _ROLLBACK_SLOT)
         except Exception:
             logger.exception(
                 "FAIL: purge raised on the legacy-migrated table; the "
@@ -212,8 +204,7 @@ def _verify_legacy_migration_purge(admin_client) -> int:
         finally:
             clickhouse._thread_local.client = original
         if purged != [_VERIFY_TX_HASH]:
-            logger.error("FAIL: expected [%s] purged, got %s",
-                         _VERIFY_TX_HASH, purged)
+            logger.error("FAIL: expected [%s] purged, got %s", _VERIFY_TX_HASH, purged)
             return 1
         remaining = legacy_client.execute(
             "SELECT count() FROM transactions WHERE network = %(n)s",
@@ -233,8 +224,7 @@ def _verify_legacy_migration_purge(admin_client) -> int:
         try:
             admin_client.execute(f"DROP DATABASE IF EXISTS {_LEGACY_DB}")
         except Exception:
-            logger.warning("Cleanup: failed to drop %s", _LEGACY_DB,
-                           exc_info=True)
+            logger.warning("Cleanup: failed to drop %s", _LEGACY_DB, exc_info=True)
         legacy_client.disconnect()
 
 

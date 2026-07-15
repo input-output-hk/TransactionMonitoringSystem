@@ -28,16 +28,16 @@ async def test_deliveries_are_concurrency_bounded(monkeypatch):
         return True
 
     monkeypatch.setattr(notifications.dispatcher, "dispatch", fake_dispatch)
-    monkeypatch.setattr(notifications.postgres, "already_notified",
-                        lambda *a, **k: _false())
-    monkeypatch.setattr(notifications.postgres, "claim_notification",
-                        lambda *a, **k: _true())
+    monkeypatch.setattr(notifications.postgres, "already_notified", lambda *a, **k: _false())
+    monkeypatch.setattr(notifications.postgres, "claim_notification", lambda *a, **k: _true())
 
     # Fire far more deliveries than the limit, concurrently.
-    await asyncio.gather(*(
-        notifications._deliver_with_dedup("preprod", f"tx{i}", "Critical", {}, [("email", {})])
-        for i in range(20)
-    ))
+    await asyncio.gather(
+        *(
+            notifications._deliver_with_dedup("preprod", f"tx{i}", "Critical", {}, [("email", {})])
+            for i in range(20)
+        )
+    )
     assert state["peak"] <= limit, f"peak concurrency {state['peak']} exceeded limit {limit}"
 
 

@@ -3,6 +3,7 @@
 Kept light: only the fields the API actually returns. Domain objects (DB
 row dicts) are passed around as plain dicts elsewhere in `app.auth`.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -10,7 +11,6 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-
 
 UserRole = Literal["Admin", "Reviewer"]
 UserStatus = Literal["pending", "active", "disabled"]

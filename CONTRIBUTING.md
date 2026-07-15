@@ -19,10 +19,8 @@ Be respectful and constructive. Assume good faith, keep discussion technical, an
 ## Development setup
 
 ```bash
-# Backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+# Backend (uv creates .venv from uv.lock, dev tools included)
+uv sync
 
 # Databases (Postgres, ClickHouse, Mailpit)
 cp .env.example .env
@@ -33,6 +31,10 @@ cd frontend
 pnpm install
 pnpm dev
 ```
+
+Dependencies are declared in the root `pyproject.toml`. After editing them run
+`uv lock`, then regenerate the hashed lock the Docker image installs:
+`uv export --no-dev --no-emit-project -o requirements.lock`.
 
 The clustering sidecar uses its own environment (it is not installed into the root venv):
 
@@ -61,7 +63,7 @@ Every gate, threshold, and weight is calibrated against this order. Tighten prec
 
 After any change to detection parameters (`config/detection.yaml`, scorer config) or scorer code, prove there is no recall regression before opening the PR:
 
-- Run the scorer suite: `cd backend && pytest tests/analysis/`. The positive, attack-must-fire cases (for example `*_passes_*`, `*_high_score`, `*_composite_reason`) must all still pass. A precision-tuning change may only remove false positives, never silence a true detection.
+- Run the scorer suite: `cd backend && uv run pytest tests/analysis/`. The positive, attack-must-fire cases (for example `*_passes_*`, `*_high_score`, `*_composite_reason`) must all still pass. A precision-tuning change may only remove false positives, never silence a true detection.
 - A change that narrows a gate or raises a threshold must come with a test proving the real-attack case it is meant to preserve still scores above its band. If no such test exists yet, add it.
 - If a change cannot be shown to preserve recall, do not ship it. Surface the trade-off in the PR instead.
 
@@ -86,8 +88,8 @@ Comments explain why a constant has its value (the threat model, the protocol li
 
 | Suite | Command | Notes |
 |---|---|---|
-| Backend | `cd backend && pytest tests/` | Hermetic: no live ClickHouse, node, or network needed. |
-| Backend recall gate | `cd backend && pytest tests/analysis/` | The attack-must-fire cases. Must stay green on every detection change. |
+| Backend | `cd backend && uv run pytest tests/` | Hermetic: no live ClickHouse, node, or network needed. |
+| Backend recall gate | `cd backend && uv run pytest tests/analysis/` | The attack-must-fire cases. Must stay green on every detection change. |
 | Clustering sidecar | `cd services/clustering/backend && uv run pytest -q` | Needs its own env (`uv sync --extra dev`). |
 | Frontend | `cd frontend && pnpm lint && pnpm build` | Lint, then the type-checked build. |
 

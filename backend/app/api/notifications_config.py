@@ -10,10 +10,11 @@ with ``role='Admin'``; an API key alone is not enough). Secrets (SMTP creds,
 the webhook HMAC signing key) live in env and are never read or written here —
 only their "configured: yes/no" status is surfaced.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict
@@ -26,7 +27,7 @@ from app.notifications import config as notif_config
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/notifications", tags=["notifications-config"])
+router = APIRouter(prefix="/notifications", tags=["notifications-config"])
 
 
 class NotificationConfigUpdate(BaseModel):
@@ -37,26 +38,37 @@ class NotificationConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     version: int = 1
-    channels: Dict[str, Any] = {}
-    groups: Dict[str, Any] = {}
-    triggers: Dict[str, Any] = {}
-    periodic_report: Optional[Dict[str, Any]] = None
+    channels: dict[str, Any] = {}
+    groups: dict[str, Any] = {}
+    triggers: dict[str, Any] = {}
+    periodic_report: dict[str, Any] | None = None
 
 
-@router.get("/config")
-async def get_config(_admin: dict = Depends(require_admin)) -> dict:
+class SecretsStatusOut(BaseModel):
+    webhook_signing_secret_configured: bool
+    smtp_configured: bool
+
+
+class NotificationConfigOut(BaseModel):
+    config: dict[str, Any]
+    secrets_status: SecretsStatusOut
+    clustering_enabled: bool
+
+
+@router.get("/config", response_model=NotificationConfigOut)
+async def get_config(_admin: dict = Depends(require_admin)):
     """Return the current config document + read-only secret-status flags."""
     doc = await postgres.get_notification_config()
     if doc is None:
         doc = notif_config.load()  # safe default (also gets seeded at startup)
-    return {
-        "config": doc,
-        "secrets_status": {
-            "webhook_signing_secret_configured": bool(settings.WEBHOOK_SIGNING_SECRET),
-            "smtp_configured": bool(settings.SMTP_HOST) and settings.SMTP_ENABLED,
-        },
-        "clustering_enabled": settings.CLUSTERING_ENABLED,
-    }
+    return NotificationConfigOut(
+        config=doc,
+        secrets_status=SecretsStatusOut(
+            webhook_signing_secret_configured=bool(settings.WEBHOOK_SIGNING_SECRET),
+            smtp_configured=bool(settings.SMTP_HOST) and settings.SMTP_ENABLED,
+        ),
+        clustering_enabled=settings.CLUSTERING_ENABLED,
+    )
 
 
 @router.put("/config")
@@ -79,7 +91,7 @@ async def put_config(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
     await postgres.set_notification_config(doc, admin.get("email") or "unknown")
-    await notif_config.refresh_from_db()       # rebind the cache to the new doc
+    await notif_config.refresh_from_db()  # rebind the cache to the new doc
     notif_config.warn_if_webhook_egress_public()
 
     # Accountability: best-effort, matching the admin user-CRUD posture (the

@@ -6,11 +6,20 @@ from collections.abc import Sequence
 from typing import Any
 
 from .base import _RepoBase, _row_to_dict
-from .ingest import TX_CONTEXT_KEYS, TX_CONTEXT_SELECT
+from .ingest import TX_CONTEXT_KEYS, _tx_context_aliased
 
 _ANOMALY_RUN_OUT_KEYS = [
-    "run_id", "target", "feature_set", "methods", "n_points", "n_flagged",
-    "eps", "min_samples", "top_quantile", "origin", "created_at",
+    "run_id",
+    "target",
+    "feature_set",
+    "methods",
+    "n_points",
+    "n_flagged",
+    "eps",
+    "min_samples",
+    "top_quantile",
+    "origin",
+    "created_at",
 ]
 _ANOMALY_RUN_INT_KEYS = ("n_points", "n_flagged", "min_samples")
 
@@ -100,20 +109,41 @@ class _AnomalyMixin(_RepoBase):
     @staticmethod
     def _anomaly_run_to_dict(r: Sequence[Any]) -> dict[str, Any]:
         return _row_to_dict(
-            _ANOMALY_RUN_OUT_KEYS, r,
-            int_keys=_ANOMALY_RUN_INT_KEYS, float_keys=("eps", "top_quantile"),
+            _ANOMALY_RUN_OUT_KEYS,
+            r,
+            int_keys=_ANOMALY_RUN_INT_KEYS,
+            float_keys=("eps", "top_quantile"),
         )
 
-    def list_anomaly_runs(self, target: str | None = None) -> list[dict[str, Any]]:
+    def list_anomaly_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
         where = "WHERE target = {t:String}" if target else ""
-        sql = self._ANOMALY_RUN_SELECT.format(db=self._db, where=where) + " ORDER BY created_at DESC"
-        rows = self.client.query(
-            sql, parameters={"t": target} if target else None
-        ).result_rows
+        sql = self._ANOMALY_RUN_SELECT.format(db=self._db, where=where) + (
+            " ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}"
+        )
+        params: dict[str, Any] = {"lim": limit, "off": offset}
+        if target:
+            params["t"] = target
+        rows = self.client.query(sql, parameters=params).result_rows
         return [self._anomaly_run_to_dict(r) for r in rows]
 
+    def count_anomaly_runs(self, target: str | None = None) -> int:
+        """Full (unpaginated) anomaly-run count backing the list envelope's
+        ``total``. ``count() AS total`` is safe under the 26.x alias rule: single
+        aggregate, and ``anomaly_runs`` has no ``total`` source column."""
+        where = "WHERE target = {t:String}" if target else ""
+        rows = self.client.query(
+            f"SELECT count() AS total FROM {self._db}.anomaly_runs FINAL {where}",
+            parameters={"t": target} if target else None,
+        ).result_rows
+        return int(rows[0][0]) if rows else 0
+
     def get_anomaly_run(self, run_id: str) -> dict[str, Any] | None:
-        sql = self._ANOMALY_RUN_SELECT.format(db=self._db, where="WHERE run_id = {r:String}") + " LIMIT 1"
+        sql = (
+            self._ANOMALY_RUN_SELECT.format(db=self._db, where="WHERE run_id = {r:String}")
+            + " LIMIT 1"
+        )
         rows = self.client.query(sql, parameters={"r": run_id}).result_rows
         return self._anomaly_run_to_dict(rows[0]) if rows else None
 
@@ -133,25 +163,43 @@ class _AnomalyMixin(_RepoBase):
     def top_anomalies(
         self, run_id: str, target: str, *, limit: int, offset: int = 0
     ) -> list[dict[str, Any]]:
+        # `rlim`/`off` page the RESULT; the host-backed tx relation reserves
+        # `lim` for its window subquery, so the two never clobber each other.
+        params = self._tx_scope_params(target)
+        params.update({"r": run_id, "rlim": limit, "off": offset})
         rows = self.client.query(
             f"""
             SELECT s.score_rank AS score_rank, toString(s.tx_hash) AS tx_hash,
                    s.consensus AS consensus, s.votes AS votes,
                    s.iso_score AS iso_score, s.lof_score AS lof_score,
                    s.dbscan_noise AS dbscan_noise,
-                   {TX_CONTEXT_SELECT},
+                   {_tx_context_aliased("t")},
                    toHour(t.block_time) AS hour_of_day,
                    toDayOfWeek(t.block_time) AS day_of_week
-            FROM (SELECT * FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}) s
-            INNER JOIN (SELECT * FROM {self._db}.transactions FINAL WHERE target = {{t:String}}) t
-                USING (tx_hash)
+            FROM (
+                SELECT tx_hash, iso_score, lof_score, dbscan_noise, consensus,
+                       votes, score_rank
+                FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}
+            ) s
+            INNER JOIN {self._tx_relation()} t USING (tx_hash)
             ORDER BY s.score_rank ASC
-            LIMIT {{lim:UInt32}} OFFSET {{off:UInt32}}
+            LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,
-            parameters={"r": run_id, "t": target, "lim": limit, "off": offset},
+            parameters=params,
         ).result_rows
         keys = [
-            "score_rank", "tx_hash", "consensus", "votes", "iso_score", "lof_score",
-            "dbscan_noise", *TX_CONTEXT_KEYS, "hour_of_day", "day_of_week",
+            "score_rank",
+            "tx_hash",
+            "consensus",
+            "votes",
+            "iso_score",
+            "lof_score",
+            "dbscan_noise",
+            *TX_CONTEXT_KEYS,
+            "hour_of_day",
+            "day_of_week",
         ]
-        return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score",))
+        # NaN -> None for BOTH detector scores (the superset of the two former
+        # per-repo variants): iso_score is NaN for the precomputed metric and
+        # lof_score can be NaN when a detector was skipped for the row.
+        return self._rows_to_dicts(keys, rows, nan_none_keys=("iso_score", "lof_score"))

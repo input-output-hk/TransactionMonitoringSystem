@@ -27,13 +27,13 @@ Production builds always use the real client regardless of the mock flag.
 Authentication note: the SPA authenticates with the HTTP-only session cookie
 (`tms_session`) that `fetchWithAuth` sends on every request; no API key is
 baked into the bundle. The backend's `verify_api_key` guard also accepts a
-`TMS-API-Key` header for server-to-server callers (CLI, integrations), but
+`X-API-Key` header for server-to-server callers (CLI, integrations), but
 the frontend never sends one. Mutating requests additionally echo the CSRF
 double-submit cookie as a header (handled inside `fetchWithAuth`).
 
 ## Endpoint contract
 
-All routes are guarded by `verify_api_key` (session cookie or `TMS-API-Key`
+All routes are guarded by `verify_api_key` (session cookie or `X-API-Key`
 header). Identity is the composite `(network, tx_hash)`.
 
 ### `POST /api/archive`

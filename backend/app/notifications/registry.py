@@ -7,19 +7,17 @@ the module changes. To remove one: disable it in the config (or its env
 switch) — no code change.
 """
 
-from typing import Dict, List, Optional, Type
-
 from app.notifications.channels.base import NotificationChannel
 from app.notifications.channels.email import EmailChannel
 from app.notifications.channels.webhook import WebhookChannel
 
-_FACTORY: Dict[str, Type[NotificationChannel]] = {
+_FACTORY: dict[str, type[NotificationChannel]] = {
     "email": EmailChannel,
     "webhook": WebhookChannel,
     # "sms": SmsChannel,   # <- a future channel slots in here, and only here.
 }
 
-_channels: List[NotificationChannel] = []
+_channels: list[NotificationChannel] = []
 
 
 def build_channels() -> None:
@@ -32,9 +30,9 @@ def build_channels() -> None:
     _channels.extend(cls() for cls in _FACTORY.values())
 
 
-def get_channel(name: str) -> Optional[NotificationChannel]:
+def get_channel(name: str) -> NotificationChannel | None:
     return next((c for c in _channels if c.name == name), None)
 
 
-def all_channels() -> List[NotificationChannel]:
+def all_channels() -> list[NotificationChannel]:
     return list(_channels)

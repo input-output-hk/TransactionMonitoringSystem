@@ -49,14 +49,20 @@ class FakeApiRepo(FakeRepoBase):
             raise RuntimeError("down")
         return True
 
-    def list_contracts(self) -> list[dict[str, Any]]:
-        return self.contracts
+    def list_contracts(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        return self.contracts[offset : offset + limit]
+
+    def count_contracts(self) -> int:
+        return len(self.contracts)
 
     def get_contract(self, target: str) -> dict[str, Any] | None:
         return next((c for c in self.contracts if c["target"] == target), None)
 
-    def list_jobs(self) -> list[dict[str, Any]]:
-        return self.jobs
+    def list_jobs(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        return self.jobs[offset : offset + limit]
+
+    def count_jobs(self) -> int:
+        return len(self.jobs)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         return next((j for j in self.jobs if j["job_id"] == job_id), None)
@@ -64,8 +70,11 @@ class FakeApiRepo(FakeRepoBase):
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self.runs.get(run_id)
 
-    def list_targets(self) -> list[dict[str, Any]]:
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return []
+
+    def count_targets(self) -> int:
+        return 0
 
     def nonterminal_jobs(self) -> list[dict[str, Any]]:
         return self._nonterminal
@@ -139,11 +148,20 @@ class FakeApiRepo(FakeRepoBase):
 def _contract_row(**over: Any) -> dict[str, Any]:
     """A full contract row as the real repo returns it; override what the test cares about."""
     row: dict[str, Any] = {
-        "target": "addr1a", "target_type": "address", "label": "", "exists": 1,
-        "is_script": 1, "script_type": "plutusV2", "balance_lovelace": 0,
-        "asset_count": 0, "sample_tokens": "[]", "status": "done",
-        "requested_max_txs": 0, "updated_at": "2026-01-01 00:00:00.000000",
-        "tx_count": 0, "drift_score": 0.0,
+        "target": "addr1a",
+        "target_type": "address",
+        "label": "",
+        "exists": 1,
+        "is_script": 1,
+        "script_type": "plutusV2",
+        "balance_lovelace": 0,
+        "asset_count": 0,
+        "sample_tokens": "[]",
+        "status": "done",
+        "requested_max_txs": 0,
+        "updated_at": "2026-01-01 00:00:00.000000",
+        "tx_count": 0,
+        "drift_score": 0.0,
     }
     row.update(over)
     return row
@@ -151,9 +169,16 @@ def _contract_row(**over: Any) -> dict[str, Any]:
 
 def _job_row(**over: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
-        "job_id": "job-1", "target": "addr1a", "target_type": "address",
-        "max_txs": 0, "reprocess": 0, "kind": "onboard", "status": "done",
-        "stage_detail": "", "txs_done": 0, "error": "",
+        "job_id": "job-1",
+        "target": "addr1a",
+        "target_type": "address",
+        "max_txs": 0,
+        "reprocess": 0,
+        "kind": "onboard",
+        "status": "done",
+        "stage_detail": "",
+        "txs_done": 0,
+        "error": "",
         "created_at": "2026-01-01 00:00:00.000000",
         "updated_at": "2026-01-01 00:00:00.000000",
     }
@@ -174,6 +199,7 @@ def _reset_overrides() -> Any:
 
 
 # --- Health / readiness ----------------------------------------------------
+
 
 def test_health_is_liveness_only() -> None:
     client = _client(FakeApiRepo())
@@ -214,10 +240,49 @@ def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # --- Reads -----------------------------------------------------------------
 
+
 def test_list_contracts() -> None:
     repo = FakeApiRepo(contracts=[_contract_row(tx_count=5)])
     r = _client(repo).get("/api/contracts")
-    assert r.status_code == 200 and r.json()[0]["target"] == "addr1a"
+    assert r.status_code == 200 and r.json()["data"][0]["target"] == "addr1a"
+
+
+# --- List pagination envelope ------------------------------------------------
+
+
+def test_list_envelope_shape_total_exceeds_count() -> None:
+    """{count, total, data}: count is the page length, total the full collection
+    size, so total > count signals more rows beyond this page."""
+    jobs = [_job_row(job_id=f"job-{i}") for i in range(3)]
+    body = _client(FakeApiRepo(jobs=jobs)).get("/api/jobs?limit=2").json()
+    assert set(body) == {"count", "total", "data"}
+    assert body["count"] == 2 and body["total"] == 3
+    assert len(body["data"]) == 2 and body["count"] > 0 and body["total"] > body["count"]
+
+
+def test_jobs_list_limit_offset_slice() -> None:
+    jobs = [_job_row(job_id=f"job-{i}") for i in range(5)]
+    client = _client(FakeApiRepo(jobs=jobs))
+    body = client.get("/api/jobs?limit=2&offset=2").json()
+    assert [j["job_id"] for j in body["data"]] == ["job-2", "job-3"]
+    assert body["count"] == 2 and body["total"] == 5
+    # Trailing partial page: count reflects what the page actually holds.
+    body = client.get("/api/jobs?limit=2&offset=4").json()
+    assert [j["job_id"] for j in body["data"]] == ["job-4"]
+    assert body["count"] == 1 and body["total"] == 5
+
+
+def test_jobs_list_default_envelope() -> None:
+    body = _client(FakeApiRepo(jobs=[_job_row()])).get("/api/jobs").json()
+    assert body["count"] == 1 and body["total"] == 1
+    assert body["data"][0]["job_id"] == "job-1"
+
+
+def test_list_limit_bounds_rejected() -> None:
+    client = _client(FakeApiRepo())
+    assert client.get("/api/jobs?limit=1001").status_code == 422  # over le=1000
+    assert client.get("/api/jobs?limit=0").status_code == 422  # under ge=1
+    assert client.get("/api/jobs?offset=-1").status_code == 422  # under ge=0
 
 
 def test_get_contract_404() -> None:
@@ -274,11 +339,14 @@ def test_get_run_404() -> None:
 
 # --- Cluster verdict labels ------------------------------------------------
 
+
 def _run_repo(**extra: Any) -> FakeApiRepo:
     repo = FakeApiRepo(
         runs={
             "r1": {
-                "run_id": "r1", "target": "addr", "feature_set": "shape",
+                "run_id": "r1",
+                "target": "addr",
+                "feature_set": "shape",
                 "created_at": "2024-01-01 00:00:00.000000",
             }
         }
@@ -333,13 +401,23 @@ def test_clear_cluster_label_422_noise_bucket() -> None:
 
 
 def test_cluster_summary_includes_verdict_fields() -> None:
-    summary = [{
-        "cluster_id": 0, "size": 2, "avg_fees": 0.0, "avg_output_lovelace": 0.0,
-        "avg_inputs": 0.0, "avg_outputs": 0.0, "avg_assets": 0.0,
-    }]
+    summary = [
+        {
+            "cluster_id": 0,
+            "size": 2,
+            "avg_fees": 0.0,
+            "avg_output_lovelace": 0.0,
+            "avg_inputs": 0.0,
+            "avg_outputs": 0.0,
+            "avg_assets": 0.0,
+        }
+    ]
     repo = _run_repo(
-        _summary=summary, _membership={"aa": 0, "bb": 0},
-        _explicit={"aa": "malicious"}, _anomaly_run="an1", _votes={"bb": 3},
+        _summary=summary,
+        _membership={"aa": 0, "bb": 0},
+        _explicit={"aa": "malicious"},
+        _anomaly_run="an1",
+        _votes={"bb": 3},
     )
     row = _client(repo).get("/api/runs/r1/clusters").json()[0]
     assert row["verdict"] == "malicious"  # inherited from "aa"
@@ -349,8 +427,14 @@ def test_cluster_summary_includes_verdict_fields() -> None:
 
 def _txrow(h: str) -> dict[str, Any]:
     return {
-        "tx_hash": h, "block_time": "t", "fees": 0, "total_output_lovelace": 0,
-        "input_count": 0, "output_count": 0, "distinct_assets": 0, "redeemer_count": 0,
+        "tx_hash": h,
+        "block_time": "t",
+        "fees": 0,
+        "total_output_lovelace": 0,
+        "input_count": 0,
+        "output_count": 0,
+        "distinct_assets": 0,
+        "redeemer_count": 0,
     }
 
 
@@ -360,7 +444,9 @@ def test_cluster_transactions_include_per_tx_verdict() -> None:
     repo = _run_repo(
         _txs={0: [_txrow("aa")], 1: [_txrow("bb")]},
         _members={0: ["aa"], 1: ["bb"]},
-        _explicit={"aa": "benign"}, _anomaly_run="an1", _votes={"aa": 3, "bb": 3},
+        _explicit={"aa": "benign"},
+        _anomaly_run="an1",
+        _votes={"aa": 3, "bb": 3},
     )
     client = _client(repo)
     c0 = client.get("/api/runs/r1/clusters/0/transactions").json()["transactions"][0]
@@ -370,6 +456,7 @@ def test_cluster_transactions_include_per_tx_verdict() -> None:
 
 
 # --- POST /api/contracts ---------------------------------------------------
+
 
 def test_create_contract_rejects_invalid_target() -> None:
     r = _client(FakeApiRepo()).post("/api/contracts", json={"target": "not a target!"})
@@ -392,9 +479,7 @@ def test_create_contract_enqueues_job() -> None:
 def test_create_contract_persists_display_name() -> None:
     repo = FakeApiRepo()
     client = _client(repo)
-    r = client.post(
-        "/api/contracts", json={"target": "addr1qxyztest0001", "label": "  My Vault  "}
-    )
+    r = client.post("/api/contracts", json={"target": "addr1qxyztest0001", "label": "  My Vault  "})
     assert r.status_code == 200
     assert repo.saved_contracts[0]["label"] == "My Vault"  # stripped
 
@@ -462,6 +547,7 @@ def test_identify_invalid_target_is_not_an_error() -> None:
 
 # --- PATCH /api/contracts/{target} (rename) --------------------------------
 
+
 def test_rename_contract_updates_label() -> None:
     repo = FakeApiRepo(contracts=[_contract_row()])
     r = _client(repo).patch("/api/contracts/addr1a", json={"label": "My Name"})
@@ -474,6 +560,7 @@ def test_rename_contract_404_when_missing() -> None:
 
 
 # --- DELETE /api/anomaly-runs/{run_id} -------------------------------------
+
 
 def test_delete_custom_anomaly_run() -> None:
     repo = FakeApiRepo()
@@ -500,6 +587,7 @@ def test_delete_missing_anomaly_run_404() -> None:
 
 # --- Auth ------------------------------------------------------------------
 
+
 def test_api_key_enforced_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.api.deps.get_settings",
@@ -513,6 +601,7 @@ def test_api_key_enforced_when_configured(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # --- Target normalization: policy ids are case-insensitive -------------------
+
 
 def test_policy_target_case_insensitive_across_endpoints() -> None:
     """POST lowercases stored policy ids; every {target} path lookup must apply
@@ -590,3 +679,23 @@ def test_tx_label_routes_canonicalize_tx_hash_case() -> None:
     r = client.post(f"/api/contracts/addr1a/transactions/{lower_tx.upper()}/clear-label", json={})
     assert r.status_code == 200
     assert repo.clear_calls == [("addr1a", [lower_tx])]
+
+
+def test_wire_timestamps_are_z_suffixed_iso() -> None:
+    """UtcIsoStr contract: storage's 'YYYY-MM-DD HH:MM:SS' strings reach the
+    wire as Z-suffixed ISO, matching the host API's format, and an already
+    Z-suffixed value is not double-suffixed on re-validation."""
+    import re
+
+    repo = FakeApiRepo(jobs=[_job_row(job_id="j-z")])
+    client = _client(repo)
+    body = client.get("/api/v1/jobs").json()
+    z_iso = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+    assert z_iso.match(body["data"][0]["created_at"]), body["data"][0]["created_at"]
+    assert z_iso.match(body["data"][0]["updated_at"])
+
+    from app.api.schemas import _iso_z
+
+    assert _iso_z("2026-01-01 00:00:00") == "2026-01-01T00:00:00Z"
+    assert _iso_z("2026-01-01T00:00:00Z") == "2026-01-01T00:00:00Z"
+    assert _iso_z("2026-01-01T02:00:00+02:00") == "2026-01-01T02:00:00+02:00"

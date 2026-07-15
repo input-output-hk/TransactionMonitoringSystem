@@ -56,7 +56,10 @@ class FakeRepoBase:
     ) -> None:
         raise NotImplementedError
 
-    def list_targets(self) -> list[dict[str, Any]]:
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_targets(self) -> int:
         raise NotImplementedError
 
     def fetch_shape_features(self, target: str) -> pd.DataFrame:
@@ -82,7 +85,12 @@ class FakeRepoBase:
     def save_cluster_labels(self, run_id: str, labels: Sequence[tuple[str, int]]) -> None:
         raise NotImplementedError
 
-    def list_runs(self, target: str | None = None) -> list[dict[str, Any]]:
+    def list_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_runs(self, target: str | None = None) -> int:
         raise NotImplementedError
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
@@ -146,7 +154,12 @@ class FakeRepoBase:
     def save_anomaly_scores(self, run_id: str, rows: Sequence[tuple[Any, ...]]) -> None:
         raise NotImplementedError
 
-    def list_anomaly_runs(self, target: str | None = None) -> list[dict[str, Any]]:
+    def list_anomaly_runs(
+        self, target: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_anomaly_runs(self, target: str | None = None) -> int:
         raise NotImplementedError
 
     def get_anomaly_run(self, run_id: str) -> dict[str, Any] | None:
@@ -165,7 +178,10 @@ class FakeRepoBase:
     def save_contract(self, contract: dict[str, Any]) -> None:
         raise NotImplementedError
 
-    def list_contracts(self) -> list[dict[str, Any]]:
+    def list_contracts(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_contracts(self) -> int:
         raise NotImplementedError
 
     def get_contract(self, target: str) -> dict[str, Any] | None:
@@ -196,7 +212,10 @@ class FakeRepoBase:
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
-    def list_jobs(self) -> list[dict[str, Any]]:
+    def list_jobs(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def count_jobs(self) -> int:
         raise NotImplementedError
 
     def nonterminal_jobs(self) -> list[dict[str, Any]]:
@@ -241,6 +260,7 @@ def _drift_check() -> None:  # pragma: no cover - exists for mypy only
 
 # --- Shared concrete fakes (used across service test modules) -----------------
 
+
 class FakeGraphRepo(FakeRepoBase):
     """In-memory repo exposing exactly what the verdict-decorated graph read and
     the cluster-label writes touch. Shared by test_service_verdicts and
@@ -263,7 +283,9 @@ class FakeGraphRepo(FakeRepoBase):
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return {
-            "run_id": run_id, "target": "addr", "feature_set": "shape",
+            "run_id": run_id,
+            "target": "addr",
+            "feature_set": "shape",
             "created_at": "2024-01-01 00:00:00.000000",
         }
 

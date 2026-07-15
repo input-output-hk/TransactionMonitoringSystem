@@ -22,7 +22,6 @@ session-mode pool, for the guard to hold.
 """
 
 import logging
-from typing import Optional
 
 import asyncpg
 
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 # The dedicated connection holding the lock, or None if this process is not
 # (yet) the leader. Never drawn from app.db.postgres's pool — see module
 # docstring.
-_conn: Optional[asyncpg.Connection] = None
+_conn: asyncpg.Connection | None = None
 
 
 async def try_acquire() -> bool:
@@ -58,9 +57,7 @@ async def try_acquire() -> bool:
         timeout=settings.LEADER_LOCK_RETRY_SECONDS,
     )
     try:
-        acquired = await probe.fetchval(
-            "SELECT pg_try_advisory_lock($1)", settings.LEADER_LOCK_KEY
-        )
+        acquired = await probe.fetchval("SELECT pg_try_advisory_lock($1)", settings.LEADER_LOCK_KEY)
     except Exception:
         await probe.close()
         raise
@@ -86,7 +83,7 @@ async def release() -> None:
         await conn.execute("SELECT pg_advisory_unlock($1)", settings.LEADER_LOCK_KEY)
     except Exception:
         pass  # process is shutting down either way; closing the session below
-              # releases any session-level lock regardless.
+        # releases any session-level lock regardless.
     finally:
         await conn.close()
 

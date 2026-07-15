@@ -99,3 +99,26 @@ describe("formatTimeAgo", () => {
 		expect(formatTimeAgo(undefined)).toBe("—");
 	});
 });
+
+describe("formatTimeAgo (compact)", () => {
+	const compact = { compact: true } as const;
+
+	it("formats each magnitude in the dense style", () => {
+		expect(formatTimeAgo("2026-07-06T11:59:43Z", compact)).toBe("17s ago");
+		expect(formatTimeAgo("2026-07-06T11:57:00Z", compact)).toBe("3m ago");
+		expect(formatTimeAgo("2026-07-06T10:00:00Z", compact)).toBe("2h ago");
+		expect(formatTimeAgo("2026-07-01T12:00:00Z", compact)).toBe("5d ago");
+	});
+
+	it("parses the legacy space-separated ClickHouse UTC form", () => {
+		expect(formatTimeAgo("2026-07-06 11:57:00", compact)).toBe("3m ago");
+	});
+
+	it("parses an explicit offset without a local-time skew", () => {
+		expect(formatTimeAgo("2026-07-06T13:57:00+02:00", compact)).toBe("3m ago");
+	});
+
+	it("returns the raw string when unparseable", () => {
+		expect(formatTimeAgo("not-a-date", compact)).toBe("not-a-date");
+	});
+});

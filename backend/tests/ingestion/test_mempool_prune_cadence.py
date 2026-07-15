@@ -9,7 +9,7 @@ PROCESSED txs, independent of set-size churn.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -48,7 +48,7 @@ def _process(client, count, churn):
     rollbacks, and reconnects mutating its size arbitrarily."""
 
     async def scenario():
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for i in range(count):
             tx_id, tx_data = _tx(i)
             await client._record_mempool_collisions(tx_id, tx_data, now)
@@ -77,7 +77,8 @@ class TestPruneCadence:
         stuck_set = {"w" * 64, "x" * 64, "y" * 64, "z" * 64}
         client._seen_mempool_txs = set(stuck_set)
         _process(
-            client, PRUNE_EVERY * 2,
+            client,
+            PRUNE_EVERY * 2,
             churn=lambda i: client._seen_mempool_txs.update(stuck_set),
         )
         assert len(sweeps) == 2  # fired on the 3rd and 6th processed tx
@@ -86,7 +87,8 @@ class TestPruneCadence:
         # Rollbacks/reconnects clear the set; cadence must be unaffected.
         sweeps = self._spy_sweeps(client)
         _process(
-            client, PRUNE_EVERY * 2,
+            client,
+            PRUNE_EVERY * 2,
             churn=lambda i: client._seen_mempool_txs.clear(),
         )
         assert len(sweeps) == 2
@@ -101,7 +103,7 @@ class TestPruneCadence:
         # End-to-end effect of a fired sweep: a pending entry past the TTL
         # is untracked and its orphaned input-cache entry evicted.
         monkeypatch.setattr(settings, "MEMPOOL_PENDING_TTL_SECONDS", 60)
-        stale_at = datetime.now(timezone.utc) - timedelta(seconds=3600)
+        stale_at = datetime.now(UTC) - timedelta(seconds=3600)
         stale_id = "ee" * 32
         client._pending.track(stale_id, ({("dd" * 32, 0)}, stale_at, 0, "", 0))
         client._pending_input_cache[stale_id] = ({}, stale_at)

@@ -1,15 +1,15 @@
 """Raw-store read-back and the engine's raw_data recovery/deferral."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
 
+from app.analysis.engine import _raw_fallback_attempts, _resolve_raw_data
 from app.config import settings
 from app.db import raw_store
-from app.analysis.engine import _resolve_raw_data, _raw_fallback_attempts
 
-TS = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
+TS = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 TX = "ab" * 32
 
 

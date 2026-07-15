@@ -6,13 +6,10 @@ Cross-instance CSV import is supported, so an entry may exist for a
 transaction this instance has never observed (no matching score row).
 """
 
-from datetime import datetime
-from typing import List, Optional
-
 from pydantic import BaseModel, Field
 
 from app.models.transaction import NetworkType
-
+from app.utils.datetime_utils import UtcDateTime
 
 # 64-char lowercase hex. Cardano tx hashes are blake2b-256 of the tx body.
 TX_HASH_PATTERN = r"^[0-9a-f]{64}$"
@@ -31,8 +28,8 @@ class ArchiveBulkEntry(ArchiveEntry):
     """Bulk import entry. Carries the original archived_at + source so a
     CSV exported from one instance round-trips cleanly into another."""
 
-    archived_at: Optional[datetime] = None
-    source: Optional[str] = None
+    archived_at: UtcDateTime | None = None
+    source: str | None = None
 
 
 class BulkArchiveRequest(BaseModel):
@@ -40,7 +37,7 @@ class BulkArchiveRequest(BaseModel):
     # The existence check sends one tuple per entry in a single IN clause;
     # 2000 entries at ~80 bytes per (network, tx_hash) tuple stays around
     # 160 KiB worst case, leaving headroom for the surrounding SQL.
-    entries: List[ArchiveBulkEntry] = Field(min_length=1, max_length=2_000)
+    entries: list[ArchiveBulkEntry] = Field(min_length=1, max_length=2_000)
     source_label: str = Field(
         min_length=1,
         max_length=200,
@@ -54,7 +51,7 @@ class BulkArchiveRequest(BaseModel):
 class BulkArchiveResult(BaseModel):
     inserted: int
     skipped: int
-    errors: List[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class ArchiveEntryEnriched(BaseModel):
@@ -65,11 +62,11 @@ class ArchiveEntryEnriched(BaseModel):
     tx_hash: str
     note: str
     archived_by: str
-    archived_at: datetime
+    archived_at: UtcDateTime
     source: str
     # Joined detection data; null when this archive came from a CSV import
     # for a tx this instance never observed locally.
-    max_score: Optional[float] = None
-    max_class: Optional[str] = None
-    risk_band: Optional[str] = None
-    analyzed_at: Optional[datetime] = None
+    max_score: float | None = None
+    max_class: str | None = None
+    risk_band: str | None = None
+    analyzed_at: UtcDateTime | None = None

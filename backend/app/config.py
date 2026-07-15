@@ -37,9 +37,7 @@ def _env_files() -> list[str]:
     """
     raw = os.environ.get("TMS_ENV", "").strip() or "preprod"
     if not _TMS_ENV_RE.fullmatch(raw):
-        raise RuntimeError(
-            f"TMS_ENV must match [a-z0-9_-]+, got: {raw!r}"
-        )
+        raise RuntimeError(f"TMS_ENV must match [a-z0-9_-]+, got: {raw!r}")
     specific = f".env.{raw}"
     candidates = [".env", "../.env", specific, f"../{specific}"]
     found = [p for p in candidates if Path(p).is_file()]
@@ -118,7 +116,7 @@ class Settings(BaseSettings):
 
     # Security - API Key Authentication
     API_KEYS: str = ""  # Comma-separated list of valid API keys
-    API_KEY_HEADER: str = "TMS-API-Key"  # Header name for API key
+    API_KEY_HEADER: str = "X-API-Key"  # Header name for API key (matches the sidecar)
     # Must be "1" to allow the app to start with empty API_KEYS (dev mode).
     # Refusal-to-start otherwise prevents accidental open-API production deploys.
     TMS_ALLOW_DEV_MODE: str = ""
@@ -155,9 +153,7 @@ class Settings(BaseSettings):
     # inside one of these CIDRs (the proxy itself). Defaults cover loopback
     # and the RFC1918 ranges Docker bridge networks use (cloudflared reaches
     # the app via the published loopback port / compose bridge gateway).
-    TRUSTED_PROXY_CIDRS: str = (
-        "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-    )
+    TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     # Optional single-value client-IP header set by the edge (e.g.
     # "CF-Connecting-IP" for Cloudflare). Empty = use X-Forwarded-For.
     TRUSTED_PROXY_CLIENT_IP_HEADER: str = ""
@@ -206,8 +202,8 @@ class Settings(BaseSettings):
 
     # Analysis Engine
     ANALYSIS_ENGINE_ENABLED: bool = True
-    ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30   # how often the engine polls for new txs
-    ANALYSIS_ENGINE_BATCH_SIZE: int = 100         # max transactions scored per run
+    ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30  # how often the engine polls for new txs
+    ANALYSIS_ENGINE_BATCH_SIZE: int = 100  # max transactions scored per run
     # Cap on referenced-tx raw_data lookups per enrichment batch (bounds the
     # IN-clause size); inputs past the cap simply stay unresolved for the run.
     ANALYSIS_MAX_REF_TXS: int = 2000
@@ -296,9 +292,9 @@ class Settings(BaseSettings):
     # data). tx_class_scores / archived_alerts / baselines are never
     # expired regardless of these settings.
     CH_RETENTION_DAYS_TRANSACTIONS: int = 0
-    CH_RETENTION_DAYS_IO: int = 0          # inputs / outputs / address_transactions
-    CH_RETENTION_DAYS_FEATURES: int = 0    # utxo_features / tx_script_features
-    LIFECYCLE_RETENTION_DAYS: int = 0      # terminal (DROPPED/ROLLED_BACK) rows only
+    CH_RETENTION_DAYS_IO: int = 0  # inputs / outputs / address_transactions
+    CH_RETENTION_DAYS_FEATURES: int = 0  # utxo_features / tx_script_features
+    LIFECYCLE_RETENTION_DAYS: int = 0  # terminal (DROPPED/ROLLED_BACK) rows only
     MEMPOOL_COLLISION_RETENTION_DAYS: int = 0
     # Audit rows are the suppression accountability record: prefer archiving
     # the table over short retention.
@@ -334,10 +330,10 @@ class Settings(BaseSettings):
 
     # Analysis Engine: multi-class detection
     ANALYSIS_ENABLED: bool = True
-    BASELINE_MIN_SAMPLES: int = 200          # min txs before per-script baseline is trusted
+    BASELINE_MIN_SAMPLES: int = 200  # min txs before per-script baseline is trusted
     BASELINE_BOOTSTRAP_ON_STARTUP: bool = True
     BASELINE_RECOMPUTE_INTERVAL_HOURS: int = 24  # recompute script baselines daily
-    BASELINE_MAX_SCRIPTS: int = 500              # max script addresses to recompute per cycle
+    BASELINE_MAX_SCRIPTS: int = 500  # max script addresses to recompute per cycle
     SCORER_PHISHING_ENABLED: bool = True
     SCORER_TOKEN_DUST_ENABLED: bool = True
     SCORER_LARGE_VALUE_ENABLED: bool = True
@@ -539,10 +535,10 @@ class Settings(BaseSettings):
     # These are the deployment master switches and operational knobs; SMTP_*
     # (above) supplies the email transport. A channel fires only when its env
     # switch AND its config `enabled` are both on, so either layer can unplug it.
-    EMAIL_NOTIFY_ENABLED: bool = True        # master switch for alert emails
-    WEBHOOK_NOTIFY_ENABLED: bool = True      # master switch for webhook posts
-    NOTIFY_TOP_FEATURES: int = 5             # top-N contributing sub-scores in payload
-    NOTIFY_SEND_TIMEOUT_SECONDS: int = 10    # per-channel hard ceiling at dispatch
+    EMAIL_NOTIFY_ENABLED: bool = True  # master switch for alert emails
+    WEBHOOK_NOTIFY_ENABLED: bool = True  # master switch for webhook posts
+    NOTIFY_TOP_FEATURES: int = 5  # top-N contributing sub-scores in payload
+    NOTIFY_SEND_TIMEOUT_SECONDS: int = 10  # per-channel hard ceiling at dispatch
     # Max concurrent alert deliveries across BOTH the per-tx scorer path and the
     # contract_anomaly poller. The scorer path (on_new_scores) schedules one
     # fire-and-forget delivery per alerting tx with no bound, so a backlog drain
@@ -552,10 +548,10 @@ class Settings(BaseSettings):
     # semaphore paces sends without dropping any (recall-safe): every alert
     # still delivers, at most N at a time.
     NOTIFY_MAX_CONCURRENT_DELIVERIES: int = 8
-    WEBHOOK_TIMEOUT_SECONDS: float = 8.0     # per-HTTP-attempt timeout
-    WEBHOOK_MAX_RETRIES: int = 2             # extra attempts on 5xx / network error
+    WEBHOOK_TIMEOUT_SECONDS: float = 8.0  # per-HTTP-attempt timeout
+    WEBHOOK_MAX_RETRIES: int = 2  # extra attempts on 5xx / network error
     WEBHOOK_RETRY_BACKOFF_SECONDS: float = 1.0  # linear backoff between attempts
-    WEBHOOK_SIGNING_SECRET: str = ""         # HMAC-SHA256 key for signing webhook request bodies
+    WEBHOOK_SIGNING_SECRET: str = ""  # HMAC-SHA256 key for signing webhook request bodies
     # A webhook URL is refused (config validation) or its send skipped (DNS
     # resolves to an internal address at request time) unless this is set —
     # otherwise the server would happily SSRF into its own network / a cloud
@@ -564,8 +560,8 @@ class Settings(BaseSettings):
     WEBHOOK_ALLOW_INTERNAL: bool = False
     # Periodic report. Frequency/window/recipients live in the notification
     # config document; these are operational knobs.
-    NOTIFY_REPORT_CHECK_INTERVAL_SECONDS: int = 60   # how often the scheduler checks if due
-    NOTIFY_REPORT_TOP_ALERTS: int = 10               # top-N transactions in the report
+    NOTIFY_REPORT_CHECK_INTERVAL_SECONDS: int = 60  # how often the scheduler checks if due
+    NOTIFY_REPORT_TOP_ALERTS: int = 10  # top-N transactions in the report
     # Clustering-sidecar poller: how often to check for new contract_anomaly
     # verdicts to notify on. Only runs when CLUSTERING_ENABLED.
     NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS: int = 60
@@ -588,10 +584,7 @@ class Settings(BaseSettings):
     # `.env.<TMS_ENV>` supplies per-network overrides for CARDANO_NETWORK,
     # OGMIOS_WS_URL, API_PORT.
     model_config = SettingsConfigDict(
-        env_file=_env_files(),
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore"
+        env_file=_env_files(), env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
 

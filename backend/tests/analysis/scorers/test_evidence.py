@@ -6,8 +6,6 @@ exercise a minimal positive fixture per class and assert the
 class-specific keys we wire into the UI.
 """
 
-import pytest
-
 from app.analysis.scorers.circular import CircularScorer
 from app.analysis.scorers.fake_token import FakeTokenScorer
 from app.analysis.scorers.front_running import FrontRunningScorer
@@ -239,9 +237,7 @@ def test_circular_evidence():
 
 def test_fake_token_evidence():
     mint = {FAKE_POLICY: {"HOSKY": 10_000}}
-    outputs = [
-        {"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(5)
-    ]
+    outputs = [{"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(5)]
     features = {
         "tx_hash": "ft",
         "network": "mainnet",
@@ -296,5 +292,7 @@ def test_phishing_evidence():
     # tier label should be "None" — confirms the classifier doesn't
     # default to a positive tier on benign text.
     assert result.evidence["se_tier"] in {
-        "None", "Tier 2: Urgency language", "Tier 3: Brand impersonation",
+        "None",
+        "Tier 2: Urgency language",
+        "Tier 3: Brand impersonation",
     }

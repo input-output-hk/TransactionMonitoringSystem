@@ -114,19 +114,13 @@ def main() -> None:
 
     limit_clause = f"LIMIT {int(args.limit)}" if args.limit > 0 else ""
     days_clause = (
-        f"AND analyzed_at >= now() - INTERVAL {int(args.days)} DAY"
-        if args.days > 0
-        else ""
+        f"AND analyzed_at >= now() - INTERVAL {int(args.days)} DAY" if args.days > 0 else ""
     )
     # Default to alert-only rows: a tx with max_class='' / max_score=0 never
     # surfaces on the alerts list, so its evidence never gets read. Skipping
     # them cuts the backlog ~10x without changing what's visible. ``min_score=1``
     # mirrors the dashboard's own filter (see frontend/.../analysis.ts).
-    alert_clause = (
-        ""
-        if args.all_rows
-        else "AND max_class != '' AND max_score >= 1"
-    )
+    alert_clause = "" if args.all_rows else "AND max_class != '' AND max_score >= 1"
     # Risk-band filter via the in-table column. Bands are an ordered enum
     # (Informational < Moderate < High < Critical); we encode the order in a
     # fixed dict so a future band rename is a one-line change.
@@ -144,9 +138,7 @@ def main() -> None:
     # ``{}`` is written with two characters; getting interpolated into the
     # outer f-string below as a substitution does NOT re-escape braces.
     evidence_clause = (
-        ""
-        if args.force
-        else "AND (evidence = '' OR evidence = '{}' OR evidence IS NULL)"
+        "" if args.force else "AND (evidence = '' OR evidence = '{}' OR evidence IS NULL)"
     )
     # Count-only path: cheap COUNT() against tx_class_scores alone,
     # without the JOIN to transactions or the big raw_data payload.
@@ -202,8 +194,23 @@ def main() -> None:
     feature_rows = []
     metadata_by_tx = {}
     for row in rows:
-        (tx_hash, network, prev_max, prev_class, prev_at,
-         fee, in_n, out_n, total_out, addrs, metadata_s, raw_s, slot, bh, ts) = row
+        (
+            tx_hash,
+            network,
+            prev_max,
+            prev_class,
+            prev_at,
+            fee,
+            in_n,
+            out_n,
+            total_out,
+            addrs,
+            metadata_s,
+            raw_s,
+            slot,
+            bh,
+            ts,
+        ) = row
 
         try:
             raw = json.loads(raw_s) if isinstance(raw_s, str) else raw_s
@@ -214,20 +221,22 @@ def main() -> None:
         except (json.JSONDecodeError, TypeError):
             meta = None
 
-        feature_rows.append({
-            "tx_hash": tx_hash,
-            "network": network,
-            "fee": fee,
-            "input_count": in_n,
-            "output_count": out_n,
-            "total_output_value": total_out,
-            "metadata": meta,
-            "addresses": list(addrs) if addrs else [],
-            "raw_data": raw,
-            "slot": slot,
-            "block_height": bh,
-            "timestamp": ts,
-        })
+        feature_rows.append(
+            {
+                "tx_hash": tx_hash,
+                "network": network,
+                "fee": fee,
+                "input_count": in_n,
+                "output_count": out_n,
+                "total_output_value": total_out,
+                "metadata": meta,
+                "addresses": list(addrs) if addrs else [],
+                "raw_data": raw,
+                "slot": slot,
+                "block_height": bh,
+                "timestamp": ts,
+            }
+        )
         metadata_by_tx[tx_hash] = (prev_max, prev_class, prev_at)
 
     # Collision enrichment (front_running) is fetched ONCE for all rows
@@ -241,9 +250,7 @@ def main() -> None:
     if settings.SCORER_FRONT_RUNNING_ENABLED:
         all_hashes = [r["tx_hash"] for r in feature_rows]
         try:
-            collisions = asyncio.run(
-                postgres.get_collisions_for_txs(all_hashes, args.network)
-            )
+            collisions = asyncio.run(postgres.get_collisions_for_txs(all_hashes, args.network))
         except Exception as e:
             logger.warning(f"Collision enrichment failed (non-fatal): {e}")
             collisions = {}

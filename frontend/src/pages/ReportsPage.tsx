@@ -107,7 +107,7 @@ export function ReportsPage() {
 	);
 
 	const total = data?.total ?? 0;
-	// Backend already anti-joins `archived_alerts` from `/api/analysis/results`.
+	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`.
 	const visibleRows = data?.rows ?? [];
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));

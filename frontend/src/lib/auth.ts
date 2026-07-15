@@ -5,9 +5,9 @@
  * `signUp` / `verifyEmail` / `resendEmail` actions. After the
  * magic-link backend landed (Phase 2/3), all of that was replaced by:
  *
- *  - a real session cookie set by `GET /api/auth/verify?token=…`
+ *  - a real session cookie set by `GET /api/v1/auth/verify?token=…`
  *  - the `<AuthProvider>` context built on a TanStack Query against
- *    `GET /api/auth/me` (see `components/auth-provider.tsx`)
+ *    `GET /api/v1/auth/me` (see `components/auth-provider.tsx`)
  *
  * Callers should keep using `useAuth()` from here — the hook's return
  * shape is intentionally kept close to the old mock so the migration

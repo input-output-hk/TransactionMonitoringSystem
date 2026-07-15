@@ -1,7 +1,7 @@
 /**
  * Archive state hooks, backed by {@link archiveApi}.
  *
- * Every hook talks to the same underlying `GET /api/archive` query (or its
+ * Every hook talks to the same underlying `GET /api/v1/archive` query (or its
  * mock equivalent), scoped to the active Cardano network. Mutations invalidate
  * both the archive list AND the analysis-results queries so that archiving an
  * alert immediately removes it from the dashboard / reports views (the
@@ -57,7 +57,7 @@ function useArchiveListQuery(params?: ArchiveListParams) {
 /**
  * Single-entry query — backs both {@link useIsArchived} and {@link useArchiveMeta}.
  *
- * Hits `GET /api/archive/{tx_hash}`, which returns the entry or `null` on 404.
+ * Hits `GET /api/v1/archive/{tx_hash}`, which returns the entry or `null` on 404.
  * This is the deep-link path: visiting `/archive/{tx_hash}` directly works
  * even when the list query has never run (or doesn't include this entry
  * because it's past the current page).
@@ -77,7 +77,7 @@ function useArchiveDetailQuery(txHash: string | undefined, network?: Network) {
 /**
  * Array of archived tx_hashes for the current network. Useful for ad-hoc
  * client-side filtering; in practice the backend already anti-joins on
- * `/api/analysis/results`, so most callers don't need this anymore.
+ * `/api/v1/analysis/results`, so most callers don't need this anymore.
  */
 export function useArchiveSnapshot(): string[] {
 	const { data } = useArchiveListQuery();
