@@ -34,7 +34,7 @@ import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/utils/clipboard";
 import { formatTimeAgo } from "@/lib/utils/dates";
-import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
+import { formatAdaCompact, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/lib/attacks";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
@@ -270,7 +270,7 @@ export function AttacksPage() {
 						primary: shortHash(t.tx_hash),
 						mono: true,
 						middle: formatTimeAgo(t.timestamp),
-						trailing: formatAda(t.total_output_value),
+						trailing: formatAdaCompact(t.total_output_value),
 					}))}
 				/>
 				<LatestList
@@ -280,7 +280,7 @@ export function AttacksPage() {
 						primary: String(b.block_height),
 						mono: false,
 						middle: formatTimeAgo(b.timestamp),
-						trailing: formatAda(b.total_output_value),
+						trailing: formatAdaCompact(b.total_output_value),
 					}))}
 				/>
 			</div>
@@ -353,13 +353,6 @@ function CriticalTriangleIcon({ className }: { className?: string }) {
 	);
 }
 
-/** Middle-truncate a long string, keeping the start and end visible.
- *  Matches the Figma look (`dfgsdfsd4rge4resvse....terge4ge4er`). */
-function middleTruncate(s: string, head = 19, tail = 11): string {
-	if (s.length <= head + tail + 4) return s;
-	return `${s.slice(0, head)}....${s.slice(-tail)}`;
-}
-
 function CriticalAlertCard() {
 	const navigate = useNavigate();
 	const { data, isPending } = useRiskAlerts({
@@ -404,7 +397,7 @@ function CriticalAlertCard() {
 			<div className="text-foreground mt-2 flex items-center justify-center gap-2 font-mono text-xs">
 				<span className="truncate">
 					{latest
-						? middleTruncate(latest.fullHash.toUpperCase())
+						? shortHash(latest.fullHash.toUpperCase(), 19, 11)
 						: isPending
 							? "Loading…"
 							: "—"}

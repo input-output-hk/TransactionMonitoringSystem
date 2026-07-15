@@ -136,9 +136,9 @@ export function UsersPage() {
 								<TableCell>
 									<div className="flex items-center gap-3">
 										<Avatar>
-											<AvatarFallback>{initials(u.fullName, 1)}</AvatarFallback>
+											<AvatarFallback>{initials(u.full_name, 1)}</AvatarFallback>
 										</Avatar>
-										<span className="text-foreground">{u.fullName}</span>
+										<span className="text-foreground">{u.full_name}</span>
 									</div>
 								</TableCell>
 								<TableCell className="text-foreground">{u.email}</TableCell>
@@ -262,7 +262,7 @@ function AddUserFlow({
 		mutationFn: () =>
 			createUser({
 				email: draft.email.trim(),
-				fullName: draft.fullName.trim(),
+				full_name: draft.fullName.trim(),
 				role: draft.role,
 			}),
 		onSuccess: () => {

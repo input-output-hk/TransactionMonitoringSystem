@@ -14,7 +14,7 @@ interface ImportMetaEnv {
 	 * param on `/api/v1/analysis/*` and `/api/v1/archive/*`. Defaults to `preprod`
 	 * (matches the backend's default).
 	 */
-	readonly VITE_NETWORK?: "mainnet" | "preprod" | "preview";
+	readonly VITE_NETWORK?: import("./lib/api/fetch").Network;
 }
 
 interface ImportMeta {
