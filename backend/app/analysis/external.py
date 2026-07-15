@@ -387,10 +387,12 @@ def _refresh_legitimate_tokens() -> tuple[dict[str, list[str]], int]:
         # Extract ticker and name from the registry entry
         ticker_obj = entry.get("ticker")
         name_obj = entry.get("name")
-        ticker = ticker_obj.get("value") if isinstance(ticker_obj, dict) else ticker_obj
-        name = name_obj.get("value") if isinstance(name_obj, dict) else name_obj
+        # Distinct names from the seed-loop's `name` above (which stays a str
+        # in scope); these hold the registry entry's raw ticker/name value.
+        ticker_val = ticker_obj.get("value") if isinstance(ticker_obj, dict) else ticker_obj
+        name_val = name_obj.get("value") if isinstance(name_obj, dict) else name_obj
 
-        for token_name in (ticker, name):
+        for token_name in (ticker_val, name_val):
             if token_name and isinstance(token_name, str):
                 existing = registry.get(token_name, [])
                 if policy_id not in existing:

@@ -114,12 +114,24 @@ extend-immutable-calls = [
 
 [tool.mypy]
 # Lenient baseline: untyped defs stay allowed while the codebase is annotated
-# module by module. Strictness ratchets up via per-module overrides (see
+# module by module. Strictness ratchets up via per-module overrides below (see
 # CONTRIBUTING.md); the sidecar already runs disallow_untyped_defs globally.
 python_version = "3.13"
 ignore_missing_imports = true
 warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 
+# Strict-cohort ratchet: modules known fully-annotated hold to
+# disallow_untyped_defs so they can't regress. Add a module here once it is
+# clean under strict (`mypy <mod> --disallow-untyped-defs`); the goal is to
+# grow this list until it can become the global default.
+[[tool.mypy.overrides]]
+module = ["app.logging_utils", "app.config", "app.analysis.normalise"]
+disallow_untyped_defs = true
+
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
+# Every `async def test_*` is collected as an asyncio test without a per-test
+# marker, matching the sidecar. Existing module-level `pytestmark` lines are
+# now redundant but harmless.
+asyncio_mode = "auto"

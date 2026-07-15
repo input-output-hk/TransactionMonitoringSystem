@@ -312,7 +312,7 @@ def _estimate_value_cbor_bytes(value: dict[str, Any]) -> int:
             lovelace = ada_obj.get("lovelace", 0)
         else:
             lovelace = value.get("lovelace", 0)
-        assets = {}
+        assets: dict[bytes, dict[bytes, int] | int] = {}
         for key, val in value.items():
             if key in ("lovelace", "ada"):
                 continue

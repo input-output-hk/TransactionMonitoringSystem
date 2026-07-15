@@ -146,7 +146,6 @@ def test_is_internal_webhook_target(url, expected):
     assert config.is_internal_webhook_target(url) is expected
 
 
-@pytest.mark.asyncio
 async def test_refresh_seeds_default_on_empty_db(monkeypatch):
     import app.db.postgres as pg
 
@@ -169,7 +168,6 @@ async def test_refresh_seeds_default_on_empty_db(monkeypatch):
     assert seeded["by"] == "system:seed"
 
 
-@pytest.mark.asyncio
 async def test_refresh_raises_on_invalid_stored_doc(monkeypatch):
     import app.db.postgres as pg
 
@@ -182,7 +180,6 @@ async def test_refresh_raises_on_invalid_stored_doc(monkeypatch):
         await config.refresh_from_db()
 
 
-@pytest.mark.asyncio
 async def test_refresh_reflects_stored_doc_in_sync_accessors(monkeypatch):
     """After refresh_from_db loads a stored doc, the SYNC accessors (called from
     the ClickHouse executor thread) reflect it immediately — the hot-reload

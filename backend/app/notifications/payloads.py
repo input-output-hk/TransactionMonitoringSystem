@@ -141,7 +141,7 @@ def build_contract_anomaly_alert(
     result dict.
     """
     band = winner.get("risk_band")
-    band_str = band.value if hasattr(band, "value") else str(band or "")
+    band_str = band.value if band is not None and hasattr(band, "value") else str(band or "")
     timestamp = _utc_isoformat(winner.get("scored_at"))
     # Surface the discriminating raw verdict signals as "contributing features".
     feats = {
