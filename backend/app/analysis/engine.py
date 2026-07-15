@@ -173,7 +173,7 @@ def _score_transaction(
     # Compute aggregate
     applicable = {k: v for k, v in scores.items() if v >= 0}
     if applicable:
-        max_class = max(applicable, key=applicable.get)
+        max_class = max(applicable, key=lambda k: applicable[k])
         max_score = applicable[max_class]
     else:
         max_class = ""
@@ -564,7 +564,7 @@ def run_once(network: str) -> int:
     # Log summary
     critical = sum(1 for r in results if r["risk_band"] == "Critical")
     high = sum(1 for r in results if r["risk_band"] == "High")
-    scored_classes = {}
+    scored_classes: dict[str, int] = {}
     for r in results:
         for cls in _CLASS_NAMES:
             if r.get(cls, -1) >= 0:

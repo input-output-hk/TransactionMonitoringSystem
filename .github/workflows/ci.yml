@@ -20,11 +20,12 @@ concurrency:
 
 jobs:
   lint:
-    # Formatting and lint rules are enforced for both Python trees from one
-    # job so a drifted tree can never merge. Pre-existing findings accepted at
-    # gate-introduction time are grandfathered via per-file-ignores burn-down
-    # blocks in each pyproject; new code is held to the full rule set.
-    name: Python lint (ruff)
+    # Formatting, lint, and type checks are enforced for both Python trees from
+    # one job so a drifted tree can never merge. Pre-existing ruff findings
+    # accepted at gate-introduction time are grandfathered via per-file-ignores
+    # burn-down blocks in each pyproject; new code is held to the full rule set.
+    # mypy runs at a lenient baseline with a growing strict-module cohort.
+    name: Python lint (ruff + mypy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +41,8 @@ jobs:
         run: uv run ruff format --check backend
       - name: Backend lint
         run: uv run ruff check backend
+      - name: Backend type check
+        run: uv run mypy backend/app
       - name: Sidecar sync
         working-directory: services/clustering/backend
         run: uv sync --extra dev
@@ -49,6 +52,9 @@ jobs:
       - name: Sidecar lint
         working-directory: services/clustering/backend
         run: uv run ruff check .
+      - name: Sidecar type check
+        working-directory: services/clustering/backend
+        run: uv run mypy app
 
   backend:
     name: Backend (pytest + recall gate)
