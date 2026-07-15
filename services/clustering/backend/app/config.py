@@ -8,6 +8,14 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Blockfrost base URLs per Cardano network (used only when CHAIN_SOURCE=blockfrost;
+# the host_ch default reads ClickHouse and never touches these).
+_BLOCKFROST_BASE_URLS = {
+    "mainnet": "https://cardano-mainnet.blockfrost.io/api/v0",
+    "preprod": "https://cardano-preprod.blockfrost.io/api/v0",
+    "preview": "https://cardano-preview.blockfrost.io/api/v0",
+}
+
 
 class Settings(BaseSettings):
     """Runtime configuration sourced from the environment / `.env`."""
@@ -22,8 +30,23 @@ class Settings(BaseSettings):
     chain_source: str = Field(default="host_ch", alias="CHAIN_SOURCE")
 
     # Cardano network the sidecar is pinned to; matches the host TMS's network and
-    # keys both the host_ch reads and the published contract_anomaly rows.
+    # keys both the host_ch reads and the published contract_anomaly rows. Also
+    # selects the Blockfrost base URL when CHAIN_SOURCE=blockfrost.
     cardano_network: str = Field(default="mainnet", alias="CARDANO_NETWORK")
+
+    # Blockfrost (only consumed when CHAIN_SOURCE=blockfrost; the host_ch default
+    # ignores all of these). Project id authenticates every request; empty is only
+    # valid for host_ch runs.
+    blockfrost_project_id: str = Field(default="", alias="BLOCKFROST_PROJECT_ID")
+    # Free tier: 10 req/s sustained, burst of 500 refilling at 10/s.
+    blockfrost_max_rps: float = Field(default=10.0, alias="BLOCKFROST_MAX_RPS")
+    blockfrost_burst: int = Field(default=500, alias="BLOCKFROST_BURST")
+    blockfrost_page_size: int = Field(default=100, alias="BLOCKFROST_PAGE_SIZE")
+    # Per-request HTTP timeout, max retry attempts for transient errors (429/5xx/
+    # transport), and the ceiling on exponential backoff between those retries.
+    blockfrost_timeout_s: float = Field(default=30.0, alias="BLOCKFROST_TIMEOUT_S")
+    blockfrost_max_retries: int = Field(default=6, alias="BLOCKFROST_MAX_RETRIES")
+    blockfrost_backoff_cap_s: float = Field(default=30.0, alias="BLOCKFROST_BACKOFF_CAP_S")
 
     # Upper bound on transactions fed to the O(n^2) precomputed-Jaccard graph
     # clustering. Above this the tx set is sampled (and the drop is logged) to
@@ -183,6 +206,16 @@ class Settings(BaseSettings):
         download, fits run over the rolling window. Single source of truth for
         the "host_ch" check so the many call sites can't drift."""
         return self.chain_source == "host_ch"
+
+    @property
+    def blockfrost_base_url(self) -> str:
+        try:
+            return _BLOCKFROST_BASE_URLS[self.cardano_network]
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"Unknown CARDANO_NETWORK {self.cardano_network!r}; "
+                f"expected one of {sorted(_BLOCKFROST_BASE_URLS)}"
+            ) from exc
 
     def recluster_recommended(self, drift_score: float) -> bool:
         """Whether an online-classifier ``drift_score`` is stale enough to recommend
