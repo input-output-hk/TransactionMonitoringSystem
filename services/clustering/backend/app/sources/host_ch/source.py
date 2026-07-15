@@ -21,6 +21,7 @@ address; policy targets are rejected).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from datetime import datetime
 from typing import Any
 
 from app.config import Settings
@@ -44,6 +45,15 @@ _SCRIPT_PAYMENT_TYPES = frozenset({1, 3, 5, 7})
 # Discovery page size: tx_hashes per yielded page. Bounds the result set per
 # round-trip the same way any page-based adapter's page size does.
 _PAGE = 1000
+
+# Chars of the target address echoed in error messages: enough to recognise the
+# address in a client-facing log without dumping the full ~100-char bech32.
+_TARGET_PREVIEW = 24
+
+# ClickHouse min()/max() over an empty set return the DateTime zero value
+# (1970-01-01), not NULL. Cardano genesis is 2017, so any real floor is well
+# after this; a floor in this year therefore means "no rows for the network".
+_EPOCH_YEAR = 1970
 
 
 def _payment_is_script(address: str) -> bool:
@@ -80,7 +90,8 @@ class HostChainSource:
         if target_type != "address":
             raise SourceNotFound(
                 "host_ch v1 supports address/script targets only "
-                "(the host indexes transactions by address, not by policy id)"
+                "(the host indexes transactions by address, not by policy id)",
+                client_safe=True,
             )
         rows = self._client.query(
             f"SELECT count() FROM {self._host_db}.address_transactions "
@@ -89,10 +100,7 @@ class HostChainSource:
         ).result_rows
         count = int(rows[0][0]) if rows else 0
         if count == 0:
-            raise SourceNotFound(
-                f"address {target[:24]}… has no transactions in the host's "
-                f"{self._network} data (nothing synced yet, or behind retention)"
-            )
+            raise SourceNotFound(self._no_txs_message(target), client_safe=True)
         # Identity is read from the address header; balance/token enrichment is
         # left to the host's own views (display-only here, not needed to fit).
         return {
@@ -103,6 +111,42 @@ class HostChainSource:
             "asset_count": 0,
             "sample_tokens": "[]",
         }
+
+    def _no_txs_message(self, target: str) -> str:
+        """Explain a zero-row onboarding without misleading the client.
+
+        A script that exists on-chain but has no rows here is rarely "not on
+        chain": far more often this instance simply has not synced back to the
+        address's last activity (a fresh deployment syncs tip-forward, no
+        historical backfill) or those rows aged out of retention. Report how far
+        back the instance has indexed this network so the operator can tell
+        "before our data begins" apart from "genuinely never active"."""
+        floor = self._network_data_floor()
+        head = (
+            f"address {target[:_TARGET_PREVIEW]}… has no transactions in this "
+            f"instance's {self._network} data"
+        )
+        if floor is None:
+            return f"{head}; no {self._network} transactions have been indexed yet"
+        return (
+            f"{head}; this instance has indexed {self._network} activity only back "
+            f"to {floor:%Y-%m-%d} (the address was likely last active before then, "
+            "or its rows aged out of retention)"
+        )
+
+    def _network_data_floor(self) -> datetime | None:
+        """Earliest transaction time this instance has indexed for the network,
+        or None when it holds none. Runs only on the zero-row error path, so the
+        full-partition ``min(timestamp)`` scan is off the hot path."""
+        rows = self._client.query(
+            f"SELECT min(timestamp) FROM {self._host_db}.address_transactions "
+            "WHERE network = {net:String}",
+            parameters={"net": self._network},
+        ).result_rows
+        earliest = rows[0][0] if rows else None
+        if earliest is None or earliest.year <= _EPOCH_YEAR:
+            return None
+        return earliest
 
     async def tx_hash_pages(
         self,
@@ -122,7 +166,9 @@ class HostChainSource:
         ``mode='tip'`` re-covers from the cursor's slot (idempotent: the host
         rows are append-only and the engine classifies each hash once)."""
         if not address:
-            raise SourceNotFound("host_ch discovery requires an address target")
+            raise SourceNotFound(
+                "host_ch discovery requires an address target", client_safe=True
+            )
         from_slot = 0
         if cursor and mode != "restart" and cursor.startswith("slot:"):
             from_slot = int(cursor.split(":", 1)[1])
