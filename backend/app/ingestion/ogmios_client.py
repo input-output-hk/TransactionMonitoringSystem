@@ -9,7 +9,6 @@ Uses three separate WebSocket connections (Ogmios multiplexes one mini-protocol 
 """
 
 import asyncio
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -18,6 +17,7 @@ import websockets
 
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
+from app.ingestion import ogmios_rpc
 from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.input_enrichment import (
     apply_resolved_inputs,
@@ -132,29 +132,13 @@ class OgmiosClient:
         self._rpc_id += 1
         return str(self._rpc_id)
 
-    def _jsonrpc(self, method: str, params: dict | None = None) -> str:
-        msg: dict[str, object] = {"jsonrpc": "2.0", "method": method, "id": self._next_id()}
-        if params:
-            msg["params"] = params
-        return json.dumps(msg)
-
     async def _send_recv(self, ws, method: str, params: dict | None = None) -> dict:
-        """Send a JSON-RPC request and wait for the response.
-
-        Large frames (a busy block of Plutus txs serialises to tens of MB;
-        the socket allows 64 MB) are parsed on the default executor so the
-        event loop — which also serves the API, WebSocket feed, and mempool
-        monitor — is not blocked for the parse duration. Small frames parse
-        inline: the thread handoff costs more than the parse below the
-        threshold.
-        """
-        msg = self._jsonrpc(method, params)
-        await ws.send(msg)
-        raw = await ws.recv()
+        """Send a JSON-RPC request and wait for the response (framing +
+        large-frame handling live in ``ogmios_rpc.send_recv``); stamp the
+        last-message telemetry the pipeline-health probe reads."""
+        resp = await ogmios_rpc.send_recv(ws, method, params, request_id=self._next_id())
         self._last_msg_at = datetime.now(UTC)
-        if len(raw) > settings.OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES:
-            return await asyncio.to_thread(json.loads, raw)
-        return json.loads(raw)
+        return resp
 
     # --- WebSocket connection with resilience ---
 

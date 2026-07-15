@@ -23,7 +23,6 @@ a mid-run reconnect is harmless.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,6 +32,7 @@ import websockets
 
 from app.config import settings
 from app.db import clickhouse
+from app.ingestion import ogmios_rpc
 from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.input_enrichment import resolve_input_amounts
 from app.ingestion.kupo_client import KupoClient
@@ -74,12 +74,7 @@ class _OgmiosReader:
 
     async def _send_recv(self, method: str, params: dict | None = None) -> dict:
         self._id += 1
-        msg: dict[str, object] = {"jsonrpc": "2.0", "method": method, "id": self._id}
-        if params:
-            msg["params"] = params
-        await self._ws.send(json.dumps(msg))
-        raw = await self._ws.recv()
-        return json.loads(raw)
+        return await ogmios_rpc.send_recv(self._ws, method, params, request_id=str(self._id))
 
     async def slot_time_converter(self) -> SlotTimeConverter | None:
         """Build the slot→UTC converter so backfilled ``timestamp`` is chain-time,
