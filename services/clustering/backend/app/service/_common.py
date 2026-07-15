@@ -54,6 +54,11 @@ def _raise_if_incomplete(result: IngestResult) -> None:
 def _safe_error(exc: Exception) -> str:
     """A concise, client-safe error string for the jobs table — never the raw
     upstream response body (which is logged server-side instead)."""
+    if isinstance(exc, SourceError) and exc.client_safe:
+        # The source explicitly authored this message for the client (e.g.
+        # host_ch's "no transactions in this instance's <network> data …"),
+        # so it carries the actual reason instead of a generic placeholder.
+        return str(exc)
     if isinstance(exc, SourceNotFound):
         return "address or policy id not found on-chain"
     if isinstance(exc, SourceRateLimited):
