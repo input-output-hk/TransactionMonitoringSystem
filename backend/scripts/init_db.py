@@ -12,8 +12,9 @@ import logging
 
 from app.config import settings
 from app.db import clickhouse, postgres
+from app.logging_utils import setup_logging
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 

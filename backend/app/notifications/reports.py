@@ -258,7 +258,9 @@ async def build_periodic_report(
                 tx_hash=w.get("tx_hash", ""),
                 attack_class="contract_anomaly",
                 risk_score=float(w.get("score") or 0.0),
-                risk_band=raw_band.value if hasattr(raw_band, "value") else str(raw_band or ""),
+                risk_band=raw_band.value
+                if raw_band is not None and hasattr(raw_band, "value")
+                else str(raw_band or ""),
                 timestamp=_iso(w.get("scored_at")),
             )
         )

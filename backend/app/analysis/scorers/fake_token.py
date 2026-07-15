@@ -248,7 +248,7 @@ def _compute_cip25_similarity(
         return 0.0
 
     # Flatten CIP-25 metadata to find name/ticker/description fields
-    text_parts = []
+    text_parts: list[str] = []
     _flatten_cip25(label_721, text_parts)
     if not text_parts:
         return 0.0

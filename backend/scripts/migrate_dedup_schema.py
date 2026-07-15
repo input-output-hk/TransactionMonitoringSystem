@@ -48,8 +48,9 @@ from datetime import UTC, datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import clickhouse
+from app.logging_utils import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+setup_logging()
 logger = logging.getLogger("migrate_dedup_schema")
 
 _MIG_SUFFIX = "__mig"

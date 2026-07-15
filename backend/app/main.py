@@ -15,21 +15,21 @@ from fastapi.staticfiles import StaticFiles
 from app.auth import verify_api_key
 from app.config import DEFAULT_DEV_POSTGRES_PASSWORD, settings
 from app.csrf import CSRFMiddleware
-from app.utils.datetime_utils import format_iso_utc, to_aware_utc
 
 # Configure logging before importing modules that emit log records at import time
-# (e.g. app.analysis.scorer_config which logs the config file it loaded).
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# (e.g. app.analysis.scorer_config which logs the config file it loaded). One
+# shared setup for the app and the scripts (app.logging_utils.setup_logging),
+# which also attaches the secret-redaction filter to the root handlers.
+from app.logging_utils import configure_access_log_redaction, setup_logging
+from app.utils.datetime_utils import format_iso_utc, to_aware_utc
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
-# Magic-link tokens ride in `/api/auth/verify?token=...`; without this,
-# uvicorn's access log writes that live credential in plaintext for every
-# redemption (review finding).
-from app.logging_utils import configure_access_log_redaction
-
+# Magic-link tokens ride in `/api/auth/verify?token=...`. setup_logging already
+# scrubs the root handlers, but uvicorn attaches its own access-log handler
+# later via dictConfig; this logger-level filter survives that and catches the
+# credential in every access line (review finding).
 configure_access_log_redaction()
 
 from app import leader, notifications

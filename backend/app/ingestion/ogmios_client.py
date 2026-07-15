@@ -133,7 +133,7 @@ class OgmiosClient:
         return str(self._rpc_id)
 
     def _jsonrpc(self, method: str, params: dict | None = None) -> str:
-        msg = {"jsonrpc": "2.0", "method": method, "id": self._next_id()}
+        msg: dict[str, object] = {"jsonrpc": "2.0", "method": method, "id": self._next_id()}
         if params:
             msg["params"] = params
         return json.dumps(msg)
@@ -158,7 +158,7 @@ class OgmiosClient:
 
     # --- WebSocket connection with resilience ---
 
-    async def _connect_ws(self, label: str) -> websockets.WebSocketClientProtocol:
+    async def _connect_ws(self, label: str) -> websockets.WebSocketClientProtocol:  # type: ignore[name-defined]  # runtime-valid; websockets 16.x stubs omit the alias
         """Open a WebSocket connection to Ogmios with ping/pong keepalive."""
         ws = await websockets.connect(
             self.ws_url,
