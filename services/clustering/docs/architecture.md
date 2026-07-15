@@ -61,6 +61,11 @@ Dependencies point strictly downward; there are no cycles.
                          config.py (Settings)
 ```
 
+The layering above shows the default `host_ch` source. A second `ChainSource` ships
+behind the same `sources/` seam: `app/blockfrost/` (`BlockfrostSource`), selected by
+`CHAIN_SOURCE=blockfrost`, which downloads an address's history over HTTP from
+blockfrost.io into `tms_clustering` (the base `ClickHouseRepo`, not `HostBackedRepo`).
+
 Responsibilities:
 
 | Layer | Module(s) | Responsibility |
@@ -69,10 +74,10 @@ Responsibilities:
 | Orchestration | [service/](../backend/app/service/) (package: `pipeline` · `analysis` · `verdicts` · `online` · `scheduler` · `publish` · `_common`), [jobs.py](../backend/app/jobs.py) | The canonical pipeline, the automatic-feed scheduler that drives it, the verdict projection to `tx_contract_anomaly`, and the background worker. |
 | Feed | [service/scheduler.py](../backend/app/service/scheduler.py) | The automatic feed: polls the watchlist and enqueues onboard / re-fit / classify jobs as the host ingests new transactions. No manual fetch step. |
 | Publish | [service/publish.py](../backend/app/service/publish.py) | Projects resolved per-tx verdicts to `tms_clustering.tx_contract_anomaly`, the table the host reads as the `contract_anomaly` attack class. |
-| Ingest | [ingest/ingester.py](../backend/app/ingest/ingester.py) | Resumable orchestration over a `ChainSource`. In the integrated module this never downloads: the host already ingested the chain, so the host-backed path reads existing data and the ingester's writes are no-ops. |
+| Ingest | [ingest/ingester.py](../backend/app/ingest/ingester.py) | Resumable orchestration over a `ChainSource`. Under the default `host_ch` this never downloads (the host already ingested the chain, so the host-backed path reads existing data and the ingester's writes are no-ops); under `CHAIN_SOURCE=blockfrost` it drives the real download path, fetching each tx and persisting it to `tms_clustering`. |
 | Algorithms | [features/](../backend/app/features/), [clustering/](../backend/app/clustering/), [anomaly/](../backend/app/anomaly/) | Feature matrices, DBSCAN, parameter evaluation, anomaly ensemble. See [algorithms.md](algorithms.md). |
 | Identity | [contracts.py](../backend/app/contracts.py) | Classify a target as an address vs minting policy (pure, source‑neutral). |
-| Data source | [sources/](../backend/app/sources/) (`ChainSource` protocol + factory), [sources/host_ch/](../backend/app/sources/host_ch/) (`HostChainSource`) | The seam the analysis cores read through. In the delivered system `CHAIN_SOURCE=host_ch` selects `HostChainSource`, which reads contract metadata and discovers transaction hashes from the host's `tms_analytics` database; nothing is fetched from an external provider. See [online-classification-design.md](online-classification-design.md). |
+| Data source | [sources/](../backend/app/sources/) (`ChainSource` protocol + factory), [sources/host_ch/](../backend/app/sources/host_ch/) (`HostChainSource`), [blockfrost/](../backend/app/blockfrost/) (`BlockfrostSource`) | The seam the analysis cores read through. `CHAIN_SOURCE=host_ch` (default) selects `HostChainSource`, which reads contract metadata and discovers transaction hashes from the host's `tms_analytics` database, with nothing fetched externally; `CHAIN_SOURCE=blockfrost` selects `BlockfrostSource`, which downloads them over HTTP from blockfrost.io. See [online-classification-design.md](online-classification-design.md). |
 | Storage | [storage/clickhouse/](../backend/app/storage/clickhouse/) | All SQL. A thin repository (`ClickHouseRepo`) composed from per‑entity mixins over the HTTP client. The `HostBackedRepo` variant reads raw transaction / feature data cross-database from `tms_analytics` and writes module state to `tms_clustering`. |
 | Config | [config.py](../backend/app/config.py) | Pydantic‑settings; env‑driven configuration + logging setup. |
 
@@ -212,21 +217,24 @@ chain/feature reads come from `tms_analytics`, module state lives in
 
 - **One pipeline, no debt.** Centralizing onboarding in `process_contract` means
   every contract is processed identically and there is no ad‑hoc second path.
-- **The data source is a seam, not a download.** The analysis cores depend on the
+- **The data source is a seam.** The analysis cores depend on the
   `ChainSource` protocol ([sources/base.py](../backend/app/sources/base.py)) and a
-  neutral `SourceError` taxonomy, never on a provider package. In the delivered
-  system `CHAIN_SOURCE=host_ch` selects `HostChainSource`
-  ([sources/host_ch/](../backend/app/sources/host_ch/)), which reads contract
-  metadata and discovers transaction hashes from the host's `tms_analytics`,
-  paired with the `HostBackedRepo` for the feature reads; nothing is fetched from
-  an external provider. `get_source()`
+  neutral `SourceError` taxonomy, never on a provider package. `get_source()`
   ([sources/factory.py](../backend/app/sources/factory.py)) picks the
-  implementation by the `CHAIN_SOURCE` setting. See
+  implementation by the `CHAIN_SOURCE` setting. The default `host_ch` selects
+  `HostChainSource` ([sources/host_ch/](../backend/app/sources/host_ch/)), which
+  reads contract metadata and discovers transaction hashes from the host's
+  `tms_analytics`, paired with the `HostBackedRepo` for the feature reads, and
+  fetches nothing externally. `CHAIN_SOURCE=blockfrost` selects `BlockfrostSource`
+  ([blockfrost/](../backend/app/blockfrost/)), the downloading alternative that
+  fetches an address's history from blockfrost.io. See
   [online-classification-design.md](online-classification-design.md) (Part A).
-- **No data duplication.** Raw transaction / feature reads come cross-database from
-  the host's `tms_analytics`; the module's `transactions` / `tx_utxos` tables are
-  never populated, and the host-backed ingest writes are no-ops. Only the module's
-  own derived state lives in `tms_clustering`.
+- **No data duplication under `host_ch`.** In the default mode raw transaction /
+  feature reads come cross-database from the host's `tms_analytics`; the module's
+  `transactions` / `tx_utxos` tables are never populated, and the host-backed ingest
+  writes are no-ops. (Under `CHAIN_SOURCE=blockfrost` those tables ARE populated: the
+  download path writes the fetched transactions into `tms_clustering`.) Either way,
+  the module's own derived state lives in `tms_clustering`.
 - **Repository pattern over ClickHouse.** All SQL lives in `ClickHouseRepo`;
   callers speak in dicts/dataclasses. Row mapping is name‑based via a single
   `_row_to_dict` helper with per‑entity column specs.

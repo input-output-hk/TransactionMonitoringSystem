@@ -38,7 +38,7 @@ C4Container
         Container(api, "API Gateway", "FastAPI, Uvicorn", "Services layer. REST and WebSocket endpoints. Dual auth: X-API-Key (programmatic) and magic-link session cookies (dashboard, Admin/Reviewer roles). Per-key/IP rate limiting. User-management + archive APIs.")
         Container(analysis, "Analysis Engine", "Python", "Services layer. 9-class Polimi detection engine. Reads unscored transactions, assigns multi-class risk scores, writes results to Analytics Warehouse.")
         Container(ui, "TMS Dashboard", "React SPA (served by API Gateway)", "Presentation layer. Real-time mempool feed, confirmed txs, lifecycle stats, analysis results, and the Validators / cluster-graph views.")
-        Container(clustering, "Clustering Module", "Python, FastAPI, scikit-learn", "OPTIONAL first-party sidecar (services/clustering, --profile clustering). Per-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict the API merges in. Reads chain facts from the Analytics Warehouse; owns its own ClickHouse database.")
+        Container(clustering, "Clustering Module", "Python, FastAPI, scikit-learn", "OPTIONAL first-party sidecar (services/clustering, --profile clustering). Per-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict the API merges in. Owns its own ClickHouse database. Default source (CHAIN_SOURCE=host_ch) reads chain facts from the Analytics Warehouse; CHAIN_SOURCE=blockfrost instead downloads an address's history over HTTP (blockfrost.io) on demand.")
         ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Storage layer. Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store. Derived from the Data Lake.")
         ContainerDb(clusterdb, "Clustering State", "ClickHouse (tms_clustering DB, same server)", "Storage layer. The clustering module's own state: cluster_models, tx_classifications, and tx_contract_anomaly (the projection the host reads). Empty/absent unless the module runs.")
         ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Storage layer. Mutable state: transaction lifecycle, sync checkpoint, entity state, mempool collisions, config, audit logs, and the auth tables (users, magic_link_tokens, user_sessions).")
@@ -337,8 +337,8 @@ C4Deployment
             Deployment_Node(ch_container, "tms-clickhouse") {
                 ContainerDb(ch_inst, "Analytics Warehouse", "ClickHouse 26.1 MergeTree", "transactions, transaction_inputs, transaction_outputs, address_transactions, tx_class_scores, baselines")
             }
-            Deployment_Node(mail_container, "tms-mailpit") {
-                Container(mail_inst, "Mailpit", "Go", "Dev SMTP sink + webmail (:1025 SMTP, :8025 UI). Swap for a real relay in production.")
+            Deployment_Node(mail_container, "tms-mailpit", "opt-in: --profile mail") {
+                Container(mail_inst, "Mailpit", "Go", "Dev/demo SMTP sink + webmail (:1025 SMTP, :8025 UI). Started only with --profile mail; NOT part of the default deployment. A real deployment points SMTP_* at a real relay instead.")
             }
         }
         Deployment_Node(node_infra, "Cardano Node Infrastructure") {
@@ -351,5 +351,5 @@ C4Deployment
     Rel(app, ogmios_inst, "JSON-RPC 2.0", "WebSocket :1337")
     Rel(app, pg_inst, "asyncpg", "TCP :5432")
     Rel(app, ch_inst, "clickhouse-driver", "Native :9000")
-    Rel(app, mail_inst, "Magic-link emails", "SMTP :1025")
+    Rel(app, mail_inst, "Magic-link emails (dev/demo only, --profile mail)", "SMTP :1025")
 ```
