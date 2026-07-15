@@ -23,10 +23,12 @@ docker-compose --profile app up -d
 |---|---|---|---|
 | `postgres` | `tms-postgres` | default | Operational database (lifecycle, auth, audit) |
 | `clickhouse` | `tms-clickhouse` | default | Analytics warehouse |
-| `mailpit` | `tms-mailpit` | default | Dev SMTP sink for magic-link emails (SMTP `:1025`, web UI `:8025`) |
+| `mailpit` | `tms-mailpit` | `mail` | Opt-in dev/demo SMTP sink for magic-link emails (SMTP `:1025`, web UI `:8025`); started only with `--profile mail` |
 | `app` | `tms-app` | `app` | FastAPI application (host-run by default in development) |
+| `clustering` | `tms-clustering-sidecar` | `clustering` | Optional contract-anomaly sidecar (per-contract DBSCAN + anomaly ensemble); publishes the `contract_anomaly` verdict |
 | `cardano-node` | `tms-cardano-node` | `ingestion` | Full node, pinned to `11.0.1` (van Rossem PV11) |
 | `ogmios` | `tms-ogmios` | `ingestion` | WebSocket bridge `:1337`, pinned to `v6.14.0` |
+| `kupo` | `tms-kupo` | `ingestion` | Address→tx index (`:1442`) for on-demand historical backfill (`POST /api/v1/backfill`) |
 
 ## Connection Details
 

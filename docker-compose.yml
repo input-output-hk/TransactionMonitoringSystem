@@ -181,8 +181,10 @@ services:
 
   # Local SMTP catch-all for magic-link emails. Anything sent to port 1025
   # is captured (never forwarded) and viewable in the web UI at :8025.
-  # Customer prod deployments swap this for a real SMTP server via the
-  # SMTP_* env vars on the `app` service.
+  # Opt-in via `--profile mail` (dev/demo, to read captured magic-link emails);
+  # a real deployment instead points the app's SMTP_* env vars at a real SMTP
+  # server and leaves this off. Not started by the default `--profile app` so a
+  # client delivery doesn't run a mail catcher it doesn't need.
   mailpit:
     # Pinned like every other image: `latest` made this the one service that
     # could silently change under a compose pull. Bump deliberately.
@@ -194,8 +196,8 @@ services:
     restart: unless-stopped
     networks:
       - tms-network
-    # No `profiles:` here — Mailpit is harmless and convenient enough
-    # that we want it up by default during `docker compose up`.
+    profiles:
+      - mail  # `docker compose --profile app --profile mail up` to include it
 
   # Application service (optional - can run on host or in Docker)
   app:
@@ -286,11 +288,10 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-      # Current mailpit images ship a healthcheck (`/mailpit readyz`).
-      # Magic-link sends are failure-tolerant either way: an SMTP error
-      # logs and the API still returns a silent 200.
-      mailpit:
-        condition: service_healthy
+    # No hard dependency on mailpit: it is opt-in (`--profile mail`) and
+    # magic-link/notification sends are failure-tolerant (an SMTP error logs and
+    # the API still returns a silent 200), so the app must start whether or not a
+    # mail catcher is running. A real deployment points SMTP_* at a real server.
     restart: unless-stopped
     logging: *default-logging
     healthcheck:

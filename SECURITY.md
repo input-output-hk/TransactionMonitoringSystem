@@ -34,6 +34,6 @@ This repository ships secure by default. A few operational notes for anyone runn
 - **Authentication is fail-closed.** The application refuses to start with an empty `API_KEYS`, an empty ClickHouse password, the default Postgres password, or a wildcard CORS origin, unless `TMS_ALLOW_DEV_MODE=1` is set explicitly. Dev mode disables authentication entirely and is for local use only: never expose a dev-mode instance beyond `localhost`.
 - **Bind to trusted networks.** The Compose services bind to `127.0.0.1` by default. Put the API behind a reverse proxy with TLS before exposing it, and narrow `TRUSTED_PROXY_CIDRS` to your actual proxy address.
 - **Clustering model store.** When the ClickHouse instance is shared, set `MODEL_SIGNING_KEYS` so the clustering sidecar verifies model blobs before loading them.
-- **Local mail capture.** The bundled Mailpit service captures magic-link emails for local development. It is unauthenticated and must not be exposed publicly.
+- **Local mail capture.** The bundled Mailpit service (opt-in via `--profile mail`; not started by the default deployment) captures magic-link emails for local development. It is unauthenticated and must not be exposed publicly.
 
 See [RUNBOOK.md](RUNBOOK.md) for the full configuration reference.
