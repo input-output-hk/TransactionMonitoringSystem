@@ -166,9 +166,7 @@ class HostChainSource:
         ``mode='tip'`` re-covers from the cursor's slot (idempotent: the host
         rows are append-only and the engine classifies each hash once)."""
         if not address:
-            raise SourceNotFound(
-                "host_ch discovery requires an address target", client_safe=True
-            )
+            raise SourceNotFound("host_ch discovery requires an address target", client_safe=True)
         from_slot = 0
         if cursor and mode != "restart" and cursor.startswith("slot:"):
             from_slot = int(cursor.split(":", 1)[1])
