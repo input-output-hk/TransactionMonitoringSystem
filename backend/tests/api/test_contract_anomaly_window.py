@@ -8,8 +8,6 @@ date filter is applied" bug)."""
 
 from datetime import UTC, datetime
 
-import pytest
-
 from app.api import contract_anomaly_read as car
 from app.api.contract_anomaly_read import _within_analyzed_window
 
@@ -67,7 +65,6 @@ def _stored_row(tx_hash: str, analyzed_at: datetime) -> dict:
     }
 
 
-@pytest.mark.asyncio
 async def test_list_with_aware_bounds_returns_rows_end_to_end(monkeypatch):
     """Endpoint-level regression: _list_contract_anomaly_results must not empty
     out when the API passes tz-aware bounds (Z-suffixed) against naive

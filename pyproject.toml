@@ -123,3 +123,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
+# Every `async def test_*` is collected as an asyncio test without a per-test
+# marker, matching the sidecar. Existing module-level `pytestmark` lines are
+# now redundant but harmless.
+asyncio_mode = "auto"
