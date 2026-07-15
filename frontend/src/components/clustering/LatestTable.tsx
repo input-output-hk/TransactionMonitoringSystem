@@ -10,6 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
 import { HelpDetails } from "@/components/ui/help-details";
+import { EmptyText, ErrorText, LoadingText } from "@/components/ui/status-text";
 import {
 	Select,
 	SelectContent,
@@ -147,15 +148,11 @@ export function LatestTable({ target }: { target: string }) {
 			{errorMsg && <p className="text-destructive text-sm">{errorMsg}</p>}
 
 			{isLoading ? (
-				<p className="text-muted-foreground text-sm">Loading interactions…</p>
+				<LoadingText>Loading interactions…</LoadingText>
 			) : isError ? (
-				<p className="text-destructive text-sm">
-					Failed to load the latest interactions.
-				</p>
+				<ErrorText>Failed to load the latest interactions.</ErrorText>
 			) : !rows.length ? (
-				<p className="text-muted-foreground text-sm">
-					No transactions stored yet. Use “Fetch newer from chain”.
-				</p>
+				<EmptyText>No transactions stored yet. Use “Fetch newer from chain”.</EmptyText>
 			) : (
 				<>
 					<p className="text-muted-foreground text-xs">

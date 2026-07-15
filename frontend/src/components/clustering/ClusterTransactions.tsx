@@ -16,6 +16,7 @@ import { CopyHash, VerdictBadge } from "./cells";
 import { formatAdaExact } from "@/lib/utils/numbers";
 import { formatTimeAgo } from "@/lib/utils/dates";
 import { TxLabelControl } from "./TxLabelControl";
+import { EmptyText, ErrorText, LoadingText } from "@/components/ui/status-text";
 
 type Props = { runId: string; target: string; clusterId: number };
 
@@ -24,23 +25,17 @@ export function ClusterTransactions({ runId, target, clusterId }: Props) {
 
 	if (isLoading)
 		return (
-			<p className="text-muted-foreground px-4 py-3 text-sm">
-				Loading transactions…
-			</p>
+			<LoadingText className="px-4 py-3">Loading transactions…</LoadingText>
 		);
 	if (isError)
 		return (
-			<p className="text-destructive px-4 py-3 text-sm">
-				Failed to load this cluster's transactions.
-			</p>
+			<ErrorText className="px-4 py-3">Failed to load this cluster's transactions.</ErrorText>
 		);
 
 	const rows = data?.transactions ?? [];
 	if (!rows.length)
 		return (
-			<p className="text-muted-foreground px-4 py-3 text-sm">
-				No transactions in this cluster.
-			</p>
+			<EmptyText className="px-4 py-3">No transactions in this cluster.</EmptyText>
 		);
 
 	return (

@@ -39,12 +39,9 @@ import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/lib/attacks";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AlertCircle, ArrowUp, Copy } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-
-// Recharts (+ its d3/redux transitive deps, ~280 KB gzip) loads as a
-// deferred async chunk so it doesn't bloat the initial dashboard bundle.
-const Sparkline = lazy(() => import("@/components/sparkline"));
+import Sparkline from "@/components/sparkline";
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -462,15 +459,7 @@ function GraphBarCard() {
 					{isError ? "Unavailable" : "Loading…"}
 				</div>
 			) : (
-				<Suspense
-					fallback={
-						<div className="text-muted-foreground mt-2 flex h-10 items-center text-xs">
-							Loading…
-						</div>
-					}
-				>
-					<Sparkline points={points} className="mt-2 h-10 w-full" />
-				</Suspense>
+				<Sparkline points={points} className="mt-2 h-10 w-full" />
 			)}
 			<div className="text-muted-foreground mt-1 text-xs">
 				{total} in last 14 days

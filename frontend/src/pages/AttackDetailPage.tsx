@@ -372,7 +372,7 @@ function RestoreDialog({
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent
 				showClose={false}
-				className="max-w-xl gap-8 bg-white dark:bg-[#373D3F]"
+				className="max-w-xl gap-8 bg-dialog"
 			>
 				<DialogHeader>
 					<DialogTitle className="text-center text-base font-normal">
@@ -1444,7 +1444,7 @@ function DeleteDialog({
 			    (#292929) so they read as recessed surfaces inside the frame. */}
 			<DialogContent
 				showClose={false}
-				className="max-w-sm bg-white dark:bg-[#373D3F]"
+				className="max-w-sm bg-dialog"
 			>
 				<DialogHeader>
 					<DialogTitle>Are you sure this is not an attack?</DialogTitle>

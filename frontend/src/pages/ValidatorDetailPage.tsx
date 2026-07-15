@@ -41,6 +41,7 @@ import { VerdictLegend } from "@/components/clustering/VerdictLegend";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ErrorText, LoadingText } from "@/components/ui/status-text";
 import {
 	type Run,
 	useAnomalyRuns,
@@ -126,11 +127,11 @@ function AnomaliesTab({ target }: { target: string }) {
 
 	if (isLoading)
 		return (
-			<p className="text-muted-foreground text-sm">Loading anomaly runs…</p>
+			<LoadingText>Loading anomaly runs…</LoadingText>
 		);
 	if (isError)
 		return (
-			<p className="text-destructive text-sm">Failed to load anomaly runs.</p>
+			<ErrorText>Failed to load anomaly runs.</ErrorText>
 		);
 
 	return (
