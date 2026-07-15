@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EmptyText, LoadingText } from "@/components/ui/status-text";
 import {
 	Table,
 	TableBody,
@@ -59,10 +60,10 @@ export function ClusterSummaryTable({
 		onSelectCluster ? onSelectCluster(id) : setLocalExpanded(id);
 
 	if (isLoading)
-		return <p className="text-muted-foreground text-sm">Loading clusters…</p>;
+		return <LoadingText>Loading clusters…</LoadingText>;
 	if (!clusters?.length)
 		return (
-			<p className="text-muted-foreground text-sm">No clusters in this run.</p>
+			<EmptyText>No clusters in this run.</EmptyText>
 		);
 
 	const toggle = (id: number) => setExpanded(expanded === id ? null : id);

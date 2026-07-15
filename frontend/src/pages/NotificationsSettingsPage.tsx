@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MultiSelect } from "@/components/ui/multi-select";
+import { LoadingText } from "@/components/ui/status-text";
 import {
 	Select,
 	SelectContent,
@@ -219,7 +220,7 @@ export function NotificationsSettingsPage() {
 	if (isError)
 		return <p className="text-status-offline p-6 text-sm">Failed to load.</p>;
 	if (isPending || !cfg)
-		return <p className="text-muted-foreground p-6 text-sm">Loading…</p>;
+		return <LoadingText className="p-6">Loading…</LoadingText>;
 
 	const channelNames = Object.keys(cfg.channels);
 	// contract_anomaly is selectable only when the sidecar is enabled; an already

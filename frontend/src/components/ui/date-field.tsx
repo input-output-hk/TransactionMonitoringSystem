@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
@@ -23,15 +24,12 @@ export function DateField({
 			<Label htmlFor={id} className="text-foreground text-xs">
 				{label}
 			</Label>
-			<input
+			<Input
 				id={id}
 				type="date"
 				value={value}
 				onChange={(e) => onChange(e.target.value)}
-				className={cn(
-					"border-border bg-input/40 text-foreground flex h-11 w-[180px] items-center rounded-sm border px-3 py-2 text-sm transition-colors",
-					"focus-visible:ring-ring focus-visible:ring-offset-background focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:outline-none",
-				)}
+				className="w-[180px]"
 			/>
 		</div>
 	);
