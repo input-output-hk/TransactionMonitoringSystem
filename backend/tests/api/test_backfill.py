@@ -31,7 +31,9 @@ def client(monkeypatch):
     return TestClient(app)
 
 
-_ADDR = "addr_test1qz3ql06nvc602eem2af4aefp7w5ce4ja7nuuarzavnkd06l"
+# A full, valid preprod (testnet) address; the network guard bech32-decodes it,
+# so a truncated stub would classify as unknown and skip the guard.
+_ADDR = "addr_test1qz3ql06nvc602eem2af4aefp7w5ce4ja7nuuarzavnkd06ljl64qlwnlynjwzevdrufxslpe29y47u5wxmv6nad026lqvehpe5"
 
 
 async def _fast(address, *, network, max_txs, progress):
