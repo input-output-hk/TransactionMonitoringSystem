@@ -30,7 +30,17 @@ DiscoveryWindow = Literal["history", "recent"]
 
 
 class SourceError(RuntimeError):
-    """Base error for chain data-source failures (provider-neutral)."""
+    """Base error for chain data-source failures (provider-neutral).
+
+    Pass ``client_safe=True`` when the message is authored by our own code (not
+    a raw upstream response body) and is safe to show to the client verbatim.
+    ``_safe_error`` then surfaces the message as-is instead of collapsing it to
+    a generic string; the default is False so an upstream body is never leaked.
+    """
+
+    def __init__(self, *args: object, client_safe: bool = False) -> None:
+        super().__init__(*args)
+        self.client_safe = client_safe
 
 
 class SourceNotFound(SourceError):
