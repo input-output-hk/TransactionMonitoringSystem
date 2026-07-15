@@ -36,6 +36,7 @@ from app import leader, notifications
 from app.api import (
     analysis,
     archive,
+    backfill,
     entities,
     lifecycle,
     notifications_config,
@@ -489,6 +490,7 @@ api_v1.include_router(auth_api.router)
 api_v1.include_router(users_api.router)
 api_v1.include_router(clustering_api.router)
 api_v1.include_router(notifications_config.router)
+api_v1.include_router(backfill.router)
 app.include_router(api_v1)
 
 
