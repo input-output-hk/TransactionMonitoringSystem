@@ -578,6 +578,9 @@ class Settings(BaseSettings):
 
     # Logging
     LOG_LEVEL: str = "INFO"
+    # "text" (human-readable, the default) or "json" (one object per line for
+    # log aggregators). Consumed by app.logging_utils.setup_logging.
+    LOG_FORMAT: str = "text"
 
     # Files are loaded in order with later files overriding earlier ones (see
     # _env_files docstring). The shared `.env` holds cross-network defaults;

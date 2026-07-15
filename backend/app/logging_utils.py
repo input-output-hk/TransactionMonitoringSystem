@@ -58,3 +58,58 @@ def configure_access_log_redaction() -> None:
     time uvicorn's handlers start emitting records either way.
     """
     logging.getLogger("uvicorn.access").addFilter(_RedactTokenFilter())
+
+
+class _JsonFormatter(logging.Formatter):
+    """One JSON object per line — greppable locally, parseable by any
+    aggregator. stdlib-only on purpose (no log-library dependency for four
+    fields).
+
+    Paired with the clustering sidecar's identical formatter
+    (services/clustering/backend/app/config.py); the two packages cannot
+    import each other, so keep them in sync when either changes.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+
+        entry: dict[str, object] = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        extra = getattr(record, "extra_fields", None)
+        if isinstance(extra, dict):
+            entry.update(extra)
+        if record.exc_info:
+            entry["exc"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
+
+def setup_logging() -> None:
+    """Install the root logging config, honoring ``LOG_LEVEL`` / ``LOG_FORMAT``.
+
+    The single entry point for logging setup across the app and the scripts,
+    replacing the several divergent ``logging.basicConfig`` calls that used
+    different format strings. ``LOG_LEVEL`` is upper-cased so a lower-case env
+    value (e.g. ``info``) no longer silently falls back. When
+    ``LOG_FORMAT=json`` every root handler emits ``_JsonFormatter`` lines.
+
+    Secret redaction (``_RedactTokenFilter``) is attached at the ROOT-HANDLER
+    level here so it scrubs records from every logger, not only
+    ``uvicorn.access`` — a real token/api_key that reaches any log line is
+    caught. Idempotent: re-invocation does not stack duplicate filters.
+    """
+    from app.config import settings
+
+    logging.basicConfig(
+        level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    as_json = settings.LOG_FORMAT.strip().lower() == "json"
+    for handler in logging.getLogger().handlers:
+        if as_json:
+            handler.setFormatter(_JsonFormatter())
+        if not any(isinstance(f, _RedactTokenFilter) for f in handler.filters):
+            handler.addFilter(_RedactTokenFilter())
