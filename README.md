@@ -12,7 +12,7 @@ Real-time transaction monitoring system for the Cardano blockchain. Ingests bloc
 
 ## Ingestion modes
 
-The `cardano-node` and `ogmios` services in `docker-compose.yml` are gated behind the `ingestion` Compose profile, so you can choose where transactions come from:
+The `cardano-node`, `ogmios`, and `kupo` services in `docker-compose.yml` are gated behind the `ingestion` Compose profile, so you can choose where transactions come from (`kupo` is the address→tx index backing the on-demand `POST /api/v1/backfill` historical backfill):
 
 | Mode | How to start | When to use |
 |---|---|---|
@@ -142,6 +142,8 @@ Interactive docs: `http://localhost:8000/docs`
 | GET | `/api/v1/transactions/stats/summary` | Aggregate stats (count, volume, fees) |
 | GET | `/api/v1/transactions/blocks/recent` | Recent blocks derived from the transactions table (params: `limit`) |
 | GET | `/api/v1/transactions/stats/throughput` | Recent transactions per minute over a sliding window (params: `window_minutes`) |
+| POST | `/api/v1/backfill` | Start an on-demand historical backfill of an address (Kupo-indexed discovery + Ogmios re-fetch; requires `KUPO_URL`). Admin session or API key |
+| GET | `/api/v1/backfill/{address}` | Status of the backfill job for an address |
 
 ### Lifecycle
 | Method | Path | Description |

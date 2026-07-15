@@ -22,7 +22,7 @@ Be respectful and constructive. Assume good faith, keep discussion technical, an
 # Backend (uv creates .venv from uv.lock, dev tools included)
 uv sync
 
-# Databases (Postgres, ClickHouse, Mailpit)
+# Databases (Postgres + ClickHouse; add `--profile mail` for the Mailpit dev SMTP sink)
 cp .env.example .env
 docker-compose up -d
 

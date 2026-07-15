@@ -18,14 +18,21 @@ and exploring their clusters lives in the main SPA (`frontend/src/pages` /
 
 ## How it runs
 
-The module reads each watched contract's transactions from the system's
-`tms_analytics` ClickHouse database (the same chain data the core scorers use,
-via `HostBackedRepo`) and writes its own state to the sibling `tms_clustering`
-database on the same ClickHouse server, so no chain data is duplicated. A
-scheduler polls the watchlist and onboards/classifies contracts automatically as
-new transactions are ingested, then publishes per-transaction verdicts to
-`tms_clustering.tx_contract_anomaly`. `app.cli migrate` creates the
+In its default mode (`CHAIN_SOURCE=host_ch`) the module reads each watched
+contract's transactions from the system's `tms_analytics` ClickHouse database (the
+same chain data the core scorers use, via `HostBackedRepo`) and writes its own state
+to the sibling `tms_clustering` database on the same ClickHouse server, so no chain
+data is duplicated. A scheduler polls the watchlist and onboards/classifies contracts
+automatically as new transactions are ingested, then publishes per-transaction
+verdicts to `tms_clustering.tx_contract_anomaly`. `app.cli migrate` creates the
 `tms_clustering` schema idempotently on startup.
+
+Setting `CHAIN_SOURCE=blockfrost` selects an alternative source that downloads an
+arbitrary address's transaction history over HTTP (blockfrost.io) into
+`tms_clustering` on demand, for clustering contracts the host has not ingested. In
+that mode the automatic feed is off (onboarding is manual) and the downloaded
+transactions are stored in `tms_clustering`; the clustering/anomaly analysis is
+identical to `host_ch`.
 
 The detection algorithms, feature engineering, online-classification design, and
 data model are documented in [docs/](docs/).
@@ -34,7 +41,8 @@ data model are documented in [docs/](docs/).
 
 ```
 backend/            FastAPI + Typer service (app/, tests/, Dockerfile, pyproject)
-  app/sources/host_ch/   reads the system's chain data (no external provider)
+  app/sources/host_ch/   default source: read the system's own chain data (no external provider)
+  app/blockfrost/        alt source (CHAIN_SOURCE=blockfrost): download address history over HTTP
   app/storage/clickhouse/host_backed.py   cross-database feature reads
   app/service/publish.py + scheduler.py   verdict projection + the automatic feed
 clickhouse/init/    idempotent schema (001…009_contract_anomaly), applied by migrate

@@ -35,24 +35,27 @@ expected column contract:
 - `redeemer_count` is a LEFT JOIN to `tx_script_features`, coalesced to `0` for
   non-script txs.
 
-A watched contract is an address `target`; its transactions are resolved from the
-host's `address_transactions` and bounded to the most recent `CLUSTERING_WINDOW_TXS`
-so DBSCAN / Isolation Forest and the O(n²) silhouette stay bounded on a high-volume
-mainnet contract. Because the host already ingested the chain, there is no external
-download and no second copy of the chain data.
+A watched contract is an address `target`. In the default `host_ch` mode its
+transactions are resolved from the host's `address_transactions` and bounded to the
+most recent `CLUSTERING_WINDOW_TXS` so DBSCAN / Isolation Forest and the O(n²)
+silhouette stay bounded on a high-volume mainnet contract. Because the host already
+ingested the chain, in that mode there is no external download and no second copy of
+the chain data.
 
-The module's schema still defines `transactions`, `tx_utxos`, `tx_utxo_assets`,
-and `ingest_cursor` in `tms_clustering` (they describe the column contract the
-feature builders expect), but in the integrated deployment they are **never
-populated**: writes to them and to the ingest cursor are no-ops, since the
-sidecar reads from `tms_analytics` rather than downloading anything.
+The module's schema defines `transactions`, `tx_utxos`, `tx_utxo_assets`, and
+`ingest_cursor` in `tms_clustering` (they describe the column contract the feature
+builders expect). Under `host_ch` they are **never populated**: writes to them and to
+the ingest cursor are no-ops, since the sidecar reads from `tms_analytics` rather than
+downloading anything. Under `CHAIN_SOURCE=blockfrost` they **are** populated: the
+download path fetches each transaction from blockfrost.io and writes it here, and the
+feature builders read from these tables instead of `tms_analytics`.
 
 | Table | Engine | ORDER BY | Purpose |
 |---|---|---|---|
-| `transactions` | `ReplacingMergeTree(ingested_at)` | `(target, tx_hash)` | Column contract for the per-tx shape facts (read from `tms_analytics`; not populated here). |
+| `transactions` | `ReplacingMergeTree(ingested_at)` | `(target, tx_hash)` | Per-tx shape facts. Under `host_ch` read from `tms_analytics` and not populated here; under `blockfrost` populated by the download path. |
 | `tx_utxos` | `ReplacingMergeTree` | `(target, tx_hash, role, idx, address)` | Column contract for per input/output UTXO graph features. |
 | `tx_utxo_assets` | `ReplacingMergeTree` | `(target, tx_hash, role, idx, unit)` | Column contract for native assets moved. |
-| `ingest_cursor` | `ReplacingMergeTree(updated_at)` | `(target)` | Resume cursor for the column contract; inert in the integrated deployment (no ingestion happens here). |
+| `ingest_cursor` | `ReplacingMergeTree(updated_at)` | `(target)` | Resume cursor for the column contract; inert under `host_ch` (no ingestion here), used by the `blockfrost` download path to resume discovery. |
 
 ### Derived results
 
@@ -253,6 +256,7 @@ Reprocessing and republishing append duplicate parts that `FINAL` dedups on read
 that accumulate on disk until a merge. At showcase scale this is negligible. For
 sustained use, run an occasional `OPTIMIZE TABLE tms_clustering.<table> FINAL` after
 large re-cluster batches (or add a TTL on the run tables) to bound part count and
-`FINAL` cost. Raw chain data is **not** stored here, so the on-disk footprint of
-`tms_clustering` is just clusters, runs, models, labels, and the
-`tx_contract_anomaly` projection, not a copy of the chain.
+`FINAL` cost. Under `host_ch`, raw chain data is **not** stored here, so the on-disk
+footprint of `tms_clustering` is just clusters, runs, models, labels, and the
+`tx_contract_anomaly` projection, not a copy of the chain. Under `blockfrost` it also
+holds the downloaded transactions / UTXOs / assets for each onboarded address.
