@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/table";
 import { type TxRow, useClusterTransactions } from "@/lib/api/clustering";
 import { CopyHash, VerdictBadge } from "./cells";
-import { formatAda, formatAge } from "./format";
+import { formatAdaExact } from "@/lib/utils/numbers";
+import { formatTimeAgo } from "@/lib/utils/dates";
 import { TxLabelControl } from "./TxLabelControl";
 
 type Props = { runId: string; target: string; clusterId: number };
@@ -67,13 +68,13 @@ export function ClusterTransactions({ runId, target, clusterId }: Props) {
 								<VerdictBadge verdict={t.verdict} />
 							</TableCell>
 							<TableCell className="text-muted-foreground" title={t.block_time}>
-								{formatAge(t.block_time)}
+								{formatTimeAgo(t.block_time, { compact: true })}
 							</TableCell>
 							<TableCell className="text-right tabular-nums">
-								{formatAda(t.fees, 0)}
+								{formatAdaExact(t.fees, 0)}
 							</TableCell>
 							<TableCell className="text-right tabular-nums">
-								{formatAda(t.total_output_lovelace, 0)}
+								{formatAdaExact(t.total_output_lovelace, 0)}
 							</TableCell>
 							<TableCell className="text-right tabular-nums">
 								{t.input_count}/{t.output_count}

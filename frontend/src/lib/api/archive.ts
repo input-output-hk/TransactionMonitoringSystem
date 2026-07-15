@@ -28,8 +28,12 @@ import type { Severity } from "@/lib/attacks";
 
 /* ---------- Wire format ---------- */
 
-/** Cardano network identifier. Same enum as the backend `NetworkType`. */
-export type Network = "mainnet" | "preprod" | "preview";
+/** Cardano network identifier (canonical definition in lib/api/fetch).
+ *  Imported for use in this module's types and re-exported so existing
+ *  `import { Network } from "@/lib/api/archive"` call sites keep working. */
+import type { Network } from "./fetch";
+
+export type { Network };
 
 /** Backend response row for `GET /api/v1/archive`. */
 export type ArchiveEntry = {

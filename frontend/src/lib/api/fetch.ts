@@ -18,12 +18,16 @@
  * sends one.
  */
 
-export const DEFAULT_NETWORK: "mainnet" | "preprod" | "preview" =
-	(import.meta.env.VITE_NETWORK as "mainnet" | "preprod" | "preview") ??
-	"preprod";
+/** The Cardano networks the dashboard can target. Single source of truth for
+ *  this union; other modules import it from here (or the re-export in
+ *  lib/api/archive) rather than re-spelling the literals. */
+export type Network = "mainnet" | "preprod" | "preview";
+
+export const DEFAULT_NETWORK: Network =
+	(import.meta.env.VITE_NETWORK as Network) ?? "preprod";
 
 /** Active Cardano network for all backend calls. */
-export function getNetwork(): "mainnet" | "preprod" | "preview" {
+export function getNetwork(): Network {
 	return DEFAULT_NETWORK;
 }
 

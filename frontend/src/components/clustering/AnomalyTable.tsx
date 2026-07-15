@@ -18,7 +18,8 @@ import { TableFooter } from "@/components/ui/table-footer";
 import { type AnomalyCandidate, useTopAnomalies } from "@/lib/api/clustering";
 import { cn } from "@/lib/utils";
 import { CopyHash, VerdictBadge } from "./cells";
-import { WEEKDAYS, formatAda, formatInt } from "./format";
+import { WEEKDAYS, formatInt } from "./format";
+import { formatAdaExact } from "@/lib/utils/numbers";
 import { ReasonChips } from "./ReasonChips";
 import { TxLabelControl } from "./TxLabelControl";
 
@@ -165,7 +166,7 @@ export function AnomalyTable({ runId, target }: Props) {
 								/>
 							</TableCell>
 							<TableCell className="text-right tabular-nums">
-								{formatAda(a.fees, 0)}
+								{formatAdaExact(a.fees, 0)}
 							</TableCell>
 							{showAll && (
 								<TableCell className="text-right tabular-nums">
@@ -174,15 +175,15 @@ export function AnomalyTable({ runId, target }: Props) {
 							)}
 							{showAll && (
 								<TableCell className="text-right tabular-nums">
-									{formatAda(a.total_input_lovelace, 0)}
+									{formatAdaExact(a.total_input_lovelace, 0)}
 								</TableCell>
 							)}
 							<TableCell className="text-right tabular-nums">
-								{formatAda(a.total_output_lovelace, 0)}
+								{formatAdaExact(a.total_output_lovelace, 0)}
 							</TableCell>
 							{showAll && (
 								<TableCell className="text-right tabular-nums">
-									{formatAda(a.net_lovelace, 0)}
+									{formatAdaExact(a.net_lovelace, 0)}
 								</TableCell>
 							)}
 							<TableCell className="text-right tabular-nums">

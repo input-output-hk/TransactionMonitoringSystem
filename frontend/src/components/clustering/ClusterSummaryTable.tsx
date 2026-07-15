@@ -27,7 +27,8 @@ import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { ClusterTag } from "./cells";
 import { ClusterTransactions } from "./ClusterTransactions";
-import { formatAda, formatInt } from "./format";
+import { formatInt } from "./format";
+import { formatAdaExact } from "@/lib/utils/numbers";
 import { VERDICT_BADGE, VERDICT_LABEL } from "./verdict";
 
 // The grid has 9 columns; the expanded drill-down row spans all of them.
@@ -111,10 +112,10 @@ export function ClusterSummaryTable({
 									)}
 								</TableCell>
 								<TableCell className="text-right tabular-nums">
-									{formatAda(c.avg_fees, 2)}
+									{formatAdaExact(c.avg_fees, 2)}
 								</TableCell>
 								<TableCell className="text-right tabular-nums">
-									{formatAda(c.avg_output_lovelace, 1)}
+									{formatAdaExact(c.avg_output_lovelace, 1)}
 								</TableCell>
 								<TableCell className="text-right tabular-nums">
 									{c.avg_inputs.toFixed(1)} / {c.avg_outputs.toFixed(1)}

@@ -5,9 +5,9 @@
  * `fetchWithAuth({ credentials: "include" })` — the SPA never reads or
  * writes the cookie directly.
  *
- * The mapping below converts backend snake_case payloads
- * (``full_name``, ``created_at``) to the camelCase shape the rest of
- * the app expects. Keep it centralized so callers don't deal with both.
+ * Payloads stay snake_case end to end, matching the backend and every other
+ * API module (see lib/api/README.md): `User` mirrors the backend field names
+ * verbatim, so there is no per-module case-mapping layer to keep in sync.
  */
 import { fetchWithAuth } from "./fetch";
 
@@ -24,22 +24,6 @@ export type UserStatus = "pending" | "active" | "disabled";
 export type User = {
 	id: string;
 	email: string;
-	fullName: string;
-	role: UserRole;
-	status: UserStatus;
-	createdAt: string;
-	lastLoginAt: string | null;
-};
-
-export type UsersListResponse = {
-	count: number;
-	total: number;
-	data: User[];
-};
-
-type ApiUser = {
-	id: string;
-	email: string;
 	full_name: string;
 	role: UserRole;
 	status: UserStatus;
@@ -47,17 +31,11 @@ type ApiUser = {
 	last_login_at: string | null;
 };
 
-function toUser(u: ApiUser): User {
-	return {
-		id: u.id,
-		email: u.email,
-		fullName: u.full_name,
-		role: u.role,
-		status: u.status,
-		createdAt: u.created_at,
-		lastLoginAt: u.last_login_at,
-	};
-}
+export type UsersListResponse = {
+	count: number;
+	total: number;
+	data: User[];
+};
 
 /* ---------- /api/v1/auth/* ---------- */
 
@@ -92,7 +70,7 @@ export async function verifyToken(token: string): Promise<User> {
 			| null;
 		throw new Error(err?.detail ?? `Verification failed (${res.status})`);
 	}
-	return toUser((await res.json()) as ApiUser);
+	return (await res.json()) as User;
 }
 
 /** Drops the current session server-side and clears the cookie. */
@@ -116,7 +94,7 @@ export async function fetchMe(): Promise<User | null> {
 	if (!res.ok) {
 		throw new Error(`me failed (${res.status})`);
 	}
-	return toUser((await res.json()) as ApiUser);
+	return (await res.json()) as User;
 }
 
 /* ---------- /api/v1/users (admin) ---------- */
@@ -132,21 +110,12 @@ export async function listUsers(
 	if (!res.ok) {
 		throw new Error(`list users failed (${res.status})`);
 	}
-	const json = (await res.json()) as {
-		count: number;
-		total: number;
-		data: ApiUser[];
-	};
-	return {
-		count: json.count,
-		total: json.total,
-		data: json.data.map(toUser),
-	};
+	return (await res.json()) as UsersListResponse;
 }
 
 export type CreateUserPayload = {
 	email: string;
-	fullName: string;
+	full_name: string;
 	role: UserRole;
 };
 
@@ -154,11 +123,7 @@ export async function createUser(payload: CreateUserPayload): Promise<User> {
 	const res = await fetchWithAuth("/api/v1/users", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			email: payload.email,
-			full_name: payload.fullName,
-			role: payload.role,
-		}),
+		body: JSON.stringify(payload),
 	});
 	if (!res.ok) {
 		const err = (await res.json().catch(() => null)) as
@@ -166,7 +131,7 @@ export async function createUser(payload: CreateUserPayload): Promise<User> {
 			| null;
 		throw new Error(err?.detail ?? `create user failed (${res.status})`);
 	}
-	return toUser((await res.json()) as ApiUser);
+	return (await res.json()) as User;
 }
 
 export async function deleteUser(id: string): Promise<void> {
