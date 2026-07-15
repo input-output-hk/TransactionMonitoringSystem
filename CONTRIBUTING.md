@@ -92,6 +92,14 @@ Comments explain why a constant has its value (the threat model, the protocol li
 | Backend recall gate | `cd backend && uv run pytest tests/analysis/` | The attack-must-fire cases. Must stay green on every detection change. |
 | Clustering sidecar | `cd services/clustering/backend && uv run pytest -q` | Needs its own env (`uv sync --extra dev`). |
 | Frontend | `cd frontend && pnpm lint && pnpm build` | Lint, then the type-checked build. |
+| Lint + types (backend) | `uv run ruff check backend && uv run mypy backend/app` | Also `ruff format --check backend`. CI runs all three. |
+| Lint + types (sidecar) | `cd services/clustering/backend && uv run ruff check . && uv run mypy app` | The sidecar runs `disallow_untyped_defs` globally. |
+
+mypy runs at a lenient baseline (untyped defs allowed) with a growing strict
+cohort: modules listed in the root `pyproject.toml` `[[tool.mypy.overrides]]`
+block hold to `disallow_untyped_defs`. When you fully annotate a module, add it
+to that list (confirm with `uv run mypy <module> --disallow-untyped-defs`); the
+aim is to grow the cohort until strict can become the global default.
 
 ## Commits and pull requests
 

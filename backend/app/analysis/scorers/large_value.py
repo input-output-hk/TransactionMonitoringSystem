@@ -178,7 +178,8 @@ class LargeValueScorer(BaseScorer):
                 "quantity_digits",
             )
         else:
-            p50_qd, p99_qd, bl1 = (*_anchor(_BOOT, "quantity_digits"), "bootstrap")
+            _qd = _anchor(_BOOT, "quantity_digits")
+            p50_qd, p99_qd, bl1 = _qd[0], _qd[1], "bootstrap"
 
         p50_cb, p99_cb, _ = _resolve(
             "value_cbor_bytes",
