@@ -17,45 +17,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Security
 from pydantic import BaseModel, Field
 
+from app.api._params import ADDRESS_RE
 from app.auth import verify_api_key
 from app.config import settings
 from app.ingestion.address_backfill import backfill_address
+from app.utils.bech32 import address_network_class
 
 logger = logging.getLogger(__name__)
-
-# Same address shape the transactions API accepts: bech32 / legacy base58, no SQL
-# metacharacters. Length-bounded so a junk value is rejected before any work.
-_ADDRESS_RE = re.compile(r"^[A-Za-z0-9_]{10,200}$")
 
 router = APIRouter(prefix="/backfill", tags=["backfill"])
 
 
-def _address_network_class(address: str) -> str | None:
-    """``"mainnet"`` / ``"testnet"`` from a Shelley address's CIP-19 human-readable
-    prefix (mainnet is ``addr``/``stake``; every testnet is ``addr_test``/
-    ``stake_test``). Returns None for Byron base58 or anything else we can't
-    classify from the prefix, so those are not blocked. The ``_test`` prefixes
-    are checked first because ``addr_test`` also starts with ``addr``."""
-    if address.startswith(("addr_test", "stake_test")):
-        return "testnet"
-    if address.startswith(("addr", "stake")):
-        return "mainnet"
-    return None
-
-
 def _network_mismatch(address: str, network: str) -> str | None:
     """A client-facing error string when the address's network class cannot match
-    the configured network, else None. Testnets share the ``addr_test`` prefix, so
-    this catches only the mainnet-vs-testnet class error (the common mistake, e.g.
-    a mainnet contract submitted to a preprod instance), NOT preprod-vs-preview."""
-    addr_class = _address_network_class(address)
+    the configured network, else None. Every testnet shares network id 0, so this
+    catches only the mainnet-vs-testnet class error (the common mistake, e.g. a
+    mainnet contract submitted to a preprod instance), NOT preprod-vs-preview."""
+    addr_class = address_network_class(address)
     if addr_class is None:
         return None
     expected = "mainnet" if network == "mainnet" else "testnet"
@@ -135,7 +119,7 @@ async def start_backfill(req: BackfillRequest) -> dict:
     network, 503 when Kupo is not configured, 409 when a backfill for the same
     address is already running.
     """
-    if not _ADDRESS_RE.match(req.address):
+    if not ADDRESS_RE.match(req.address):
         raise HTTPException(status_code=422, detail="Invalid address format")
     network = settings.CARDANO_NETWORK
     mismatch = _network_mismatch(req.address, network)
