@@ -25,7 +25,7 @@ C4Container
         Boundary(services, "Services") {
             Container(api, "API Gateway", "FastAPI + Uvicorn", "REST and WebSocket endpoints. API key authentication, per-key rate limiting, CORS. Reverse-proxies /api/clustering/* to the clustering module and merges its contract_anomaly verdict into analysis results.")
             Container(analysis, "Analysis Engine", "Python", "9-class Polimi detection engine. Reads unscored transactions from Analytics Warehouse. Assigns multi-class risk scores and labels. Writes analysis results back to Analytics Warehouse.")
-            Container(clustering, "Clustering Module", "Python + FastAPI + scikit-learn", "[Optional, --profile clustering] First-party sidecar (services/clustering). Per-watched-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict; reads chain facts from the Analytics Warehouse, owns its own ClickHouse database.")
+            Container(clustering, "Clustering Module", "Python + FastAPI + scikit-learn", "[Optional, --profile clustering] First-party sidecar (services/clustering). Per-watched-contract DBSCAN clustering + IsolationForest/LOF anomaly detection. Publishes the contract_anomaly verdict; owns its own ClickHouse database. Default source (host_ch) reads chain facts from the Analytics Warehouse; CHAIN_SOURCE=blockfrost instead downloads an address's history over HTTP (blockfrost.io) on demand.")
         }
 
         Boundary(presentation, "Presentation") {

@@ -9,7 +9,7 @@ The TMS connects to a Cardano node through Ogmios, a WebSocket bridge. You must 
 Two options:
 
 - **External infrastructure (recommended for production/staging):** run node + Ogmios separately and point `OGMIOS_WS_URL` at the remote endpoint. The details below describe this path.
-- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node` and `ogmios` services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json` and `topology.json`, plus ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
+- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json` and `topology.json`, plus ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
 
 | Component | Version | Notes |
 |---|---|---|
@@ -329,13 +329,13 @@ WebSocket note: browsers cannot set custom headers on WS upgrades, so the dashbo
 
 ### Magic-link email in production
 
-The compose stack bundles Mailpit as a catch-all SMTP sink for development: every email the app sends is captured and viewable at `http://127.0.0.1:8025`, and nothing is forwarded. That convenience is a liability once real users sign in, because magic-link emails are login credentials. If `SMTP_HOST` is left at its `mailpit` default in production, every sign-in link accumulates in an unauthenticated inbox on the host.
+The compose stack can bundle Mailpit as a catch-all SMTP sink for development, opt-in via `--profile mail`: with that profile every email the app sends is captured and viewable at `http://127.0.0.1:8025`, and nothing is forwarded. The default deployment (`--profile app`) does not start Mailpit and the app does not depend on it. Magic-link emails are login credentials, so leaving `SMTP_HOST` at its `mailpit` default in production is wrong either way: with `--profile mail` active, every sign-in link accumulates in an unauthenticated inbox on the host; without it, sends fail (logged, tolerated) and no one can sign in.
 
 For production deployments:
 
 1. Point `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (plus `SMTP_USE_TLS` or `SMTP_USE_STARTTLS`) at the customer's SMTP provider.
 2. Set `APP_BASE_URL` to the public dashboard URL so emailed links resolve.
-3. Stop the Mailpit container once the stack is up: `docker compose stop mailpit`. The app only requires it at startup ordering time; SMTP failures at runtime are tolerated (logged, silent 200 to the caller).
+3. Do not pass `--profile mail` in production: Mailpit is not started by the default `--profile app`, and the app has no dependency on it, so there is nothing to stop. (SMTP failures at runtime are tolerated anyway: logged, silent 200 to the caller.)
 
 ### Webhook notifications: payload and signature verification
 

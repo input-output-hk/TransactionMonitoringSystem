@@ -14,8 +14,10 @@ The module reads each watched contract's transactions from the TMS's
 scorers already use) via `HostBackedRepo`, selected by `CHAIN_SOURCE=host_ch`.
 Its own state (clusters, anomaly runs, models, classifications, the
 `tx_contract_anomaly` projection) lives in the sibling `tms_clustering` database
-on the same server. There is no external download: the data is already in the
-system when a contract is onboarded.
+on the same server. Under `host_ch` there is no external download: the data is
+already in the system when a contract is onboarded. (The alternative
+`CHAIN_SOURCE=blockfrost` instead downloads the address's history over HTTP; see the
+source-selection note below.)
 
 ## Why this is needed (one paragraph)
 
@@ -49,12 +51,15 @@ These are load-bearing and the design keeps them:
 > **Status: implemented.** The `ChainSource` seam ships: `app/sources/base.py`
 > (protocol + `NormalizedTx` + the `SourceError`/`SourceNotFound`/`SourceRateLimited`
 > taxonomy) and `app/sources/factory.py` (`get_source` keyed by `CHAIN_SOURCE`).
-> The integrated deployment runs `CHAIN_SOURCE=host_ch`:
+> The integrated deployment defaults to `CHAIN_SOURCE=host_ch`:
 > `app/sources/host_ch/source.py` (`HostChainSource`) reads the host TMS's
 > already-ingested chain data from `tms_analytics`, paired with `HostBackedRepo`
-> for the feature reads. The seam is the single point of source selection; the
-> delivered system is wired to `host_ch` and uses no external download path. The
-> ingester/service/CLI are typed to `ChainSource` and import no provider package.
+> for the feature reads, and uses no external download path. A second implementation,
+> `app/blockfrost/source.py` (`BlockfrostSource`), ships behind the same seam and
+> DOES download over HTTP (from blockfrost.io) when `CHAIN_SOURCE=blockfrost`. The
+> seam is the single point of source selection; the ingester/service/CLI are typed to
+> `ChainSource` and import no provider package (blockfrost is imported lazily only in
+> the factory).
 > One deviation from the protocol sketch below, made so the seam stays a pure,
 > behaviour-preserving abstraction: discovery is `tx_hash_pages(...)` with
 > explicit resume params (host_ch resumes by slot: `slot:<n>`) rather than a

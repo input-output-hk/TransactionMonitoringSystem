@@ -3,11 +3,15 @@
 Reference documentation for the TMS clustering module, the detection module that
 clusters a watched contract's transactions (a script address or a minting policy
 id) and flags outliers, surfacing them as the `contract_anomaly` attack class.
-It does not download chain data: it reads each watched contract's transactions
-from the system's own `tms_analytics` ClickHouse database (the same Ogmios-ingested
-data the core scorers use, via `HostBackedRepo`), fits per-contract DBSCAN clusters
-and an anomaly ensemble, then classifies new transactions and publishes verdicts to
-the sibling `tms_clustering` database.
+In its default mode (`CHAIN_SOURCE=host_ch`) it does not download chain data: it
+reads each watched contract's transactions from the system's own `tms_analytics`
+ClickHouse database (the same Ogmios-ingested data the core scorers use, via
+`HostBackedRepo`), fits per-contract DBSCAN clusters and an anomaly ensemble, then
+classifies new transactions and publishes verdicts to the sibling `tms_clustering`
+database. A second source, `CHAIN_SOURCE=blockfrost`, instead downloads an arbitrary
+address's transaction history over HTTP (blockfrost.io) into `tms_clustering` for
+on-demand clustering of contracts the host has not ingested; the analysis is
+identical either way (see [architecture.md](architecture.md)).
 
 For how the module runs (the `clustering` compose service, the `CLUSTERING_ENABLED`
 flag, the scheduler's automatic feed, build and test commands), see the module
@@ -48,9 +52,11 @@ data model, API surface, and design.
  └──────────────┘                           └────────────────────────┘
 ```
 
-Both databases live on the same ClickHouse server, so no chain data is duplicated.
-The watched-contract management and cluster/anomaly drill-down UI is part of the
-main TMS SPA, not a separate interface.
+Both databases live on the same ClickHouse server; in the default `host_ch` mode no
+chain data is duplicated (the diagram above shows that mode). The `blockfrost` source
+instead stores a downloaded copy of each onboarded address's history in
+`tms_clustering`. The watched-contract management and cluster/anomaly drill-down UI is
+part of the main TMS SPA, not a separate interface.
 
 ## Core idea: one per-contract pipeline
 
