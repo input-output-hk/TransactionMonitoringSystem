@@ -371,7 +371,9 @@ async def _preserve_unparseable(
     try:
         await raw_store.write_parse_failed(network, tx_id, tx_data, ts or datetime.now(UTC))
     except Exception as exc:
-        logger.error("Backfill: failed to preserve raw payload for unparseable tx %s: %s", tx_id, exc)
+        logger.error(
+            "Backfill: failed to preserve raw payload for unparseable tx %s: %s", tx_id, exc
+        )
 
 
 async def _write_raw_payloads(

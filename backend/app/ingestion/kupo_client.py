@@ -107,9 +107,7 @@ class KupoClient:
             raise KupoError("Kupo /health did not return an object")
         return data
 
-    async def address_tx_points(
-        self, address: str, *, max_txs: int | None = None
-    ) -> list[TxPoint]:
+    async def address_tx_points(self, address: str, *, max_txs: int | None = None) -> list[TxPoint]:
         """The block points of the transactions touching ``address``, newest
         first, capped at ``max_txs`` distinct transactions.
 
@@ -131,9 +129,7 @@ class KupoClient:
         # For a pathologically active address this can be large; it is bounded only
         # by KUPO_TIMEOUT_SECONDS today. A server-side limit (Kupo has no cursor on
         # /matches) or a streaming parse would tighten this if it ever bites.
-        matches = await self._get_json(
-            f"/matches/{address}", params={"order": "most_recent_first"}
-        )
+        matches = await self._get_json(f"/matches/{address}", params={"order": "most_recent_first"})
         if not isinstance(matches, list):
             raise KupoError(f"Kupo /matches/{address} did not return a list")
 
