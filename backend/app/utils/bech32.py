@@ -106,6 +106,22 @@ def _decode_address_bytes(address: str) -> list[int] | None:
     return convertbits(decoded[1], 5, 8, pad=False)
 
 
+def address_network_class(address: str) -> str | None:
+    """``"mainnet"`` / ``"testnet"`` for a Shelley address, from the network id in
+    the header byte's low nibble (CIP-19: ``1`` = mainnet, ``0`` = testnet).
+
+    Returns ``None`` for Byron base58 or anything that does not bech32-decode, so
+    a caller using this to reject a network mismatch does not block an address it
+    cannot classify. Every testnet shares network id ``0``, so this distinguishes
+    mainnet from testnet but NOT preprod from preview.
+    """
+    raw = _decode_address_bytes(address)
+    if not raw:
+        return None
+    # header byte = (address_type << 4) | network_id
+    return "mainnet" if (raw[0] & 0x0F) == 1 else "testnet"
+
+
 def payment_credential_hex(address: str) -> str | None:
     """Return the 56-hex payment credential of a Shelley ``addr…``, else ``None``.
 

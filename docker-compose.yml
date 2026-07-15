@@ -126,6 +126,54 @@ services:
     profiles:
       - ingestion
 
+  kupo:
+    # Address→transaction index the node/Ogmios cannot provide; it is what the
+    # backend's on-demand historical backfill queries (ingestion/kupo_client.py,
+    # ingestion/address_backfill.py) to find which blocks an address's txs live
+    # in, before re-fetching those blocks at full fidelity via chain-sync.
+    # Pinned like every other image (ADR-004 rationale): a silent major bump
+    # could change the HTTP shape the client parses. Reads the node socket
+    # directly (no Ogmios hop), sharing the node-ipc + config volumes.
+    image: cardanosolutions/kupo:v2.11.0
+    container_name: tms-kupo
+    depends_on:
+      - cardano-node
+    command:
+      - --node-socket
+      - /ipc/node.socket
+      - --node-config
+      - /config/config.json
+      - --host
+      - 0.0.0.0
+      - --port
+      - "1442"
+      - --workdir
+      - /kupo-db
+      # Match every address so any onboarded contract is answerable. KUPO_SINCE
+      # bounds the one-time index cost: 'origin' indexes the full chain (needed
+      # to backfill an OLD contract's complete history, but large on mainnet),
+      # or a 'slot.header_hash' point to only index from there forward. Set it
+      # in .env.${TMS_ENV}.
+      - --match
+      - "*"
+      - --since
+      - ${KUPO_SINCE:-origin}
+      # First-sync speedup: build the DB indexes once at the end of the initial
+      # catch-up instead of per-block. No-op on later restarts.
+      - --defer-db-indexes
+    volumes:
+      - ${CARDANO_CONFIG_DIR:-./cardano-config/preprod}:/config:ro
+      - node-ipc:/ipc
+      - kupo-db:/kupo-db
+    ports:
+      - "127.0.0.1:1442:1442"
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - tms-network
+    profiles:
+      - ingestion
+
   # Local SMTP catch-all for magic-link emails. Anything sent to port 1025
   # is captured (never forwarded) and viewable in the web UI at :8025.
   # Customer prod deployments swap this for a real SMTP server via the
@@ -175,6 +223,10 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
+      # Address backfill is opt-in: empty by default (POST /api/v1/backfill then
+      # returns 503). Set to http://kupo:1442 when the ingestion-profile kupo
+      # service runs, or to a co-located kupo on a remote node box.
+      - KUPO_URL=${KUPO_URL:-}
       - RAW_STORE_PATH=/data/raw
       - RAW_STORE_ENABLED=${RAW_STORE_ENABLED:-true}
       # Magic-link SMTP defaults — point to the docker-compose mailpit
@@ -350,6 +402,8 @@ volumes:
   cardano-node-db:
     driver: local
   node-ipc:
+    driver: local
+  kupo-db:
     driver: local
 
 networks:

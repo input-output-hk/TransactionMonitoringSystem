@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Security
 from pydantic import BaseModel
 
-from app.api._params import NetworkParam, PageLimit, TimeFromParam, TimeToParam
+from app.api._params import ADDRESS_RE, NetworkParam, PageLimit, TimeFromParam, TimeToParam
 from app.auth import verify_api_key
 from app.config import settings
 from app.db import clickhouse
@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Cardano tx hash: exactly 64 lowercase hex characters.
 _TX_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-# Cardano addresses: bech32 (addr1.../addr_test1...) and legacy base58 (Ae2.../Dzz...).
-# Only alphanumeric + underscore; no SQL metacharacters possible.
-_ADDRESS_RE = re.compile(r"^[A-Za-z0-9_]{10,200}$")
+# Address shape is shared across endpoints; see app.api._params.ADDRESS_RE.
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -90,7 +88,7 @@ async def get_transactions(
     api_key: str = Security(verify_api_key),
 ):
     """List transactions from ClickHouse."""
-    if address and not _ADDRESS_RE.match(address):
+    if address and not ADDRESS_RE.match(address):
         raise HTTPException(status_code=422, detail="Invalid address format")
     try:
         query_network = network or settings.CARDANO_NETWORK

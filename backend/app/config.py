@@ -71,6 +71,36 @@ class Settings(BaseSettings):
     PIPELINE_BLOCK_AGE_DEGRADED_SECONDS: int = 120
     PIPELINE_BLOCK_AGE_DOWN_SECONDS: int = 300
 
+    # Kupo Configuration
+    # Kupo (github.com/CardanoSolutions/kupo) is the address→transaction index the
+    # base node/Ogmios cannot provide. It powers on-demand historical backfill of an
+    # address whose transactions predate this node's tip-forward sync (see
+    # ingestion/address_backfill.py). Empty string = backfill disabled.
+    KUPO_URL: str = ""
+    # Cap on a single Kupo HTTP call; matches the clustering-proxy timeout since
+    # /matches for a busy address can return a large body.
+    KUPO_TIMEOUT_SECONDS: float = 30.0
+    # Latest-N transactions a backfill pulls when the request omits max_txs, and
+    # the hard ceiling on any single request. The ceiling bounds the block scan
+    # one operator call can trigger (a sparse old address spans many blocks).
+    BACKFILL_DEFAULT_MAX_TXS: int = 500
+    BACKFILL_MAX_TXS_CAP: int = 5000
+    # At most one backfill scan runs at a time: a single-process deploy (ADR-005)
+    # shares one event loop with the API, live chain-sync, and mempool monitor, so
+    # concurrent multi-block scans would contend for it. Serialising them keeps the
+    # scan off the critical path of live ingestion.
+    BACKFILL_MAX_CONCURRENT: int = 1
+    # Hard wall on a single scan. max_txs bounds the tx COUNT but not the slot span
+    # (a sparse old address forces a walk across a wide range), so an unbounded scan
+    # could hold a worker for hours; on timeout the job is marked failed. This also
+    # auto-clears the same-address 409 guard, so a wedged scan cannot block re-runs
+    # of that address forever.
+    BACKFILL_TIMEOUT_SECONDS: float = 3600.0
+    # Finished/failed jobs kept in the in-memory job store. Bounds memory against an
+    # authenticated caller starting backfills for many distinct addresses; the
+    # oldest finished jobs are evicted first (running jobs are never evicted).
+    BACKFILL_JOB_RETENTION: int = 100
+
     # API Server Configuration
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
