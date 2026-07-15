@@ -115,11 +115,22 @@ class KupoClient:
 
         Both sides of the address's activity are included: the match's own
         ``transaction_id`` (the tx that *created* an output at the address) and
-        ``spent_at.transaction_id`` (the tx that later *spent* it). Their union is
-        the address's full transaction set : exactly what ``address_transactions``
-        records. A transaction occupies one block, so the first point seen per
-        hash is canonical and later duplicates are ignored.
+        ``spent_at.transaction_id`` (the tx that later *spent* it). A transaction
+        occupies one block, so the first point seen per hash is canonical and
+        later duplicates are ignored.
+
+        Limitation: Kupo indexes the UTxO set, so this surfaces the transactions
+        that successfully created or spent an output at the address. A phase-2
+        *failed* transaction that targeted the address does not appear (its
+        collateral is consumed at the collateral address, not here), so a
+        backfilled history can omit failed attack attempts against the address.
+        Recovering those would need a separate block-range scan and is out of
+        scope for this index-driven backfill.
         """
+        # The full /matches body is buffered and parsed before max_txs is applied.
+        # For a pathologically active address this can be large; it is bounded only
+        # by KUPO_TIMEOUT_SECONDS today. A server-side limit (Kupo has no cursor on
+        # /matches) or a streaming parse would tighten this if it ever bites.
         matches = await self._get_json(
             f"/matches/{address}", params={"order": "most_recent_first"}
         )
