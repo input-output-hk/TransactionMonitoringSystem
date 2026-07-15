@@ -71,6 +71,21 @@ class Settings(BaseSettings):
     PIPELINE_BLOCK_AGE_DEGRADED_SECONDS: int = 120
     PIPELINE_BLOCK_AGE_DOWN_SECONDS: int = 300
 
+    # Kupo Configuration
+    # Kupo (github.com/CardanoSolutions/kupo) is the address→transaction index the
+    # base node/Ogmios cannot provide. It powers on-demand historical backfill of an
+    # address whose transactions predate this node's tip-forward sync (see
+    # ingestion/address_backfill.py). Empty string = backfill disabled.
+    KUPO_URL: str = ""
+    # Cap on a single Kupo HTTP call; matches the clustering-proxy timeout since
+    # /matches for a busy address can return a large body.
+    KUPO_TIMEOUT_SECONDS: float = 30.0
+    # Latest-N transactions a backfill pulls when the request omits max_txs, and
+    # the hard ceiling on any single request. The ceiling bounds the block scan
+    # one operator call can trigger (a sparse old address spans many blocks).
+    BACKFILL_DEFAULT_MAX_TXS: int = 500
+    BACKFILL_MAX_TXS_CAP: int = 5000
+
     # API Server Configuration
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
