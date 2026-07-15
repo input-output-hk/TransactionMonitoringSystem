@@ -19,4 +19,11 @@ def get_source(settings: Settings) -> ChainSource:
         from app.sources.host_ch import HostChainSource
 
         return HostChainSource(settings)
+    if name == "blockfrost":
+        # On-demand download of an arbitrary address's history over HTTP (no local
+        # index, no extra disk). Imported lazily so host_ch deployments don't drag
+        # in httpx/Blockfrost. Not host-backed: routes through the download path.
+        from app.blockfrost.source import BlockfrostSource
+
+        return BlockfrostSource(settings)
     raise ValueError(f"unknown CHAIN_SOURCE {settings.chain_source!r}")
