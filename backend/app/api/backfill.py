@@ -6,11 +6,20 @@ re-fetch (see ``ingestion/address_backfill.py``), so a contract whose activity
 predates this node's tip-forward sync can be onboarded. ``GET
 /api/v1/backfill/{address}`` reports the job's status and summary.
 
+Starting a backfill is a heavy, state-changing operator action, so it is gated by
+``require_admin_or_api_key`` (an Admin session or an API key; a non-admin Reviewer
+session is rejected) and writes an audit row, matching the clustering proxy's
+mutate path. Reading a job's status is a plain authenticated read.
+
 The job store is in-memory: a single-process deploy (ADR-005) needs nothing more,
 and a restart forgetting finished jobs is harmless because the ingested rows are
 already durable in ClickHouse and a re-run is idempotent (ReplacingMergeTree).
-This is deliberately operator-initiated, not automatic: an old, sparse address
-can span a wide slot range, so kicking off that block scan is an explicit action.
+Finished jobs are evicted past ``BACKFILL_JOB_RETENTION`` so the store cannot grow
+without bound. Each scan is bounded by ``BACKFILL_TIMEOUT_SECONDS`` (a timed-out
+job becomes ``failed``, which also releases the same-address 409 guard), and at
+most ``BACKFILL_MAX_CONCURRENT`` scans run at once. This is deliberately
+operator-initiated, not automatic: an old, sparse address can span a wide slot
+range, so kicking off that block scan is an explicit action.
 """
 
 from __future__ import annotations
@@ -20,18 +29,24 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Security
+from fastapi import APIRouter, Depends, HTTPException, Request, Security
 from pydantic import BaseModel, Field
 
+from app import audit
 from app.api._params import ADDRESS_RE
 from app.auth import verify_api_key
+from app.auth.deps import require_admin_or_api_key
 from app.config import settings
-from app.ingestion.address_backfill import backfill_address
+from app.ingestion.address_backfill import BackfillError, backfill_address
+from app.ingestion.kupo_client import KupoError, KupoUnavailable
 from app.utils.bech32 import address_network_class
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/backfill", tags=["backfill"])
+
+# Chars of the address echoed in progress log lines (see address_backfill._ADDR_PREVIEW).
+_ADDR_PREVIEW = 24
 
 
 def _network_mismatch(address: str, network: str) -> str | None:
@@ -87,37 +102,79 @@ def _public(job: _Job) -> dict:
     }
 
 
+def _safe_job_error(exc: BaseException) -> str:
+    """A concise, client-safe error for the job view. The full exception (which
+    can carry the internal Kupo URL or an upstream response body) is logged
+    server-side; the client sees only a stable category string, never the raw
+    message. Mirrors the clustering sidecar's ``_safe_error`` discipline."""
+    if isinstance(exc, TimeoutError):
+        return f"Backfill exceeded the {settings.BACKFILL_TIMEOUT_SECONDS:g}s time limit"
+    if isinstance(exc, KupoUnavailable):
+        return "Backfill unavailable: Kupo is not configured"
+    if isinstance(exc, KupoError):
+        return "Kupo request failed; see server logs"
+    if isinstance(exc, BackfillError):
+        return "Backfill failed during the chain scan; see server logs"
+    return "Backfill failed unexpectedly; see server logs"
+
+
+def _evict_finished_jobs() -> None:
+    """Bound the in-memory store: drop the oldest finished/failed jobs beyond
+    ``BACKFILL_JOB_RETENTION``. Running jobs are never evicted (their task and the
+    409 guard depend on them). ``started_at`` is an ISO-8601 UTC string, so a
+    lexical sort is chronological."""
+    finished = [(key, job) for key, job in _jobs.items() if job.status != "running"]
+    excess = len(finished) - settings.BACKFILL_JOB_RETENTION
+    if excess <= 0:
+        return
+    finished.sort(key=lambda kv: kv[1].started_at)  # oldest first
+    for key, _job in finished[:excess]:
+        _jobs.pop(key, None)
+
+
 async def _run(job: _Job) -> None:
     """Run the backfill and record its outcome on the job. Never raises: the
-    result is polled via GET, so a failure becomes ``status='failed'`` with the
-    message rather than an unobserved task exception."""
+    result is polled via GET, so a failure becomes ``status='failed'`` with a
+    client-safe message rather than an unobserved task exception. The scan is
+    wrapped in a hard timeout so a stuck Ogmios cannot pin the job (and the
+    same-address 409 guard) indefinitely."""
     try:
-        result = await backfill_address(
-            job.address,
-            network=job.network,
-            max_txs=job.max_txs,
-            progress=lambda m: logger.info("backfill[%s…]: %s", job.address[:24], m),
+        result = await asyncio.wait_for(
+            backfill_address(
+                job.address,
+                network=job.network,
+                max_txs=job.max_txs,
+                progress=lambda m: logger.info("backfill[%s…]: %s", job.address[:_ADDR_PREVIEW], m),
+            ),
+            timeout=settings.BACKFILL_TIMEOUT_SECONDS,
         )
         job.result = {
             "requested_txs": result.requested_txs,
             "txs_ingested": result.txs_ingested,
             "blocks_scanned": result.blocks_scanned,
             "missing_tx_hashes": result.missing_tx_hashes,
+            "complete": result.complete,
+            "degraded_reason": result.degraded_reason,
         }
         job.status = "done"
     except Exception as exc:
         job.status = "failed"
-        job.error = str(exc)
+        job.error = _safe_job_error(exc)
         logger.exception("backfill failed for %s", job.address)
 
 
-@router.post("", status_code=202, dependencies=[Security(verify_api_key)])
-async def start_backfill(req: BackfillRequest) -> dict:
+@router.post("", status_code=202)
+async def start_backfill(
+    req: BackfillRequest,
+    request: Request,
+    principal: str = Depends(require_admin_or_api_key),
+) -> dict:
     """Start a backfill for ``address`` (returns 202 with the job view).
 
     422 on a malformed address or a mainnet/testnet mismatch with the configured
     network, 503 when Kupo is not configured, 409 when a backfill for the same
-    address is already running.
+    address is already running, 429 when the global concurrent-scan limit is
+    reached. Requires an Admin session or an API key.
     """
     if not ADDRESS_RE.match(req.address):
         raise HTTPException(status_code=422, detail="Invalid address format")
@@ -136,6 +193,21 @@ async def start_backfill(req: BackfillRequest) -> dict:
         raise HTTPException(
             status_code=409, detail="A backfill for this address is already running"
         )
+    running = sum(1 for job in _jobs.values() if job.status == "running")
+    if running >= settings.BACKFILL_MAX_CONCURRENT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many backfills already running; retry once one finishes",
+        )
+    await audit.record(
+        event_type="address_backfill",
+        action="start",
+        entity_type="address",
+        entity_id=req.address,
+        details={"network": network, "max_txs": max_txs},
+        request=request,
+        actor=audit.actor_from_principal(principal),
+    )
     job = _Job(
         status="running",
         address=req.address,
@@ -145,6 +217,7 @@ async def start_backfill(req: BackfillRequest) -> dict:
     )
     job.task = asyncio.create_task(_run(job))
     _jobs[key] = job
+    _evict_finished_jobs()
     return _public(job)
 
 

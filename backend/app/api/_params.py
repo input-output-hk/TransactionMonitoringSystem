@@ -17,8 +17,10 @@ from app.models.transaction import NetworkType
 # Cardano address shape accepted across the API: Shelley bech32 (addr1.../
 # addr_test1...) and legacy Byron base58 (Ae2.../Ddz...). Alphanumeric plus
 # underscore only, so no SQL metacharacter can reach a query; length-bounded.
-# Single-sourced here so endpoints validate addresses identically.
-ADDRESS_RE = re.compile(r"^[A-Za-z0-9_]{10,200}$")
+# Single-sourced here so endpoints validate addresses identically. Anchored with
+# ``\Z`` (not ``$``) so a value with a trailing newline is rejected: ``$`` also
+# matches just before a final ``\n``, which would let "addr…\n" validate.
+ADDRESS_RE = re.compile(r"^[A-Za-z0-9_]{10,200}\Z")
 
 # The optional ``?network`` selector shared by every network-scoped endpoint.
 # Callers default it to None (``network: NetworkParam = None``) so the route falls

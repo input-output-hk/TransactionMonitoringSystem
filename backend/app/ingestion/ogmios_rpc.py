@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def jsonrpc_message(method: str, params: dict | None, request_id: str) -> str:
@@ -41,5 +44,23 @@ async def send_recv(ws: Any, method: str, params: dict | None, *, request_id: st
     await ws.send(jsonrpc_message(method, params, request_id))
     raw = await ws.recv()
     if len(raw) > settings.OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES:
-        return await asyncio.to_thread(json.loads, raw)
-    return json.loads(raw)
+        resp = await asyncio.to_thread(json.loads, raw)
+    else:
+        resp = json.loads(raw)
+    # This assumes strict request/response ordering on a single socket. If a prior
+    # call was cancelled after send() but before recv(), a reused socket can hand
+    # back the stale response and desync every later call. We can't recover here
+    # (the framing is stateless by design), but a mismatched id is the signature of
+    # that desync, so surface it rather than let it corrupt results silently. Not
+    # fatal: some responses may legitimately omit the id, so only a present-and-
+    # different id warns.
+    resp_id = resp.get("id") if isinstance(resp, dict) else None
+    if resp_id is not None and resp_id != request_id:
+        logger.warning(
+            "Ogmios JSON-RPC id mismatch for %s: sent %r, received %r "
+            "(possible socket desync from a cancelled prior call)",
+            method,
+            request_id,
+            resp_id,
+        )
+    return resp
