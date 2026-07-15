@@ -31,9 +31,10 @@ from clickhouse_driver import Client
 
 from app.config import settings
 from app.db import clickhouse, clickhouse_schema
+from app.logging_utils import setup_logging
 from app.models.transaction import NormalizedTransaction
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+setup_logging()
 logger = logging.getLogger("verify_rollback_purge")
 
 # Sentinel network: rows under it are created and deleted by this script only.

@@ -29,6 +29,7 @@ from app.auth.schema import execute_auth_schema
 from app.auth.tokens import issue_token
 from app.config import settings
 from app.db.postgres import close_pool, get_connection, init_pool
+from app.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,7 @@ async def create_admin(
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    setup_logging()
     parser = argparse.ArgumentParser(
         prog="python -m app.cli",
         description="TMS admin utilities.",
