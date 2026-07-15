@@ -27,14 +27,6 @@ def client():
     return TestClient(app)
 
 
-@pytest.fixture
-def auth_open(monkeypatch):
-    from app.auth import api_key
-
-    monkeypatch.setattr(api_key, "_valid_keys", [])
-    monkeypatch.setattr(api_key, "_dev_mode", True)
-
-
 class TestEntitiesGet:
     def test_found_shape(self, client, auth_open, monkeypatch):
         monkeypatch.setattr(

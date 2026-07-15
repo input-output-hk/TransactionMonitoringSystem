@@ -151,15 +151,6 @@ def client(monkeypatch, store):
     return TestClient(app)
 
 
-@pytest.fixture
-def auth_open(monkeypatch):
-    """Run the API in dev mode (no API-key required) for the happy-path tests."""
-    from app.auth import api_key
-
-    monkeypatch.setattr(api_key, "_valid_keys", [])
-    monkeypatch.setattr(api_key, "_dev_mode", True)
-
-
 VALID_HASH = "a" * 64
 OTHER_HASH = "b" * 64
 
