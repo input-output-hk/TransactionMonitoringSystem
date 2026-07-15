@@ -4,11 +4,12 @@ A user row whose email fails EmailStr (special-use domains such as
 ``.local``) must be impossible to CREATE through any entry point (API
 payload, bootstrap CLI), but must not break read paths if such a row
 already exists (legacy data, manual SQL): one bad row used to 500 both
-magic-link redemption and the entire ``GET /api/users`` listing.
+magic-link redemption and the entire ``GET /api/v1/users`` listing.
 """
+
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -33,7 +34,7 @@ def _user_row(email: str) -> dict:
         "full_name": "Legacy Row",
         "role": "Admin",
         "status": "active",
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "last_login_at": None,
     }
 
@@ -50,7 +51,9 @@ def test_user_create_payload_still_rejects_special_use_email():
     """Input validation stays strict — only the OUTBOUND model relaxed."""
     with pytest.raises(ValidationError):
         UserCreate(
-            email=SPECIAL_USE_EMAIL, full_name="Poison Test", role="Admin",
+            email=SPECIAL_USE_EMAIL,
+            full_name="Poison Test",
+            role="Admin",
         )
 
 
@@ -76,6 +79,7 @@ class _DbTouched(Exception):
 def no_db(monkeypatch):
     """Replace the CLI's init_pool so no test can reach a live database
     (the default settings may point at a running dev Postgres)."""
+
     async def _refuse() -> None:
         raise _DbTouched()
 

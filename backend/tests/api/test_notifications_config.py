@@ -3,6 +3,7 @@
 DB + audit + cache-refresh are mocked so no live Postgres is needed; the
 TestClient is used without lifespan (matching the other api tests).
 """
+
 from unittest.mock import AsyncMock
 
 import pytest
@@ -36,14 +37,16 @@ def mocked(monkeypatch):
 
 def _as_admin():
     app.dependency_overrides[require_admin] = lambda: {
-        "email": "admin@x.com", "role": "Admin", "id": "00000000-0000-0000-0000-000000000001",
+        "email": "admin@x.com",
+        "role": "Admin",
+        "id": "00000000-0000-0000-0000-000000000001",
     }
 
 
 def test_put_requires_auth(mocked):
     # No admin override + no session cookie → require_admin chain → 401.
     client = TestClient(app)
-    r = client.put("/api/notifications/config", json=VALID)
+    r = client.put("/api/v1/notifications/config", json=VALID)
     assert r.status_code == 401
     mocked["set"].assert_not_awaited()
 
@@ -54,12 +57,13 @@ def test_put_forbidden_for_reviewer(mocked):
     # current_user so the real require_admin actually runs (rather than the
     # tests' usual bypass of require_admin itself).
     app.dependency_overrides[current_user] = lambda: {
-        "email": "rev@x.com", "role": "Reviewer",
+        "email": "rev@x.com",
+        "role": "Reviewer",
         "id": "00000000-0000-0000-0000-000000000002",
     }
     try:
         client = TestClient(app)
-        r = client.put("/api/notifications/config", json=VALID)
+        r = client.put("/api/v1/notifications/config", json=VALID)
         assert r.status_code == 403
         mocked["set"].assert_not_awaited()
         mocked["refresh"].assert_not_awaited()
@@ -70,7 +74,7 @@ def test_put_forbidden_for_reviewer(mocked):
 def test_put_valid_persists_and_refreshes(mocked):
     _as_admin()
     client = TestClient(app)
-    r = client.put("/api/notifications/config", json=VALID)
+    r = client.put("/api/v1/notifications/config", json=VALID)
     assert r.status_code == 200
     mocked["set"].assert_awaited_once()
     mocked["refresh"].assert_awaited_once()
@@ -81,7 +85,7 @@ def test_put_invalid_is_422_and_does_not_persist(mocked):
     _as_admin()
     client = TestClient(app)
     bad = {"version": 1, "channels": {}, "triggers": {"defaults": {}}}  # empty channels
-    r = client.put("/api/notifications/config", json=bad)
+    r = client.put("/api/v1/notifications/config", json=bad)
     assert r.status_code == 422
     mocked["set"].assert_not_awaited()
     mocked["refresh"].assert_not_awaited()
@@ -90,12 +94,13 @@ def test_put_invalid_is_422_and_does_not_persist(mocked):
 def test_get_returns_config_and_secret_status(mocked):
     _as_admin()
     client = TestClient(app)
-    r = client.get("/api/notifications/config")
+    r = client.get("/api/v1/notifications/config")
     assert r.status_code == 200
     body = r.json()
     assert "config" in body
     assert set(body["secrets_status"]) == {
-        "webhook_signing_secret_configured", "smtp_configured",
+        "webhook_signing_secret_configured",
+        "smtp_configured",
     }
     # The UI gates the read-time-only contract_anomaly attack class on this flag.
     assert isinstance(body["clustering_enabled"], bool)

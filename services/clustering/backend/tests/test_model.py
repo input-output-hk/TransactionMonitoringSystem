@@ -20,9 +20,18 @@ from app.clustering.model import (
 )
 
 _SHAPE_COLUMNS = [
-    "tx_hash", "fees", "size", "input_count", "output_count",
-    "total_input_lovelace", "total_output_lovelace", "net_lovelace",
-    "distinct_assets", "redeemer_count", "hour_of_day", "day_of_week",
+    "tx_hash",
+    "fees",
+    "size",
+    "input_count",
+    "output_count",
+    "total_input_lovelace",
+    "total_output_lovelace",
+    "net_lovelace",
+    "distinct_assets",
+    "redeemer_count",
+    "hour_of_day",
+    "day_of_week",
 ]
 
 
@@ -151,7 +160,7 @@ def test_online_noise_below_auto_anomaly_bar_is_still_surfaced_for_review() -> N
     )
     probe = pd.DataFrame(
         [
-            _row("near".ljust(64, "0"), scale=1.05),   # in-distribution, in cluster 0
+            _row("near".ljust(64, "0"), scale=1.05),  # in-distribution, in cluster 0
             _row("out".ljust(64, "0"), scale=5000.0),  # far outside every cluster
         ],
         columns=_SHAPE_COLUMNS,
@@ -196,9 +205,7 @@ def test_serialize_round_trip_preserves_scoring() -> None:
     after = score_shape(deserialize_model(serialize_model(model)), probe)
     assert [c.cluster_id for c in before] == [c.cluster_id for c in after]
     assert [c.verdict for c in before] == [c.verdict for c in after]
-    assert np.allclose(
-        [c.consensus for c in before], [c.consensus for c in after], equal_nan=True
-    )
+    assert np.allclose([c.consensus for c in before], [c.consensus for c in after], equal_nan=True)
 
 
 def test_load_cluster_model_caches_by_id() -> None:

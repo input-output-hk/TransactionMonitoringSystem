@@ -9,6 +9,7 @@ import type {
 	Evaluation,
 	FeatureSet,
 	GraphData,
+	ListPage,
 	ProjectionData,
 	Run,
 	TxRow,
@@ -16,22 +17,27 @@ import type {
 import {
 	arrayOf,
 	clusterItem,
+	listPage,
 	runItem,
 	validateClusterTxs,
 	validateEvaluation,
 	validateGraph,
 	validateProjection,
 } from "../validation";
-import { get, send } from "../transport";
+import { get, MAX_PAGE_LIMIT, send } from "../transport";
 
 export function useRuns(target: string | undefined) {
 	return useQuery({
 		queryKey: ["clustering", "runs", target],
-		queryFn: () =>
-			get<Run[]>(
-				`/runs?target=${encodeURIComponent(target!)}`,
-				arrayOf("/runs", runItem),
-			),
+		// The endpoint returns a {count,total,data} envelope; fetch one max-size
+		// page and unwrap so consumers keep seeing a plain array.
+		queryFn: async () =>
+			(
+				await get<ListPage<Run>>(
+					`/runs?target=${encodeURIComponent(target!)}&limit=${MAX_PAGE_LIMIT}`,
+					listPage("/runs", runItem),
+				)
+			).data,
 		enabled: !!target,
 	});
 }

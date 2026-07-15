@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EmptyText, LoadingText } from "@/components/ui/status-text";
 import {
 	Table,
 	TableBody,
@@ -27,7 +28,8 @@ import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { ClusterTag } from "./cells";
 import { ClusterTransactions } from "./ClusterTransactions";
-import { formatAda, formatInt } from "./format";
+import { formatInt } from "./format";
+import { formatAdaExact } from "@/lib/utils/numbers";
 import { VERDICT_BADGE, VERDICT_LABEL } from "./verdict";
 
 // The grid has 9 columns; the expanded drill-down row spans all of them.
@@ -58,10 +60,10 @@ export function ClusterSummaryTable({
 		onSelectCluster ? onSelectCluster(id) : setLocalExpanded(id);
 
 	if (isLoading)
-		return <p className="text-muted-foreground text-sm">Loading clusters…</p>;
+		return <LoadingText>Loading clusters…</LoadingText>;
 	if (!clusters?.length)
 		return (
-			<p className="text-muted-foreground text-sm">No clusters in this run.</p>
+			<EmptyText>No clusters in this run.</EmptyText>
 		);
 
 	const toggle = (id: number) => setExpanded(expanded === id ? null : id);
@@ -111,10 +113,10 @@ export function ClusterSummaryTable({
 									)}
 								</TableCell>
 								<TableCell className="text-right tabular-nums">
-									{formatAda(c.avg_fees, 2)}
+									{formatAdaExact(c.avg_fees, 2)}
 								</TableCell>
 								<TableCell className="text-right tabular-nums">
-									{formatAda(c.avg_output_lovelace, 1)}
+									{formatAdaExact(c.avg_output_lovelace, 1)}
 								</TableCell>
 								<TableCell className="text-right tabular-nums">
 									{c.avg_inputs.toFixed(1)} / {c.avg_outputs.toFixed(1)}

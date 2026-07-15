@@ -126,7 +126,8 @@ class JobManager:
                 # internals), capped by the shared limit — matches process_contract's
                 # own failure path so the jobs table never carries a raw message.
                 repo.update_job(
-                    job_id, status="failed",
+                    job_id,
+                    status="failed",
                     error=_safe_error(exc)[:_MAX_ERROR_DETAIL],
                 )
             except Exception:  # pragma: no cover

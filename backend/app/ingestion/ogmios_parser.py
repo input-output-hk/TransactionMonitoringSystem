@@ -1,8 +1,8 @@
 """Parser for Ogmios v6 transaction format into NormalizedTransaction"""
 
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
 import logging
+from datetime import UTC, datetime
+from typing import Any
 
 from app.analysis.features import (
     extract_fee,
@@ -19,7 +19,7 @@ from app.models.transaction import (
 logger = logging.getLogger(__name__)
 
 
-def ogmios_input_ref(inp: Dict[str, Any]) -> tuple[str, int]:
+def ogmios_input_ref(inp: dict[str, Any]) -> tuple[str, int]:
     """Extract ``(tx_hash, output_index)`` from an Ogmios input reference.
 
     Tolerates both shapes the node emits: v6 nests the source tx as
@@ -32,12 +32,12 @@ def ogmios_input_ref(inp: Dict[str, Any]) -> tuple[str, int]:
 
 
 def parse_ogmios_transaction(
-    tx_data: Dict[str, Any],
-    block_slot: Optional[int] = None,
-    block_hash: Optional[str] = None,
-    block_height: Optional[int] = None,
-    timestamp: Optional[datetime] = None,
-    block_index: Optional[int] = None,
+    tx_data: dict[str, Any],
+    block_slot: int | None = None,
+    block_hash: str | None = None,
+    block_height: int | None = None,
+    timestamp: datetime | None = None,
+    block_index: int | None = None,
 ) -> NormalizedTransaction:
     """Parse an Ogmios v6 transaction into NormalizedTransaction.
 
@@ -80,37 +80,43 @@ def parse_ogmios_transaction(
         inp_tx_hash, inp_index = ogmios_input_ref(inp)
         # Ogmios inputs don't include resolved address/value in the transaction body;
         # address and amount are only available if resolved via UTxO queries.
-        inputs.append(TransactionInput(
-            tx_hash=inp_tx_hash,
-            index=inp_index,
-            address="",  # not resolved in Ogmios tx body
-            amount=0,
-            is_unspent_attempt=not script_valid,
-        ))
+        inputs.append(
+            TransactionInput(
+                tx_hash=inp_tx_hash,
+                index=inp_index,
+                address="",  # not resolved in Ogmios tx body
+                amount=0,
+                is_unspent_attempt=not script_valid,
+            )
+        )
 
     # Parse reference inputs
     for inp in tx_data.get("references", []):
         inp_tx_hash, inp_index = ogmios_input_ref(inp)
-        inputs.append(TransactionInput(
-            tx_hash=inp_tx_hash,
-            index=inp_index,
-            address="",
-            amount=0,
-            is_reference=True,
-        ))
+        inputs.append(
+            TransactionInput(
+                tx_hash=inp_tx_hash,
+                index=inp_index,
+                address="",
+                amount=0,
+                is_reference=True,
+            )
+        )
 
     # Parse collateral inputs. For a validated tx these were NOT consumed
     # (recorded with the is_collateral flag so analytics can exclude them);
     # for a failed tx they are exactly what the ledger consumed.
     for inp in tx_data.get("collaterals", []):
         inp_tx_hash, inp_index = ogmios_input_ref(inp)
-        inputs.append(TransactionInput(
-            tx_hash=inp_tx_hash,
-            index=inp_index,
-            address="",
-            amount=0,
-            is_collateral=True,
-        ))
+        inputs.append(
+            TransactionInput(
+                tx_hash=inp_tx_hash,
+                index=inp_index,
+                address="",
+                amount=0,
+                is_collateral=True,
+            )
+        )
 
     # Parse outputs. A failed tx's regular outputs never exist on-chain, so
     # they are skipped (raw_data retains them); only the collateralReturn is
@@ -131,11 +137,13 @@ def parse_ogmios_transaction(
             assets = flatten_assets(value)
             asset_dict = assets if assets else None
 
-            outputs.append(TransactionOutput(
-                address=address,
-                amount=int(lovelace),
-                assets=asset_dict,
-            ))
+            outputs.append(
+                TransactionOutput(
+                    address=address,
+                    amount=int(lovelace),
+                    assets=asset_dict,
+                )
+            )
             total_output_value += int(lovelace)
     else:
         collateral_return = tx_data.get("collateralReturn")
@@ -151,18 +159,20 @@ def parse_ogmios_transaction(
             # failed attack posted as collateral (Ticket F).
             cr_assets = flatten_assets(cr_value)
             addresses.add(addr)
-            outputs.append(TransactionOutput(
-                address=addr,
-                amount=int(lv),
-                assets=cr_assets if cr_assets else None,
-                is_collateral=True,
-                # Babbage rule: the collateral return's on-chain index is
-                # the count of regular outputs (which never materialise for
-                # a failed tx but still occupy the index space). Storing it
-                # at enumerate-position 0 made any later spend of this UTxO
-                # unresolvable (review finding).
-                output_index=len(tx_data.get("outputs", [])),
-            ))
+            outputs.append(
+                TransactionOutput(
+                    address=addr,
+                    amount=int(lv),
+                    assets=cr_assets if cr_assets else None,
+                    is_collateral=True,
+                    # Babbage rule: the collateral return's on-chain index is
+                    # the count of regular outputs (which never materialise for
+                    # a failed tx but still occupy the index space). Storing it
+                    # at enumerate-position 0 made any later spend of this UTxO
+                    # unresolvable (review finding).
+                    output_index=len(tx_data.get("outputs", [])),
+                )
+            )
             total_output_value += int(lv)
 
     # Add input addresses (mostly empty for Ogmios)
@@ -219,7 +229,7 @@ def parse_ogmios_transaction(
         block_height=block_height,
         block_hash=block_hash,
         block_index=block_index,
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(UTC),
         fee=int(fee),
         deposit=deposit,
         inputs=inputs,

@@ -5,6 +5,24 @@
  * to keep things deterministic; no locale-dependent parsing.
  */
 
+/**
+ * Parse a backend timestamp to a `Date`, or `null` if unparseable.
+ *
+ * Accepts both wire shapes deterministically: the canonical API form
+ * (`2026-05-19T15:37:38Z`) and the legacy ClickHouse form
+ * (`2026-05-19 15:37:38`, space-separated, UTC but unsuffixed). Replaces the
+ * first space with `T` and appends `Z` only when no timezone is already
+ * encoded, so a naive string can never be read as the client's local time.
+ * This keeps the file-header "no locale-dependent parsing" promise for every
+ * consumer.
+ */
+export function parseUtcInstant(s: string): Date | null {
+	const iso = s.replace(" ", "T");
+	const hasTz = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
+	const d = new Date(hasTz ? iso : `${iso}Z`);
+	return Number.isNaN(d.getTime()) ? null : d;
+}
+
 /** Today's date in `yyyy-mm-dd` form (UTC, matching the UTC display + range
  *  boundaries below so the Reports range is internally consistent). */
 export function todayISODate(): string {
@@ -58,9 +76,8 @@ export function nextDayISO(date: string): string | undefined {
  */
 export function formatAnalyzedAt(iso: string): string {
 	if (!iso) return iso;
-	const hasTz = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
-	const d = new Date(hasTz ? iso : `${iso}Z`);
-	if (Number.isNaN(d.getTime())) return iso;
+	const d = parseUtcInstant(iso);
+	if (d === null) return iso;
 	const dd = String(d.getUTCDate()).padStart(2, "0");
 	const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
 	const yyyy = d.getUTCFullYear();
@@ -70,21 +87,33 @@ export function formatAnalyzedAt(iso: string): string {
 }
 
 /**
- * Compact "time ago" formatter for live widgets — e.g. "17 sec", "3 min",
- * "2 hr", "5 days".
+ * Relative "time ago" formatter for live widgets. Two styles from one source:
  *
- * Backend datetimes from ClickHouse arrive as naive ISO (no `Z` suffix)
- * but represent UTC. Plain `new Date("2026-05-22T08:00:18")` would parse
- * those as LOCAL time, which throws the elapsed calculation off by the
- * client's UTC offset. We append `Z` when the timezone isn't already
- * encoded to keep parsing deterministic.
+ * - default: `"17 sec"`, `"3 min"`, `"2 hr"`, `"5 days"` (dashboard tables)
+ * - `{ compact: true }`: `"12s ago"`, `"5m ago"`, `"3h ago"`, `"2d ago"`
+ *   (the clustering tables' denser style)
+ *
+ * Parsing goes through `parseUtcInstant`, so both the API's `Z`-suffixed form
+ * and the legacy naive-UTC ClickHouse form are handled without a local-time
+ * skew. On unparseable input the default style returns the em-dash placeholder
+ * and the compact style returns the raw string (matching the prior behavior of
+ * the two separate helpers this replaces).
  */
-export function formatTimeAgo(iso: string | null | undefined): string {
-	if (!iso) return "—";
-	const hasTz = /Z|[+-]\d{2}:?\d{2}$/.test(iso);
-	const d = new Date(hasTz ? iso : `${iso}Z`);
-	if (Number.isNaN(d.getTime())) return iso;
+export function formatTimeAgo(
+	input: string | null | undefined,
+	opts?: { compact?: boolean },
+): string {
+	const compact = opts?.compact ?? false;
+	if (!input) return compact ? "" : "—";
+	const d = parseUtcInstant(input);
+	if (d === null) return input;
 	const sec = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+	if (compact) {
+		if (sec < 60) return `${sec}s ago`;
+		if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+		if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+		return `${Math.floor(sec / 86400)}d ago`;
+	}
 	if (sec < 60) return `${sec} sec`;
 	const min = Math.floor(sec / 60);
 	if (min < 60) return `${min} min`;

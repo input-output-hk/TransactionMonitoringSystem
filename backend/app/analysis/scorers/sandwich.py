@@ -21,12 +21,16 @@ built, this scorer's gate will not pass.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.analysis.normalise import EPSILON, normalise
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -43,7 +47,7 @@ W_SLOTS = int(_CFG["window_slots"])
 _MIN_PROFIT_LOVELACE = int(_CFG["min_profit_lovelace"])
 
 
-def _get_sandwich_data(features: Dict[str, Any]) -> Optional[Dict]:
+def _get_sandwich_data(features: dict[str, Any]) -> dict | None:
     """Extract sandwich candidate data from features if available.
 
     The engine populates features["sandwich"] when a tx is identified as
@@ -68,7 +72,7 @@ def _get_sandwich_data(features: Dict[str, Any]) -> Optional[Dict]:
 class SandwichScorer(BaseScorer):
     name = "sandwich"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Transaction must be identified as a sandwich victim."""
         sw = _get_sandwich_data(features)
         if not sw:
@@ -76,7 +80,7 @@ class SandwichScorer(BaseScorer):
         # Gate: slot span within window
         return sw.get("slot_span", W_SLOTS + 1) <= W_SLOTS
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         sw = _get_sandwich_data(features)
         if not sw:
             return ScorerResult(score=0.0)
@@ -101,24 +105,36 @@ class SandwichScorer(BaseScorer):
         # Sub-score 3: price_impact of tx_A
         impact = sw.get("price_impact_a", 0.0)
         p50_pi, p99_pi, bl1 = _resolve(
-            "price_impact", "per_policy", pool_id, network,
-            _BOOT, "price_impact",
+            "price_impact",
+            "per_policy",
+            pool_id,
+            network,
+            _BOOT,
+            "price_impact",
         )
         s_impact = normalise(impact, p50=p50_pi, p99=p99_pi)
 
         # Sub-score 4: profit of tx_B
         profit = sw.get("profit_b", 0.0)
         p50_pr, p99_pr, _ = _resolve(
-            "swap_profit", "per_policy", pool_id, network,
-            _BOOT, "swap_profit",
+            "swap_profit",
+            "per_policy",
+            pool_id,
+            network,
+            _BOOT,
+            "swap_profit",
         )
         s_profit = normalise(profit, p50=p50_pr, p99=p99_pr)
 
         # Sub-score 5: attacker recurrence
         sandwich_count = sw.get("attacker_sandwich_count", 0)
         p50_sc, p99_sc, _ = _resolve(
-            "sandwich_count", "per_cluster", "__global__", network,
-            _BOOT, "attacker_recurrence",
+            "sandwich_count",
+            "per_cluster",
+            "__global__",
+            network,
+            _BOOT,
+            "attacker_recurrence",
         )
         s_recurrence = normalise(sandwich_count, p50=p50_sc, p99=p99_sc)
 

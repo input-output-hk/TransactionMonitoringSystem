@@ -8,7 +8,6 @@ to global baselines.
 """
 
 import logging
-from typing import List, Optional, Tuple
 
 from app.config import settings
 from app.db import clickhouse
@@ -52,13 +51,14 @@ def normalise_inverted(value: float, p50: float, p99: float) -> float:
 # the top-level `baselines.min_spread_ratio` block in config/detection.yaml
 # (see the rationale comment there). Loaded lazily: scorer_config imports
 # this module, so a module-level import here would be circular.
-_MIN_BASELINE_SPREAD_RATIO: Optional[float] = None
+_MIN_BASELINE_SPREAD_RATIO: float | None = None
 
 
 def _min_baseline_spread_ratio() -> float:
     global _MIN_BASELINE_SPREAD_RATIO
     if _MIN_BASELINE_SPREAD_RATIO is None:
         from app.analysis.scorer_config import baselines_config
+
         _MIN_BASELINE_SPREAD_RATIO = float(baselines_config()["min_spread_ratio"])
     return _MIN_BASELINE_SPREAD_RATIO
 
@@ -84,8 +84,8 @@ def resolve_baseline(
     scope_id: str,
     network: str,
     min_samples: int = 0,
-    scope_types_allowed: Optional[List[str]] = None,
-) -> Tuple[float, float, str]:
+    scope_types_allowed: list[str] | None = None,
+) -> tuple[float, float, str]:
     """Resolve the (p50, p99) baseline for a feature on a given network, with fallback.
 
     Tries the requested scope first. Falls back to global within the same

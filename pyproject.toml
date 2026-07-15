@@ -1,0 +1,125 @@
+# Backend project and toolchain configuration (repo root: backend/ app,
+# scripts, and tests). The clustering sidecar under services/clustering/backend
+# keeps its own pyproject.toml; tool sections here deliberately mirror it so
+# both Python trees are held to the same conventions.
+#
+# Dependency workflow (uv):
+#   uv sync        # create/refresh .venv from uv.lock (includes the dev group)
+#   uv lock        # re-resolve after editing dependencies below
+#   uv export --no-dev --no-emit-project -o requirements.lock
+#                  # regenerate the hashed lock that backend/Dockerfile installs
+[project]
+name = "tms-backend"
+version = "0.1.0"
+description = "Cardano transaction monitoring system: chain ingestion, detection scoring, and dashboard API"
+requires-python = ">=3.13"
+dependencies = [
+    # Core framework
+    "fastapi==0.138.0",
+    "uvicorn[standard]==0.49.0",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    # WebSocket client (Ogmios). The 16.x API is stable; a major bump may
+    # change the connect()/recv() interface, so the minor series is pinned.
+    "websockets>=16.0,<17.0",
+    # HTTP client: webhook notification delivery + the clustering sidecar
+    # reverse-proxy (app/api/clustering.py). The sidecar itself only uses
+    # httpx in its dev extra (test client), so no cross-repo version coupling
+    # remains; this pin is just the newest release validated against both
+    # call sites.
+    "httpx==0.28.1",
+    # Database drivers
+    "clickhouse-driver==0.2.10",
+    "asyncpg==0.31.0",
+    # Email (magic-link auth)
+    "aiosmtplib==5.1.2",
+    "email-validator==2.3.0",  # Pydantic's EmailStr requires this
+    # Configuration
+    "python-dotenv==1.2.2",
+    "PyYAML==6.0.3",
+    # Analysis engine
+    "cbor2==6.1.2",
+    "rapidfuzz==3.14.5",
+    "tldextract==5.3.1",
+]
+
+[dependency-groups]
+# Test and development tooling. Never installed in the production image
+# (backend/Dockerfile installs requirements.lock, the hashed --no-dev export
+# of this project). Formatting is ruff format; black was dropped when the
+# toolchain unified on ruff (the sidecar never used black).
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.15.21",
+    "mypy==2.1.0",
+]
+
+[tool.uv]
+# The backend is not an installable package: backend/conftest.py puts the app
+# on sys.path for tests, and the Docker image COPYs the source tree directly.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["backend"]
+# services/ carries its own pyproject (ruff resolves the nearest config per
+# file); internal/ is the red-team attack tooling, deliberately unlinted;
+# frontend/, data/, and docs/ hold no first-party Python.
+extend-exclude = ["services", "internal", "frontend", "data", "docs", "venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.per-file-ignores]
+# Permanent, deliberate patterns:
+# main.py must configure logging before importing app modules (the module
+# docstring explains the ordering); E402 is the point, not an accident.
+"backend/app/main.py" = ["E402"]
+# The phishing detector and its fixtures work with confusable/homoglyph
+# characters on purpose; the "ambiguous unicode" IS the test payload.
+"backend/app/analysis/url_extraction.py" = ["RUF001"]
+"backend/app/analysis/scorers/multiple_sat.py" = ["RUF002"]
+"backend/tests/analysis/scorers/test_fake_token.py" = ["RUF001", "RUF002", "RUF003"]
+
+# Grandfathered burn-down list: pre-existing findings accepted when the ruff
+# gate was introduced. Fix opportunistically and delete the entry; do not add
+# new code that trips these rules.
+"backend/app/api/*.py" = ["B904"]
+"backend/app/cli.py" = ["B904"]
+"backend/app/db/*.py" = ["B905"]
+"backend/scripts/oneoff/_rescore_common.py" = ["B905"]
+"backend/app/ingestion/resilience.py" = ["UP042"]
+"backend/app/models/transaction.py" = ["UP042"]
+"backend/app/notifications/channels/base.py" = ["UP007"]
+"backend/tests/analysis/test_engine.py" = ["E402"]
+"backend/tests/**" = ["B017", "RUF005", "RUF012", "RUF043", "RUF059"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's parameter helpers are the idiomatic way to declare defaults.
+extend-immutable-calls = [
+    "fastapi.Query",
+    "fastapi.Depends",
+    "fastapi.Path",
+    "fastapi.Security",
+    "fastapi.Header",
+    "fastapi.Cookie",
+]
+
+[tool.mypy]
+# Lenient baseline: untyped defs stay allowed while the codebase is annotated
+# module by module. Strictness ratchets up via per-module overrides (see
+# CONTRIBUTING.md); the sidecar already runs disallow_untyped_defs globally.
+python_version = "3.13"
+ignore_missing_imports = true
+warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]

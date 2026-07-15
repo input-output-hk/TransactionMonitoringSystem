@@ -17,24 +17,37 @@ TX_COLUMNS = [f.name for f in fields(TxRecord)]
 UTXO_COLUMNS = [f.name for f in fields(UtxoRecord)]
 ASSET_COLUMNS = [f.name for f in fields(AssetRecord)]
 
-# The canonical transaction shape-context projection, shared by the tx-joined reads
-# that surface the full context (latest interactions, top anomalies). It assumes the
-# transactions subquery is aliased ``t`` (every such read uses that alias). Keep
-# ``TX_CONTEXT_SELECT`` and ``TX_CONTEXT_KEYS`` in lockstep — the select aliases ARE
-# the dict keys, in this order — so a column can't drift between the two callers.
-TX_CONTEXT_SELECT = (
-    "toString(t.block_time) AS block_time, t.fees AS fees, t.size AS size, "
-    "t.total_input_lovelace AS total_input_lovelace, "
-    "t.total_output_lovelace AS total_output_lovelace, "
-    "CAST(t.total_output_lovelace AS Int64) - CAST(t.total_input_lovelace AS Int64) "
-    "AS net_lovelace, "
-    "t.input_count AS input_count, t.output_count AS output_count, "
-    "t.distinct_assets AS distinct_assets, t.redeemer_count AS redeemer_count"
-)
+# The canonical transaction shape-context columns, shared by the tx-joined reads
+# that surface the full context (latest interactions, top anomalies). Those reads
+# join the ``_tx_relation`` derived table (see base.py), which already projects
+# every engine-named column including the derived ``net_lovelace``; the keys ARE
+# the result-dict keys, in this order, and ``_tx_context_aliased`` renders the
+# matching SELECT so a column can't drift between the projection and the mapping.
 TX_CONTEXT_KEYS = [
-    "block_time", "fees", "size", "total_input_lovelace", "total_output_lovelace",
-    "net_lovelace", "input_count", "output_count", "distinct_assets", "redeemer_count",
+    "block_time",
+    "fees",
+    "size",
+    "total_input_lovelace",
+    "total_output_lovelace",
+    "net_lovelace",
+    "input_count",
+    "output_count",
+    "distinct_assets",
+    "redeemer_count",
 ]
+
+
+def _tx_context_aliased(alias: str) -> str:
+    """The ``TX_CONTEXT_KEYS`` projection over an already-shaped derived table
+    (columns carry the engine names), aliased ``{alias}`` and with block_time
+    stringified so the mapped value is a plain string, not a driver datetime."""
+    parts = []
+    for k in TX_CONTEXT_KEYS:
+        if k == "block_time":
+            parts.append(f"toString({alias}.block_time) AS block_time")
+        else:
+            parts.append(f"{alias}.{k} AS {k}")
+    return ", ".join(parts)
 
 
 class _IngestMixin(_RepoBase):
@@ -63,8 +76,14 @@ class _IngestMixin(_RepoBase):
         if not rows:
             return None
         keys = [
-            "target", "target_type", "cursor", "source", "last_page", "last_tx_hash",
-            "txs_seen", "done",
+            "target",
+            "target_type",
+            "cursor",
+            "source",
+            "last_page",
+            "last_tx_hash",
+            "txs_seen",
+            "done",
         ]
         row = self._rows_to_dicts(keys, rows)[0]
         # Legacy shim: rows written before 006_cursor.sql carry only the page
@@ -90,23 +109,37 @@ class _IngestMixin(_RepoBase):
         self._insert(
             "ingest_cursor",
             ["target", "target_type", "cursor", "source", "last_tx_hash", "txs_seen", "done"],
-            [[
-                target, target_type, cursor, self.settings.chain_source,
-                last_tx_hash, txs_seen, int(done),
-            ]],
+            [
+                [
+                    target,
+                    target_type,
+                    cursor,
+                    self.settings.chain_source,
+                    last_tx_hash,
+                    txs_seen,
+                    int(done),
+                ]
+            ],
         )
 
     # --- Targets ---------------------------------------------------------------
 
-    def list_targets(self) -> list[dict[str, Any]]:
+    def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         rows = self.client.query(
             f"SELECT target, any(target_type) AS target_type, "
             f"count(DISTINCT tx_hash) AS tx_count "
-            f"FROM {self._db}.transactions GROUP BY target ORDER BY tx_count DESC"
+            f"FROM {self._db}.transactions GROUP BY target ORDER BY tx_count DESC "
+            f"LIMIT {{lim:UInt32}} OFFSET {{off:UInt32}}",
+            parameters={"lim": limit, "off": offset},
         ).result_rows
-        return [
-            {"target": t, "target_type": tt, "tx_count": int(c)} for (t, tt, c) in rows
-        ]
+        return [{"target": t, "target_type": tt, "tx_count": int(c)} for (t, tt, c) in rows]
+
+    def count_targets(self) -> int:
+        """Distinct ingested targets: the full ``total`` for the paginated list."""
+        rows = self.client.query(
+            f"SELECT uniqExact(target) FROM {self._db}.transactions"
+        ).result_rows
+        return int(rows[0][0]) if rows else 0
 
     # --- Feature extraction ----------------------------------------------------
 

@@ -29,8 +29,9 @@ _NEW_LABEL = "Informational"
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--network", default=None,
-                    help="restrict to one network (default: all networks)")
+    ap.add_argument(
+        "--network", default=None, help="restrict to one network (default: all networks)"
+    )
     ap.add_argument("--apply", action="store_true", help="execute the mutation")
     args = ap.parse_args()
 
@@ -43,7 +44,8 @@ def main() -> None:
         params["net"] = args.network
 
     remaining = client.execute(
-        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}", params,
+        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}",
+        params,
     )[0][0]
     scope = args.network or "all networks"
     print(f"rows still labelled '{_OLD_LABEL}' ({scope}): {remaining}")
@@ -62,7 +64,8 @@ def main() -> None:
         settings={"mutations_sync": 2},
     )
     left = client.execute(
-        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}", params,
+        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}",
+        params,
     )[0][0]
     print(f"Migrated. Rows still labelled '{_OLD_LABEL}': {left}")
 

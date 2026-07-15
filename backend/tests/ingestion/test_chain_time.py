@@ -8,7 +8,7 @@ slots) and the wall-clock fallback that keeps ingestion alive when the
 node cannot answer the queries.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,7 +18,11 @@ from app.ingestion.chain_time import SlotTimeConverter
 from app.ingestion.ogmios_client import OgmiosClient
 from tests.ingestion.conftest import (
     make_block as _block,
+)
+from tests.ingestion.conftest import (
     persistence_patches as _persistence_patches,
+)
+from tests.ingestion.conftest import (
     run_async as _run,
 )
 
@@ -107,9 +111,7 @@ class TestSlotToUtc:
         del open_ended[1]["end"]
         conv = SlotTimeConverter.from_ogmios(SYSTEM_START, open_ended)
         far = SHELLEY_START_SLOT + 100_000_000
-        expected = SYSTEM_START_DT + timedelta(
-            seconds=SHELLEY_START_SECONDS + 100_000_000
-        )
+        expected = SYSTEM_START_DT + timedelta(seconds=SHELLEY_START_SECONDS + 100_000_000)
         assert conv.slot_to_utc(far) == expected
 
     def test_slot_before_first_known_era_is_none(self):
@@ -137,9 +139,7 @@ class TestSlotToUtc:
 
 class TestFromOgmios:
     def test_naive_start_time_assumed_utc(self):
-        conv = SlotTimeConverter.from_ogmios(
-            "2017-09-23T21:44:51", ERA_SUMMARIES
-        )
+        conv = SlotTimeConverter.from_ogmios("2017-09-23T21:44:51", ERA_SUMMARIES)
         assert conv.slot_to_utc(0) == SYSTEM_START_DT
 
     def test_bare_seconds_slot_length_accepted(self):
@@ -163,13 +163,25 @@ class TestFromOgmios:
             (SYSTEM_START, None),
             (SYSTEM_START, []),
             (SYSTEM_START, [{"start": {}}]),
-            (SYSTEM_START, [{"start": {"time": {"seconds": 0}, "slot": 0},
-                             "parameters": {"slotLength": {"milliseconds": 0}}}]),
+            (
+                SYSTEM_START,
+                [
+                    {
+                        "start": {"time": {"seconds": 0}, "slot": 0},
+                        "parameters": {"slotLength": {"milliseconds": 0}},
+                    }
+                ],
+            ),
             (SYSTEM_START, "origin"),
         ],
         ids=[
-            "no-start", "dict-start", "garbage-start", "no-summaries",
-            "empty-summaries", "missing-keys", "zero-slot-length",
+            "no-start",
+            "dict-start",
+            "garbage-start",
+            "no-summaries",
+            "empty-summaries",
+            "missing-keys",
+            "zero-slot-length",
             "string-summaries",
         ],
     )
@@ -197,9 +209,7 @@ class TestChainSyncWiring:
         client = OgmiosClient()
         client._slot_time = _converter()
         txs = self._roll_forward(client, SHELLEY_START_SLOT + 30, monkeypatch)
-        assert txs[0].timestamp == SYSTEM_START_DT + timedelta(
-            seconds=SHELLEY_START_SECONDS + 30
-        )
+        assert txs[0].timestamp == SYSTEM_START_DT + timedelta(seconds=SHELLEY_START_SECONDS + 30)
 
     def test_raw_store_blob_keyed_by_row_timestamp(self, monkeypatch):
         # read_confirmed derives the blob's day directory from the row's
@@ -219,19 +229,19 @@ class TestChainSyncWiring:
         with ExitStack() as stack:
             for p in _persistence_patches():
                 stack.enter_context(p)
-            stack.enter_context(patch(
-                "app.ingestion.ogmios_client.raw_store.write_confirmed",
-                capture_write,
-            ))
+            stack.enter_context(
+                patch(
+                    "app.ingestion.ogmios_client.raw_store.write_confirmed",
+                    capture_write,
+                )
+            )
             _run(client._handle_roll_forward(_block(SHELLEY_START_SLOT + 30)))
-        assert captured["ts"] == SYSTEM_START_DT + timedelta(
-            seconds=SHELLEY_START_SECONDS + 30
-        )
+        assert captured["ts"] == SYSTEM_START_DT + timedelta(seconds=SHELLEY_START_SECONDS + 30)
 
     def test_block_timestamp_falls_back_to_wall_clock(self, monkeypatch):
         client = OgmiosClient()
         assert client._slot_time is None
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         txs = self._roll_forward(client, SHELLEY_START_SLOT + 30, monkeypatch)
         assert txs[0].timestamp >= before
 
@@ -252,9 +262,7 @@ class TestChainSyncWiring:
 
     def test_fetch_failure_leaves_wall_clock_fallback(self):
         client = OgmiosClient()
-        with patch.object(
-            client, "_send_recv", AsyncMock(side_effect=RuntimeError("closed"))
-        ):
+        with patch.object(client, "_send_recv", AsyncMock(side_effect=RuntimeError("closed"))):
             _run(client._fetch_slot_time_converter(object()))  # must not raise
         assert client._slot_time is None
 
@@ -266,9 +274,7 @@ class TestChainSyncWiring:
         client = OgmiosClient()
         client._slot_time = _converter()
         previous = client._slot_time
-        with patch.object(
-            client, "_send_recv", AsyncMock(side_effect=RuntimeError("closed"))
-        ):
+        with patch.object(client, "_send_recv", AsyncMock(side_effect=RuntimeError("closed"))):
             _run(client._fetch_slot_time_converter(object()))
         assert client._slot_time is previous
 
@@ -276,7 +282,7 @@ class TestChainSyncWiring:
         client = OgmiosClient()
         client._slot_time = _converter()
         beyond_horizon = SHELLEY_START_SLOT + 432_000 + 5
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         txs = self._roll_forward(client, beyond_horizon, monkeypatch)
         assert txs[0].timestamp >= before  # wall clock, not extrapolated
         assert client._slot_time_refetch_needed is True
@@ -296,10 +302,13 @@ class TestChainSyncWiring:
 
         client._running = True
         client._replay_pending_score_repurges = AsyncMock()
-        with patch.object(client, "_fetch_slot_time_converter", fetch), \
-             patch.object(client, "_send_recv", send_recv), \
-             patch("app.ingestion.ogmios_client.postgres.get_sync_point",
-                   AsyncMock(return_value=None)):
+        with (
+            patch.object(client, "_fetch_slot_time_converter", fetch),
+            patch.object(client, "_send_recv", send_recv),
+            patch(
+                "app.ingestion.ogmios_client.postgres.get_sync_point", AsyncMock(return_value=None)
+            ),
+        ):
             _run(client._chain_sync_loop(ws=object()))
         # Once at session start, once inside the loop for the flag
         # (_slot_time_fetched_at stays None because fetch is stubbed,
@@ -329,9 +338,12 @@ class TestChainSyncWiring:
 
         client._running = False  # skip the nextBlock loop body
         client._replay_pending_score_repurges = AsyncMock()
-        with patch.object(client, "_fetch_slot_time_converter", fetch), \
-             patch.object(client, "_send_recv", send_recv), \
-             patch("app.ingestion.ogmios_client.postgres.get_sync_point",
-                   AsyncMock(return_value=None)):
+        with (
+            patch.object(client, "_fetch_slot_time_converter", fetch),
+            patch.object(client, "_send_recv", send_recv),
+            patch(
+                "app.ingestion.ogmios_client.postgres.get_sync_point", AsyncMock(return_value=None)
+            ),
+        ):
             _run(client._chain_sync_loop(ws=object()))
         assert order[0] == "fetch"

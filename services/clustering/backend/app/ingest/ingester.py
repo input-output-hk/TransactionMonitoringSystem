@@ -74,9 +74,7 @@ class _Batch:
     utxos: list[UtxoRecord] = field(default_factory=list)
     assets: list[AssetRecord] = field(default_factory=list)
 
-    def add(
-        self, tx: TxRecord, utxo_rows: list[UtxoRecord], asset_rows: list[AssetRecord]
-    ) -> None:
+    def add(self, tx: TxRecord, utxo_rows: list[UtxoRecord], asset_rows: list[AssetRecord]) -> None:
         self.txs.append(tx)
         self.utxos.extend(utxo_rows)
         self.assets.extend(asset_rows)
@@ -237,16 +235,21 @@ class _CursorTracker:
             self.save(cursor=cur, done=False)
         progress(f"Rate limit hit {where}; cursor saved. Resume later.")
         return IngestResult(
-            self.target, self.target_type, "rate_limited",
-            self.seen, cur or self.stored_cursor or "",
+            self.target,
+            self.target_type,
+            "rate_limited",
+            self.seen,
+            cur or self.stored_cursor or "",
         )
 
     def completed(self, *, final_seen: int) -> IngestResult:
         """The walk ran to the end: persist done=True at the last completed page
         (or the prior state when nothing new was walked)."""
         self.seen = final_seen
-        final = self.completed_cursor if self.completed_cursor is not None else (
-            self.stored_cursor or ""
+        final = (
+            self.completed_cursor
+            if self.completed_cursor is not None
+            else (self.stored_cursor or "")
         )
         self.save(cursor=final, done=True)
         return IngestResult(self.target, self.target_type, "completed", self.seen, final)
@@ -275,9 +278,7 @@ async def _drain_pages(
     try:
         async for page_cursor, hashes in pages:
             # Fetch only what we still need (respect max_txs precisely), concurrently.
-            page_hashes = (
-                hashes if max_txs is None else hashes[: max(0, max_txs - tracker.seen)]
-            )
+            page_hashes = hashes if max_txs is None else hashes[: max(0, max_txs - tracker.seen)]
             if not page_hashes:
                 break
             sem = asyncio.Semaphore(concurrency)
@@ -307,9 +308,7 @@ async def _drain_pages(
                 tracker.seen = drained.seen
                 tracker.save(cursor=page_cursor, last_tx_hash=drained.last_tx_hash, done=False)
                 progress(f"Reached max_txs={max_txs}.")
-                return IngestResult(
-                    target, target_type, "max_reached", drained.seen, page_cursor
-                )
+                return IngestResult(target, target_type, "max_reached", drained.seen, page_cursor)
 
             batch.flush(repo)
             tracker.page_done(page_cursor, seen=drained.seen, last_tx_hash=drained.last_tx_hash)
@@ -395,28 +394,31 @@ async def ingest(
     assert target is not None
     target_type = "address" if address else "policy"
 
-    window = _resolve_window(
-        address=address, recent=recent, max_txs=max_txs, progress=progress
-    )
+    window = _resolve_window(address=address, recent=recent, max_txs=max_txs, progress=progress)
 
     plan = _plan_walk(repo, target, resume=resume, from_tip=from_tip, progress=progress)
 
     remaining = None if max_txs is None else max(0, max_txs - plan.seen)
     if remaining == 0:
         progress(f"Already at max_txs={max_txs} for {target}; nothing to do.")
-        return IngestResult(
-            target, target_type, "max_reached", plan.seen, plan.stored_cursor or ""
-        )
+        return IngestResult(target, target_type, "max_reached", plan.seen, plan.stored_cursor or "")
 
     batch = _Batch()
     tracker = _CursorTracker(
-        repo=repo, target=target, target_type=target_type,
-        mode=plan.mode, stored_cursor=plan.stored_cursor, seen=plan.seen,
+        repo=repo,
+        target=target,
+        target_type=target_type,
+        mode=plan.mode,
+        stored_cursor=plan.stored_cursor,
+        seen=plan.seen,
     )
 
     page_max_items = _discovery_max_items(
-        address=address, max_txs=max_txs, remaining=remaining,
-        window=window, mode=plan.mode,
+        address=address,
+        max_txs=max_txs,
+        remaining=remaining,
+        window=window,
+        mode=plan.mode,
     )
     pages = source.tx_hash_pages(
         address=address,

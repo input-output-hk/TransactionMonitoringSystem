@@ -78,6 +78,7 @@ async def process_contract(
             # not declare the attribute; absent means "downloading", the default.)
             host_backed = getattr(source, "host_backed", False)
             if not reprocess and not host_backed:
+
                 def on_download(msg: str) -> None:
                     set_stage("downloading", msg)
 
@@ -89,8 +90,12 @@ async def process_contract(
                 # clusters/baselines reflect current traffic and the cursor lands
                 # near the tip (classify then catches up from the window's end).
                 ingest_result = await ingest(
-                    repo=repo, source=source, max_txs=max_txs, recent=bool(max_txs),
-                    progress=on_download, **target_kw
+                    repo=repo,
+                    source=source,
+                    max_txs=max_txs,
+                    recent=bool(max_txs),
+                    progress=on_download,
+                    **target_kw,
                 )
                 # A rate-limited (partial) download must not be clustered or marked
                 # done — re-raise so this becomes a failed, resumable job.
@@ -112,20 +117,25 @@ async def process_contract(
 
         eps, min_samples = _recommended_params(evaluate(shape_ci))
         cluster = _cluster_ci(
-            repo, target, shape_ci, eps, min_samples,
-            notes="auto: process_contract", origin="system",
+            repo,
+            target,
+            shape_ci,
+            eps,
+            min_samples,
+            notes="auto: process_contract",
+            origin="system",
         )
         result["cluster_run_id"] = cluster["run_id"]
 
         set_stage("scoring", "shape anomaly detection")
-        result["shape_anomaly_run_id"] = _detect_ci(
-            repo, target, shape_ci, origin="system"
-        )["run_id"]
+        result["shape_anomaly_run_id"] = _detect_ci(repo, target, shape_ci, origin="system")[
+            "run_id"
+        ]
         set_stage("scoring", "graph anomaly detection")
         graph_ci = load_clustering_input(repo, target, "graph")
-        result["graph_anomaly_run_id"] = _detect_ci(
-            repo, target, graph_ci, origin="system"
-        )["run_id"]
+        result["graph_anomaly_run_id"] = _detect_ci(repo, target, graph_ci, origin="system")[
+            "run_id"
+        ]
 
         # Surface this fit's flagged verdicts to the TMS as contract_anomaly
         # rows (the host_ch sidecar path; a non-host_ch source would skip this).
@@ -154,8 +164,10 @@ async def process_contract(
         if job_id is not None:
             try:
                 repo.update_job(
-                    job_id, status="failed",
-                    error=_safe_error(exc)[:_MAX_ERROR_DETAIL], stage_detail="",
+                    job_id,
+                    status="failed",
+                    error=_safe_error(exc)[:_MAX_ERROR_DETAIL],
+                    stage_detail="",
                 )
             except Exception:  # pragma: no cover
                 logger.exception("failed to persist failed-job status for %s", job_id)

@@ -49,7 +49,9 @@ class FakeClient:
         rows = self._query_rows.pop(0) if self._query_rows else []
         return SimpleNamespace(result_rows=rows)
 
-    def insert(self, table: str, data: list[list[Any]], column_names: list[str] | None = None) -> None:
+    def insert(
+        self, table: str, data: list[list[Any]], column_names: list[str] | None = None
+    ) -> None:
         self.inserts.append((table, data, column_names or []))
 
     def command(self, sql: str, parameters: dict[str, Any] | None = None) -> None:
@@ -65,7 +67,12 @@ def test_retract_stale_tombstones_only_dropped_hashes() -> None:
     # txC dropped out → it (and only it) must get a 'normal' tombstone.
     fake = FakeClient([[("txA",), ("txC",)]])
     n = _retract_stale(
-        _repo(fake), "addr1", "preprod", "shape", keep={"txA", "txB"}, published_at=_PUB,
+        _repo(fake),
+        "addr1",
+        "preprod",
+        "shape",
+        keep={"txA", "txB"},
+        published_at=_PUB,
     )
     assert n == 1
     table, rows, cols = fake.inserts[0]
@@ -83,7 +90,12 @@ def test_retract_stale_is_scoped_to_its_feature_set() -> None:
     # another feature set published for the same (network, target).
     fake = FakeClient([[("txA",)]])
     _retract_stale(
-        _repo(fake), "addr1", "preprod", "graph", keep=set(), published_at=_PUB,
+        _repo(fake),
+        "addr1",
+        "preprod",
+        "graph",
+        keep=set(),
+        published_at=_PUB,
     )
     assert "feature_set = {fs:String}" in fake.queries[0]
     assert fake.query_params[0]["fs"] == "graph"
@@ -92,7 +104,12 @@ def test_retract_stale_is_scoped_to_its_feature_set() -> None:
 def test_retract_stale_noop_when_nothing_dropped() -> None:
     fake = FakeClient([[("txA",)]])
     n = _retract_stale(
-        _repo(fake), "addr1", "preprod", "shape", keep={"txA", "txB"}, published_at=_PUB,
+        _repo(fake),
+        "addr1",
+        "preprod",
+        "shape",
+        keep={"txA", "txB"},
+        published_at=_PUB,
     )
     assert n == 0
     assert fake.inserts == []
@@ -144,11 +161,13 @@ def test_publish_reconciles_then_counts(monkeypatch: pytest.MonkeyPatch) -> None
     # test stays focused on online+batch reconciliation.
     monkeypatch.setattr("app.service.publish._publish_labels", lambda *a, **k: set())
     stale_max = datetime(2200, 1, 1)  # far enough ahead to outlive any real now()
-    fake = FakeClient([
-        [(stale_max,)],        # _reconciliation_version: table MAX(published_at)
-        [("txA",), ("txC",)],  # _retract_stale: current non-normal hashes
-        [(2,)],                # final flagged count
-    ])
+    fake = FakeClient(
+        [
+            [(stale_max,)],  # _reconciliation_version: table MAX(published_at)
+            [("txA",), ("txC",)],  # _retract_stale: current non-normal hashes
+            [(2,)],  # final flagged count
+        ]
+    )
     n = publish_contract_anomaly(_repo(fake), "addr1", network="preprod")
     assert n == 2
     # The pass derives its version before touching any rows.
@@ -206,7 +225,12 @@ def test_publish_labels_publishes_unscored_malicious() -> None:
     # it (otherwise _retract_stale would tombstone it).
     fake = FakeClient([[("txMANUAL",), ("txKNOWN",)]])  # tx_labels malicious hashes
     labeled = _publish_labels(
-        _repo(fake), "addr1", "preprod", "shape", _PUB, exclude={"txKNOWN"},
+        _repo(fake),
+        "addr1",
+        "preprod",
+        "shape",
+        _PUB,
+        exclude={"txKNOWN"},
     )
     assert labeled == {"txMANUAL", "txKNOWN"}
     # Only the not-already-published hash is inserted, as a malicious row.
@@ -220,7 +244,12 @@ def test_publish_labels_publishes_unscored_malicious() -> None:
 def test_publish_labels_noop_when_all_already_published() -> None:
     fake = FakeClient([[("txKNOWN",)]])
     labeled = _publish_labels(
-        _repo(fake), "addr1", "preprod", "shape", _PUB, exclude={"txKNOWN"},
+        _repo(fake),
+        "addr1",
+        "preprod",
+        "shape",
+        _PUB,
+        exclude={"txKNOWN"},
     )
     assert labeled == {"txKNOWN"}
     assert fake.inserts == []  # nothing fresh to insert

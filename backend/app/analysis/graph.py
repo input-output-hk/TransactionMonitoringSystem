@@ -9,7 +9,7 @@ import logging
 import math
 import statistics
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from app.analysis.features import LOVELACE_PER_ADA
 from app.analysis.scorer_config import get as _get_cfg
@@ -53,7 +53,7 @@ def detect_cycle(
     tx_hash: str,
     network: str,
     max_hops: int = 0,
-) -> Optional[Dict]:
+) -> dict | None:
     """Detect if tx_hash is part of a value cycle returning to origin.
 
     Returns a dict matching the circular scorer's expected structure, or None.
@@ -77,7 +77,7 @@ def detect_cycle(
         """,
         {"tx_hash": tx_hash, "network": network},
     )
-    origin_addresses: Set[str] = {r[0] for r in rows}
+    origin_addresses: set[str] = {r[0] for r in rows}
     if not origin_addresses:
         return None
 
@@ -112,7 +112,7 @@ def detect_cycle(
     origin_amount = sum(r[1] for r in out_rows if r[0] not in origin_addresses)
 
     # Recipients of this tx (excluding change back to origin)
-    current_addresses: Set[str] = {r[0] for r in out_rows if r[0] not in origin_addresses}
+    current_addresses: set[str] = {r[0] for r in out_rows if r[0] not in origin_addresses}
     if not current_addresses:
         return None
 
@@ -122,8 +122,8 @@ def detect_cycle(
         return None
 
     # Step 3: Bounded BFS forward
-    visited_addresses: Set[str] = set(origin_addresses) | set(current_addresses)
-    all_cycle_addresses: List[str] = list(origin_addresses)
+    visited_addresses: set[str] = set(origin_addresses) | set(current_addresses)
+    all_cycle_addresses: list[str] = list(origin_addresses)
     # ``hops`` is the single source of truth for per-step amounts/slots.
     # The stats math in ``_build_cycle_result`` derives ``hop_amounts`` and
     # ``hop_slots`` from this list, so they never get out of sync.
@@ -131,7 +131,7 @@ def detect_cycle(
     # step: set iteration order varies across processes (string hash
     # randomization) and would otherwise make evidence non-reproducible.
     origin_repr = _first_sorted(origin_addresses)
-    hops: List[Dict[str, Any]] = [
+    hops: list[dict[str, Any]] = [
         {"address": origin_repr, "amount_lovelace": origin_amount, "slot": origin_slot}
     ]
 
@@ -182,7 +182,7 @@ def detect_cycle(
         if not next_rows:
             break
 
-        next_addresses: Set[str] = set()
+        next_addresses: set[str] = set()
         hop_amount = 0
         hop_slot = 0
         for r in next_rows:
@@ -194,9 +194,7 @@ def detect_cycle(
                 # Cycle found
                 all_cycle_addresses.extend(list(current_addresses))
                 all_cycle_addresses.append(out_addr)
-                hops.append(
-                    {"address": out_addr, "amount_lovelace": out_amt, "slot": slot}
-                )
+                hops.append({"address": out_addr, "amount_lovelace": out_amt, "slot": slot})
 
                 return _build_cycle_result(
                     cycle_length=hop + 1,
@@ -215,9 +213,7 @@ def detect_cycle(
 
         all_cycle_addresses.extend(list(current_addresses))
         hop_repr = _first_sorted(current_addresses)
-        hops.append(
-            {"address": hop_repr, "amount_lovelace": hop_amount, "slot": hop_slot}
-        )
+        hops.append({"address": hop_repr, "amount_lovelace": hop_amount, "slot": hop_slot})
         visited_addresses |= next_addresses
         current_addresses = next_addresses
 
@@ -276,14 +272,14 @@ def _count_origin_recurrence(
 
 def _build_cycle_result(
     cycle_length: int,
-    addresses: List[str],
+    addresses: list[str],
     origin_amount: int,
     final_amount: int,
-    hops: List[Dict[str, Any]],
-    origin_addresses: Set[str],
+    hops: list[dict[str, Any]],
+    origin_addresses: set[str],
     tx_hash: str = "",
     network: str = "",
-) -> Dict:
+) -> dict:
     """Build the cycle dict expected by the CircularScorer.
 
     ``hops`` is the single source of truth for per-step amounts and slots;
@@ -320,10 +316,7 @@ def _build_cycle_result(
     n_total = len(addresses)
     n_unique = len(addr_counts)
     if n_unique > 1 and n_total > 0:
-        entropy = -sum(
-            (c / n_total) * math.log2(c / n_total)
-            for c in addr_counts.values()
-        )
+        entropy = -sum((c / n_total) * math.log2(c / n_total) for c in addr_counts.values())
         max_entropy = math.log2(n_unique)
         entropy = entropy / max_entropy if max_entropy > 0 else 0.0
     else:
@@ -344,7 +337,11 @@ def _build_cycle_result(
 
     # Mean inter-hop delta in slots
     if len(hop_slots) >= 2:
-        deltas = [hop_slots[i + 1] - hop_slots[i] for i in range(len(hop_slots) - 1) if hop_slots[i + 1] > hop_slots[i]]
+        deltas = [
+            hop_slots[i + 1] - hop_slots[i]
+            for i in range(len(hop_slots) - 1)
+            if hop_slots[i + 1] > hop_slots[i]
+        ]
         mean_delta = sum(deltas) / len(deltas) if deltas else float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
     else:
         mean_delta = float(_DEFAULT_INTER_HOP_DELTA_SLOTS)

@@ -4,14 +4,12 @@ The fresh / expired / exhausted / already-consumed distinctions of
 consume_token live in one SQL WHERE clause, and the TOCTOU sibling
 cleanup of claim_session_token lives in FOR UPDATE + DELETE semantics.
 Mocks cannot regress-test either, so this is the authoritative coverage;
-tests/api/test_auth_tokens_sessions.py only pins the call contract.
+tests/api/v1/test_auth_tokens_sessions.py only pins the call contract.
 
 Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-
-import pytest
 
 from app.auth.sessions import create_session, lookup_session
 from app.auth.tokens import (
@@ -75,8 +73,7 @@ class TestConsumeTokenSemantics:
                 # eligible for the purge sweep.
                 async with get_connection() as conn:
                     consumed_at = await conn.fetchval(
-                        "SELECT consumed_at FROM magic_link_tokens"
-                        " WHERE token_hash = $1",
+                        "SELECT consumed_at FROM magic_link_tokens WHERE token_hash = $1",
                         hash_token(token),
                     )
                 assert consumed_at is not None
@@ -154,9 +151,7 @@ class TestSessionClaimToctou:
                 first, _ = await create_session(user_id, token_hash=token_hash)
                 second, _ = await create_session(user_id, token_hash=token_hash)
 
-                revoked = await claim_session_token(
-                    session_id=first, token_hash=token_hash
-                )
+                revoked = await claim_session_token(session_id=first, token_hash=token_hash)
 
                 assert revoked == 1
                 assert await lookup_session(second) is None
@@ -175,16 +170,12 @@ class TestSessionClaimToctou:
                 token = await issue_token(user_id, "login")
                 token_hash = hash_token(token)
                 first, _ = await create_session(user_id, token_hash=token_hash)
-                await claim_session_token(
-                    session_id=first, token_hash=token_hash
-                )
+                await claim_session_token(session_id=first, token_hash=token_hash)
                 # A later redemption of the same link claims its own
                 # session; the already-claimed one has a NULL back-ref and
                 # must not be caught in the sibling DELETE.
                 third, _ = await create_session(user_id, token_hash=token_hash)
-                revoked = await claim_session_token(
-                    session_id=third, token_hash=token_hash
-                )
+                revoked = await claim_session_token(session_id=third, token_hash=token_hash)
                 assert revoked == 0
                 assert await lookup_session(first) is not None
                 assert await lookup_session(third) is not None

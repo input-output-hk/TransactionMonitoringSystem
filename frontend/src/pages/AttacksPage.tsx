@@ -34,17 +34,14 @@ import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/utils/clipboard";
 import { formatTimeAgo } from "@/lib/utils/dates";
-import { formatAda, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
+import { formatAdaCompact, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
 import { ATTACK_TYPES, type AttackType, type Severity } from "@/lib/attacks";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
 import { AlertCircle, ArrowUp, Copy } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-
-// Recharts (+ its d3/redux transitive deps, ~280 KB gzip) loads as a
-// deferred async chunk so it doesn't bloat the initial dashboard bundle.
-const Sparkline = lazy(() => import("@/components/sparkline"));
+import Sparkline from "@/components/sparkline";
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -76,7 +73,7 @@ export function AttacksPage() {
 	});
 
 	const total = data?.total ?? 0;
-	// Backend already anti-joins `archived_alerts` from `/api/analysis/results`,
+	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`,
 	// so the rows we get are guaranteed not archived. No client filter needed.
 	const visibleRows = data?.rows ?? [];
 
@@ -270,7 +267,7 @@ export function AttacksPage() {
 						primary: shortHash(t.tx_hash),
 						mono: true,
 						middle: formatTimeAgo(t.timestamp),
-						trailing: formatAda(t.total_output_value),
+						trailing: formatAdaCompact(t.total_output_value),
 					}))}
 				/>
 				<LatestList
@@ -280,7 +277,7 @@ export function AttacksPage() {
 						primary: String(b.block_height),
 						mono: false,
 						middle: formatTimeAgo(b.timestamp),
-						trailing: formatAda(b.total_output_value),
+						trailing: formatAdaCompact(b.total_output_value),
 					}))}
 				/>
 			</div>
@@ -322,7 +319,7 @@ export function AttacksPage() {
 
 /**
  * Latest CRITICAL alert banner. Pulls the most recent risk_band=Critical
- * row from `/api/analysis/results` (sorted by date, page size 1) and shares
+ * row from `/api/v1/analysis/results` (sorted by date, page size 1) and shares
  * the table's 15s poll cadence — `useRiskAlerts` uses its `params` as the
  * query key, so a separate page=0/pageSize=1 request lives independently.
  *
@@ -351,13 +348,6 @@ function CriticalTriangleIcon({ className }: { className?: string }) {
 			<circle cx="12" cy="17.2" r="1.05" fill="white" />
 		</svg>
 	);
-}
-
-/** Middle-truncate a long string, keeping the start and end visible.
- *  Matches the Figma look (`dfgsdfsd4rge4resvse....terge4ge4er`). */
-function middleTruncate(s: string, head = 19, tail = 11): string {
-	if (s.length <= head + tail + 4) return s;
-	return `${s.slice(0, head)}....${s.slice(-tail)}`;
 }
 
 function CriticalAlertCard() {
@@ -404,7 +394,7 @@ function CriticalAlertCard() {
 			<div className="text-foreground mt-2 flex items-center justify-center gap-2 font-mono text-xs">
 				<span className="truncate">
 					{latest
-						? middleTruncate(latest.fullHash.toUpperCase())
+						? shortHash(latest.fullHash.toUpperCase(), 19, 11)
 						: isPending
 							? "Loading…"
 							: "—"}
@@ -469,15 +459,7 @@ function GraphBarCard() {
 					{isError ? "Unavailable" : "Loading…"}
 				</div>
 			) : (
-				<Suspense
-					fallback={
-						<div className="text-muted-foreground mt-2 flex h-10 items-center text-xs">
-							Loading…
-						</div>
-					}
-				>
-					<Sparkline points={points} className="mt-2 h-10 w-full" />
-				</Suspense>
+				<Sparkline points={points} className="mt-2 h-10 w-full" />
 			)}
 			<div className="text-muted-foreground mt-1 text-xs">
 				{total} in last 14 days

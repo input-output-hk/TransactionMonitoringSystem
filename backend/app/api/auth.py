@@ -19,11 +19,11 @@ direct peer, so dev http://localhost still works and an untrusted direct
 caller cannot spoof the scheme). A second, JS-readable CSRF cookie rides
 alongside it (same lifetime, not HTTP-only) — see app.csrf.CSRFMiddleware.
 """
+
 from __future__ import annotations
 
 import logging
 import secrets
-from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # Cookie max-age arithmetic: SESSION_TTL_DAYS is the tunable, this is the unit.
 _SECONDS_PER_DAY = 86_400
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 # Per-email throttle on /api/auth/request-link.
 #
@@ -108,7 +108,9 @@ def _set_csrf_cookie(request: Request, response: Response) -> None:
 
 
 def _set_session_cookie(
-    request: Request, response: Response, session_id: str,
+    request: Request,
+    response: Response,
+    session_id: str,
 ) -> None:
     """Apply the session cookie (and its CSRF double-submit companion) to
     ``response`` with the right flags."""
@@ -144,7 +146,7 @@ def _clear_session_cookie(request: Request, response: Response) -> None:
     )
 
 
-async def _find_active_user_by_email(email: str) -> Optional[dict]:
+async def _find_active_user_by_email(email: str) -> dict | None:
     """Case-insensitive lookup, restricted to fully ``active`` users.
 
     Pending users (invited but never redeemed their invite link) are
@@ -168,7 +170,7 @@ async def _find_active_user_by_email(email: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-async def _get_user(user_id: UUID) -> Optional[dict]:
+async def _get_user(user_id: UUID) -> dict | None:
     """Fetch a user row by primary key, or ``None`` if not found.
 
     Used after ``consume_token`` to re-read the user (whose ``status``
@@ -232,12 +234,14 @@ async def request_link(payload: RequestLinkPayload):
             # Catch-all: do NOT propagate. Logging is the audit trail.
             logger.error(
                 "request-link: token/email issuance failed for %r: %s",
-                payload.email, e,
+                payload.email,
+                e,
             )
     else:
         # Log only — never surface to client.
         logger.info(
-            "request-link: no active user for %r (silent 200)", payload.email,
+            "request-link: no active user for %r (silent 200)",
+            payload.email,
         )
     return {"status": "ok"}
 

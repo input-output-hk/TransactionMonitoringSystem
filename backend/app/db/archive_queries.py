@@ -7,8 +7,8 @@ All queries use parameterized SQL with dict-style placeholders.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from app.db.clickhouse import _ch_executor, _get_client
 
@@ -37,11 +37,14 @@ def _archive_exists(network: str, tx_hash: str) -> bool:
 async def archive_exists_async(network: str, tx_hash: str) -> bool:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_exists, network, tx_hash,
+        _ch_executor,
+        _archive_exists,
+        network,
+        tx_hash,
     )
 
 
-def _archive_get(network: str, tx_hash: str) -> Optional[Dict[str, Any]]:
+def _archive_get(network: str, tx_hash: str) -> dict[str, Any] | None:
     rows = _get_client().execute(
         """
         SELECT note, archived_by, archived_at, source
@@ -62,10 +65,13 @@ def _archive_get(network: str, tx_hash: str) -> Optional[Dict[str, Any]]:
     }
 
 
-async def archive_get_async(network: str, tx_hash: str) -> Optional[Dict[str, Any]]:
+async def archive_get_async(network: str, tx_hash: str) -> dict[str, Any] | None:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_get, network, tx_hash,
+        _ch_executor,
+        _archive_get,
+        network,
+        tx_hash,
     )
 
 
@@ -95,10 +101,16 @@ async def archive_insert_async(
 ) -> None:
     """Insert a single local archive entry. Caller must check existence first."""
     loop = asyncio.get_running_loop()
-    archived_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    archived_at = datetime.now(UTC).replace(tzinfo=None)
     await loop.run_in_executor(
-        _ch_executor, _archive_insert,
-        network, tx_hash, note, archived_by, archived_at, SOURCE_LOCAL,
+        _ch_executor,
+        _archive_insert,
+        network,
+        tx_hash,
+        note,
+        archived_by,
+        archived_at,
+        SOURCE_LOCAL,
     )
 
 
@@ -138,32 +150,49 @@ def _archive_delete(network: str, tx_hash: str) -> int:
 async def archive_delete_async(network: str, tx_hash: str) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_delete, network, tx_hash,
+        _ch_executor,
+        _archive_delete,
+        network,
+        tx_hash,
     )
 
 
 _LIST_COLUMNS = (
-    "network", "tx_hash", "note", "archived_by", "archived_at", "source",
-    "max_score", "max_class", "risk_band", "analyzed_at", "_has_score",
+    "network",
+    "tx_hash",
+    "note",
+    "archived_by",
+    "archived_at",
+    "source",
+    "max_score",
+    "max_class",
+    "risk_band",
+    "analyzed_at",
+    "_has_score",
 )
 
 
 def _archive_list(
     network: str,
-    date_from: Optional[datetime],
-    date_to: Optional[datetime],
+    date_from: datetime | None,
+    date_to: datetime | None,
     limit: int,
     offset: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     conditions = ["a.network = %(network)s"]
-    params: Dict[str, Any] = {
-        "network": network, "limit": limit, "offset": offset,
+    params: dict[str, Any] = {
+        "network": network,
+        "limit": limit,
+        "offset": offset,
     }
     if date_from is not None:
         conditions.append("a.archived_at >= %(date_from)s")
         params["date_from"] = date_from
     if date_to is not None:
-        conditions.append("a.archived_at <= %(date_to)s")
+        # Exclusive upper bound: the API's shared [from, to) half-open window
+        # convention (app.api._params), so chained windows never double-count
+        # a row archived exactly at the boundary instant.
+        conditions.append("a.archived_at < %(date_to)s")
         params["date_to"] = date_to
     where = " AND ".join(conditions)
     # LEFT JOIN onto tx_class_scores so imported entries with no local
@@ -195,7 +224,7 @@ def _archive_list(
         """,
         params,
     )
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for row in rows:
         d = dict(zip(_LIST_COLUMNS, row))
         if not d.pop("_has_score"):
@@ -209,21 +238,27 @@ def _archive_list(
 
 async def archive_list_async(
     network: str,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_list,
-        network, date_from, date_to, limit, offset,
+        _ch_executor,
+        _archive_list,
+        network,
+        date_from,
+        date_to,
+        limit,
+        offset,
     )
 
 
 def _archive_get_enriched(
-    network: str, tx_hash: str,
-) -> Optional[Dict[str, Any]]:
+    network: str,
+    tx_hash: str,
+) -> dict[str, Any] | None:
     """Single archive row with the same detection-record LEFT JOIN as the list.
 
     Returns ``None`` when no archive row exists for ``(network, tx_hash)``.
@@ -265,18 +300,22 @@ def _archive_get_enriched(
 
 
 async def archive_get_enriched_async(
-    network: str, tx_hash: str,
-) -> Optional[Dict[str, Any]]:
+    network: str,
+    tx_hash: str,
+) -> dict[str, Any] | None:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_get_enriched, network, tx_hash,
+        _ch_executor,
+        _archive_get_enriched,
+        network,
+        tx_hash,
     )
 
 
 def _archive_count(
     network: str,
-    date_from: Optional[datetime],
-    date_to: Optional[datetime],
+    date_from: datetime | None,
+    date_to: datetime | None,
 ) -> int:
     """Total archive rows matching the network + date-range filters.
 
@@ -285,7 +324,7 @@ def _archive_count(
     paginated list responses without an extra query per page.
     """
     conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {"network": network}
+    params: dict[str, Any] = {"network": network}
     if date_from is not None:
         conditions.append("archived_at >= %(date_from)s")
         params["date_from"] = date_from
@@ -302,16 +341,20 @@ def _archive_count(
 
 async def archive_count_async(
     network: str,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
 ) -> int:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_count, network, date_from, date_to,
+        _ch_executor,
+        _archive_count,
+        network,
+        date_from,
+        date_to,
     )
 
 
-def _existing_pairs(pairs: List[Tuple[str, str]]) -> set:
+def _existing_pairs(pairs: list[tuple[str, str]]) -> set:
     """Return the subset of (network, tx_hash) already archived."""
     if not pairs:
         return set()
@@ -328,9 +371,9 @@ def _existing_pairs(pairs: List[Tuple[str, str]]) -> set:
 
 
 def _archive_bulk_insert(
-    entries: List[Dict[str, Any]],
+    entries: list[dict[str, Any]],
     source_label: str,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Skip-existing bulk insert. Returns {'inserted', 'skipped'}.
 
     Each entry is a dict with: network, tx_hash, note, archived_by,
@@ -344,10 +387,10 @@ def _archive_bulk_insert(
         return {"inserted": 0, "skipped": 0}
     pairs = [(e["network"], e["tx_hash"]) for e in entries]
     existing = _existing_pairs(pairs)
-    to_insert: List[Tuple[Any, ...]] = []
+    to_insert: list[tuple[Any, ...]] = []
     seen_in_batch: set = set()
     skipped = 0
-    fallback_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+    fallback_ts = datetime.now(UTC).replace(tzinfo=None)
     source_tag = f"{IMPORT_SOURCE_PREFIX}{source_label}"
     for entry in entries:
         key = (entry["network"], entry["tx_hash"])
@@ -357,11 +400,17 @@ def _archive_bulk_insert(
         seen_in_batch.add(key)
         archived_at = entry.get("archived_at") or fallback_ts
         if isinstance(archived_at, datetime) and archived_at.tzinfo is not None:
-            archived_at = archived_at.astimezone(timezone.utc).replace(tzinfo=None)
-        to_insert.append((
-            entry["tx_hash"], entry["network"], entry["note"],
-            entry["archived_by"], archived_at, source_tag,
-        ))
+            archived_at = archived_at.astimezone(UTC).replace(tzinfo=None)
+        to_insert.append(
+            (
+                entry["tx_hash"],
+                entry["network"],
+                entry["note"],
+                entry["archived_by"],
+                archived_at,
+                source_tag,
+            )
+        )
     if to_insert:
         _get_client().execute(
             """
@@ -373,33 +422,43 @@ def _archive_bulk_insert(
         )
     logger.debug(
         "archive bulk import from %s: inserted=%d skipped=%d",
-        source_label, len(to_insert), skipped,
+        source_label,
+        len(to_insert),
+        skipped,
     )
     return {"inserted": len(to_insert), "skipped": skipped}
 
 
 async def archive_bulk_insert_async(
-    entries: List[Dict[str, Any]],
+    entries: list[dict[str, Any]],
     source_label: str,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_bulk_insert, entries, source_label,
+        _ch_executor,
+        _archive_bulk_insert,
+        entries,
+        source_label,
     )
 
 
 _EXPORT_COLUMNS = (
-    "network", "tx_hash", "note", "archived_by", "archived_at", "source",
+    "network",
+    "tx_hash",
+    "note",
+    "archived_by",
+    "archived_at",
+    "source",
 )
 
 
 def _archive_export_rows(
     network: str,
-    date_from: Optional[datetime],
-    date_to: Optional[datetime],
-) -> List[Dict[str, Any]]:
+    date_from: datetime | None,
+    date_to: datetime | None,
+) -> list[dict[str, Any]]:
     conditions = ["network = %(network)s"]
-    params: Dict[str, Any] = {"network": network}
+    params: dict[str, Any] = {"network": network}
     if date_from is not None:
         conditions.append("archived_at >= %(date_from)s")
         params["date_from"] = date_from
@@ -421,12 +480,14 @@ def _archive_export_rows(
 
 async def archive_export_rows_async(
     network: str,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-) -> List[Dict[str, Any]]:
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> list[dict[str, Any]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _ch_executor, _archive_export_rows, network, date_from, date_to,
+        _ch_executor,
+        _archive_export_rows,
+        network,
+        date_from,
+        date_to,
     )
-
-

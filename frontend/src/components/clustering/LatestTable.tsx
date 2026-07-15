@@ -10,6 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
 import { HelpDetails } from "@/components/ui/help-details";
+import { EmptyText, ErrorText, LoadingText } from "@/components/ui/status-text";
 import {
 	Select,
 	SelectContent,
@@ -32,7 +33,8 @@ import {
 	useLatest,
 } from "@/lib/api/clustering";
 import { ClusterTag, CopyHash, VerdictBadge } from "./cells";
-import { formatAda, formatAge } from "./format";
+import { formatAdaExact } from "@/lib/utils/numbers";
+import { formatTimeAgo } from "@/lib/utils/dates";
 import { ReasonChips } from "./ReasonChips";
 
 const LIMIT_OPTIONS = [50, 100, 200];
@@ -146,15 +148,11 @@ export function LatestTable({ target }: { target: string }) {
 			{errorMsg && <p className="text-destructive text-sm">{errorMsg}</p>}
 
 			{isLoading ? (
-				<p className="text-muted-foreground text-sm">Loading interactions…</p>
+				<LoadingText>Loading interactions…</LoadingText>
 			) : isError ? (
-				<p className="text-destructive text-sm">
-					Failed to load the latest interactions.
-				</p>
+				<ErrorText>Failed to load the latest interactions.</ErrorText>
 			) : !rows.length ? (
-				<p className="text-muted-foreground text-sm">
-					No transactions stored yet. Use “Fetch newer from chain”.
-				</p>
+				<EmptyText>No transactions stored yet. Use “Fetch newer from chain”.</EmptyText>
 			) : (
 				<>
 					<p className="text-muted-foreground text-xs">
@@ -187,7 +185,7 @@ export function LatestTable({ target }: { target: string }) {
 										className="text-muted-foreground"
 										title={r.block_time}
 									>
-										{formatAge(r.block_time)}
+										{formatTimeAgo(r.block_time, { compact: true })}
 									</TableCell>
 									<TableCell>
 										{/* A not-yet-classified row reads as Unclassified, same as a
@@ -205,10 +203,10 @@ export function LatestTable({ target }: { target: string }) {
 										{r.classified ? r.votes : "—"}
 									</TableCell>
 									<TableCell className="text-right tabular-nums">
-										{formatAda(r.fees, 0)}
+										{formatAdaExact(r.fees, 0)}
 									</TableCell>
 									<TableCell className="text-right tabular-nums">
-										{formatAda(r.total_output_lovelace, 0)}
+										{formatAdaExact(r.total_output_lovelace, 0)}
 									</TableCell>
 									<TableCell className="text-right tabular-nums">
 										{r.input_count}/{r.output_count}

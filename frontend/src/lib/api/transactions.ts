@@ -2,7 +2,7 @@
  * Read-only hooks for raw transaction/block data used by the dashboard
  * "Latest …" widgets.
  *
- * The schema has no `blocks` table — `/api/transactions/blocks/recent`
+ * The schema has no `blocks` table — `/api/v1/transactions/blocks/recent`
  * aggregates by `block_height` on the backend. See `backend/app/api/transactions.py`.
  */
 import { useQuery } from "@tanstack/react-query";
@@ -36,15 +36,20 @@ export type RecentBlock = {
 
 /* ---------- Fetchers ---------- */
 
+/** Shared list envelope: every /api/v1 list endpoint returns {count,total,data}
+ * (total is null on cursor-paginated feeds like this one). */
+type ListResponse<T> = { count: number; total: number | null; data: T[] };
+
 async function fetchLatestTransactions(
 	limit: number,
 ): Promise<TransactionRow[]> {
 	const qs = new URLSearchParams();
 	qs.set("network", getNetwork());
 	qs.set("limit", String(limit));
-	const res = await fetchWithAuth(`/api/transactions/?${qs.toString()}`);
+	const res = await fetchWithAuth(`/api/v1/transactions?${qs.toString()}`);
 	if (!res.ok) throw new Error(`Latest transactions failed: ${res.status}`);
-	return (await res.json()) as TransactionRow[];
+	const json = (await res.json()) as ListResponse<TransactionRow>;
+	return json.data;
 }
 
 async function fetchRecentBlocks(limit: number): Promise<RecentBlock[]> {
@@ -52,7 +57,7 @@ async function fetchRecentBlocks(limit: number): Promise<RecentBlock[]> {
 	qs.set("network", getNetwork());
 	qs.set("limit", String(limit));
 	const res = await fetchWithAuth(
-		`/api/transactions/blocks/recent?${qs.toString()}`,
+		`/api/v1/transactions/blocks/recent?${qs.toString()}`,
 	);
 	if (!res.ok) throw new Error(`Recent blocks failed: ${res.status}`);
 	return (await res.json()) as RecentBlock[];

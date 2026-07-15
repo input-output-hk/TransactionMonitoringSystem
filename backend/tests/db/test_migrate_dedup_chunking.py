@@ -8,13 +8,16 @@ so a group never splits) and each INSERT carries explicit memory settings.
 
 import importlib.util
 import os
-import sys
 from unittest.mock import MagicMock
 
 import pytest
 
 _SCRIPT = os.path.join(
-    os.path.dirname(__file__), "..", "..", "scripts", "migrate_dedup_schema.py",
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "scripts",
+    "migrate_dedup_schema.py",
 )
 
 
@@ -60,11 +63,16 @@ class TestChunkedCollapse:
     def test_collapse_runs_one_insert_per_bucket_with_memory_settings(self, mig):
         client = _legacy_client()
         mig.migrate_table(
-            client, "transactions", apply=True, legacy_suffix="20260611",
-            buckets=4, max_memory_bytes=1_000_000,
+            client,
+            "transactions",
+            apply=True,
+            legacy_suffix="20260611",
+            buckets=4,
+            max_memory_bytes=1_000_000,
         )
         inserts = [
-            c for c in client.execute.call_args_list
+            c
+            for c in client.execute.call_args_list
             if c.args[0].startswith("INSERT INTO transactions__mig")
         ]
         assert len(inserts) == 4
@@ -85,11 +93,16 @@ class TestChunkedCollapse:
         # aggregates must carry no AS aliases at all.
         client = _legacy_client()
         mig.migrate_table(
-            client, "transactions", apply=True, legacy_suffix="20260612",
-            buckets=1, max_memory_bytes=1_000_000,
+            client,
+            "transactions",
+            apply=True,
+            legacy_suffix="20260612",
+            buckets=1,
+            max_memory_bytes=1_000_000,
         )
         inserts = [
-            c.args[0] for c in client.execute.call_args_list
+            c.args[0]
+            for c in client.execute.call_args_list
             if c.args[0].startswith("INSERT INTO transactions__mig")
         ]
         assert inserts
@@ -110,12 +123,13 @@ class TestChunkedCollapse:
         client.execute.side_effect = execute
         with pytest.raises(RuntimeError, match="migrated row count"):
             mig.migrate_table(
-                client, "transactions", apply=True, legacy_suffix="20260611",
+                client,
+                "transactions",
+                apply=True,
+                legacy_suffix="20260611",
             )
         # Live table untouched: no EXCHANGE issued.
-        assert not any(
-            c.args[0].startswith("EXCHANGE") for c in client.execute.call_args_list
-        )
+        assert not any(c.args[0].startswith("EXCHANGE") for c in client.execute.call_args_list)
 
 
 class TestStrandedMigRecovery:
@@ -130,23 +144,30 @@ class TestStrandedMigRecovery:
                 name = a[0]["t"]
                 if name.endswith("__mig"):
                     return [("MergeTree", "MergeTree ORDER BY tx_hash")]
-                return [("ReplacingMergeTree", "ReplacingMergeTree(ingestion_timestamp) ORDER BY tx_hash")]
+                return [
+                    (
+                        "ReplacingMergeTree",
+                        "ReplacingMergeTree(ingestion_timestamp) ORDER BY tx_hash",
+                    )
+                ]
             if "name, type" in q:
                 return []  # columns already wide
             return None
 
         client.execute.side_effect = execute
         swapped = mig.migrate_table(
-            client, "transactions", apply=True, legacy_suffix="20260611",
+            client,
+            "transactions",
+            apply=True,
+            legacy_suffix="20260611",
         )
         assert swapped is False
         renames = [
-            c.args[0] for c in client.execute.call_args_list
+            c.args[0]
+            for c in client.execute.call_args_list
             if c.args[0].startswith("RENAME TABLE transactions__mig")
         ]
-        assert renames == [
-            "RENAME TABLE transactions__mig TO transactions__legacy_20260611"
-        ]
+        assert renames == ["RENAME TABLE transactions__mig TO transactions__legacy_20260611"]
 
     def test_v2_without_stranded_mig_skips_quietly(self, mig):
         client = MagicMock()
@@ -162,12 +183,16 @@ class TestStrandedMigRecovery:
             return None
 
         client.execute.side_effect = execute
-        assert mig.migrate_table(
-            client, "transactions", apply=True, legacy_suffix="20260611",
-        ) is False
-        assert not any(
-            c.args[0].startswith("RENAME") for c in client.execute.call_args_list
+        assert (
+            mig.migrate_table(
+                client,
+                "transactions",
+                apply=True,
+                legacy_suffix="20260611",
+            )
+            is False
         )
+        assert not any(c.args[0].startswith("RENAME") for c in client.execute.call_args_list)
 
 
 class TestNarrowColumnRebuild:
@@ -185,10 +210,12 @@ class TestNarrowColumnRebuild:
                 name = a[0]["t"] if a else None
                 if name and name.endswith("__mig"):
                     return []
-                return [(
-                    "ReplacingMergeTree",
-                    "ReplacingMergeTree(ingestion_timestamp) ORDER BY (network, tx_hash)",
-                )]
+                return [
+                    (
+                        "ReplacingMergeTree",
+                        "ReplacingMergeTree(ingestion_timestamp) ORDER BY (network, tx_hash)",
+                    )
+                ]
             if "name, type" in q:
                 return [("input_count", "UInt8"), ("output_count", "UInt16")]
             if "FROM system.columns" in q:
@@ -206,7 +233,10 @@ class TestNarrowColumnRebuild:
     def test_v2_engine_with_narrow_columns_is_rebuilt(self, mig):
         client = self._v2_narrow_client()
         swapped = mig.migrate_table(
-            client, "transactions", apply=True, legacy_suffix="20260612",
+            client,
+            "transactions",
+            apply=True,
+            legacy_suffix="20260612",
         )
         assert swapped is True
         assert any(

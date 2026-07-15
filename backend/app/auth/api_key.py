@@ -3,7 +3,7 @@
 This module unifies two parallel auth mechanisms behind a single
 ``verify_api_key`` dependency so existing endpoints don't need to change:
 
-- **API key** via the ``TMS-API-Key`` header — for server-to-server
+- **API key** via the ``X-API-Key`` header (name configurable via API_KEY_HEADER) — for server-to-server
   callers (CLI, integrations, the analysis engine talking to itself).
 - **Session cookie** via ``settings.SESSION_COOKIE_NAME`` (default
   ``tms_session``) — for browser users authenticated through the
@@ -16,7 +16,6 @@ auth specifically (e.g. ``/api/users``) should use ``require_user`` or
 
 import hmac
 import logging
-from typing import List, Optional
 
 from fastapi import HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
@@ -32,17 +31,15 @@ api_key_header = APIKeyHeader(
 )
 
 # Parse and cache valid keys once at startup — avoids repeated string splits on every request
-_valid_keys: List[str] = (
-    [k.strip() for k in settings.API_KEYS.split(",") if k.strip()]
-    if settings.API_KEYS
-    else []
+_valid_keys: list[str] = (
+    [k.strip() for k in settings.API_KEYS.split(",") if k.strip()] if settings.API_KEYS else []
 )
 _dev_mode: bool = not _valid_keys
 # Dev-mode warning is emitted from main.py lifespan so that logging is fully
 # configured before the message is written.
 
 
-def is_valid_api_key(candidate: Optional[str]) -> bool:
+def is_valid_api_key(candidate: str | None) -> bool:
     """Constant-time check against the configured API keys.
 
     Returns True when ``candidate`` matches any key in ``_valid_keys``. The
@@ -64,13 +61,13 @@ def is_valid_api_key(candidate: Optional[str]) -> bool:
 
 async def verify_api_key(
     request: Request,
-    api_key: Optional[str] = Security(api_key_header),
+    api_key: str | None = Security(api_key_header),
 ) -> str:
     """Accept either a valid API key OR a valid session cookie.
 
     Returns a short string identifying the credential used:
       - ``"dev-mode"`` when no API_KEYS are configured (dev fallback)
-      - the raw API key string when ``TMS-API-Key`` matched
+      - the raw API key string when the API-key header matched
       - ``"session:<user_id>"`` when a session cookie resolved to a user
 
     Raises 401 only if neither credential is present/valid: the caller is
@@ -94,6 +91,7 @@ async def verify_api_key(
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
     if session_id:
         from app.auth.sessions import lookup_session  # local to dodge cycles
+
         user = await lookup_session(session_id)
         if user:
             # Same session-claim as `deps.current_user`. Lives in both
@@ -103,6 +101,7 @@ async def verify_api_key(
             # `tokens.claim_session_token`.
             if user.get("created_by_token_hash"):
                 from app.auth.tokens import claim_session_token
+
                 await claim_session_token(
                     session_id=user["session_id"],
                     token_hash=user["created_by_token_hash"],

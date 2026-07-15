@@ -2,19 +2,27 @@
 // identify, manual reclassify). Public surface (re-exported by the barrel).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { Contract, IdentifyResult } from "../types";
+import type { Contract, IdentifyResult, ListPage } from "../types";
 import { validateContracts, validateIdentify } from "../validation";
-import { get, send } from "../transport";
+import { get, MAX_PAGE_LIMIT, send } from "../transport";
 
 const CONTRACTS_KEY = ["clustering", "contracts"] as const;
 
 export function useContracts(pollMs = 10_000, enabled = true) {
 	return useQuery({
 		queryKey: CONTRACTS_KEY,
-		queryFn: () => get<Contract[]>("/contracts", validateContracts),
+		// The endpoint returns a {count,total,data} envelope; fetch one max-size
+		// page and unwrap so consumers keep seeing a plain array.
+		queryFn: async () =>
+			(
+				await get<ListPage<Contract>>(
+					`/contracts?limit=${MAX_PAGE_LIMIT}`,
+					validateContracts,
+				)
+			).data,
 		refetchInterval: pollMs,
 		// Let the page hold the query off until it knows clustering is enabled, so
-		// a clustering-disabled deployment never polls /api/clustering/*.
+		// a clustering-disabled deployment never polls /api/v1/clustering/*.
 		enabled,
 	});
 }

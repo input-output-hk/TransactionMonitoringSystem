@@ -40,7 +40,9 @@ class TestCorsFailFast:
 
     def test_explicit_origin_passes(self, prod_mode, monkeypatch):
         monkeypatch.setattr(
-            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+            settings,
+            "CORS_ALLOW_ORIGINS",
+            "https://tms.example.com",
         )
         _validate_startup_settings()
 
@@ -64,17 +66,23 @@ class TestPostgresPasswordFailFast:
         from app.config import DEFAULT_DEV_POSTGRES_PASSWORD
 
         monkeypatch.setattr(
-            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+            settings,
+            "CORS_ALLOW_ORIGINS",
+            "https://tms.example.com",
         )
         monkeypatch.setattr(
-            settings, "POSTGRES_PASSWORD", DEFAULT_DEV_POSTGRES_PASSWORD,
+            settings,
+            "POSTGRES_PASSWORD",
+            DEFAULT_DEV_POSTGRES_PASSWORD,
         )
         with pytest.raises(RuntimeError, match="POSTGRES_PASSWORD"):
             _validate_startup_settings()
 
     def test_custom_password_passes(self, prod_mode, monkeypatch):
         monkeypatch.setattr(
-            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+            settings,
+            "CORS_ALLOW_ORIGINS",
+            "https://tms.example.com",
         )
         monkeypatch.setattr(settings, "POSTGRES_PASSWORD", "a-real-secret")
         _validate_startup_settings()
@@ -87,7 +95,9 @@ class TestPostgresPasswordFailFast:
         monkeypatch.setattr(settings, "TMS_ALLOW_DEV_MODE", "1")
         monkeypatch.setattr(settings, "CORS_ALLOW_ORIGINS", "*")
         monkeypatch.setattr(
-            settings, "POSTGRES_PASSWORD", DEFAULT_DEV_POSTGRES_PASSWORD,
+            settings,
+            "POSTGRES_PASSWORD",
+            DEFAULT_DEV_POSTGRES_PASSWORD,
         )
         _validate_startup_settings()
 
@@ -101,13 +111,17 @@ class TestTrustedProxyCidrsFailFast:
         # Keep the CORS guard quiet so these tests exercise only the
         # proxy-CIDR validation.
         monkeypatch.setattr(
-            settings, "CORS_ALLOW_ORIGINS", "https://tms.example.com",
+            settings,
+            "CORS_ALLOW_ORIGINS",
+            "https://tms.example.com",
         )
 
     def test_malformed_cidr_refuses_start(self, monkeypatch):
         monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
         monkeypatch.setattr(
-            settings, "TRUSTED_PROXY_CIDRS", "10.0.0.0/8,not-a-cidr",
+            settings,
+            "TRUSTED_PROXY_CIDRS",
+            "10.0.0.0/8,not-a-cidr",
         )
         with pytest.raises(RuntimeError, match="TRUSTED_PROXY_CIDRS"):
             _validate_startup_settings()
@@ -115,7 +129,9 @@ class TestTrustedProxyCidrsFailFast:
     def test_error_names_the_bad_cidr(self, monkeypatch):
         monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
         monkeypatch.setattr(
-            settings, "TRUSTED_PROXY_CIDRS", "10.0.0.0/8,1.2.3.999/32",
+            settings,
+            "TRUSTED_PROXY_CIDRS",
+            "10.0.0.0/8,1.2.3.999/32",
         )
         with pytest.raises(RuntimeError, match=r"1\.2\.3\.999/32"):
             _validate_startup_settings()
@@ -123,7 +139,9 @@ class TestTrustedProxyCidrsFailFast:
     def test_valid_cidrs_pass(self, monkeypatch):
         monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
         monkeypatch.setattr(
-            settings, "TRUSTED_PROXY_CIDRS", "127.0.0.1/32,172.18.0.1/32",
+            settings,
+            "TRUSTED_PROXY_CIDRS",
+            "127.0.0.1/32,172.18.0.1/32",
         )
         _validate_startup_settings()
 
@@ -158,7 +176,10 @@ class TestAnalysisBatchesValidation:
             Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=batches)
 
     def test_positive_batches_accepted(self):
-        assert Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=5).ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK == 5
+        assert (
+            Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=5).ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK
+            == 5
+        )
 
 
 class TestDocsGating:
@@ -169,11 +190,7 @@ class TestDocsGating:
         from app import auth
         from app.main import app
 
-        expected = (
-            "/openapi.json"
-            if (auth._dev_mode or settings.TMS_API_DOCS_ENABLED)
-            else None
-        )
+        expected = "/openapi.json" if (auth._dev_mode or settings.TMS_API_DOCS_ENABLED) else None
         assert app.openapi_url == expected
         assert (app.docs_url == "/docs") == (expected is not None)
 

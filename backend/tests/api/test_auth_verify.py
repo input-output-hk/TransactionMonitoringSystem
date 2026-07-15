@@ -1,5 +1,5 @@
 """TestClient coverage for the magic-link redemption route
-GET /api/auth/verify (app/api/auth.py).
+GET /api/v1/auth/verify (app/api/v1/auth.py).
 
 Pins the route contract:
 
@@ -16,7 +16,7 @@ real Postgres in tests/live_db/test_auth_lifecycle_pg.py.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -39,7 +39,7 @@ def _user_row(status="active", user_id=None):
         "full_name": "Op Erator",
         "role": "Reviewer",
         "status": status,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
         "last_login_at": None,
     }
 
@@ -53,29 +53,23 @@ def client():
 
 @pytest.fixture
 def session_stub(monkeypatch):
-    expires = datetime.now(timezone.utc) + timedelta(
-        days=settings.SESSION_TTL_DAYS
-    )
+    expires = datetime.now(UTC) + timedelta(days=settings.SESSION_TTL_DAYS)
     stub = AsyncMock(return_value=("sess-abc", expires))
     monkeypatch.setattr(auth_api, "create_session", stub)
     return stub
 
 
 class TestVerifySuccess:
-    def test_sets_http_only_session_cookie(
-        self, client, monkeypatch, session_stub
-    ):
+    def test_sets_http_only_session_cookie(self, client, monkeypatch, session_stub):
         user_id = uuid.uuid4()
-        monkeypatch.setattr(
-            auth_api, "consume_token", AsyncMock(return_value=user_id)
-        )
+        monkeypatch.setattr(auth_api, "consume_token", AsyncMock(return_value=user_id))
         monkeypatch.setattr(
             auth_api,
             "_get_user",
             AsyncMock(return_value=_user_row(user_id=user_id)),
         )
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 200, r.text
         set_cookie = r.headers["set-cookie"].lower()
@@ -86,40 +80,29 @@ class TestVerifySuccess:
         assert body["email"] == "operator@example.com"
         assert body["role"] == "Reviewer"
 
-    def test_session_bound_to_token_hash(
-        self, client, monkeypatch, session_stub
-    ):
+    def test_session_bound_to_token_hash(self, client, monkeypatch, session_stub):
         # The session row must carry the token hash so the first
         # authenticated request can revoke sibling sessions minted from
         # the same link (claim_session_token).
         user_id = uuid.uuid4()
-        monkeypatch.setattr(
-            auth_api, "consume_token", AsyncMock(return_value=user_id)
-        )
+        monkeypatch.setattr(auth_api, "consume_token", AsyncMock(return_value=user_id))
         monkeypatch.setattr(
             auth_api,
             "_get_user",
             AsyncMock(return_value=_user_row(user_id=user_id)),
         )
 
-        client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
-        assert (
-            session_stub.await_args.kwargs["token_hash"]
-            == hash_token(VALID_TOKEN)
-        )
+        assert session_stub.await_args.kwargs["token_hash"] == hash_token(VALID_TOKEN)
         assert session_stub.await_args.kwargs["user_id"] == user_id
 
-    def test_pending_user_returned_as_active(
-        self, client, monkeypatch, session_stub
-    ):
+    def test_pending_user_returned_as_active(self, client, monkeypatch, session_stub):
         # create_session flips pending to active in the DB; the route
         # re-fetches the user afterwards so the response reflects the
         # post-login state, not the pre-login snapshot.
         user_id = uuid.uuid4()
-        monkeypatch.setattr(
-            auth_api, "consume_token", AsyncMock(return_value=user_id)
-        )
+        monkeypatch.setattr(auth_api, "consume_token", AsyncMock(return_value=user_id))
         get_user = AsyncMock(
             side_effect=[
                 _user_row(status="pending", user_id=user_id),
@@ -128,7 +111,7 @@ class TestVerifySuccess:
         )
         monkeypatch.setattr(auth_api, "_get_user", get_user)
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "active"
@@ -136,16 +119,12 @@ class TestVerifySuccess:
 
 
 class TestVerifyRejection:
-    def test_unredeemable_token_gets_generic_400(
-        self, client, monkeypatch, session_stub
-    ):
+    def test_unredeemable_token_gets_generic_400(self, client, monkeypatch, session_stub):
         # consume_token folds unknown/expired/exhausted/consumed into one
         # None; the route must not re-differentiate them.
-        monkeypatch.setattr(
-            auth_api, "consume_token", AsyncMock(return_value=None)
-        )
+        monkeypatch.setattr(auth_api, "consume_token", AsyncMock(return_value=None))
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 400
         assert r.json()["detail"] == GENERIC_DETAIL
@@ -159,15 +138,11 @@ class TestVerifyRejection:
         # A valid token for a dead account must be indistinguishable from
         # a bad token: no user-state oracle, no session.
         user_id = uuid.uuid4()
-        monkeypatch.setattr(
-            auth_api, "consume_token", AsyncMock(return_value=user_id)
-        )
+        monkeypatch.setattr(auth_api, "consume_token", AsyncMock(return_value=user_id))
         row = None if user_state == "vanished" else _user_row(status="disabled")
-        monkeypatch.setattr(
-            auth_api, "_get_user", AsyncMock(return_value=row)
-        )
+        monkeypatch.setattr(auth_api, "_get_user", AsyncMock(return_value=row))
 
-        r = client.get("/api/auth/verify", params={"token": VALID_TOKEN})
+        r = client.get("/api/v1/auth/verify", params={"token": VALID_TOKEN})
 
         assert r.status_code == 400
         assert r.json()["detail"] == GENERIC_DETAIL
@@ -181,13 +156,11 @@ class TestVerifyQueryValidation:
         [{}, {"token": "short"}, {"token": "x" * 201}],
         ids=["missing", "too-short", "too-long"],
     )
-    def test_malformed_token_rejected_before_handler(
-        self, client, monkeypatch, params
-    ):
+    def test_malformed_token_rejected_before_handler(self, client, monkeypatch, params):
         consume = AsyncMock()
         monkeypatch.setattr(auth_api, "consume_token", consume)
 
-        r = client.get("/api/auth/verify", params=params)
+        r = client.get("/api/v1/auth/verify", params=params)
 
         assert r.status_code == 422
         consume.assert_not_awaited()

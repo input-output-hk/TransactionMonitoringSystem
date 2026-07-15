@@ -6,11 +6,13 @@ normalise tz-aware inputs and produce a single canonical ISO 8601 / RFC 3339
 string format for API responses (``YYYY-MM-DDTHH:MM:SSZ``).
 """
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
+from typing import Annotated
+
+from pydantic import PlainSerializer
 
 
-def to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+def to_naive_utc(dt: datetime | None) -> datetime | None:
     """Strip tzinfo after converting to UTC. Naive input passes through.
 
     Used when handing a Python datetime to clickhouse_driver, which writes
@@ -20,10 +22,10 @@ def to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
         return None
     if dt.tzinfo is None:
         return dt
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.astimezone(UTC).replace(tzinfo=None)
 
 
-def to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+def to_aware_utc(dt: datetime | None) -> datetime | None:
     """Return ``dt`` as a timezone-AWARE UTC datetime (``None`` passes through).
 
     Naive input is ASSUMED to already be UTC (matches what ClickHouse hands
@@ -35,11 +37,11 @@ def to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
-def format_iso_utc(dt: Optional[datetime]) -> Optional[str]:
+def format_iso_utc(dt: datetime | None) -> str | None:
     """Canonical UTC encoding for API responses.
 
     Naive datetimes are assumed to already be UTC (matches what ClickHouse
@@ -50,4 +52,14 @@ def format_iso_utc(dt: Optional[datetime]) -> Optional[str]:
         return None
     if dt.tzinfo is None:
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Annotated datetime for pydantic response models: serializes to the canonical
+# ``...Z`` wire format on JSON output while staying a real ``datetime`` inside
+# the application. Every wire-facing timestamp field uses this type so the API
+# cannot emit the naive-ISO / ``+00:00`` variants that plain ``datetime``
+# fields and raw ``.isoformat()`` produce.
+UtcDateTime = Annotated[
+    datetime, PlainSerializer(format_iso_utc, return_type=str, when_used="json")
+]

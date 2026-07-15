@@ -15,8 +15,13 @@ export function initials(
 	return parts.join("") || "U";
 }
 
-/** Truncate a tx hash like Figma's `xxxxxxxxxxxx...xxxxxxxx` style. */
-export function shortHash(hash: string): string {
-	if (hash.length <= 20) return hash;
-	return `${hash.slice(0, 12)}...${hash.slice(-8)}`;
+/**
+ * Middle-truncate a hash/address to `head` + `...` + `tail` chars. The single
+ * project-wide truncation helper: callers pass head/tail to match their column
+ * width instead of hand-rolling their own slicing with a different glyph.
+ */
+export function shortHash(s: string, head = 12, tail = 8): string {
+	// 3 = the "..." glyph; below this a truncated string would be no shorter.
+	if (s.length <= head + tail + 3) return s;
+	return `${s.slice(0, head)}...${s.slice(-tail)}`;
 }

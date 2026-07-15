@@ -1,5 +1,5 @@
 /**
- * Notification-config admin API client. Talks to `/api/notifications/config`
+ * Notification-config admin API client. Talks to `/api/v1/notifications/config`
  * (admin-only). The config is a single structured document round-tripped
  * verbatim — no snake/camel mapping, so what we PUT is exactly what the
  * backend validator expects.
@@ -55,7 +55,7 @@ export type NotificationConfigResponse = {
 };
 
 export async function fetchNotificationConfig(): Promise<NotificationConfigResponse> {
-	const res = await fetchWithAuth("/api/notifications/config");
+	const res = await fetchWithAuth("/api/v1/notifications/config");
 	if (!res.ok) {
 		throw new Error(`load notification config failed (${res.status})`);
 	}
@@ -65,7 +65,7 @@ export async function fetchNotificationConfig(): Promise<NotificationConfigRespo
 export async function updateNotificationConfig(
 	config: NotificationConfig,
 ): Promise<void> {
-	const res = await fetchWithAuth("/api/notifications/config", {
+	const res = await fetchWithAuth("/api/v1/notifications/config", {
 		method: "PUT",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(config),

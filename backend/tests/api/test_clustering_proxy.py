@@ -1,4 +1,4 @@
-"""The /api/clustering reverse-proxy forwards a service API key to the sidecar.
+"""The /api/v1/clustering reverse-proxy forwards a service API key to the sidecar.
 
 Review finding: the sidecar shipped unauthenticated because the proxy forwarded
 no credential. With CLUSTERING_SIDECAR_API_KEY set the proxy must present it as
@@ -56,7 +56,7 @@ def test_forwards_api_key_when_configured(client, monkeypatch):
     monkeypatch.setattr(settings, "CLUSTERING_SIDECAR_API_KEY", "sidecar-key")
     monkeypatch.setattr(clustering.httpx, "AsyncClient", _FakeClient)
 
-    resp = client.get("/api/clustering/contracts")
+    resp = client.get("/api/v1/clustering/contracts")
     assert resp.status_code == 200
     assert _FakeClient.captured["headers"].get("X-API-Key") == "sidecar-key"
 
@@ -68,6 +68,6 @@ def test_no_key_forwarded_when_unset(client, monkeypatch):
     monkeypatch.setattr(settings, "CLUSTERING_SIDECAR_API_KEY", "")
     monkeypatch.setattr(clustering.httpx, "AsyncClient", _FakeClient)
 
-    resp = client.get("/api/clustering/contracts")
+    resp = client.get("/api/v1/clustering/contracts")
     assert resp.status_code == 200
     assert "X-API-Key" not in _FakeClient.captured["headers"]

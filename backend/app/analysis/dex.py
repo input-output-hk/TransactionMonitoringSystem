@@ -9,10 +9,10 @@ are set to 0 (structural detection only).
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from app.analysis.scorer_config import get as _get_cfg
 from app.analysis.features import SCRIPT_ADDRESS_PREFIXES, is_script_address
+from app.analysis.scorer_config import get as _get_cfg
 from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def _is_script_address(addr: str) -> bool:
     return is_script_address(addr)
 
 
-def _network_script_prefixes(network: str) -> List[str]:
+def _network_script_prefixes(network: str) -> list[str]:
     """The script prefixes valid for ``network`` (testnet variants for
     preprod/preview, mainnet variants otherwise)."""
     is_testnet = network.startswith("pre")
@@ -57,10 +57,8 @@ def _count_attacker_history(
     front leg of a potential sandwich (2+ txs at the same script address
     within a slot window, before the current slot)."""
     prefixes = _network_script_prefixes(network)
-    like_clause = " OR ".join(
-        f"o.address LIKE %(script_prefix_{i})s" for i in range(len(prefixes))
-    )
-    params: Dict[str, Any] = {
+    like_clause = " OR ".join(f"o.address LIKE %(script_prefix_{i})s" for i in range(len(prefixes)))
+    params: dict[str, Any] = {
         "network": network,
         "addr": attacker_addr,
         "slot": current_slot,
@@ -93,7 +91,7 @@ def _count_attacker_history(
 def _attacker_net_ada(
     client: Any,
     attacker_addr: str,
-    leg_hashes: List[str],
+    leg_hashes: list[str],
     network: str,
 ) -> int:
     """Net lovelace the attacker wallet gained across the front + back legs.
@@ -162,7 +160,7 @@ def _attacker_net_ada(
     return out_amt - in_amt
 
 
-def _pool_script_addresses(client: Any, tx_hash: str, network: str) -> List[str]:
+def _pool_script_addresses(client: Any, tx_hash: str, network: str) -> list[str]:
     """Script addresses this tx pays into: the candidate pool/venue addresses."""
     rows = client.execute(
         """
@@ -177,7 +175,7 @@ def _pool_script_addresses(client: Any, tx_hash: str, network: str) -> List[str]
     return [r[0] for r in rows if _is_script_address(r[0])]
 
 
-def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: int):
+def _neighbors_in_window(client: Any, addresses: list[str], network: str, slot: int):
     """Txs paying into the same pool addresses within +/- _SLOT_WINDOW slots.
 
     Returns rows of (tx_hash, slot, block_index, fee) ordered by
@@ -209,8 +207,10 @@ def _neighbors_in_window(client: Any, addresses: List[str], network: str, slot: 
 
 
 def _first_input_addresses(
-    client: Any, tx_hashes: List[str], network: str,
-) -> Dict[str, str]:
+    client: Any,
+    tx_hashes: list[str],
+    network: str,
+) -> dict[str, str]:
     """Map each tx to its first-input address (the address-cluster proxy)."""
     rows = client.execute(
         """
@@ -247,10 +247,10 @@ def _tx_position(client: Any, tx_hash: str, network: str):
 
 
 def _bracketing_legs(
-    cluster_txs: List[str],
-    pos: Dict[str, Tuple[int, int]],
-    victim_pos: Tuple[int, int],
-) -> Optional[Tuple[str, str, int]]:
+    cluster_txs: list[str],
+    pos: dict[str, tuple[int, int]],
+    victim_pos: tuple[int, int],
+) -> tuple[str, str, int] | None:
     """Closest attacker leg before the victim and after it, by (slot, block_index).
 
     Returns ``(tx_a, tx_b, slot_span)`` when the cluster's legs straddle the
@@ -268,8 +268,8 @@ def _bracketing_legs(
     after = sorted(p for p in cluster_pos if p[0] > victim_pos)
     if not before or not after:
         return None
-    front_pos, tx_a = before[-1]   # last leg before the victim
-    back_pos, tx_b = after[0]      # first leg after the victim
+    front_pos, tx_a = before[-1]  # last leg before the victim
+    back_pos, tx_b = after[0]  # first leg after the victim
     return tx_a, tx_b, abs(back_pos[0] - front_pos[0])
 
 
@@ -277,7 +277,7 @@ def detect_sandwich_pattern(
     tx_hash: str,
     network: str,
     slot: int,
-) -> Optional[Dict]:
+) -> dict | None:
     """Check if tx_hash is the victim in a structural sandwich pattern.
 
     Looks for 3+ txs within _SLOT_WINDOW slots interacting with the same script
@@ -305,7 +305,7 @@ def detect_sandwich_pattern(
     first_input_addr = _first_input_addresses(client, neighbor_hashes, network)
 
     # Group by first input address to find linked tx pairs
-    addr_to_txs: Dict[str, List[str]] = {}
+    addr_to_txs: dict[str, list[str]] = {}
     for h, addr in first_input_addr.items():
         if h != tx_hash:  # exclude the potential victim
             addr_to_txs.setdefault(addr, []).append(h)
@@ -326,8 +326,8 @@ def detect_sandwich_pattern(
     # then suppresses via its profit floor -- mask a genuinely profitable
     # attacker straddling the same victim in the same window (a missed attack).
     # Scan in sorted order so the chosen candidate is reproducible across runs.
-    best: Optional[Dict] = None
-    best_profit: Optional[float] = None
+    best: dict | None = None
+    best_profit: float | None = None
     for cluster_addr in sorted(addr_to_txs):
         cluster_txs = addr_to_txs[cluster_addr]
         if len(cluster_txs) < 2 or cluster_addr == victim_addr:

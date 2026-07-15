@@ -16,10 +16,10 @@ Two dependency shapes:
 - ``require_user`` / ``require_admin`` — raise ``401`` / ``403``
   appropriately. Use when the route is human-only.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import Depends, HTTPException, Request, status
 
@@ -29,7 +29,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-async def current_user(request: Request) -> Optional[dict]:
+async def current_user(request: Request) -> dict | None:
     """Resolve the session cookie to a user dict, or ``None`` if absent.
 
     Side effect: if the session row still carries a
@@ -52,6 +52,7 @@ async def current_user(request: Request) -> Optional[dict]:
         # which already imports from app.config — keeping the import
         # tree flat helps `python -m app.cli` cold-start.
         from app.auth.tokens import claim_session_token
+
         await claim_session_token(
             session_id=user["session_id"],
             token_hash=user["created_by_token_hash"],
@@ -63,7 +64,7 @@ async def current_user(request: Request) -> Optional[dict]:
 
 
 async def require_user(
-    user: Optional[dict] = Depends(current_user),
+    user: dict | None = Depends(current_user),
 ) -> dict:
     """401 if no valid session. Returns the user dict otherwise."""
     if user is None:

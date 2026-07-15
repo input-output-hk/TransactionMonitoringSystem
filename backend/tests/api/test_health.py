@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     from app.main import app
+
     return TestClient(app)
 
 
@@ -30,10 +31,13 @@ class TestHealthMinimal:
 
 class TestHealthDetail:
     def test_health_detail_requires_auth_when_keys_configured(
-        self, client, monkeypatch,
+        self,
+        client,
+        monkeypatch,
     ):
         """With API_KEYS set, /health/detail must reject unauthenticated calls."""
         from app.auth import api_key
+
         monkeypatch.setattr(api_key, "_valid_keys", ["sentinel-key"])
         monkeypatch.setattr(api_key, "_dev_mode", False)
         r = client.get("/health/detail")
@@ -44,6 +48,7 @@ class TestHealthDetail:
         """With no API keys (dev mode), /health/detail is open — same policy
         as the rest of the API under the existing _dev_mode behaviour."""
         from app.auth import api_key
+
         monkeypatch.setattr(api_key, "_valid_keys", [])
         monkeypatch.setattr(api_key, "_dev_mode", True)
         r = client.get("/health/detail")

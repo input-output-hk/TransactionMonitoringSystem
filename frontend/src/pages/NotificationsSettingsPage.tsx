@@ -2,7 +2,7 @@
  * Admin-only page to manage the notification config (channels, groups, the
  * band×attack-class trigger matrix + per-rule overrides, and periodic-report
  * settings) — the runtime replacement for the former notifications.yaml.
- * Loads from / saves to `/api/notifications/config`; a save takes effect with
+ * Loads from / saves to `/api/v1/notifications/config`; a save takes effect with
  * no restart. Secrets (SMTP, webhook signing key) are env-managed and shown
  * read-only here.
  */
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MultiSelect } from "@/components/ui/multi-select";
+import { LoadingText } from "@/components/ui/status-text";
 import {
 	Select,
 	SelectContent,
@@ -219,7 +220,7 @@ export function NotificationsSettingsPage() {
 	if (isError)
 		return <p className="text-status-offline p-6 text-sm">Failed to load.</p>;
 	if (isPending || !cfg)
-		return <p className="text-muted-foreground p-6 text-sm">Loading…</p>;
+		return <LoadingText className="p-6">Loading…</LoadingText>;
 
 	const channelNames = Object.keys(cfg.channels);
 	// contract_anomaly is selectable only when the sidecar is enabled; an already

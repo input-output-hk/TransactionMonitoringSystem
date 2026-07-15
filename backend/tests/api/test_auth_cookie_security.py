@@ -6,7 +6,7 @@ double-submit companion cookie must be issued/cleared alongside the session
 cookie (see app.csrf).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -22,9 +22,7 @@ from app.main import app
 
 
 def _request(scheme="http", headers=None, client=("203.0.113.9", 12345)):
-    raw_headers = [
-        (k.lower().encode(), v.encode()) for k, v in (headers or [])
-    ]
+    raw_headers = [(k.lower().encode(), v.encode()) for k, v in (headers or [])]
     scope = {
         "type": "http",
         "method": "GET",
@@ -44,7 +42,9 @@ def _request(scheme="http", headers=None, client=("203.0.113.9", 12345)):
 def proxy_enabled(monkeypatch):
     monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
     monkeypatch.setattr(
-        settings, "TRUSTED_PROXY_CIDRS", "127.0.0.1/32,10.0.0.0/8",
+        settings,
+        "TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,10.0.0.0/8",
     )
 
 
@@ -106,7 +106,8 @@ class TestCSRFCookieIssuance:
         assert f"{CSRF_COOKIE_NAME}=" in cookies
         # The CSRF cookie must NOT be HttpOnly — the SPA needs to read it.
         csrf_line = next(
-            line for line in response.headers.getlist("set-cookie")
+            line
+            for line in response.headers.getlist("set-cookie")
             if line.startswith(f"{CSRF_COOKIE_NAME}=")
         )
         assert "HttpOnly" not in csrf_line
@@ -127,7 +128,7 @@ class TestCSRFCookieIssuance:
 
 
 class TestCSRFSelfHeal:
-    """GET /api/auth/me issues the CSRF cookie to a valid session that lacks
+    """GET /api/v1/auth/me issues the CSRF cookie to a valid session that lacks
     one — the healing path for sessions issued before the CSRF companion
     existed. The SPA calls /me on boot, so pre-CSRF sessions recover on
     their next page load instead of having every mutating request rejected."""
@@ -138,7 +139,7 @@ class TestCSRFSelfHeal:
         "full_name": "Ops",
         "role": "Admin",
         "status": "active",
-        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
         "last_login_at": None,
         "created_by_token_hash": None,
         "session_id": "legacy-sess",
@@ -153,7 +154,7 @@ class TestCSRFSelfHeal:
             "app.auth.deps.lookup_session",
             AsyncMock(return_value=dict(self._USER_ROW)),
         ):
-            return client.get("/api/auth/me")
+            return client.get("/api/v1/auth/me")
 
     def test_me_issues_csrf_cookie_when_missing(self):
         resp = self._get_me(with_csrf_cookie=False)

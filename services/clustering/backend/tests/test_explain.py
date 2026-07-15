@@ -19,18 +19,35 @@ from app.service.verdicts import (
 )
 
 _COLUMNS = [
-    "tx_hash", "fees", "size", "input_count", "output_count",
-    "total_input_lovelace", "total_output_lovelace", "net_lovelace",
-    "distinct_assets", "redeemer_count", "hour_of_day", "day_of_week",
+    "tx_hash",
+    "fees",
+    "size",
+    "input_count",
+    "output_count",
+    "total_input_lovelace",
+    "total_output_lovelace",
+    "net_lovelace",
+    "distinct_assets",
+    "redeemer_count",
+    "hour_of_day",
+    "day_of_week",
 ]
 
 
 def _row(tx: str, **over: float) -> dict:
     base = {
-        "tx_hash": tx, "fees": 180_000, "size": 400, "input_count": 2, "output_count": 2,
-        "total_input_lovelace": 5_000_000, "total_output_lovelace": 4_800_000,
-        "net_lovelace": -200_000, "distinct_assets": 1, "redeemer_count": 1,
-        "hour_of_day": 12, "day_of_week": 3,
+        "tx_hash": tx,
+        "fees": 180_000,
+        "size": 400,
+        "input_count": 2,
+        "output_count": 2,
+        "total_input_lovelace": 5_000_000,
+        "total_output_lovelace": 4_800_000,
+        "net_lovelace": -200_000,
+        "distinct_assets": 1,
+        "redeemer_count": 1,
+        "hour_of_day": 12,
+        "day_of_week": 3,
     }
     base.update(over)
     return base
@@ -38,9 +55,16 @@ def _row(tx: str, **over: float) -> dict:
 
 def _scaler():
     """Center/scale fitted on a tight-but-varied normal population (hour ~ midday)."""
-    rows = [_row(f"n{i:02d}", input_count=2 + i % 3, fees=180_000 + i * 500,
-                 total_output_lovelace=4_800_000 + i * 1000, hour_of_day=11 + i % 3)
-            for i in range(20)]
+    rows = [
+        _row(
+            f"n{i:02d}",
+            input_count=2 + i % 3,
+            fees=180_000 + i * 500,
+            total_output_lovelace=4_800_000 + i * 1000,
+            hour_of_day=11 + i % 3,
+        )
+        for i in range(20)
+    ]
     _, _, _, (center, scale) = fit_shape_features(pd.DataFrame(rows, columns=_COLUMNS))
     return center, scale
 
@@ -82,21 +106,32 @@ def test_top_k_caps_the_number_of_reasons() -> None:
     center, scale = _scaler()
     # Several features extreme at once; default top_k = 3.
     reasons = _reasons(
-        center, scale,
-        _row("wild", input_count=400, output_count=400, fees=9_000_000,
-             total_output_lovelace=1, distinct_assets=99),
+        center,
+        scale,
+        _row(
+            "wild",
+            input_count=400,
+            output_count=400,
+            fees=9_000_000,
+            total_output_lovelace=1,
+            distinct_assets=99,
+        ),
     )
     assert len(reasons) == 3
 
 
 # --- service wiring: _attach_anomaly_reasons -------------------------------
 
+
 def _model_blob():
     rows = [_row(f"n{i:02d}", input_count=2 + i % 3) for i in range(20)]
     df = pd.DataFrame(rows, columns=_COLUMNS)
     model = build_shape_model(
-        train_df=df, cluster_of={r["tx_hash"]: 0 for r in rows},
-        cluster_verdicts={}, eps=0.5, min_samples=4,
+        train_df=df,
+        cluster_of={r["tx_hash"]: 0 for r in rows},
+        cluster_verdicts={},
+        eps=0.5,
+        min_samples=4,
     )
     return serialize_model(model)
 
@@ -169,6 +204,7 @@ def test_attach_reasons_survives_unusable_model_blob() -> None:
 
 # --- Outliers: reasons only on the latest anomaly run (P3) ------------------
 
+
 class _OutlierRepo:
     """Full duck-typed repo for top_anomalies_with_verdicts with a real model, so
     reasons can attach. ``latest`` controls which run is the latest anomaly run."""
@@ -181,8 +217,12 @@ class _OutlierRepo:
         )
 
     def get_anomaly_run(self, run_id):
-        return {"run_id": run_id, "target": "addr", "feature_set": "shape",
-                "created_at": "2026-01-01 10:00:00"}
+        return {
+            "run_id": run_id,
+            "target": "addr",
+            "feature_set": "shape",
+            "created_at": "2026-01-01 10:00:00",
+        }
 
     def top_anomalies(self, run_id, target, *, limit, offset=0):
         return [{"tx_hash": "a", "votes": 2}, {"tx_hash": "lone", "votes": 2}]
@@ -203,8 +243,12 @@ class _OutlierRepo:
         return self._latest
 
     def latest_cluster_model(self, target, feature_set):
-        return {"model_id": "om1", "run_id": "cr1",
-                "schema_version": MODEL_SCHEMA_VERSION, "blob": self._blob}
+        return {
+            "model_id": "om1",
+            "run_id": "cr1",
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "blob": self._blob,
+        }
 
     def fetch_shape_features_for(self, target, tx_hashes):
         return self._probe[self._probe["tx_hash"].isin(set(tx_hashes))]

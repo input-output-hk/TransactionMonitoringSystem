@@ -8,7 +8,7 @@ namespace with UUID hashes. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.db import clickhouse_scores as scores
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
@@ -22,7 +22,7 @@ _TEST_SCORE = 82.0
 
 def _naive_utc_now() -> datetime:
     # The ClickHouse driver expects naive UTC datetimes for DateTime columns.
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _score_row(tx_hash: str) -> dict:
@@ -70,7 +70,7 @@ class TestTransactionsRoundtrip:
             block_slot=1_000_000,
             block_hash="ef" * 32,
             block_height=500_000,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
         tx.network = LIVE_NETWORK
 
@@ -102,9 +102,7 @@ class TestTransactionsRoundtrip:
                 }
             ],
         }
-        tx = parse_ogmios_transaction(
-            payload, timestamp=datetime.now(timezone.utc)
-        )
+        tx = parse_ogmios_transaction(payload, timestamp=datetime.now(UTC))
         tx.network = LIVE_NETWORK
         ch.insert_transactions_batch([tx])
 
@@ -131,12 +129,7 @@ class TestScoreReadPath:
         )
         assert any(r["tx_hash"] == tx_hash for r in listed)
 
-        assert (
-            scores.count_class_scores(
-                network=LIVE_NETWORK, risk_band=["Critical"]
-            )
-            >= 1
-        )
+        assert scores.count_class_scores(network=LIVE_NETWORK, risk_band=["Critical"]) >= 1
 
         # The stats aggregate is where an aggregate-alias rename would
         # blow up server-side; keys are consumed by the dashboard tiles.
@@ -168,9 +161,7 @@ class TestBaselines:
                 )
             ]
         )
-        baseline = ch.get_baseline(
-            LIVE_NETWORK, "script", scope_id, "output_count"
-        )
+        baseline = ch.get_baseline(LIVE_NETWORK, "script", scope_id, "output_count")
         assert baseline is not None
         assert baseline["p50"] == 2.0
         assert baseline["p99"] == 9.0
@@ -188,3 +179,27 @@ class TestBaselines:
 
         rows = baselines.compute_global_baselines(LIVE_NETWORK)
         assert isinstance(rows, list)
+
+
+class TestArchiveTimeWindow:
+    def test_to_bound_is_exclusive(self, ch):
+        # The API's shared [from, to) half-open window convention: a row
+        # archived exactly at the `to` instant must be EXCLUDED, so chained
+        # windows never double-count the boundary. Runs against the real
+        # server because the boundary comparison happens in ClickHouse SQL.
+        from app.db import archive_queries
+
+        tx_hash = uuid.uuid4().hex + uuid.uuid4().hex[:32]
+        boundary = _naive_utc_now().replace(microsecond=0)
+        archive_queries._archive_insert(
+            LIVE_NETWORK, tx_hash, "boundary probe", "live-db-test", boundary, "manual"
+        )
+
+        def _hashes(date_from, date_to):
+            rows = archive_queries._archive_list(LIVE_NETWORK, date_from, date_to, 1000, 0)
+            return {r["tx_hash"] for r in rows}
+
+        # Window ending exactly at the row's archived_at: excluded.
+        assert tx_hash not in _hashes(None, boundary)
+        # Window starting exactly there: included (from is inclusive).
+        assert tx_hash in _hashes(boundary, None)

@@ -28,6 +28,7 @@ def _encode_address(raw: bytes, hrp: str = "addr") -> str:
     checksum = [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
     return hrp + "1" + "".join(_CHARSET[d] for d in data + checksum)
 
+
 # Minswap "Order Contract" — present in the vendored snapshot.
 MINSWAP_ORDER_HASH = "a65ca58a4e9c755fa830173d2a5caed458ac0c73f97db7faae2e7e3b"
 MINSWAP_ORDER_LABEL = "Minswap Order Contract"

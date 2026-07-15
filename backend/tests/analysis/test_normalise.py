@@ -83,21 +83,25 @@ class TestBaselineSpreadGuard:
 
     def test_baseline_is_usable_strict_equality(self):
         from app.analysis.normalise import _baseline_is_usable
+
         assert _baseline_is_usable({"p50": 10.0, "p99": 10.0}) is False
 
     def test_baseline_is_usable_tight_spread(self):
         from app.analysis.normalise import _baseline_is_usable
+
         # 2.7% spread — the exact shape seen on the 2026-05-15 state-machine
         # script cluster. Must fall through.
         assert _baseline_is_usable({"p50": 2_519_195.0, "p99": 2_586_000.0}) is False
 
     def test_baseline_is_usable_healthy_spread(self):
         from app.analysis.normalise import _baseline_is_usable
+
         # 641% spread — natural variation across UTxOs at a real script.
         assert _baseline_is_usable({"p50": 1_349_030.0, "p99": 10_000_000.0}) is True
 
     def test_baseline_is_usable_p50_zero(self):
         from app.analysis.normalise import _baseline_is_usable
+
         # When p50 is zero the ratio is undefined; accept any positive p99
         # (the spread is "infinite" by convention) and reject p99 == 0.
         assert _baseline_is_usable({"p50": 0.0, "p99": 5.0}) is True
@@ -126,13 +130,18 @@ class TestResolveScopeTypesAllowed:
 
     def test_per_script_only_skips_global(self, monkeypatch):
         from app.analysis.normalise import resolve_baseline
+
         # A usable global baseline exists but per_script does not.
-        rows = {("global", "n_assets_out_of_script"):
-                {"p50": 1.0, "p99": 5.0, "sample_count": 1000}}
+        rows = {
+            ("global", "n_assets_out_of_script"): {"p50": 1.0, "p99": 5.0, "sample_count": 1000}
+        }
         calls = []
         self._fake_get_baseline(monkeypatch, rows, calls)
         p50, p99, source = resolve_baseline(
-            "n_assets_out_of_script", "per_script", "addrX", "preprod",
+            "n_assets_out_of_script",
+            "per_script",
+            "addrX",
+            "preprod",
             scope_types_allowed=["per_script"],
         )
         # global is present but must be ignored -> "missing" (caller bootstraps).
@@ -141,13 +150,18 @@ class TestResolveScopeTypesAllowed:
 
     def test_default_still_falls_back_to_global(self, monkeypatch):
         from app.analysis.normalise import resolve_baseline
-        rows = {("global", "n_assets_out_of_script"):
-                {"p50": 1.0, "p99": 5.0, "sample_count": 1000}}
+
+        rows = {
+            ("global", "n_assets_out_of_script"): {"p50": 1.0, "p99": 5.0, "sample_count": 1000}
+        }
         calls = []
         self._fake_get_baseline(monkeypatch, rows, calls)
         # No scope_types_allowed -> unchanged behaviour: per_script miss falls to global.
         p50, p99, source = resolve_baseline(
-            "n_assets_out_of_script", "per_script", "addrX", "preprod",
+            "n_assets_out_of_script",
+            "per_script",
+            "addrX",
+            "preprod",
         )
         assert source == "global"
         assert (p50, p99) == (1.0, 5.0)
@@ -162,16 +176,20 @@ class TestRiskBandLegacyAlias:
 
     def test_current_label_parses(self):
         from app.models.transaction import RiskBand
+
         assert RiskBand("Informational") is RiskBand.INFORMATIONAL
 
     def test_legacy_low_maps_to_informational(self):
         from app.models.transaction import RiskBand
+
         assert RiskBand("Low") is RiskBand.INFORMATIONAL
         # value is the new canonical label, so API responses serialise consistently
         assert RiskBand("Low").value == "Informational"
 
     def test_unknown_still_raises(self):
         import pytest
+
         from app.models.transaction import RiskBand
+
         with pytest.raises(ValueError):
             RiskBand("Nonexistent")

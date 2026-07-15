@@ -8,7 +8,7 @@ the intent row is written BEFORE the mutation; non-suppression audit events
 stay best-effort.
 """
 
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,10 +18,10 @@ VALID_HASH = "a" * 64
 
 class AuditLog:
     def __init__(self) -> None:
-        self.rows: List[Dict[str, Any]] = []
-        self.outcomes: List[tuple] = []
+        self.rows: list[dict[str, Any]] = []
+        self.outcomes: list[tuple] = []
         self.fail = False
-        self.call_order: List[str] = []
+        self.call_order: list[str] = []
 
 
 @pytest.fixture
@@ -33,10 +33,10 @@ def audit_log() -> AuditLog:
 def client(monkeypatch, audit_log):
     """TestClient with audit persistence + archive store faked, recording
     the relative order of audit writes and archive mutations."""
-    from app.main import app
     from app.db import archive_queries, postgres
+    from app.main import app
 
-    store: Dict[tuple, Dict[str, Any]] = {}
+    store: dict[tuple, dict[str, Any]] = {}
 
     async def fake_insert_audit(**kwargs):
         if audit_log.fail:
@@ -71,7 +71,9 @@ def client(monkeypatch, audit_log):
     monkeypatch.setattr(archive_queries, "archive_insert_async", fake_insert)
     monkeypatch.setattr(archive_queries, "archive_delete_async", fake_delete)
     monkeypatch.setattr(
-        archive_queries, "archive_bulk_insert_async", fake_bulk_insert,
+        archive_queries,
+        "archive_bulk_insert_async",
+        fake_bulk_insert,
     )
 
     client = TestClient(app)
@@ -82,6 +84,7 @@ def client(monkeypatch, audit_log):
 @pytest.fixture
 def auth_open(monkeypatch):
     from app.auth import api_key
+
     monkeypatch.setattr(api_key, "_valid_keys", [])
     monkeypatch.setattr(api_key, "_dev_mode", True)
 
@@ -98,14 +101,14 @@ def _archive_payload():
 class TestAuditFailureRefusesSuppression:
     def test_archive_503_and_no_row(self, client, audit_log, auth_open):
         audit_log.fail = True
-        resp = client.post("/api/archive", json=_archive_payload())
+        resp = client.post("/api/v1/archive", json=_archive_payload())
         assert resp.status_code == 503
         assert client._store == {}
 
     def test_bulk_503_and_no_rows(self, client, audit_log, auth_open):
         audit_log.fail = True
         resp = client.post(
-            "/api/archive/bulk",
+            "/api/v1/archive/bulk",
             json={"entries": [_archive_payload()], "source_label": "batch"},
         )
         assert resp.status_code == 503
@@ -114,16 +117,14 @@ class TestAuditFailureRefusesSuppression:
     def test_restore_503_and_row_kept(self, client, audit_log, auth_open):
         client._store[("preprod", VALID_HASH)] = {"note": "fp"}
         audit_log.fail = True
-        resp = client.delete(f"/api/archive/{VALID_HASH}?network=preprod")
+        resp = client.delete(f"/api/v1/archive/{VALID_HASH}?network=preprod")
         assert resp.status_code == 503
         assert ("preprod", VALID_HASH) in client._store
 
 
 class TestIntentBeforeMutation:
-    def test_audit_written_before_archive_insert(
-        self, client, audit_log, auth_open
-    ):
-        resp = client.post("/api/archive", json=_archive_payload())
+    def test_audit_written_before_archive_insert(self, client, audit_log, auth_open):
+        resp = client.post("/api/v1/archive", json=_archive_payload())
         assert resp.status_code == 201
         assert audit_log.call_order == ["audit", "mutate"]
         assert audit_log.rows[0]["event_type"] == "alert_suppression"
@@ -139,9 +140,11 @@ class TestIntentBeforeMutation:
             raise RuntimeError("clickhouse down")
 
         monkeypatch.setattr(
-            archive_queries, "archive_insert_async", broken_insert,
+            archive_queries,
+            "archive_insert_async",
+            broken_insert,
         )
-        resp = client.post("/api/archive", json=_archive_payload())
+        resp = client.post("/api/v1/archive", json=_archive_payload())
         assert resp.status_code == 500
         # The intent row exists with phase=failed: visible, not silent.
         assert audit_log.rows
@@ -149,14 +152,12 @@ class TestIntentBeforeMutation:
 
 
 class TestSpoofedHeaderCannotBreakAudit:
-    def test_malformed_xff_is_sanitized_end_to_end(
-        self, client, audit_log, auth_open, monkeypatch
-    ):
+    def test_malformed_xff_is_sanitized_end_to_end(self, client, audit_log, auth_open, monkeypatch):
         from app.config import settings
 
         monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", True)
         resp = client.post(
-            "/api/archive",
+            "/api/v1/archive",
             json=_archive_payload(),
             headers={"X-Forwarded-For": "notanip"},
         )
@@ -171,14 +172,12 @@ class TestActorIsAuthenticatedPrincipal:
     """The audit actor is the server-derived authenticated principal, never
     the spoofable ``archived_by`` request field (review finding)."""
 
-    def test_actor_is_server_principal_not_client_field(
-        self, client, audit_log, auth_open
-    ):
+    def test_actor_is_server_principal_not_client_field(self, client, audit_log, auth_open):
         import json
 
         payload = _archive_payload()
         payload["archived_by"] = "attacker-spoofed-name"
-        resp = client.post("/api/archive", json=payload)
+        resp = client.post("/api/v1/archive", json=payload)
         assert resp.status_code == 201
         details = json.loads(audit_log.rows[0]["details"])
         # dev-mode principal -> actor "dev-mode"; the client label is kept
@@ -186,9 +185,7 @@ class TestActorIsAuthenticatedPrincipal:
         assert details["actor"] == "dev-mode"
         assert details["archived_by"] == "attacker-spoofed-name"
 
-    def test_api_key_actor_is_fingerprint_not_raw_key(
-        self, client, audit_log, monkeypatch
-    ):
+    def test_api_key_actor_is_fingerprint_not_raw_key(self, client, audit_log, monkeypatch):
         import json
 
         from app import audit
@@ -199,7 +196,7 @@ class TestActorIsAuthenticatedPrincipal:
         monkeypatch.setattr(api_key, "_valid_keys", [key])
         monkeypatch.setattr(api_key, "_dev_mode", False)
         resp = client.post(
-            "/api/archive",
+            "/api/v1/archive",
             json=_archive_payload(),
             headers={settings.API_KEY_HEADER: key},
         )
@@ -223,6 +220,7 @@ class TestNonSuppressionStaysBestEffort:
         monkeypatch.setattr(postgres, "set_entity_state", fake_set)
         audit_log.fail = True
         resp = client.put(
-            "/api/entities/address/addr_test1xyz", json={"label": "x"},
+            "/api/v1/entities/address/addr_test1xyz",
+            json={"label": "x"},
         )
         assert resp.status_code == 200

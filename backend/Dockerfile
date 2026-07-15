@@ -15,7 +15,7 @@ ENV VITE_NETWORK=${VITE_NETWORK}
 RUN pnpm build
 
 # Stage 2: python app, with the built SPA copied in for FastAPI to serve.
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # Run as a non-root user to limit blast radius of a container escape.
 RUN groupadd --system --gid 1001 appgroup \

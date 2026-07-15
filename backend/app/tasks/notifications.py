@@ -18,13 +18,12 @@ Mirrors :mod:`app.tasks.analysis`: module-level tasks, idempotent
 import asyncio
 import gzip
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.config import settings
 from app.db import postgres
 from app.notifications import (
     DELIVER_DUPLICATE,
-    DELIVER_FAILED,
     _deliver_with_dedup,
     config,
     dispatcher,
@@ -55,7 +54,7 @@ async def _tick() -> None:
 
     cfg = config.periodic_report_config()
     network = settings.CARDANO_NETWORK
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     interval = reports.report_interval(cfg["frequency"])
     state = await postgres.get_report_state(network)
@@ -68,9 +67,7 @@ async def _tick() -> None:
         # Enabled + due but nowhere to deliver (misconfig). Don't build the
         # report or advance the boundary — cheap re-check next tick, and it
         # fires as soon as a channel/recipient is configured + restarted.
-        logger.warning(
-            "periodic report due but no enabled channel has a recipient/URL; skipping"
-        )
+        logger.warning("periodic report due but no enabled channel has a recipient/URL; skipping")
         return
 
     window_days = reports.effective_window_days(cfg["frequency"], cfg["window_days"])
@@ -93,7 +90,8 @@ async def _tick() -> None:
     await postgres.mark_report_sent(network, window_start, now, now)
     logger.info(
         "Periodic report sent (window=%dd, channels=%s)",
-         window_days, [d.channel for d in dispatches],
+        window_days,
+        [d.channel for d in dispatches],
     )
 
 
@@ -142,7 +140,8 @@ async def _contract_anomaly_tick() -> None:
 
     network = settings.CARDANO_NETWORK
     flagged = await clustering_queries.flagged_for_network_async(
-        network, raise_on_error=True,
+        network,
+        raise_on_error=True,
     )
     budget = settings.NOTIFY_CONTRACT_ANOMALY_MAX_ALERTS_PER_TICK
     attempts = 0
@@ -150,7 +149,8 @@ async def _contract_anomaly_tick() -> None:
         if attempts >= budget:
             logger.warning(
                 "contract_anomaly poll: per-tick alert cap (%d) reached; remaining "
-                "findings drain on subsequent ticks", budget,
+                "findings drain on subsequent ticks",
+                budget,
             )
             break
         try:
@@ -169,14 +169,21 @@ async def _contract_anomaly_tick() -> None:
                 # drop the alert. Fall back to a minimal payload carrying the
                 # projected band/score (the rich evidence fields are best-effort).
                 logger.exception(
-                    "contract_anomaly poll: degraded payload for %s "
-                    "(full build failed)", tx_hash,
+                    "contract_anomaly poll: degraded payload for %s (full build failed)",
+                    tx_hash,
                 )
                 payload = build_degraded_contract_anomaly_alert(
-                    tx_hash, network, band, winner.get("score"),
+                    tx_hash,
+                    network,
+                    band,
+                    winner.get("score"),
                 )
             status = await _deliver_with_dedup(
-                network, tx_hash, band, payload, dispatches,
+                network,
+                tx_hash,
+                band,
+                payload,
+                dispatches,
                 source="contract_anomaly",
             )
             if status != DELIVER_DUPLICATE:

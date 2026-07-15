@@ -13,8 +13,7 @@ import logging
 import time
 
 from app.config import settings
-from app.db import postgres
-from app.db import raw_store
+from app.db import postgres, raw_store
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,8 @@ async def _tick() -> None:
         if settings.LIFECYCLE_RETENTION_DAYS > 0:
             try:
                 n = await postgres.prune_terminal_lifecycle(
-                    network, settings.LIFECYCLE_RETENTION_DAYS,
+                    network,
+                    settings.LIFECYCLE_RETENTION_DAYS,
                 )
                 if n:
                     logger.info(f"Retention: pruned {n} terminal lifecycle rows")
@@ -67,7 +67,8 @@ async def _tick() -> None:
         if settings.MEMPOOL_COLLISION_RETENTION_DAYS > 0:
             try:
                 n = await postgres.prune_mempool_collisions(
-                    network, settings.MEMPOOL_COLLISION_RETENTION_DAYS,
+                    network,
+                    settings.MEMPOOL_COLLISION_RETENTION_DAYS,
                 )
                 if n:
                     logger.info(f"Retention: pruned {n} mempool collisions")
@@ -76,7 +77,8 @@ async def _tick() -> None:
         if settings.RAW_STORE_RETENTION_DAYS > 0:
             try:
                 await asyncio.to_thread(
-                    raw_store.prune_old_days, settings.RAW_STORE_RETENTION_DAYS,
+                    raw_store.prune_old_days,
+                    settings.RAW_STORE_RETENTION_DAYS,
                 )
             except Exception as e:
                 logger.error(f"Raw-store retention sweep failed: {e}")
@@ -97,12 +99,12 @@ async def _tick() -> None:
         try:
             from app.auth.sessions import purge_expired_sessions
             from app.auth.tokens import purge_expired_tokens
+
             n_tok = await purge_expired_tokens()
             n_sess = await purge_expired_sessions()
             if n_tok or n_sess:
                 logger.info(
-                    f"Auth purge: removed {n_tok} expired tokens, "
-                    f"{n_sess} expired sessions"
+                    f"Auth purge: removed {n_tok} expired tokens, {n_sess} expired sessions"
                 )
         except Exception as e:
             logger.error(f"Auth purge sweep failed: {e}")

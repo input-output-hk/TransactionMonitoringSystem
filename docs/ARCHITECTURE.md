@@ -81,8 +81,8 @@ All state is stored in `tx_lifecycle` (PostgreSQL). Raw payloads are written asy
 
 The API supports two authentication paths, both implemented under `app/auth/`:
 
-- **Programmatic: `TMS-API-Key` header** (`auth/api_key.py`, constant-time compare). `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys).
-- **Interactive: magic-link sessions** (`auth/tokens.py`, `auth/sessions.py`, `auth/email.py`). A user requests a login email (`POST /api/auth/request-link`), the link mints a session cookie on verify, and `auth/deps.py` exposes `require_user` / `require_admin` dependencies. Accounts (`users` table) carry an `Admin` or `Reviewer` role; the first Admin is bootstrapped via `python -m app.cli create-admin`. Magic-link delivery goes through SMTP (`SMTP_*` settings; `mailpit` in the dev compose stack).
+- **Programmatic: `X-API-Key` header** (`auth/api_key.py`, constant-time compare). `API_KEYS` env var (comma-separated). Empty = open access; startup aborts unless `TMS_ALLOW_DEV_MODE=1` is also set (prevents accidental unauthenticated production deploys).
+- **Interactive: magic-link sessions** (`auth/tokens.py`, `auth/sessions.py`, `auth/email.py`). A user requests a login email (`POST /api/v1/auth/request-link`), the link mints a session cookie on verify, and `auth/deps.py` exposes `require_user` / `require_admin` dependencies. Accounts (`users` table) carry an `Admin` or `Reviewer` role; the first Admin is bootstrapped via `python -m app.cli create-admin`. Magic-link delivery goes through SMTP (`SMTP_*` settings; `mailpit` in the dev compose stack).
 - Rate limiting: in-memory sliding window keyed per API key / IP (`RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`)
 - Audit logging: privileged actions are written to the PostgreSQL `audit_logs` table (`app/audit.py`)
 - CORS: configurable via `CORS_ALLOW_ORIGINS`, intended for reverse-proxy TLS termination in production
@@ -101,7 +101,7 @@ backend/app/
 ├── leader.py                PostgreSQL advisory-lock leader guard (single ingestion/analysis instance, standby promotion)
 ├── logging_utils.py         Access-log redaction (strips magic-link tokens from uvicorn request lines)
 ├── auth/                    Authentication package
-│   ├── api_key.py           TMS-API-Key dependency (constant-time compare)
+│   ├── api_key.py           X-API-Key dependency (constant-time compare)
 │   ├── deps.py              require_user / require_admin session dependencies
 │   ├── tokens.py            Magic-link token mint/verify
 │   ├── sessions.py          Session-cookie issue/lookup/revoke
@@ -127,16 +127,16 @@ backend/app/
 │   └── raw_store.py         Data Lake: async gzip writes, atomic rename, read-back
 ├── api/
 │   ├── _params.py           Shared query-parameter declarations (the optional ?network selector)
-│   ├── transactions.py      GET /api/transactions/*
-│   ├── lifecycle.py         GET /api/lifecycle/*
-│   ├── analysis.py          GET /api/analysis/* (merges the contract_anomaly verdict + reconciles stats/timeseries when the clustering module is enabled)
+│   ├── transactions.py      GET /api/v1/transactions/*
+│   ├── lifecycle.py         GET /api/v1/lifecycle/*
+│   ├── analysis.py          GET /api/v1/analysis/* (merges the contract_anomaly verdict + reconciles stats/timeseries when the clustering module is enabled)
 │   ├── contract_anomaly_read.py  Read-time projection of the sidecar's verdicts into results/stats/timeseries (no stored scores)
-│   ├── clustering.py        /api/clustering/* reverse-proxy to the optional clustering sidecar (session-authed, host-fixed)
-│   ├── notifications_config.py   GET/PUT /api/notifications/config (Admin; channels, trigger matrix, recipients)
-│   ├── entities.py          GET/PUT /api/entities/*
-│   ├── archive.py           GET/POST/DELETE /api/archive/* (false-positive curation)
-│   ├── auth.py              POST/GET /api/auth/* (magic-link login, session, /me)
-│   └── users.py             GET/POST/DELETE /api/users/* (Admin user management)
+│   ├── clustering.py        /api/v1/clustering/* reverse-proxy to the optional clustering sidecar (session-authed, host-fixed)
+│   ├── notifications_config.py   GET/PUT /api/v1/notifications/config (Admin; channels, trigger matrix, recipients)
+│   ├── entities.py          GET/PUT /api/v1/entities/*
+│   ├── archive.py           GET/POST/DELETE /api/v1/archive/* (false-positive curation)
+│   ├── auth.py              POST/GET /api/v1/auth/* (magic-link login, session, /me)
+│   └── users.py             GET/POST/DELETE /api/v1/users/* (Admin user management)
 ├── analysis/
 │   ├── engine.py            Multi-class orchestrator (9 attack classes, enrichment, scoring)
 │   ├── scorer_config.py     Validated loader for config/detection.yaml
@@ -188,6 +188,7 @@ A first-party, **optional** sidecar (`services/clustering/`, gated behind the `c
 - **Topology:** it shares the same ClickHouse server as the host but owns a separate database (`tms_clustering`). It **reads** chain facts from the host's Analytics Warehouse (`tms_analytics`, no chain data is duplicated) and **writes** its own state (`cluster_models`, `tx_classifications`, and the `tx_contract_anomaly` projection).
 - **How the host consumes it (read-time overlay, recall-first):** the host derives every score at read time and never trusts a precomputed one. `db/clustering_queries.py` reads the raw verdicts from `tx_contract_anomaly`; `analysis/contract_anomaly.py` projects them onto the 0-100 host scale via `config/detection.yaml` (so a calibration change there applies to all historical rows with no backfill, and `benign` / `normal` verdicts suppress to 0 while only `malicious` / `anomaly` carry a score); `api/analysis.py` merges that into results additively (it can only ever **raise** a tx's score/band, never lower it), supports filtering the list by `attack_class=contract_anomaly`, and reconciles the list view, band-count KPIs, and the alert timeseries. The Validators / cluster-graph UI talks to the sidecar through the `api/clustering.py` reverse-proxy (same-origin, session-authed; the sidecar is never exposed publicly).
 - **Authoritative projection:** `tx_contract_anomaly` is versioned by a monotonic `published_at`, so every reconciliation (a re-fit, a relabel, a clear) supersedes the prior state: stale alerts are retracted, not just added. A chain rollback or a contract deletion purges the corresponding rows so the host never surfaces a ghost verdict.
+- **Host boundary:** the seam between the two services is documented in [services/clustering/docs/host-boundary.md](../services/clustering/docs/host-boundary.md): the deliberate two-driver split (native-protocol client in the host, HTTP client in the sidecar, with per-service timeout knobs), the host-to-engine column vocabulary mapping bridged by `HostBackedRepo`, paired-copy modules, and the ClickHouse 26.x query gotchas.
 - **Opt-in & isolation:** absent the profile, none of this runs and the host behaves exactly as the nine-class system. See [services/clustering/README.md](../services/clustering/README.md) and `services/clustering/docs/` for the module's own architecture, data model, and algorithms.
 
 ## Deployment

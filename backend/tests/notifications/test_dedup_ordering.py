@@ -23,8 +23,11 @@ def spy(monkeypatch):
     branch points (is this a duplicate? did delivery succeed?).
     """
     calls = {
-        "already": [], "claim": [], "dispatch": [],
-        "already_returns": False, "dispatch_returns": True,
+        "already": [],
+        "claim": [],
+        "dispatch": [],
+        "already_returns": False,
+        "dispatch_returns": True,
     }
 
     async def fake_already(network, tx_hash, band, source="scorer"):
@@ -50,7 +53,11 @@ async def test_failed_delivery_is_not_claimed(spy):
     # unclaimed so the next re-score retries it (the recall-first fix).
     spy["dispatch_returns"] = False
     await notifications._deliver_with_dedup(
-        "preprod", "tx_fail", "High", object(), [object()],
+        "preprod",
+        "tx_fail",
+        "High",
+        object(),
+        [object()],
     )
     assert spy["dispatch"], "delivery should have been attempted"
     assert not spy["claim"], "a failed delivery must NOT record a dedup claim"
@@ -59,7 +66,11 @@ async def test_failed_delivery_is_not_claimed(spy):
 async def test_successful_delivery_is_claimed(spy):
     spy["dispatch_returns"] = True
     await notifications._deliver_with_dedup(
-        "preprod", "tx_ok", "Critical", object(), [object()],
+        "preprod",
+        "tx_ok",
+        "Critical",
+        object(),
+        [object()],
     )
     assert spy["dispatch"], "delivery should have been attempted"
     assert spy["claim"] == [("preprod", "tx_ok", "Critical", "scorer")], (
@@ -71,7 +82,11 @@ async def test_duplicate_is_skipped_before_delivery(spy):
     # Already notified at >= this band: no I/O, no re-dispatch.
     spy["already_returns"] = True
     await notifications._deliver_with_dedup(
-        "preprod", "tx_dup", "High", object(), [object()],
+        "preprod",
+        "tx_dup",
+        "High",
+        object(),
+        [object()],
     )
     assert not spy["dispatch"], "a duplicate (>= band) must not re-dispatch"
     assert not spy["claim"]
@@ -86,7 +101,11 @@ async def test_dedup_check_failure_still_delivers(spy, monkeypatch):
     spy["dispatch_returns"] = True
     monkeypatch.setattr(postgres, "already_notified", boom)
     await notifications._deliver_with_dedup(
-        "preprod", "tx_err", "Critical", object(), [object()],
+        "preprod",
+        "tx_err",
+        "Critical",
+        object(),
+        [object()],
     )
     assert spy["dispatch"], "a dedup-check error must not suppress the alert"
 
@@ -96,7 +115,11 @@ async def test_source_is_threaded_to_both_dedup_calls(spy):
     # contract_anomaly alert never suppresses (or is suppressed by) the per-tx
     # scorer alert for the same transaction.
     await notifications._deliver_with_dedup(
-        "preprod", "tx_ca", "High", object(), [object()],
+        "preprod",
+        "tx_ca",
+        "High",
+        object(),
+        [object()],
         source="contract_anomaly",
     )
     assert spy["already"] == [("preprod", "tx_ca", "High", "contract_anomaly")]

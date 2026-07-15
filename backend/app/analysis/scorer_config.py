@@ -10,10 +10,10 @@ at load time so a missing or misnamed key fails with an error that names the
 file and the key path, not a deep ``KeyError`` from inside a scorer module.
 """
 
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 import logging
 import os
+from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -30,41 +30,93 @@ logger = logging.getLogger(__name__)
 # Required top-level keys for each scorer section. Extend the set when a
 # scorer starts reading a new block. Nested key validation is left to the
 # scorer itself (KeyError there still beats a silent wrong value).
-_REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
-    "multiple_sat":  ("weights", "bootstrap_anchors", "allowlist_prefixes", "reason_threshold",
-                      "lazy_validator_threshold", "lazy_validator_floor",
-                      "lazy_validator_extraction_min",
-                      "per_script_extraction_headroom",
-                      "uniform_sweep_guard.enabled",
-                      "uniform_sweep_guard.require_uniform_redeemer",
-                      "uniform_sweep_guard.require_no_script_return",
-                      "uniform_sweep_guard.min_inputs",
-                      "suppression_escape.enabled",
-                      "suppression_escape.extraction_floor_min"),
-    "large_datum":   ("gate", "gate.flag_datum_hash_only",
-                      "weights", "fixed_anchors", "bootstrap_anchors",
-                      "aggregate_engagement_min", "reason_threshold"),
-    "token_dust":    ("gate.min_token_count", "weights", "bootstrap_anchors",
-                      "allowlist_prefixes", "allowlist_policies",
-                      "dos_asset_min", "reason_threshold"),
-    "large_value":   ("weights", "bootstrap_anchors", "reason_threshold",
-                      "min_digits_subscore"),
-    "front_running": ("weights", "fixed_anchors", "bootstrap_anchors", "outcome_scores",
-                      "reason_thresholds", "min_recurrence_wins", "high_band_cap",
-                      "delta_ms_default"),
-    "sandwich":      ("weights", "fixed_anchors", "bootstrap_anchors", "link_scores",
-                      "window_slots", "neighbor_limit", "min_profit_lovelace",
-                      "reason_thresholds"),
-    "circular":      ("weights", "fixed_anchors", "bootstrap_anchors", "cycle",
-                      "reason_threshold", "moderate_cap"),
-    "fake_token":    ("weights", "fixed_anchors", "bootstrap_anchors",
-                      "similarity_threshold", "unicode_scores", "reason_thresholds",
-                      "critical_assets.multiplier", "critical_assets.names",
-                      "ascii_homoglyphs_enabled"),
-    "phishing":      ("weights", "fixed_anchors", "bootstrap_anchors",
-                      "similarity_suspicious_range", "social_engineering",
-                      "reason_thresholds", "critical_threshold", "metadata_labels",
-                      "asset_name_carrier.enabled", "min_decoded_string_len"),
+_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
+    "multiple_sat": (
+        "weights",
+        "bootstrap_anchors",
+        "allowlist_prefixes",
+        "reason_threshold",
+        "lazy_validator_threshold",
+        "lazy_validator_floor",
+        "lazy_validator_extraction_min",
+        "per_script_extraction_headroom",
+        "uniform_sweep_guard.enabled",
+        "uniform_sweep_guard.require_uniform_redeemer",
+        "uniform_sweep_guard.require_no_script_return",
+        "uniform_sweep_guard.min_inputs",
+        "suppression_escape.enabled",
+        "suppression_escape.extraction_floor_min",
+    ),
+    "large_datum": (
+        "gate",
+        "gate.flag_datum_hash_only",
+        "weights",
+        "fixed_anchors",
+        "bootstrap_anchors",
+        "aggregate_engagement_min",
+        "reason_threshold",
+    ),
+    "token_dust": (
+        "gate.min_token_count",
+        "weights",
+        "bootstrap_anchors",
+        "allowlist_prefixes",
+        "allowlist_policies",
+        "dos_asset_min",
+        "reason_threshold",
+    ),
+    "large_value": ("weights", "bootstrap_anchors", "reason_threshold", "min_digits_subscore"),
+    "front_running": (
+        "weights",
+        "fixed_anchors",
+        "bootstrap_anchors",
+        "outcome_scores",
+        "reason_thresholds",
+        "min_recurrence_wins",
+        "high_band_cap",
+        "delta_ms_default",
+    ),
+    "sandwich": (
+        "weights",
+        "fixed_anchors",
+        "bootstrap_anchors",
+        "link_scores",
+        "window_slots",
+        "neighbor_limit",
+        "min_profit_lovelace",
+        "reason_thresholds",
+    ),
+    "circular": (
+        "weights",
+        "fixed_anchors",
+        "bootstrap_anchors",
+        "cycle",
+        "reason_threshold",
+        "moderate_cap",
+    ),
+    "fake_token": (
+        "weights",
+        "fixed_anchors",
+        "bootstrap_anchors",
+        "similarity_threshold",
+        "unicode_scores",
+        "reason_thresholds",
+        "critical_assets.multiplier",
+        "critical_assets.names",
+        "ascii_homoglyphs_enabled",
+    ),
+    "phishing": (
+        "weights",
+        "fixed_anchors",
+        "bootstrap_anchors",
+        "similarity_suspicious_range",
+        "social_engineering",
+        "reason_thresholds",
+        "critical_threshold",
+        "metadata_labels",
+        "asset_name_carrier.enabled",
+        "min_decoded_string_len",
+    ),
 }
 
 # Weight and anchor names each scorer's code reads (the ``weights[...]`` and
@@ -79,55 +131,72 @@ _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
 # import-time failure. Keep in sync with the scorer call sites when adding
 # an axis; tests/analysis/test_scorer_config.py cross-checks the
 # multiple_sat entries against the scorer's declared baseline specs.
-_SCORER_WEIGHT_NAMES: Dict[str, Tuple[str, ...]] = {
-    "multiple_sat":  ("extraction", "exunits_inv", "inputs", "recurrence"),
-    "large_datum":   ("datum_bytes", "datum_ratio", "value_cbor_inv",
-                      "recurrence"),
-    "token_dust":    ("bytes", "assets", "ada_inv", "recurrence"),
-    "large_value":   ("digits", "bytes", "ada_inv", "recurrence"),
+_SCORER_WEIGHT_NAMES: dict[str, tuple[str, ...]] = {
+    "multiple_sat": ("extraction", "exunits_inv", "inputs", "recurrence"),
+    "large_datum": ("datum_bytes", "datum_ratio", "value_cbor_inv", "recurrence"),
+    "token_dust": ("bytes", "assets", "ada_inv", "recurrence"),
+    "large_value": ("digits", "bytes", "ada_inv", "recurrence"),
     "front_running": ("outcome", "delta", "recurrence", "structure"),
-    "sandwich":      ("link", "rate", "impact", "profit", "recurrence"),
-    "circular":      ("amount", "recurrence", "entropy", "auxiliary", "speed"),
-    "fake_token":    ("identity.name", "identity.unicode", "identity.cip25",
-                      "distribution.recipients", "distribution.ratio",
-                      "distribution.policy_age", "distribution.recurrence",
-                      "overall.identity", "overall.distribution"),
-    "phishing":      ("content.blacklist", "content.domain", "content.social",
-                      "delivery.recipients", "delivery.url_recur",
-                      "delivery.targeting", "delivery.recurrence",
-                      "overall.content", "overall.delivery"),
+    "sandwich": ("link", "rate", "impact", "profit", "recurrence"),
+    "circular": ("amount", "recurrence", "entropy", "auxiliary", "speed"),
+    "fake_token": (
+        "identity.name",
+        "identity.unicode",
+        "identity.cip25",
+        "distribution.recipients",
+        "distribution.ratio",
+        "distribution.policy_age",
+        "distribution.recurrence",
+        "overall.identity",
+        "overall.distribution",
+    ),
+    "phishing": (
+        "content.blacklist",
+        "content.domain",
+        "content.social",
+        "delivery.recipients",
+        "delivery.url_recur",
+        "delivery.targeting",
+        "delivery.recurrence",
+        "overall.content",
+        "overall.delivery",
+    ),
 }
 
-_SCORER_BOOTSTRAP_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
-    "multiple_sat":  ("net_value_out_of_script", "n_assets_out_of_script",
-                      "exunits_per_script_input", "n_inputs_same_script",
-                      "sender_recurrence"),
-    "large_datum":   ("datum_bytes", "value_cbor_bytes"),
-    "token_dust":    ("value_cbor_bytes", "unique_token_count", "ada_amount"),
-    "large_value":   ("quantity_digits", "value_cbor_bytes", "ada_amount"),
+_SCORER_BOOTSTRAP_ANCHOR_NAMES: dict[str, tuple[str, ...]] = {
+    "multiple_sat": (
+        "net_value_out_of_script",
+        "n_assets_out_of_script",
+        "exunits_per_script_input",
+        "n_inputs_same_script",
+        "sender_recurrence",
+    ),
+    "large_datum": ("datum_bytes", "value_cbor_bytes"),
+    "token_dust": ("value_cbor_bytes", "unique_token_count", "ada_amount"),
+    "large_value": ("quantity_digits", "value_cbor_bytes", "ada_amount"),
     "front_running": ("attacker_recurrence",),
-    "sandwich":      ("price_impact", "swap_profit", "attacker_recurrence"),
-    "circular":      ("attacker_recurrence",),
-    "fake_token":    ("recipient_count", "mint_to_recipient_ratio"),
-    "phishing":      ("recipient_count",),
+    "sandwich": ("price_impact", "swap_profit", "attacker_recurrence"),
+    "circular": ("attacker_recurrence",),
+    "fake_token": ("recipient_count", "mint_to_recipient_ratio"),
+    "phishing": ("recipient_count",),
 }
 
-_SCORER_FIXED_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
-    "multiple_sat":  (),
-    "large_datum":   ("datum_ratio",),
-    "token_dust":    (),
-    "large_value":   (),
+_SCORER_FIXED_ANCHOR_NAMES: dict[str, tuple[str, ...]] = {
+    "multiple_sat": (),
+    "large_datum": ("datum_ratio",),
+    "token_dust": (),
+    "large_value": (),
     "front_running": ("mempool_delta_inv", "fee_delta", "ttl_delta"),
-    "sandwich":      ("rate_delta",),
-    "circular":      ("amount_sim", "entropy", "hop_delta_inv", "temporal"),
-    "fake_token":    ("name_sim", "unicode", "cip25", "policy_age_inv"),
-    "phishing":      ("brand_sim", "social_score"),
+    "sandwich": ("rate_delta",),
+    "circular": ("amount_sim", "entropy", "hop_delta_inv", "temporal"),
+    "fake_token": ("name_sim", "unicode", "cip25", "policy_age_inv"),
+    "phishing": ("brand_sim", "social_score"),
 }
 
 # Anchor names allowed in the YAML but not (yet) consumed by code: declared
 # for a documented-but-deferred axis, kept so the client-facing config does
 # not have to churn when the axis lands. Allowed but never required.
-_SCORER_OPTIONAL_FIXED_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
+_SCORER_OPTIONAL_FIXED_ANCHOR_NAMES: dict[str, tuple[str, ...]] = {
     # The phishing domain-age axis is documented in the detection spec and
     # its anchors are declared in the shipped config, but the signal needs
     # WHOIS enrichment, which is deferred.
@@ -140,43 +209,64 @@ _SCORER_OPTIONAL_FIXED_ANCHOR_NAMES: Dict[str, Tuple[str, ...]] = {
 # allowlist for unknown-key rejection: any YAML key outside the allowlist
 # fails at import, so a misspelled tunable cannot sit silently unread while
 # the code keeps using a default or an old value.
-_KNOWN_OPTIONAL_KEYS: Dict[str, Tuple[str, ...]] = {
-    "multiple_sat":  (),
-    "large_datum":   ("gate.min_datum_bytes", "gate.bloat_entropy_max",
-                      "gate.leaf_concentration_max",
-                      "gate.size_backstop_fraction"),
-    "token_dust":    ("dos_value_cbor_fraction",),
-    "large_value":   (),
-    "front_running": ("reason_thresholds.outcome", "reason_thresholds.delta",
-                      "reason_thresholds.recurrence", "unknown_outcome_score"),
-    "sandwich":      ("link_scores.linked", "link_scores.unlinked",
-                      "reason_thresholds.link", "reason_thresholds.rate",
-                      "reason_thresholds.impact"),
-    "circular":      ("structural_corroboration_floor",
-                      "recurrence_window_days",
-                      "cycle.min_length", "cycle.max_length",
-                      "cycle.fee_tolerance_multiplier",
-                      "cycle.fee_tolerance_strict",
-                      "cycle.per_hop_fee_estimate", "cycle.max_age_slots",
-                      "cycle.max_output_fanout", "cycle.bfs_hop_row_limit",
-                      "cycle.default_inter_hop_delta_slots"),
-    "fake_token":    ("unicode_scores.zero_width",
-                      "unicode_scores.mixed_scripts",
-                      "unicode_scores.homoglyphs",
-                      "reason_thresholds.name", "reason_thresholds.unicode",
-                      "reason_thresholds.recipients"),
-    "phishing":      ("similarity_suspicious_range.lo",
-                      "similarity_suspicious_range.hi",
-                      "social_engineering.urgency_increment",
-                      "social_engineering.urgency_cap",
-                      "social_engineering.brand_increment",
-                      "social_engineering.brand_cap",
-                      "social_engineering.url_combo_bonus",
-                      "social_engineering.phishing_tld_bonus",
-                      "reason_thresholds.blacklist",
-                      "reason_thresholds.domain",
-                      "reason_thresholds.social",
-                      "reason_thresholds.recipients"),
+_KNOWN_OPTIONAL_KEYS: dict[str, tuple[str, ...]] = {
+    "multiple_sat": (),
+    "large_datum": (
+        "gate.min_datum_bytes",
+        "gate.bloat_entropy_max",
+        "gate.leaf_concentration_max",
+        "gate.size_backstop_fraction",
+    ),
+    "token_dust": ("dos_value_cbor_fraction",),
+    "large_value": (),
+    "front_running": (
+        "reason_thresholds.outcome",
+        "reason_thresholds.delta",
+        "reason_thresholds.recurrence",
+        "unknown_outcome_score",
+    ),
+    "sandwich": (
+        "link_scores.linked",
+        "link_scores.unlinked",
+        "reason_thresholds.link",
+        "reason_thresholds.rate",
+        "reason_thresholds.impact",
+    ),
+    "circular": (
+        "structural_corroboration_floor",
+        "recurrence_window_days",
+        "cycle.min_length",
+        "cycle.max_length",
+        "cycle.fee_tolerance_multiplier",
+        "cycle.fee_tolerance_strict",
+        "cycle.per_hop_fee_estimate",
+        "cycle.max_age_slots",
+        "cycle.max_output_fanout",
+        "cycle.bfs_hop_row_limit",
+        "cycle.default_inter_hop_delta_slots",
+    ),
+    "fake_token": (
+        "unicode_scores.zero_width",
+        "unicode_scores.mixed_scripts",
+        "unicode_scores.homoglyphs",
+        "reason_thresholds.name",
+        "reason_thresholds.unicode",
+        "reason_thresholds.recipients",
+    ),
+    "phishing": (
+        "similarity_suspicious_range.lo",
+        "similarity_suspicious_range.hi",
+        "social_engineering.urgency_increment",
+        "social_engineering.urgency_cap",
+        "social_engineering.brand_increment",
+        "social_engineering.brand_cap",
+        "social_engineering.url_combo_bonus",
+        "social_engineering.phishing_tld_bonus",
+        "reason_thresholds.blacklist",
+        "reason_thresholds.domain",
+        "reason_thresholds.social",
+        "reason_thresholds.recipients",
+    ),
 }
 
 # Subtrees whose leaf names are operational data, not schema, so the
@@ -184,12 +274,14 @@ _KNOWN_OPTIONAL_KEYS: Dict[str, Tuple[str, ...]] = {
 # (shape-validated by load_network_map at scorer import) and the
 # front_running outcome map (keys are collision-outcome labels produced by
 # mempool ingestion, an open set this module must not have to mirror).
-_FREEFORM_SUBTREES: frozenset = frozenset({
-    "scorers.multiple_sat.allowlist_prefixes",
-    "scorers.token_dust.allowlist_prefixes",
-    "scorers.token_dust.allowlist_policies",
-    "scorers.front_running.outcome_scores",
-})
+_FREEFORM_SUBTREES: frozenset = frozenset(
+    {
+        "scorers.multiple_sat.allowlist_prefixes",
+        "scorers.token_dust.allowlist_prefixes",
+        "scorers.token_dust.allowlist_policies",
+        "scorers.front_running.outcome_scores",
+    }
+)
 
 
 def _config_dir() -> Path:
@@ -198,11 +290,7 @@ def _config_dir() -> Path:
     TMS_CONFIG_DIR can come from .env (via pydantic settings) or the shell
     environment; shell wins when both are present.
     """
-    override = (
-        os.environ.get("TMS_CONFIG_DIR")
-        or settings.TMS_CONFIG_DIR
-        or None
-    )
+    override = os.environ.get("TMS_CONFIG_DIR") or settings.TMS_CONFIG_DIR or None
     if override:
         return Path(override)
     # Walk upward until we find a directory containing `config/detection.yaml`.
@@ -221,22 +309,20 @@ def _config_dir() -> Path:
 # resource limits that several scorers' thresholds are derived from; a missing
 # block must fail loudly at import rather than surfacing as a KeyError deep
 # inside a scorer.
-_REQUIRED_PROTOCOL_LIMITS: Tuple[str, ...] = (
+_REQUIRED_PROTOCOL_LIMITS: tuple[str, ...] = (
     "max_value_size_bytes",
     "max_tx_size_bytes",
 )
 
 # Required keys for the top-level composite_corroboration block (cross-class
 # agreement signal; see detection.yaml). Top-level, not a scorer section.
-_REQUIRED_COMPOSITE_CORROBORATION: Tuple[str, ...] = (
-    "corroboration_threshold",
-)
+_REQUIRED_COMPOSITE_CORROBORATION: tuple[str, ...] = ("corroboration_threshold",)
 
 # Required keys for the top-level contract_anomaly block (projection of the
 # clustering sidecar's verdict onto the host score; see detection.yaml). A
 # top-level projection block, not a scorer section, so it has no weights or
 # anchors. Dotted leaves so a missing floor fails fast with its full path.
-_REQUIRED_CONTRACT_ANOMALY: Tuple[str, ...] = (
+_REQUIRED_CONTRACT_ANOMALY: tuple[str, ...] = (
     "verdict_floors.malicious",
     "verdict_floors.anomaly",
     "verdict_floors.benign",
@@ -248,7 +334,7 @@ _REQUIRED_CONTRACT_ANOMALY: Tuple[str, ...] = (
 
 # Dotted leaves so a missing nested tunable fails fast with its full path
 # at load time instead of a raw KeyError at first use.
-_REQUIRED_BASELINES: Tuple[str, ...] = (
+_REQUIRED_BASELINES: tuple[str, ...] = (
     "min_spread_ratio",
     "per_script_p99_cap_multiplier",
     "per_script_p50_cap_spread_fraction",
@@ -261,8 +347,10 @@ _REQUIRED_BASELINES: Tuple[str, ...] = (
 
 
 def _missing_dotted(
-    container: Dict[str, Any], keys: Tuple[str, ...], prefix: str,
-) -> List[str]:
+    container: dict[str, Any],
+    keys: tuple[str, ...],
+    prefix: str,
+) -> list[str]:
     """Return the full paths of dotted ``keys`` absent from ``container``.
 
     Dotted keys ("a.b.c") walk into nested dicts so callers can require
@@ -270,7 +358,7 @@ def _missing_dotted(
     lets YAML edits surface the precise missing field rather than a
     downstream KeyError at import.
     """
-    missing: List[str] = []
+    missing: list[str] = []
     for key in keys:
         cur: Any = container
         for part in key.split("."):
@@ -299,8 +387,11 @@ def _allowed_paths() -> set:
     ``p50`` / ``p99`` children (the shape ``anchor()`` reads).
     """
     allowed: set = {
-        "protocol_limits", "composite_corroboration", "contract_anomaly",
-        "baselines", "scorers",
+        "protocol_limits",
+        "composite_corroboration",
+        "contract_anomaly",
+        "baselines",
+        "scorers",
     }
     for key in _REQUIRED_PROTOCOL_LIMITS:
         _add_dotted(allowed, "protocol_limits", key)
@@ -331,12 +422,12 @@ def _allowed_paths() -> set:
     return allowed
 
 
-def _unknown_paths(data: Dict[str, Any]) -> List[str]:
+def _unknown_paths(data: dict[str, Any]) -> list[str]:
     """Dotted paths of YAML keys outside the allowlist (typos, dead keys)."""
     allowed = _allowed_paths()
-    unknown: List[str] = []
+    unknown: list[str] = []
 
-    def _walk(node: Dict[str, Any], prefix: str) -> None:
+    def _walk(node: dict[str, Any], prefix: str) -> None:
         for key, value in node.items():
             path = f"{prefix}.{key}" if prefix else str(key)
             if path not in allowed:
@@ -349,26 +440,32 @@ def _unknown_paths(data: Dict[str, Any]) -> List[str]:
     return unknown
 
 
-def _missing_scorer_names(scorer: str, section: Dict[str, Any]) -> List[str]:
+def _missing_scorer_names(scorer: str, section: dict[str, Any]) -> list[str]:
     """Required weight/anchor names absent from a scorer's YAML section.
 
     A missing name would otherwise surface as a KeyError at scoring time,
     where the engine swallows per-tx scorer exceptions (silent recall loss);
     here it fails at import with the full dotted path.
     """
-    missing: List[str] = []
+    missing: list[str] = []
     blocks = (
         ("weights", _SCORER_WEIGHT_NAMES.get(scorer, ())),
-        ("bootstrap_anchors", tuple(
-            f"{name}.{leaf}"
-            for name in _SCORER_BOOTSTRAP_ANCHOR_NAMES.get(scorer, ())
-            for leaf in ("p50", "p99")
-        )),
-        ("fixed_anchors", tuple(
-            f"{name}.{leaf}"
-            for name in _SCORER_FIXED_ANCHOR_NAMES.get(scorer, ())
-            for leaf in ("p50", "p99")
-        )),
+        (
+            "bootstrap_anchors",
+            tuple(
+                f"{name}.{leaf}"
+                for name in _SCORER_BOOTSTRAP_ANCHOR_NAMES.get(scorer, ())
+                for leaf in ("p50", "p99")
+            ),
+        ),
+        (
+            "fixed_anchors",
+            tuple(
+                f"{name}.{leaf}"
+                for name in _SCORER_FIXED_ANCHOR_NAMES.get(scorer, ())
+                for leaf in ("p50", "p99")
+            ),
+        ),
     )
     for block, names in blocks:
         if not names:
@@ -377,17 +474,13 @@ def _missing_scorer_names(scorer: str, section: Dict[str, Any]) -> List[str]:
         if not isinstance(container, dict):
             # Block presence itself is reported by the _REQUIRED_KEYS pass.
             continue
-        missing.extend(
-            _missing_dotted(container, names, f"scorers.{scorer}.{block}")
-        )
+        missing.extend(_missing_dotted(container, names, f"scorers.{scorer}.{block}"))
     return missing
 
 
-def _validate(path: Path, data: Dict[str, Any]) -> None:
+def _validate(path: Path, data: dict[str, Any]) -> None:
     if "scorers" not in data or not isinstance(data["scorers"], dict):
-        raise RuntimeError(
-            f"Detection config {path} must contain a top-level 'scorers' mapping."
-        )
+        raise RuntimeError(f"Detection config {path} must contain a top-level 'scorers' mapping.")
     limits = data.get("protocol_limits")
     if not isinstance(limits, dict):
         raise RuntimeError(
@@ -396,18 +489,14 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
     missing_limits = [k for k in _REQUIRED_PROTOCOL_LIMITS if k not in limits]
     if missing_limits:
         raise RuntimeError(
-            f"Detection config {path} missing protocol_limits keys: "
-            f"{', '.join(missing_limits)}"
+            f"Detection config {path} missing protocol_limits keys: {', '.join(missing_limits)}"
         )
     corroboration = data.get("composite_corroboration")
     if not isinstance(corroboration, dict):
         raise RuntimeError(
-            f"Detection config {path} must contain a top-level "
-            f"'composite_corroboration' mapping."
+            f"Detection config {path} must contain a top-level 'composite_corroboration' mapping."
         )
-    missing_corr = [
-        k for k in _REQUIRED_COMPOSITE_CORROBORATION if k not in corroboration
-    ]
+    missing_corr = [k for k in _REQUIRED_COMPOSITE_CORROBORATION if k not in corroboration]
     if missing_corr:
         raise RuntimeError(
             f"Detection config {path} missing composite_corroboration keys: "
@@ -416,46 +505,39 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
     contract_anomaly = data.get("contract_anomaly")
     if not isinstance(contract_anomaly, dict):
         raise RuntimeError(
-            f"Detection config {path} must contain a top-level "
-            f"'contract_anomaly' mapping."
+            f"Detection config {path} must contain a top-level 'contract_anomaly' mapping."
         )
     missing_ca = _missing_dotted(
-        contract_anomaly, _REQUIRED_CONTRACT_ANOMALY, "contract_anomaly",
+        contract_anomaly,
+        _REQUIRED_CONTRACT_ANOMALY,
+        "contract_anomaly",
     )
     if missing_ca:
         raise RuntimeError(
-            f"Detection config {path} missing contract_anomaly keys: "
-            f"{', '.join(missing_ca)}"
+            f"Detection config {path} missing contract_anomaly keys: {', '.join(missing_ca)}"
         )
     baselines = data.get("baselines")
     if not isinstance(baselines, dict):
-        raise RuntimeError(
-            f"Detection config {path} must contain a top-level 'baselines' mapping."
-        )
+        raise RuntimeError(f"Detection config {path} must contain a top-level 'baselines' mapping.")
     missing_bl = _missing_dotted(baselines, _REQUIRED_BASELINES, "baselines")
     if missing_bl:
         raise RuntimeError(
-            f"Detection config {path} missing baselines keys: "
-            f"{', '.join(missing_bl)}"
+            f"Detection config {path} missing baselines keys: {', '.join(missing_bl)}"
         )
     scorers = data["scorers"]
-    missing: List[str] = []
+    missing: list[str] = []
     for name, keys in _REQUIRED_KEYS.items():
         section = scorers.get(name)
         if section is None:
             missing.append(f"scorers.{name}")
             continue
         if not isinstance(section, dict):
-            raise RuntimeError(
-                f"Detection config {path}: scorers.{name} must be a mapping."
-            )
+            raise RuntimeError(f"Detection config {path}: scorers.{name} must be a mapping.")
         missing.extend(_missing_dotted(section, keys, f"scorers.{name}"))
         missing.extend(_missing_scorer_names(name, section))
     if missing:
         joined = ", ".join(sorted(missing))
-        raise RuntimeError(
-            f"Detection config {path} missing required keys: {joined}"
-        )
+        raise RuntimeError(f"Detection config {path} missing required keys: {joined}")
     unknown = _unknown_paths(data)
     if unknown:
         joined = ", ".join(sorted(unknown))
@@ -474,7 +556,7 @@ def _validate(path: Path, data: Dict[str, Any]) -> None:
 # adds a row here rather than remembering to copy a raise block). Entries:
 # (dotted path from the document root, inclusive lower bound, exclusive
 # upper bound or None, why the boundary exists).
-_BAND_INVARIANTS: Tuple[Tuple[str, float, Optional[float], str], ...] = (
+_BAND_INVARIANTS: tuple[tuple[str, float, float | None, str], ...] = (
     (
         "scorers.multiple_sat.lazy_validator_floor",
         BAND_HIGH_THRESHOLD,
@@ -502,7 +584,7 @@ _BAND_INVARIANTS: Tuple[Tuple[str, float, Optional[float], str], ...] = (
 )
 
 
-def _dotted_get(data: Dict[str, Any], dotted: str) -> Any:
+def _dotted_get(data: dict[str, Any], dotted: str) -> Any:
     """Resolve a dotted path against nested dicts; None when any hop is absent."""
     node: Any = data
     for part in dotted.split("."):
@@ -512,7 +594,7 @@ def _dotted_get(data: Dict[str, Any], dotted: str) -> Any:
     return node
 
 
-def _check_band_invariants(path: Path, data: Dict[str, Any]) -> None:
+def _check_band_invariants(path: Path, data: dict[str, Any]) -> None:
     for dotted, lower, upper, why in _BAND_INVARIANTS:
         raw = _dotted_get(data, dotted)
         if raw is None:
@@ -530,7 +612,7 @@ def _check_band_invariants(path: Path, data: Dict[str, Any]) -> None:
             )
 
 
-def _load() -> Dict[str, Any]:
+def _load() -> dict[str, Any]:
     path = _config_dir() / "detection.yaml"
     if not path.exists():
         raise RuntimeError(f"Detection config not found at {path}.")
@@ -541,10 +623,10 @@ def _load() -> Dict[str, Any]:
     return data
 
 
-_CFG: Dict[str, Any] = _load()
+_CFG: dict[str, Any] = _load()
 
 
-def get(section: str) -> Dict[str, Any]:
+def get(section: str) -> dict[str, Any]:
     """Return the config section for a given scorer (e.g. ``'multiple_sat'``)."""
     cfg = _CFG["scorers"].get(section)
     if cfg is None:
@@ -555,7 +637,7 @@ def get(section: str) -> Dict[str, Any]:
     return cfg
 
 
-def baselines_config() -> Dict[str, Any]:
+def baselines_config() -> dict[str, Any]:
     """Return the top-level baselines block (resolution tunables shared by
     every percentile-baselined scorer). Presence and required keys are
     enforced at load time by :func:`_validate`.
@@ -566,9 +648,7 @@ def baselines_config() -> Dict[str, Any]:
 # Cap on a LEARNED baseline's p99 relative to the scorer's bootstrap anchor
 # (baselines.per_script_p99_cap_multiplier; 0 disables). Applied in
 # resolved_or_bootstrap; see its docstring for the poisoning threat model.
-_P99_CAP_MULTIPLIER: float = float(
-    _CFG["baselines"]["per_script_p99_cap_multiplier"]
-)
+_P99_CAP_MULTIPLIER: float = float(_CFG["baselines"]["per_script_p99_cap_multiplier"])
 
 # Minimum (p99 - p50) / p50 spread for a usable baseline; reused here to
 # keep the p50 bound strictly below the p99 cap so a capped baseline can
@@ -581,12 +661,10 @@ _MIN_SPREAD_RATIO: float = float(_CFG["baselines"]["min_spread_ratio"])
 # CAP instead (the previous behaviour, ~4.55x the anchor p99) left enough
 # room for an in-bound median-poisoned pair to zero a real drain below the
 # suppression-escape floor; see the derivation in config/detection.yaml.
-_P50_CAP_SPREAD_FRACTION: float = float(
-    _CFG["baselines"]["per_script_p50_cap_spread_fraction"]
-)
+_P50_CAP_SPREAD_FRACTION: float = float(_CFG["baselines"]["per_script_p50_cap_spread_fraction"])
 
 
-def composite_corroboration_config() -> Dict[str, Any]:
+def composite_corroboration_config() -> dict[str, Any]:
     """Return the top-level composite_corroboration block.
 
     Cross-class agreement signal (not a scorer section). Presence and required
@@ -595,7 +673,7 @@ def composite_corroboration_config() -> Dict[str, Any]:
     return _CFG["composite_corroboration"]
 
 
-def contract_anomaly_config() -> Dict[str, Any]:
+def contract_anomaly_config() -> dict[str, Any]:
     """Return the top-level contract_anomaly projection block.
 
     Maps the clustering sidecar's verdict (consensus, votes, verdict label)
@@ -617,8 +695,7 @@ def protocol_limit(name: str) -> int:
     limits = _CFG["protocol_limits"]
     if name not in limits:
         raise KeyError(
-            f"No protocol limit '{name}'. Add it to the 'protocol_limits' "
-            f"block in detection.yaml."
+            f"No protocol limit '{name}'. Add it to the 'protocol_limits' block in detection.yaml."
         )
     return int(limits[name])
 
@@ -634,7 +711,7 @@ def fraction_of_limit(fraction: Any, limit_name: str) -> int:
     return int(float(fraction) * protocol_limit(limit_name))
 
 
-def anchor(container: Dict[str, Any], key: str) -> Tuple[float, float]:
+def anchor(container: dict[str, Any], key: str) -> tuple[float, float]:
     """Extract ``(p50, p99)`` from a ``{key: {p50: ..., p99: ...}}`` mapping."""
     a = container[key]
     return float(a["p50"]), float(a["p99"])
@@ -646,7 +723,7 @@ def load_network_map(
     scorer: str,
     field: str,
     collect=tuple,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Normalise a ``{network: [str, ...]}`` config block into ``{network: collect([...])}``.
 
     Both ``multiple_sat.allowlist_prefixes`` and
@@ -671,15 +748,14 @@ def load_network_map(
             f"{scorer}.{field} must be a mapping of {{network: [...]}}; "
             f"got {type(raw).__name__}. Update config/detection.yaml."
         )
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for network, items in raw.items():
         if items is None:
             out[network] = collect()
             continue
         if not isinstance(items, list):
             raise RuntimeError(
-                f"{scorer}.{field}.{network} must be a list; "
-                f"got {type(items).__name__}."
+                f"{scorer}.{field}.{network} must be a list; got {type(items).__name__}."
             )
         out[network] = collect(items)
     return out
@@ -690,10 +766,10 @@ def resolved_or_bootstrap(
     scope_type: str,
     scope_id: str,
     network: str,
-    bootstrap: Dict[str, Any],
+    bootstrap: dict[str, Any],
     bootstrap_key: str,
-    scope_types_allowed: Optional[List[str]] = None,
-) -> Tuple[float, float, str]:
+    scope_types_allowed: list[str] | None = None,
+) -> tuple[float, float, str]:
     """Resolve a baseline, falling back to the scorer's configured bootstrap anchor.
 
     Wraps :func:`app.analysis.normalise.resolve_baseline` with the idiom every
@@ -737,7 +813,10 @@ def resolved_or_bootstrap(
     ``"per_script" | "per_policy" | "global" | "bootstrap"``.
     """
     p50, p99, source = resolve_baseline(
-        feature, scope_type, scope_id, network,
+        feature,
+        scope_type,
+        scope_id,
+        network,
         scope_types_allowed=scope_types_allowed,
     )
     if source == "missing":

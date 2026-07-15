@@ -8,14 +8,17 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import RepoDep, analysis_slot
-from app.contracts import normalize_target
 from app.api.schemas import (
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     AnomalyDetectAck,
     AnomalyRequest,
     AnomalyRunDeleteAck,
     AnomalyRunOut,
     AnomalyTopPage,
+    ListPage,
 )
+from app.contracts import normalize_target
 from app.service import detect_anomalies_for_target, top_anomalies_with_verdicts
 from app.storage.protocol import Repo
 
@@ -35,11 +38,15 @@ def run_anomaly(req: AnomalyRequest, repo: Repo = RepoDep) -> dict[str, Any]:
         )
 
 
-@router.get("/anomaly-runs", response_model=list[AnomalyRunOut])
+@router.get("/anomaly-runs", response_model=ListPage[AnomalyRunOut])
 def list_anomaly_runs(
-    target: str | None = Query(default=None), repo: Repo = RepoDep
-) -> list[dict[str, Any]]:
-    return repo.list_anomaly_runs(target)
+    target: str | None = Query(default=None),
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_anomaly_runs(target, limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_anomaly_runs(target), "data": rows}
 
 
 @router.get("/anomaly-runs/{run_id}/top", response_model=AnomalyTopPage)

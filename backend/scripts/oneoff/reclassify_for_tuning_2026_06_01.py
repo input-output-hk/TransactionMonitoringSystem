@@ -54,7 +54,6 @@ from app.analysis.engine import (
 )
 from app.config import settings
 from app.db import postgres
-
 from scripts.oneoff import _rescore_common as rc
 
 # Bounds the ``WHERE tx_hash IN (...)`` literal that input-resolution builds, so
@@ -65,8 +64,11 @@ _CHUNK = 500
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--network", default=settings.CARDANO_NETWORK)
-    ap.add_argument("--all-bands", action="store_true",
-                    help="also re-score Informational/none rows (cosmetic, slower)")
+    ap.add_argument(
+        "--all-bands",
+        action="store_true",
+        help="also re-score Informational/none rows (cosmetic, slower)",
+    )
     ap.add_argument("--limit", type=int, default=0, help="cap rows (smoke test)")
     ap.add_argument("--apply", action="store_true", help="insert corrected rows")
     ap.add_argument("--count-only", action="store_true", help="print the row count and exit")
@@ -78,7 +80,8 @@ def main() -> None:
     where = f"network = %(n)s {band_clause}"
 
     cnt = client.execute(
-        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}", {"n": args.network},
+        f"SELECT count() FROM tx_class_scores FINAL WHERE {where}",
+        {"n": args.network},
     )[0][0]
     label = "all classified" if args.all_bands else "Moderate+"
     print(f"{label} rows ({args.network}): {cnt}")
@@ -116,17 +119,21 @@ def main() -> None:
         except Exception as exc:
             print(f"collision enrichment failed: {exc}", file=sys.stderr)
             if args.apply:
-                print("Refusing to --apply: front_running findings would be dropped. "
-                      "Re-run with Postgres reachable, or unset SCORER_FRONT_RUNNING_ENABLED.",
-                      file=sys.stderr)
+                print(
+                    "Refusing to --apply: front_running findings would be dropped. "
+                    "Re-run with Postgres reachable, or unset SCORER_FRONT_RUNNING_ENABLED.",
+                    file=sys.stderr,
+                )
                 return 1
-            print("Dry run continues WITHOUT collisions (front_running preview is incomplete).",
-                  file=sys.stderr)
+            print(
+                "Dry run continues WITHOUT collisions (front_running preview is incomplete).",
+                file=sys.stderr,
+            )
 
     scorers = _build_scorers()
     corrected, prev_classes = [], []
     for i in range(0, len(hashes), _CHUNK):
-        chunk_hashes = hashes[i:i + _CHUNK]
+        chunk_hashes = hashes[i : i + _CHUNK]
         tx_rows = client.execute(
             """
             SELECT tx_hash, fee, input_count, output_count, total_output_value,
@@ -136,12 +143,20 @@ def main() -> None:
             {"n": args.network, "h": chunk_hashes},
         )
         chunk = []
-        for (tx_hash, fee, in_n, out_n, total_out, addrs, meta_s, raw_s, slot, bh, ts) in tx_rows:
+        for tx_hash, fee, in_n, out_n, total_out, addrs, meta_s, raw_s, slot, bh, ts in tx_rows:
             fr = {
-                "tx_hash": tx_hash, "network": args.network, "fee": fee,
-                "input_count": in_n, "output_count": out_n, "total_output_value": total_out,
-                "metadata": rc.loads(meta_s, None), "addresses": list(addrs) if addrs else [],
-                "raw_data": rc.loads(raw_s, {}), "slot": slot, "block_height": bh, "timestamp": ts,
+                "tx_hash": tx_hash,
+                "network": args.network,
+                "fee": fee,
+                "input_count": in_n,
+                "output_count": out_n,
+                "total_output_value": total_out,
+                "metadata": rc.loads(meta_s, None),
+                "addresses": list(addrs) if addrs else [],
+                "raw_data": rc.loads(raw_s, {}),
+                "slot": slot,
+                "block_height": bh,
+                "timestamp": ts,
             }
             collision = collisions.get(tx_hash)
             if collision:

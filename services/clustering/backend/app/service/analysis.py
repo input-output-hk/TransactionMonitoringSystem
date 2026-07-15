@@ -85,8 +85,13 @@ def detect_anomalies_for_target(
 ) -> dict[str, Any]:
     ci = load_clustering_input(repo, target, feature_set)
     return _detect_ci(
-        repo, target, ci, eps=eps, min_samples=min_samples,
-        top_quantile=top_quantile, origin=origin,
+        repo,
+        target,
+        ci,
+        eps=eps,
+        min_samples=min_samples,
+        top_quantile=top_quantile,
+        origin=origin,
     )
 
 
@@ -102,9 +107,7 @@ def _detect_ci(
 ) -> dict[str, Any]:
     """Run anomaly detection on a pre-built ``ClusteringInput`` and persist it."""
     feature_set = ci.feature_set
-    result = detect_anomalies(
-        ci, eps=eps, min_samples=min_samples, top_quantile=top_quantile
-    )
+    result = detect_anomalies(ci, eps=eps, min_samples=min_samples, top_quantile=top_quantile)
     run_id = "anomaly-" + new_run_id(feature_set)
     rows = [
         (

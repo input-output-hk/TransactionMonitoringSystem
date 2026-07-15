@@ -17,6 +17,7 @@ Templates are plain text. HTML can be layered on later by accepting an
 ``html`` arg in :func:`send_magic_link` — the wire format already
 supports multipart via aiosmtplib.
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,7 +45,10 @@ def _build_link(token: str) -> str:
 
 
 def _render(
-    purpose: EmailPurpose, full_name: str, link: str, ttl_minutes: int,
+    purpose: EmailPurpose,
+    full_name: str,
+    link: str,
+    ttl_minutes: int,
 ) -> tuple[str, str]:
     """Return ``(subject, body)`` for the given purpose."""
     if purpose == "invite":
@@ -117,7 +121,10 @@ def _redact_email(address: str) -> str:
 
 
 async def send_magic_link(
-    to_email: str, full_name: str, token: str, purpose: EmailPurpose,
+    to_email: str,
+    full_name: str,
+    token: str,
+    purpose: EmailPurpose,
 ) -> bool:
     """Deliver a magic-link email. Never raises — see module docstring.
 
@@ -126,7 +133,10 @@ async def send_magic_link(
     """
     link = _build_link(token)
     subject, body = _render(
-        purpose, full_name, link, settings.MAGIC_LINK_TTL_MINUTES,
+        purpose,
+        full_name,
+        link,
+        settings.MAGIC_LINK_TTL_MINUTES,
     )
 
     if not settings.SMTP_ENABLED or not settings.SMTP_HOST:
@@ -139,13 +149,16 @@ async def send_magic_link(
         if dev_mode:
             logger.warning(
                 "SMTP disabled (dev mode) — magic link for %s (%s): %s",
-                to_email, purpose, link,
+                to_email,
+                purpose,
+                link,
             )
         else:
             logger.warning(
                 "SMTP disabled and not in dev mode — magic link for %s (%s) "
                 "was NOT delivered and is redacted from logs; configure SMTP.",
-                _redact_email(to_email), purpose,
+                _redact_email(to_email),
+                purpose,
             )
         return False
 

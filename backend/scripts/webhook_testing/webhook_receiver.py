@@ -38,7 +38,7 @@ def _verify(raw: bytes, header_value: str | None) -> str:
         return "MISSING signature header (sender has a secret set, or spoofed)"
     if not header_value.startswith(SIGNATURE_PREFIX):
         return f"malformed header (want '{SIGNATURE_PREFIX}<hex>', got {header_value!r})"
-    sent = header_value[len(SIGNATURE_PREFIX):]
+    sent = header_value[len(SIGNATURE_PREFIX) :]
     expected = hmac.new(SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
     # Constant-time compare to avoid a timing oracle (sender docstring mandates this).
     return "OK — signature valid" if hmac.compare_digest(sent, expected) else "INVALID signature"

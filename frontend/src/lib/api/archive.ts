@@ -4,7 +4,7 @@
  *
  * Two implementations are wired behind the same {@link ArchiveApi} surface:
  *
- *  - **Default everywhere**: real HTTP client against `/api/archive/*`
+ *  - **Default everywhere**: real HTTP client against `/api/v1/archive/*`
  *    ({@link archive.client.ts}).
  *  - **Dev with `VITE_USE_MOCK_ARCHIVE_API=true`**: localStorage-backed mock
  *    shim ({@link archive.mock.ts}). Opt-in only — used for offline work
@@ -28,10 +28,14 @@ import type { Severity } from "@/lib/attacks";
 
 /* ---------- Wire format ---------- */
 
-/** Cardano network identifier. Same enum as the backend `NetworkType`. */
-export type Network = "mainnet" | "preprod" | "preview";
+/** Cardano network identifier (canonical definition in lib/api/fetch).
+ *  Imported for use in this module's types and re-exported so existing
+ *  `import { Network } from "@/lib/api/archive"` call sites keep working. */
+import type { Network } from "./fetch";
 
-/** Backend response row for `GET /api/archive`. */
+export type { Network };
+
+/** Backend response row for `GET /api/v1/archive`. */
 export type ArchiveEntry = {
 	network: Network;
 	tx_hash: string;
@@ -50,7 +54,7 @@ export type ArchiveEntry = {
 	analyzed_at: string | null;
 };
 
-/** Payload for `POST /api/archive`. */
+/** Payload for `POST /api/v1/archive`. */
 export type ArchiveCreateRequest = {
 	network: Network;
 	tx_hash: string;

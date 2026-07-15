@@ -1,7 +1,9 @@
 """Unit tests for the Fake Token scorer (Class 8)."""
 
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 from app.analysis.scorers.fake_token import FakeTokenScorer
 
 
@@ -50,6 +52,7 @@ class TestGate:
         local .env has the testnet-mode override turned on for debugging.
         """
         from app.config import settings
+
         monkeypatch.setattr(settings, "FAKE_TOKEN_TESTNET_MODE", False)
         mint = {FAKE_POLICY: {"HOSKY": 1000}}
         assert scorer.gate(_features(mint=mint, network="preview")) is False
@@ -120,14 +123,17 @@ class TestScore:
         assert r_critical.evidence["matched_token_criticality"] == "critical"
         assert r_standard.evidence["matched_token_criticality"] == "standard"
         # Identity is amplified for the critical asset, lifting the final score.
-        assert r_critical.sub_scores["identity_composite"] > r_standard.sub_scores["identity_composite"]
+        assert (
+            r_critical.sub_scores["identity_composite"]
+            > r_standard.sub_scores["identity_composite"]
+        )
         assert r_critical.score > r_standard.score
 
     def test_criticality_never_lowers_score(self, scorer):
         """The amplification is monotonic (multiplier >= 1.0, capped at 1.0):
         a critical-asset clone is never scored below the same clone without the
         bonus. Compared against the multiplier=1.0 (no-op) baseline."""
-        from unittest.mock import patch
+
         outputs = [{"address": "addr1", "value": {"lovelace": 1_500_000}}]
         feats = _features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=outputs)
         with_bonus = scorer.score(feats).score
@@ -148,11 +154,13 @@ class TestConfusablesFold:
     def test_normalize_folds_greek_capital_nu_to_latin_n(self):
         # Greek capital Nu (U+039D) looks identical to Latin N (U+004E).
         from app.analysis.scorers.fake_token import _normalise_token_name
+
         assert _normalise_token_name("ΝTX") == "NTX"
 
     def test_normalize_folds_cyrillic_straight_u_to_latin_y(self):
         # Cyrillic capital Straight U (U+04AE) looks like Latin Y.
         from app.analysis.scorers.fake_token import _normalise_token_name
+
         assert _normalise_token_name("INDҮ") == "INDY"
 
     def test_normalize_folds_full_forge_homoglyph(self):
@@ -162,6 +170,7 @@ class TestConfusablesFold:
         # remaining `l` is an intra-Latin confusable for `I` not folded
         # here (would inflate FPs on legitimate lowercase-L tokens).
         from app.analysis.scorers.fake_token import _normalise_token_name
+
         homoglyph = bytes.fromhex("6cce9d44d2ae").decode("utf-8")
         assert _normalise_token_name(homoglyph) == "lNDY"
 
@@ -169,11 +178,13 @@ class TestConfusablesFold:
         # Pre-fix, the homoglyph set was lowercase-Greek only and missed
         # uppercase confusables like the forge INDY attack.
         from app.analysis.scorers.fake_token import _compute_unicode_suspicion
+
         homoglyph = bytes.fromhex("6cce9d44d2ae").decode("utf-8")
         assert _compute_unicode_suspicion(homoglyph) > 0.0
 
     def test_unicode_suspicion_does_not_fire_on_pure_ascii(self):
         from app.analysis.scorers.fake_token import _compute_unicode_suspicion
+
         # Pure ASCII case-spoof has no confusables, no zero-width, no
         # mixed scripts. Score must be 0.
         assert _compute_unicode_suspicion("nTX") == 0.0
@@ -185,10 +196,7 @@ class TestAsciiHomoglyphs:
     keeps legitimately numeric names off the suspicion axis (precision)."""
 
     def _outputs(self, n=5):
-        return [
-            {"address": f"addr{i}", "value": {"lovelace": 1_500_000}}
-            for i in range(n)
-        ]
+        return [{"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(n)]
 
     def test_zero_for_O_forgery_detected(self, scorer):
         # "H0SKY" (digit zero) impersonating HOSKY under a wrong policy.

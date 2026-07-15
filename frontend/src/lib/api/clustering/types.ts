@@ -1,6 +1,11 @@
 /** Shared types for the clustering client (ported from the engine's
  *  ui/src/types.ts). Pure type/data declarations, no runtime dependencies. */
 
+/** Envelope returned by every clustering collection endpoint (mirrors the host
+ *  API's ListResponse): `data` is the requested page, `count` its length, and
+ *  `total` the full filtered collection size. */
+export type ListPage<T> = { count: number; total: number; data: T[] };
+
 export type Verdict = "malicious" | "benign" | "anomaly" | "normal";
 export type ClusterVerdict = "malicious" | "benign";
 export type FeatureSet = "shape" | "graph" | "combined";

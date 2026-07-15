@@ -20,13 +20,17 @@ Until that infrastructure is built, this scorer's gate will not pass.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.analysis.features import extract_ttl
 from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, normalise
 from app.analysis.scorer_config import (
-    get as _get_cfg,
     anchor as _anchor,
+)
+from app.analysis.scorer_config import (
+    get as _get_cfg,
+)
+from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
 )
 from app.analysis.scorers.base import BaseScorer, ScorerResult, finalise_score
@@ -37,9 +41,7 @@ _CFG = _get_cfg("front_running")
 _W = _CFG["weights"]
 _FIXED = _CFG["fixed_anchors"]
 _BOOT = _CFG["bootstrap_anchors"]
-_OUTCOME_SCORES: Dict[str, float] = {
-    k: float(v) for k, v in _CFG["outcome_scores"].items()
-}
+_OUTCOME_SCORES: dict[str, float] = {k: float(v) for k, v in _CFG["outcome_scores"].items()}
 # Fallback score for an unrecognised outcome label (neutral midpoint; see config).
 _UNKNOWN_OUTCOME_SCORE = float(_CFG["unknown_outcome_score"])
 _REASON_T = _CFG["reason_thresholds"]
@@ -50,7 +52,7 @@ _HIGH_BAND_CAP = float(_CFG["high_band_cap"])
 _DELTA_MS_DEFAULT = float(_CFG["delta_ms_default"])
 
 
-def _get_collision_data(features: Dict[str, Any]) -> Optional[Dict]:
+def _get_collision_data(features: dict[str, Any]) -> dict | None:
     """Extract mempool collision data from features if available.
 
     The engine populates features["collision"] when a tx appears in the
@@ -72,14 +74,14 @@ def _get_collision_data(features: Dict[str, Any]) -> Optional[Dict]:
 class FrontRunningScorer(BaseScorer):
     name = "front_running"
 
-    def gate(self, features: Dict[str, Any]) -> bool:
+    def gate(self, features: dict[str, Any]) -> bool:
         """Transaction must be part of a mempool collision pair."""
         collision = _get_collision_data(features)
         if not collision:
             return False
         return collision.get("shared_inputs", 0) >= 1
 
-    def score(self, features: Dict[str, Any]) -> ScorerResult:
+    def score(self, features: dict[str, Any]) -> ScorerResult:
         collision = _get_collision_data(features)
         if not collision:
             return ScorerResult(score=0.0)
@@ -106,8 +108,12 @@ class FrontRunningScorer(BaseScorer):
         # spec conformance; the 24h value remains in evidence for analysts.
         win_count = collision.get("attacker_win_count", 0)
         p50_r, p99_r, bl1 = _resolve(
-            "collision_win_count", "per_cluster", "__global__", network,
-            _BOOT, "attacker_recurrence",
+            "collision_win_count",
+            "per_cluster",
+            "__global__",
+            network,
+            _BOOT,
+            "attacker_recurrence",
         )
         s_recurrence = normalise(win_count, p50=p50_r, p99=p99_r)
 
@@ -116,14 +122,18 @@ class FrontRunningScorer(BaseScorer):
         counterpart_fee = collision.get("counterpart_fee", 0)
         p50_f, p99_f = _anchor(_FIXED, "fee_delta")
         fee_sim = 1.0 - normalise(
-            abs(fee - counterpart_fee), p50=p50_f, p99=p99_f,
+            abs(fee - counterpart_fee),
+            p50=p50_f,
+            p99=p99_f,
         )
 
         ttl = extract_ttl(features.get("raw_data", {}))
         counterpart_ttl = collision.get("counterpart_ttl", 0)
         p50_t, p99_t = _anchor(_FIXED, "ttl_delta")
         ttl_sim = 1.0 - normalise(
-            abs(ttl - counterpart_ttl), p50=p50_t, p99=p99_t,
+            abs(ttl - counterpart_ttl),
+            p50=p50_t,
+            p99=p99_t,
         )
 
         change_link = 1.0 if collision.get("shares_change_address") else 0.0

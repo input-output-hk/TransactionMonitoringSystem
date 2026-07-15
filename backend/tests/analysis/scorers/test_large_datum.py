@@ -3,9 +3,9 @@
 import os
 
 import pytest
-from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, BAND_HIGH_THRESHOLD
-from app.analysis.scorers.large_datum import LargeDatumScorer, _MIN_DATUM_BYTES
 
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, BAND_HIGH_THRESHOLD
+from app.analysis.scorers.large_datum import _MIN_DATUM_BYTES, LargeDatumScorer
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
 
@@ -121,8 +121,8 @@ class TestScore:
 
     def test_larger_datum_scores_higher(self, scorer):
         """Above the gate floor, a larger datum should score higher."""
-        medium = _out(SCRIPT, lovelace=2_000_000, datum="aa" * 9000)    # 9000 bytes
-        large = _out(SCRIPT, lovelace=2_000_000, datum="ff" * 13000)    # 13000 bytes
+        medium = _out(SCRIPT, lovelace=2_000_000, datum="aa" * 9000)  # 9000 bytes
+        large = _out(SCRIPT, lovelace=2_000_000, datum="ff" * 13000)  # 13000 bytes
         r_medium = scorer.score(_features([medium]))
         r_large = scorer.score(_features([large]))
         assert r_medium.score < r_large.score

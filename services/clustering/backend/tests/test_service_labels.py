@@ -41,7 +41,6 @@ def test_clear_cluster_members_tombstones_hashes() -> None:
 # --- Per-transaction labels: single tx, manual source, no propagation -------
 
 
-
 class FakeTxLabelRepo(FakeRepoBase):
     """Records the tx_labels writes a per-tx label triggers."""
 
@@ -82,14 +81,11 @@ def test_clear_transaction_label_tombstones_single() -> None:
 # --- Propagation: only cluster-applied labels reach unlabeled siblings ------
 
 
-
 def test_manual_label_does_not_propagate_to_siblings() -> None:
     # A,B,C in cluster 0; only A is labelled, and it's a single-tx (manual) label
     # (not in `propagating`). A is malicious; B,C must NOT inherit it.
     cluster_of = {"a": 0, "b": 0, "c": 0}
-    tx_verdict, info = compute_verdicts(
-        cluster_of, {"a": "malicious"}, {}, propagating=set()
-    )
+    tx_verdict, info = compute_verdicts(cluster_of, {"a": "malicious"}, {}, propagating=set())
     assert tx_verdict["a"] == "malicious"
     assert tx_verdict["b"] == "normal"
     assert tx_verdict["c"] == "normal"
@@ -99,9 +95,7 @@ def test_manual_label_does_not_propagate_to_siblings() -> None:
 def test_cluster_label_propagates_to_siblings() -> None:
     # Same shape, but A's label is cluster-applied (in `propagating`) → B,C inherit.
     cluster_of = {"a": 0, "b": 0, "c": 0}
-    tx_verdict, info = compute_verdicts(
-        cluster_of, {"a": "malicious"}, {}, propagating={"a"}
-    )
+    tx_verdict, info = compute_verdicts(cluster_of, {"a": "malicious"}, {}, propagating={"a"})
     assert tx_verdict["a"] == tx_verdict["b"] == tx_verdict["c"] == "malicious"
     assert info[0]["verdict"] == "malicious"
 
@@ -111,9 +105,7 @@ def test_manual_benign_overrides_malicious_cluster_without_clearing_it() -> None
     # B reads benign, the cluster stays malicious, and the row flags a conflict.
     cluster_of = {"a": 0, "b": 0, "c": 0}
     explicit = {"a": "malicious", "b": "benign", "c": "malicious"}
-    tx_verdict, info = compute_verdicts(
-        cluster_of, explicit, {}, propagating={"a", "c"}
-    )
+    tx_verdict, info = compute_verdicts(cluster_of, explicit, {}, propagating={"a", "c"})
     assert tx_verdict["b"] == "benign"
     assert tx_verdict["a"] == tx_verdict["c"] == "malicious"
     assert info[0]["verdict"] == "malicious"

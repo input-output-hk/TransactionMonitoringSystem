@@ -12,15 +12,14 @@ error on a routed finding must still page via a degraded payload; and per-tx
 failures are isolated.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from app.analysis import contract_anomaly as ca
 from app.config import settings
 from app.db import clustering_queries
-from app.notifications import DELIVER_DUPLICATE, DELIVER_FAILED, DELIVER_SENT
-from app.notifications import triggers
+from app.notifications import DELIVER_DUPLICATE, DELIVER_FAILED, DELIVER_SENT, triggers
 from app.tasks import notifications as task
 
 pytestmark = pytest.mark.asyncio
@@ -33,8 +32,8 @@ _GOOD_ROW = {
     "iso_score": 0.8,
     "lof_score": 0.7,
     "votes": 3,
-    "scored_at": datetime(2026, 6, 1, tzinfo=timezone.utc),
-    "published_at": datetime(2026, 6, 1, tzinfo=timezone.utc),
+    "scored_at": datetime(2026, 6, 1, tzinfo=UTC),
+    "published_at": datetime(2026, 6, 1, tzinfo=UTC),
 }
 
 
@@ -47,12 +46,19 @@ def spy(monkeypatch):
     outcome the budget/retry logic keys on.
     """
     calls = {
-        "delivered": [], "sent": [], "claimed": set(), "routed": [], "flagged": {},
-        "dispatches": [object()], "status": DELIVER_SENT, "fetch_calls": 0,
+        "delivered": [],
+        "sent": [],
+        "claimed": set(),
+        "routed": [],
+        "flagged": {},
+        "dispatches": [object()],
+        "status": DELIVER_SENT,
+        "fetch_calls": 0,
     }
 
-    async def fake_flagged(network, limit=clustering_queries._RESCUE_FETCH_CAP,
-                           raise_on_error=False):
+    async def fake_flagged(
+        network, limit=clustering_queries._RESCUE_FETCH_CAP, raise_on_error=False
+    ):
         calls["fetch_calls"] += 1
         return calls["flagged"]
 
@@ -66,8 +72,13 @@ def spy(monkeypatch):
         # same (source, tx_hash) becomes a DUPLICATE no-op — modelling the
         # postgres dedup ledger, without which a capped backlog could never drain.
         calls["delivered"].append(
-            {"network": network, "tx_hash": tx_hash, "band": band,
-             "payload": payload, "source": source}
+            {
+                "network": network,
+                "tx_hash": tx_hash,
+                "band": band,
+                "payload": payload,
+                "source": source,
+            }
         )
         s = calls["status"]
         status = s(tx_hash) if callable(s) else s
@@ -93,7 +104,7 @@ async def test_routed_verdict_delivers_under_contract_anomaly_source(spy):
     assert len(spy["delivered"]) == 1
     d = spy["delivered"][0]
     assert d["tx_hash"] == "tx_ca"
-    assert d["source"] == "contract_anomaly"          # separate dedup stream
+    assert d["source"] == "contract_anomaly"  # separate dedup stream
     assert d["band"] == expected_band
     assert d["payload"].attack_class == "contract_anomaly"
     assert d["payload"].tx_hash == "tx_ca"
@@ -131,9 +142,8 @@ async def test_one_bad_verdict_does_not_abort_the_tick(spy):
 async def test_sidecar_fetch_failure_raises_not_silent(spy, monkeypatch):
     # A read failure must SURFACE (recall-first: the only CA alert path must not
     # go dark reporting a healthy empty tick).
-    async def boom(network, limit=clustering_queries._RESCUE_FETCH_CAP,
-                   raise_on_error=False):
-        assert raise_on_error is True   # poller must ask for the raising contract
+    async def boom(network, limit=clustering_queries._RESCUE_FETCH_CAP, raise_on_error=False):
+        assert raise_on_error is True  # poller must ask for the raising contract
         raise RuntimeError("clickhouse down")
 
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", boom)
@@ -177,7 +187,7 @@ async def test_delivery_failure_is_retried_next_tick(spy):
     spy["status"] = DELIVER_FAILED
     await task._contract_anomaly_tick()
     await task._contract_anomaly_tick()
-    assert len(spy["delivered"]) == 2   # re-attempted on the second tick
+    assert len(spy["delivered"]) == 2  # re-attempted on the second tick
 
 
 async def test_build_failure_still_pages_via_degraded_payload(spy, monkeypatch):
@@ -194,5 +204,5 @@ async def test_build_failure_still_pages_via_degraded_payload(spy, monkeypatch):
     p = spy["delivered"][0]["payload"]
     assert p.attack_class == "contract_anomaly"
     assert p.tx_hash == "tx_ca"
-    assert p.contributing_features == {}   # degraded: evidence dropped
-    assert p.risk_score > 0                # projected score preserved so it pages
+    assert p.contributing_features == {}  # degraded: evidence dropped
+    assert p.risk_score > 0  # projected score preserved so it pages

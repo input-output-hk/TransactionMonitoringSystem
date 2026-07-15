@@ -23,7 +23,7 @@ export type AuthContextValue = {
 	isError: boolean;
 	/** Re-fetch `/me`: called after login completes via /auth/verify. */
 	refetchUser: () => Promise<void>;
-	/** Call `/api/auth/logout` and clear local user state. */
+	/** Call `/api/v1/auth/logout` and clear local user state. */
 	logout: () => Promise<void>;
 };
 

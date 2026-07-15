@@ -13,6 +13,7 @@ promoted to ``Admin`` (status untouched) and a fresh invite token is
 issued. The magic-link URL is always printed to stdout so an operator
 can bootstrap before SMTP is configured.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,7 +39,9 @@ _EMAIL_VALIDATOR = TypeAdapter(EmailStr)
 
 
 async def create_admin(
-    email: str, full_name: str, send_email: bool = True,
+    email: str,
+    full_name: str,
+    send_email: bool = True,
 ) -> None:
     """Upsert an admin user and emit an invite link.
 
@@ -118,8 +121,7 @@ async def create_admin(
                 print(f"Invite email sent to {email} via {settings.SMTP_HOST}")
             else:
                 print(
-                    "SMTP disabled or send failed — use the link above to "
-                    "complete the invite.",
+                    "SMTP disabled or send failed — use the link above to complete the invite.",
                 )
     finally:
         await close_pool()
@@ -142,7 +144,8 @@ def main() -> None:
     )
     p_admin.add_argument("email")
     p_admin.add_argument(
-        "full_name", help="Full name (quote if it contains spaces).",
+        "full_name",
+        help="Full name (quote if it contains spaces).",
     )
     p_admin.add_argument(
         "--no-email",
@@ -154,7 +157,9 @@ def main() -> None:
     if args.cmd == "create-admin":
         asyncio.run(
             create_admin(
-                args.email, args.full_name, send_email=not args.no_email,
+                args.email,
+                args.full_name,
+                send_email=not args.no_email,
             ),
         )
         return

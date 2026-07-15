@@ -20,8 +20,8 @@ JSON-RPC/telemetry layer).
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 
 from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
@@ -30,6 +30,7 @@ from app.ingestion.input_enrichment import parse_resolved_utxo
 from app.ingestion.ogmios_parser import ogmios_input_ref
 from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
 from app.models.transaction import NormalizedTransaction
+from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,8 @@ class PendingTxIndex:
     """
 
     def __init__(self) -> None:
-        self._entries: Dict[str, tuple] = {}
-        self._ref_index: Dict[tuple, Set[str]] = {}
+        self._entries: dict[str, tuple] = {}
+        self._ref_index: dict[tuple, set[str]] = {}
 
     def track(self, tx_id: str, entry: tuple) -> None:
         """Register a pending tx in both the entry map and the ref index."""
@@ -68,18 +69,18 @@ class PendingTxIndex:
                 if not ids:
                     self._ref_index.pop(ref, None)
 
-    def get(self, tx_id: str) -> Optional[tuple]:
+    def get(self, tx_id: str) -> tuple | None:
         return self._entries.get(tx_id)
 
-    def sharing(self, refs: Set[tuple]) -> Dict[str, Set[tuple]]:
+    def sharing(self, refs: set[tuple]) -> dict[str, set[tuple]]:
         """Map pending tx id -> the subset of ``refs`` it also spends."""
-        out: Dict[str, Set[tuple]] = {}
+        out: dict[str, set[tuple]] = {}
         for ref in refs:
             for pending_id in self._ref_index.get(ref, ()):
                 out.setdefault(pending_id, set()).add(ref)
         return out
 
-    def stale_ids(self, cutoff: datetime) -> List[str]:
+    def stale_ids(self, cutoff: datetime) -> list[str]:
         """Pending tx ids first seen before ``cutoff`` (for TTL pruning)."""
         return [k for k, v in self._entries.items() if v[1] < cutoff]
 
@@ -91,7 +92,7 @@ class MempoolMonitor:
         self,
         network: str,
         emit: Callable[[dict], Awaitable[None]],
-        query_utxo: Callable[[List[dict]], Awaitable[List[dict]]],
+        query_utxo: Callable[[list[dict]], Awaitable[list[dict]]],
         connect_ws: Callable[[str], Awaitable[object]],
         send_recv: Callable[..., Awaitable[dict]],
     ):
@@ -102,7 +103,7 @@ class MempoolMonitor:
         self._send_recv = send_recv
 
         self._ws = None
-        self._running = True   # set once here; stop() sets it False
+        self._running = True  # set once here; stop() sets it False
         self.connected = False
 
         # Strong refs to fire-and-forget raw-store writes. asyncio only weakly
@@ -110,10 +111,10 @@ class MempoolMonitor:
         # (the raw payload silently never persists). Keeping the ref pins the
         # task; the done-callback logs any failure (instead of swallowing it)
         # and drops the ref.
-        self._bg_tasks: Set[asyncio.Task] = set()
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # Mempool deduplication (per-snapshot, cleared on reconnect and rollback)
-        self._seen_mempool_txs: Set[str] = set()
+        self._seen_mempool_txs: set[str] = set()
 
         # Deterministic prune cadence: counts every processed mempool tx and
         # triggers the TTL/cap sweep at MEMPOOL_PRUNE_EVERY_N_TXS. The old
@@ -138,7 +139,7 @@ class MempoolMonitor:
         # evict entries whose tx never reached the pending index (e.g.
         # collision tracking threw before track()), which previously leaked
         # until restart.
-        self._pending_input_cache: Dict[str, Tuple[Dict[tuple, dict], datetime]] = {}
+        self._pending_input_cache: dict[str, tuple[dict[tuple, dict], datetime]] = {}
 
         # Resilience — own breaker so mempool failures stay isolated from
         # the chain-sync connection's.
@@ -168,7 +169,7 @@ class MempoolMonitor:
 
     # --- Seams called by the chain-sync client ---
 
-    def peek_enrichment(self, tx_hash: str) -> Optional[Tuple[Dict[tuple, dict], datetime]]:
+    def peek_enrichment(self, tx_hash: str) -> tuple[dict[tuple, dict], datetime] | None:
         """Read-only enrichment lookup for block parsing; never consumes."""
         return self._pending_input_cache.get(tx_hash)
 
@@ -198,24 +199,22 @@ class MempoolMonitor:
         return self._circuit_breaker.state.value
 
     @staticmethod
-    def _consumed_refs(tx: NormalizedTransaction) -> Set[tuple]:
+    def _consumed_refs(tx: NormalizedTransaction) -> set[tuple]:
         """The input refs a confirmed tx actually CONSUMED: the regular
         inputs for a validated tx, the collaterals for a phase-2-failed one
         (the ledger spends collateral on failure; the regular inputs stay
         live)."""
         if tx.script_valid:
             return {
-                (inp.tx_hash, inp.index) for inp in tx.inputs
+                (inp.tx_hash, inp.index)
+                for inp in tx.inputs
                 if not inp.is_collateral and not inp.is_reference
             }
-        return {
-            (inp.tx_hash, inp.index) for inp in tx.inputs
-            if inp.is_collateral
-        }
+        return {(inp.tx_hash, inp.index) for inp in tx.inputs if inp.is_collateral}
 
     async def record_displacements(
         self,
-        normalized_txs: List[NormalizedTransaction],
+        normalized_txs: list[NormalizedTransaction],
         now_utc: datetime,
     ) -> None:
         """Detect displacement: a confirmed tx may spend inputs that a
@@ -233,34 +232,39 @@ class MempoolMonitor:
                 entry = self._pending.get(pending_id)
                 if entry is None:
                     continue
-                (_pending_refs, pending_seen, pending_fee,
-                 pending_addr, pending_ttl) = entry
+                (_pending_refs, pending_seen, pending_fee, pending_addr, pending_ttl) = entry
                 if shared:
                     delta_ms = (now_utc - pending_seen).total_seconds() * 1000
                     conf_addr = ""
                     conf_inp = next(
-                        (i for i in tx.inputs if not i.is_collateral and not i.is_reference and i.address),
+                        (
+                            i
+                            for i in tx.inputs
+                            if not i.is_collateral and not i.is_reference and i.address
+                        ),
                         None,
                     )
                     if conf_inp:
                         conf_addr = conf_inp.address
                     try:
                         await postgres.insert_mempool_collision(
-                            tx_a=pending_id, tx_b=tx.tx_hash,
+                            tx_a=pending_id,
+                            tx_b=tx.tx_hash,
                             network=self.network,
                             shared_inputs=[list(s) for s in shared],
                             shared_count=len(shared),
-                            tx_a_seen_at=pending_seen, tx_b_seen_at=now_utc,
+                            tx_a_seen_at=pending_seen,
+                            tx_b_seen_at=now_utc,
                             delta_ms=delta_ms,
-                            tx_a_fee=pending_fee, tx_b_fee=tx.fee or 0,
+                            tx_a_fee=pending_fee,
+                            tx_b_fee=tx.fee or 0,
                             tx_a_first_input_addr=pending_addr,
                             tx_b_first_input_addr=conf_addr,
-                            tx_a_ttl=pending_ttl, tx_b_ttl=0,
+                            tx_a_ttl=pending_ttl,
+                            tx_b_ttl=0,
                         )
                         # Immediately mark outcome: the confirmed tx (tx_b) won
-                        await postgres.update_collision_outcome(
-                            tx.tx_hash, self.network
-                        )
+                        await postgres.update_collision_outcome(tx.tx_hash, self.network)
                         logger.info(
                             f"Displacement detected: pending {pending_id[:16]}.. "
                             f"displaced by confirmed {tx.tx_hash[:16]}.. "
@@ -271,7 +275,7 @@ class MempoolMonitor:
 
     async def settle_confirmed(
         self,
-        normalized_txs: List[NormalizedTransaction],
+        normalized_txs: list[NormalizedTransaction],
         now: datetime,
         block_id: str,
         block_slot: int,
@@ -284,20 +288,20 @@ class MempoolMonitor:
         for tx in normalized_txs:
             self._pending.untrack(tx.tx_hash)
             try:
-                await postgres.update_collision_outcome(
-                    tx.tx_hash, self.network
-                )
+                await postgres.update_collision_outcome(tx.tx_hash, self.network)
             except Exception:
                 pass
 
         for tx in normalized_txs:
-            await self._emit({
-                "eventType": "TX_CONFIRMED",
-                "txId": tx.tx_hash,
-                "network": self.network,
-                "observedAt": now.isoformat(),
-                "block": {"hash": block_id, "slot": block_slot, "height": block_height},
-            })
+            await self._emit(
+                {
+                    "eventType": "TX_CONFIRMED",
+                    "txId": tx.tx_hash,
+                    "network": self.network,
+                    "observedAt": format_iso_utc(now),
+                    "block": {"hash": block_id, "slot": block_slot, "height": block_height},
+                }
+            )
 
         for tx in normalized_txs:
             self._seen_mempool_txs.discard(tx.tx_hash)
@@ -306,6 +310,7 @@ class MempoolMonitor:
 
     async def run(self):
         """Connect to Ogmios and run the LocalTxMonitor mini-protocol with resilience."""
+
         async def _connect():
             self._ws = await self._connect_ws("mempool")
             return self._ws
@@ -332,7 +337,10 @@ class MempoolMonitor:
         )
 
     async def _record_mempool_collisions(
-        self, tx_id: str, tx_data: dict, now: datetime,
+        self,
+        tx_id: str,
+        tx_data: dict,
+        now: datetime,
     ) -> None:
         """Record same-mempool input collisions for a newly seen pending tx,
         register it in the pending index, and run the throttled TTL prune.
@@ -372,22 +380,25 @@ class MempoolMonitor:
                 other_entry = self._pending.get(other_id)
                 if other_entry is None:
                     continue
-                (_other_refs, other_seen, other_fee,
-                 other_addr, other_ttl) = other_entry
+                (_other_refs, other_seen, other_fee, other_addr, other_ttl) = other_entry
                 if shared:
                     delta_ms = (now - other_seen).total_seconds() * 1000
                     try:
                         await postgres.insert_mempool_collision(
-                            tx_a=other_id, tx_b=tx_id,
+                            tx_a=other_id,
+                            tx_b=tx_id,
                             network=self.network,
                             shared_inputs=[list(s) for s in shared],
                             shared_count=len(shared),
-                            tx_a_seen_at=other_seen, tx_b_seen_at=now,
+                            tx_a_seen_at=other_seen,
+                            tx_b_seen_at=now,
                             delta_ms=delta_ms,
-                            tx_a_fee=other_fee, tx_b_fee=tx_fee,
+                            tx_a_fee=other_fee,
+                            tx_b_fee=tx_fee,
                             tx_a_first_input_addr=other_addr,
                             tx_b_first_input_addr=first_input_addr,
-                            tx_a_ttl=other_ttl, tx_b_ttl=tx_ttl,
+                            tx_a_ttl=other_ttl,
+                            tx_b_ttl=tx_ttl,
                         )
                         logger.info(
                             f"Mempool collision: {other_id[:16]}.. vs {tx_id[:16]}.. "
@@ -397,7 +408,8 @@ class MempoolMonitor:
                         logger.error(f"Failed to record collision: {e}")
 
             self._pending.track(
-                tx_id, (input_refs, now, tx_fee, first_input_addr, tx_ttl),
+                tx_id,
+                (input_refs, now, tx_fee, first_input_addr, tx_ttl),
             )
 
         # Prune stale entries (throttled; knobs documented in config.py).
@@ -416,8 +428,7 @@ class MempoolMonitor:
             # never reached the pending index (collision tracking threw
             # before track()) is invisible to stale_ids and leaked forever.
             orphaned = [
-                k for k, (_, cached_at) in self._pending_input_cache.items()
-                if cached_at < cutoff
+                k for k, (_, cached_at) in self._pending_input_cache.items() if cached_at < cutoff
             ]
             for k in orphaned:
                 self._pending_input_cache.pop(k, None)
@@ -441,10 +452,12 @@ class MempoolMonitor:
         for inp in raw_inputs:
             tx_obj = inp.get("transaction", {})
             if isinstance(tx_obj, dict) and tx_obj.get("id"):
-                output_refs.append({
-                    "transaction": {"id": tx_obj["id"]},
-                    "index": inp.get("index", 0),
-                })
+                output_refs.append(
+                    {
+                        "transaction": {"id": tx_obj["id"]},
+                        "index": inp.get("index", 0),
+                    }
+                )
 
         if not output_refs:
             return
@@ -453,14 +466,15 @@ class MempoolMonitor:
         if not utxos:
             return
 
-        cache_entry: Dict[tuple, dict] = {}
+        cache_entry: dict[tuple, dict] = {}
         for utxo in utxos:
             ref, resolved = parse_resolved_utxo(utxo)
             cache_entry[ref] = resolved
 
         if cache_entry:
             self._pending_input_cache[tx_id] = (
-                cache_entry, datetime.now(timezone.utc),
+                cache_entry,
+                datetime.now(UTC),
             )
             logger.debug(
                 f"Resolved {len(cache_entry)}/{len(output_refs)} inputs for pending tx {tx_id}"
@@ -490,7 +504,7 @@ class MempoolMonitor:
                     continue
 
                 self._seen_mempool_txs.add(tx_id)
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
 
                 # Collision detection: extract input refs and check against pending txs
                 try:
@@ -522,12 +536,14 @@ class MempoolMonitor:
                 except Exception as e:
                     logger.error(f"Error persisting pending tx {tx_id}: {e}")
 
-                await self._emit({
-                    "eventType": "TX_PENDING",
-                    "txId": tx_id,
-                    "network": self.network,
-                    "observedAt": now.isoformat(),
-                    "firstSeenAt": now.isoformat(),
-                })
+                await self._emit(
+                    {
+                        "eventType": "TX_PENDING",
+                        "txId": tx_id,
+                        "network": self.network,
+                        "observedAt": format_iso_utc(now),
+                        "firstSeenAt": format_iso_utc(now),
+                    }
+                )
 
                 logger.debug(f"TX_PENDING: {tx_id}")

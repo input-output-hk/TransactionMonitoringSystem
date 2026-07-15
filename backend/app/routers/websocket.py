@@ -20,7 +20,6 @@ exemption there was dead code while the handshake stayed unthrottled.
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -46,10 +45,10 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 
 # Global list of active connections (set from main.py; also used for the
 # /health connection count)
-active_connections: List[WebSocket] = []
+active_connections: list[WebSocket] = []
 
 # Per-client outbound queues, keyed by the WebSocket object.
-_client_queues: Dict[WebSocket, asyncio.Queue] = {}
+_client_queues: dict[WebSocket, asyncio.Queue] = {}
 
 # Handshake limiter: repeated rejected upgrade attempts were unthrottled
 # (the HTTP middleware never sees websocket scopes). Keyed on the validated
@@ -60,7 +59,7 @@ _handshake_limiter = RateLimiter(
 )
 
 
-def set_active_connections(connections: List[WebSocket]):
+def set_active_connections(connections: list[WebSocket]):
     """Set the active WebSocket connections list"""
     global active_connections
     active_connections = connections
@@ -106,7 +105,8 @@ async def _sender(websocket: WebSocket, queue: asyncio.Queue) -> None:
         raise
     except Exception:
         logger.warning(
-            "WebSocket sender failed; closing connection", exc_info=True,
+            "WebSocket sender failed; closing connection",
+            exc_info=True,
         )
         _cleanup(websocket)
         try:
@@ -136,7 +136,7 @@ async def _reject(websocket: WebSocket, code: int) -> None:
     await websocket.close(code=code)
 
 
-def _origin_allowed(origin: Optional[str]) -> bool:
+def _origin_allowed(origin: str | None) -> bool:
     """Cross-site WebSocket hijacking guard for the live alert feed.
 
     Browsers always attach an Origin header to WebSocket upgrades, so a
@@ -160,7 +160,7 @@ def _origin_allowed(origin: Optional[str]) -> bool:
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    api_key: Optional[str] = Query(None, alias="api_key"),
+    api_key: str | None = Query(None, alias="api_key"),
 ):
     """WebSocket endpoint for real-time transaction updates.
 
@@ -173,9 +173,7 @@ async def websocket_endpoint(
     """
     if settings.RATE_LIMIT_ENABLED:
         ip = net.client_ip(websocket)
-        allowed, _retry_after = await _handshake_limiter.check(
-            f"ws:{ip or 'unknown'}"
-        )
+        allowed, _retry_after = await _handshake_limiter.check(f"ws:{ip or 'unknown'}")
         if not allowed:
             await _reject(websocket, WS_CLOSE_OVERLOADED)
             return
@@ -207,7 +205,9 @@ async def websocket_endpoint(
             await websocket.receive_text()
             _enqueue(queue, {"type": "pong", "message": "connected"})
     except WebSocketDisconnect:
-        logger.info(f"WebSocket client disconnected. Total connections: {len(active_connections) - 1}")
+        logger.info(
+            f"WebSocket client disconnected. Total connections: {len(active_connections) - 1}"
+        )
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:

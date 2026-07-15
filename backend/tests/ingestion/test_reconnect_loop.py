@@ -132,10 +132,10 @@ async def test_breaker_open_gate_sleeps_and_skips_connect(monkeypatch):
     # iter2: breaker closed -> success; iter3: is_running False -> stop.
     h = _Harness(max_iters=2, can_attempt=[False, True])
     await h.run(poll_seconds=7)
-    assert slept == [7]            # gated once with poll_seconds
-    assert h.connects == 1         # connect skipped on the gated iteration
+    assert slept == [7]  # gated once with poll_seconds
+    assert h.connects == 1  # connect skipped on the gated iteration
     assert h.breaker.successes == 1
-    assert h.closes == 1           # only the connected iteration reaches finally
+    assert h.closes == 1  # only the connected iteration reaches finally
 
 
 class _Clock:

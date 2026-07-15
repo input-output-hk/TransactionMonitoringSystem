@@ -34,6 +34,7 @@ def connect(settings: Settings, *, database: str | None = None) -> Client:
         username=settings.clickhouse_user,
         password=settings.clickhouse_password,
         database=database or settings.clickhouse_db,
+        connect_timeout=settings.clickhouse_connect_timeout_seconds,
         send_receive_timeout=settings.clickhouse_send_receive_timeout_seconds,
         settings=query_settings or None,
     )
@@ -90,22 +91,66 @@ class _RepoBase:
     def ping(self) -> bool:
         return self.client.query("SELECT 1").result_rows[0][0] == 1
 
+    # --- Transaction-source hooks ------------------------------------------------
+    # The five tx-joined reads (latest_transactions, unclassified_tx_hashes,
+    # top_anomalies, cluster_summary, cluster_transactions) are written ONCE in
+    # their mixins against these three hooks. The base repo serves them from the
+    # engine's own `transactions` table; HostBackedRepo overrides ONLY the hooks
+    # to source the identical column contract from the host's tms_analytics
+    # tables, so the query shape and row mapping cannot drift between the repos.
+
+    def _tx_relation(self) -> str:
+        """A parenthesized derived table projecting the engine transaction column
+        contract — ``toString(tx_hash) AS tx_hash, fees, size, input_count,
+        output_count, total_input_lovelace, total_output_lovelace, net_lovelace
+        (CAST subtraction), distinct_assets, redeemer_count, block_time`` — for
+        the target parameter ``{tgt:String}`` (bound via ``_tx_scope_params``)."""
+        return f"""(
+            SELECT
+                toString(tx_hash) AS tx_hash, fees, size, input_count, output_count,
+                total_input_lovelace, total_output_lovelace,
+                CAST(total_output_lovelace AS Int64) - CAST(total_input_lovelace AS Int64)
+                    AS net_lovelace,
+                distinct_assets, redeemer_count, block_time
+            FROM {self._db}.transactions FINAL WHERE target = {{tgt:String}}
+        )"""
+
+    def _tx_hashes_relation(self) -> str:
+        """A parenthesized derived table yielding just ``tx_hash`` for the target
+        parameter ``{tgt:String}`` — the cheap sibling of ``_tx_relation`` for
+        reads that only need membership."""
+        return f"(SELECT tx_hash FROM {self._db}.transactions FINAL WHERE target = {{tgt:String}})"
+
+    def _tx_scope_params(self, target: str) -> dict[str, Any]:
+        """The query parameters ``_tx_relation``/``_tx_hashes_relation`` consume."""
+        return {"tgt": target}
+
     # The schema the code expects of a live database. Init SQL creates it on a
     # fresh volume; `python -m app.cli migrate` brings an existing volume up to
     # date. Listed explicitly so the startup guard fails fast with a precise
     # message instead of a runtime "table/column not found".
     _EXPECTED_TABLES = (
-        "transactions", "tx_utxos", "tx_utxo_assets", "ingest_cursor",
-        "cluster_runs", "cluster_labels", "anomaly_runs", "anomaly_scores",
-        "contracts", "jobs", "tx_labels", "cluster_models", "tx_classifications",
+        "transactions",
+        "tx_utxos",
+        "tx_utxo_assets",
+        "ingest_cursor",
+        "cluster_runs",
+        "cluster_labels",
+        "anomaly_runs",
+        "anomaly_scores",
+        "contracts",
+        "jobs",
+        "tx_labels",
+        "cluster_models",
+        "tx_classifications",
         "tx_contract_anomaly",
     )
     _EXPECTED_COLUMNS = (
-        ("ingest_cursor", "cursor"),   # 006
-        ("ingest_cursor", "source"),   # 006
-        ("jobs", "kind"),              # 005
-        ("cluster_runs", "origin"),    # 007 (retro-edited into 001 without an ALTER)
-        ("anomaly_runs", "origin"),    # 007 (retro-edited into 002 without an ALTER)
+        ("ingest_cursor", "cursor"),  # 006
+        ("ingest_cursor", "source"),  # 006
+        ("jobs", "kind"),  # 005
+        ("cluster_runs", "origin"),  # 007 (retro-edited into 001 without an ALTER)
+        ("anomaly_runs", "origin"),  # 007 (retro-edited into 002 without an ALTER)
         ("contracts", "drift_score"),  # 008
         ("tx_contract_anomaly", "published_at"),  # 009 (reconciliation version)
     )

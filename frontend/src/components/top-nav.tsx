@@ -310,14 +310,14 @@ export function TopNav() {
 					<DropdownMenu>
 						<DropdownMenuTrigger className="focus-visible:ring-ring focus-visible:ring-offset-background shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-offset-2">
 							<Avatar className="shrink-0">
-								<AvatarFallback>{initials(user?.fullName)}</AvatarFallback>
+								<AvatarFallback>{initials(user?.full_name)}</AvatarFallback>
 							</Avatar>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" className="min-w-56">
 							<DropdownMenuItem className="gap-3" disabled>
 								<User className="text-brand h-4 w-4" />
 								<span className="text-foreground font-medium">
-									{user?.fullName ?? "User"}
+									{user?.full_name ?? "User"}
 								</span>
 							</DropdownMenuItem>
 							<DropdownMenuSeparator />

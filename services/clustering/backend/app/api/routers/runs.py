@@ -8,8 +8,9 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from app.api.deps import RepoDep, analysis_slot, run_or_404
-from app.contracts import normalize_target
 from app.api.schemas import (
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     ClusterRequest,
     ClusterRunAck,
     ClusterSummaryOut,
@@ -17,9 +18,11 @@ from app.api.schemas import (
     EvaluationOut,
     FeatureSet,
     GraphOut,
+    ListPage,
     ProjectionOut,
     RunOut,
 )
+from app.contracts import normalize_target
 from app.service import (
     build_graph,
     build_projection,
@@ -33,9 +36,15 @@ from app.storage.protocol import Repo
 router = APIRouter(tags=["runs"])
 
 
-@router.get("/runs", response_model=list[RunOut])
-def list_runs(target: str | None = Query(default=None), repo: Repo = RepoDep) -> list[dict[str, Any]]:
-    return repo.list_runs(target)
+@router.get("/runs", response_model=ListPage[RunOut])
+def list_runs(
+    target: str | None = Query(default=None),
+    limit: int = Query(default=LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    offset: int = Query(default=0, ge=0),
+    repo: Repo = RepoDep,
+) -> dict[str, Any]:
+    rows = repo.list_runs(target, limit=limit, offset=offset)
+    return {"count": len(rows), "total": repo.count_runs(target), "data": rows}
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
@@ -61,8 +70,14 @@ def cluster_transactions(
 ) -> dict[str, Any]:
     run = run_or_404(repo, run_id)
     rows = cluster_transactions_with_verdicts(
-        repo, run_id, run["target"], run["feature_set"], cluster_id,
-        limit=limit, offset=offset, run_created_at=run["created_at"],
+        repo,
+        run_id,
+        run["target"],
+        run["feature_set"],
+        cluster_id,
+        limit=limit,
+        offset=offset,
+        run_created_at=run["created_at"],
     )
     return {"run_id": run_id, "cluster_id": cluster_id, "transactions": rows}
 
@@ -78,7 +93,9 @@ def run_graph(
     return build_graph(repo, run_id, limit=limit, cluster=cluster)
 
 
-@router.get("/runs/{run_id}/projection", response_model=ProjectionOut, response_model_exclude_none=True)
+@router.get(
+    "/runs/{run_id}/projection", response_model=ProjectionOut, response_model_exclude_none=True
+)
 def run_projection(
     run_id: str,
     dims: int = Query(default=2, ge=2, le=3),

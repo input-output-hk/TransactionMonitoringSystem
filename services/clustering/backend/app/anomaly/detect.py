@@ -25,15 +25,20 @@ from scipy.stats import rankdata
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
 
+from app import tunables
 from app.clustering.dbscan import run_dbscan
 from app.clustering.evaluate import default_min_samples, k_distance
 from app.features import ClusteringInput
 
-DEFAULT_TOP_QUANTILE = 0.05
+# Values live in config/clustering.yaml (section `anomaly`), validated at
+# import by app.tunables; the constant names below are unchanged.
+_ANOMALY = tunables.get("anomaly")
+
+DEFAULT_TOP_QUANTILE: float = float(_ANOMALY["top_quantile"])
 # Shared anomaly-detector hyperparameters (also reused by the persisted online
 # model in clustering/model.py, so the batch and online detectors stay aligned).
-LOF_NEIGHBORS = 20
-ISO_ESTIMATORS = 300
+LOF_NEIGHBORS: int = int(_ANOMALY["lof_neighbors"])
+ISO_ESTIMATORS: int = int(_ANOMALY["iso_estimators"])
 
 
 def fit_iso(X: np.ndarray, random_state: int | None) -> tuple[IsolationForest, np.ndarray]:
@@ -52,13 +57,15 @@ def lof_k(n: int, lof_neighbors: int = LOF_NEIGHBORS) -> int:
     of size ``n``. The batch detector forwards its overridable ``lof_neighbors``;
     the online model takes the ``LOF_NEIGHBORS`` default."""
     return max(2, min(lof_neighbors, n - 1))
+
+
 # Fallback eps when no knee is found, chosen by metric: Jaccard distances live in
 # [0, 1] while Euclidean is unbounded, so they warrant different defaults.
-_FALLBACK_EPS_PRECOMPUTED = 0.5
-_FALLBACK_EPS_EUCLIDEAN = 1.0
+_FALLBACK_EPS_PRECOMPUTED: float = float(_ANOMALY["fallback_eps_precomputed"])
+_FALLBACK_EPS_EUCLIDEAN: float = float(_ANOMALY["fallback_eps_euclidean"])
 # A transaction is "flagged" once at least this many detectors independently vote
 # for it — a consensus signal far stronger than any single detector's top pick.
-FLAG_VOTE_THRESHOLD = 2
+FLAG_VOTE_THRESHOLD: int = int(_ANOMALY["flag_vote_threshold"])
 
 
 @dataclass(slots=True)

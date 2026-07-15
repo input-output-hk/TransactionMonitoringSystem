@@ -20,7 +20,6 @@ import hmac
 import ipaddress
 import json
 import logging
-from typing import List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -84,8 +83,8 @@ class WebhookChannel(NotificationChannel):
     async def send(
         self,
         payload: NotificationPayload,
-        recipients: Optional[List[str]] = None,
-        target_url: Optional[str] = None,
+        recipients: list[str] | None = None,
+        target_url: str | None = None,
         attachments=None,  # webhook delivers the JSON payload; attachments N/A
     ) -> NotificationResult:
         url = target_url or config.webhook_default_url()
@@ -103,31 +102,26 @@ class WebhookChannel(NotificationChannel):
                 host,
             )
             return NotificationResult(
-                self.name, ok=False,
+                self.name,
+                ok=False,
                 detail="blocked: target resolves to an internal address",
             )
 
         # Serialize ourselves and POST the exact bytes we sign (not httpx's
         # json=, whose separators we don't control) so the receiver can verify
         # the HMAC over the body it actually received.
-        raw = json.dumps(
-            payload.model_dump(mode="json"), separators=(",", ":")
-        ).encode("utf-8")
+        raw = json.dumps(payload.model_dump(mode="json"), separators=(",", ":")).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         secret = config.webhook_signing_secret()
         if secret:
-            signature = hmac.new(
-                secret.encode("utf-8"), raw, hashlib.sha256
-            ).hexdigest()
+            signature = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
             headers[_SIGNATURE_HEADER] = f"sha256={signature}"
 
         attempts = max(1, settings.WEBHOOK_MAX_RETRIES + 1)
         last = "no attempt made"
         # One client for all attempts: connection-pool and TLS reuse across
         # retries. Each attempt is still bounded by the per-request timeout.
-        async with httpx.AsyncClient(
-            timeout=settings.WEBHOOK_TIMEOUT_SECONDS
-        ) as client:
+        async with httpx.AsyncClient(timeout=settings.WEBHOOK_TIMEOUT_SECONDS) as client:
             for i in range(attempts):
                 try:
                     resp = await client.post(url, content=raw, headers=headers)
@@ -142,7 +136,5 @@ class WebhookChannel(NotificationChannel):
                 except Exception as e:  # network / DNS / TLS / timeout
                     last = repr(e)
                 if i < attempts - 1:
-                    await asyncio.sleep(
-                        settings.WEBHOOK_RETRY_BACKOFF_SECONDS * (i + 1)
-                    )
+                    await asyncio.sleep(settings.WEBHOOK_RETRY_BACKOFF_SECONDS * (i + 1))
         return NotificationResult(self.name, ok=False, detail=last)

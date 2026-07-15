@@ -18,7 +18,6 @@ from tests.fakes import FakeGraphRepo, FakeRepoBase
 # --- build_graph verdict inheritance + cluster labeling --------------------
 
 
-
 def test_build_graph_inherits_verdict_across_subset_boundary() -> None:
     # "b" is visible (limit=1); its labeled sibling "a" is capped out of the
     # subset but must still propagate malicious through full-membership inheritance.
@@ -40,11 +39,18 @@ def _shape_row(tx_hash: str, scale: float) -> dict[str, object]:
     """A shape-feature row; ``scale`` shifts the whole vector so two scales form
     two well-separated blobs PCA can spread apart."""
     return {
-        "tx_hash": tx_hash, "fees": scale, "size": scale, "input_count": scale,
-        "output_count": scale, "total_input_lovelace": scale * 10,
-        "total_output_lovelace": scale * 10, "net_lovelace": scale,
-        "distinct_assets": scale, "redeemer_count": scale,
-        "hour_of_day": int(scale) % 24, "day_of_week": int(scale) % 7 + 1,
+        "tx_hash": tx_hash,
+        "fees": scale,
+        "size": scale,
+        "input_count": scale,
+        "output_count": scale,
+        "total_input_lovelace": scale * 10,
+        "total_output_lovelace": scale * 10,
+        "net_lovelace": scale,
+        "distinct_assets": scale,
+        "redeemer_count": scale,
+        "hour_of_day": int(scale) % 24,
+        "day_of_week": int(scale) % 7 + 1,
     }
 
 
@@ -81,8 +87,9 @@ def test_build_projection_2d_nodes_carry_coords_and_verdicts() -> None:
     ax0 = out["axes"][0]
     assert 0.0 <= ax0["variance"] <= 1.0
     assert ax0["top_features"] and {"name", "weight"} <= ax0["top_features"][0].keys()
-    assert all(isinstance(f["name"], str) and isinstance(f["weight"], float)
-               for f in ax0["top_features"])
+    assert all(
+        isinstance(f["name"], str) and isinstance(f["weight"], float) for f in ax0["top_features"]
+    )
 
 
 def test_build_projection_3d_adds_z() -> None:
@@ -101,8 +108,6 @@ def test_build_projection_caps_and_filters_by_cluster() -> None:
     assert {n["id"] for n in only1["nodes"]} == {"c", "d"}
 
 
-
-
 # --- Latest interactions: recency feed, unclassified txs surfaced ------------
 
 
@@ -113,10 +118,18 @@ def _verdict_of(rows, tx):
 def _ctx(tx_hash, *, online_cluster_id=None, online_votes=None):
     """A latest_transactions row: tx context + (nullable) online signals."""
     return {
-        "tx_hash": tx_hash, "block_time": f"2026-01-01 10:00:0{tx_hash[-1]}",
-        "fees": 1, "size": 1, "total_input_lovelace": 1, "total_output_lovelace": 1,
-        "net_lovelace": 0, "input_count": 1, "output_count": 1, "distinct_assets": 0,
-        "redeemer_count": 1, "online_cluster_id": online_cluster_id,
+        "tx_hash": tx_hash,
+        "block_time": f"2026-01-01 10:00:0{tx_hash[-1]}",
+        "fees": 1,
+        "size": 1,
+        "total_input_lovelace": 1,
+        "total_output_lovelace": 1,
+        "net_lovelace": 0,
+        "input_count": 1,
+        "output_count": 1,
+        "distinct_assets": 0,
+        "redeemer_count": 1,
+        "online_cluster_id": online_cluster_id,
         "online_votes": online_votes,
     }
 
@@ -128,8 +141,9 @@ class FakeLatestRepo(FakeRepoBase):
     is the run the frozen model was fit on — when it differs from the latest cluster
     run ('r1') the online signals must NOT be trusted (mismatched cluster numbering)."""
 
-    def __init__(self, *, explicit, has_cluster_run=True, model_run="r1",
-                 model_schema=MODEL_SCHEMA_VERSION):
+    def __init__(
+        self, *, explicit, has_cluster_run=True, model_run="r1", model_schema=MODEL_SCHEMA_VERSION
+    ):
         self._explicit = explicit
         self._has_cluster_run = has_cluster_run
         self._model_run = model_run
@@ -143,8 +157,9 @@ class FakeLatestRepo(FakeRepoBase):
         ]
 
     def latest_cluster_run(self, target, feature_set, *, near=None):
-        return {"run_id": "r1", "created_at": "2026-01-01 09:00:00"} if self._has_cluster_run \
-            else None
+        return (
+            {"run_id": "r1", "created_at": "2026-01-01 09:00:00"} if self._has_cluster_run else None
+        )
 
     def latest_cluster_model(self, target, feature_set):
         if not self._has_cluster_run:
@@ -252,7 +267,6 @@ def test_latest_explicit_label_classifies_unrun_tx() -> None:
 # --- Top anomalies: candidates decorated with the effective verdict ---------
 
 
-
 class FakeAnomalyRepo(FakeRepoBase):
     """Repo exposing what top_anomalies_with_verdicts touches. The shape anomaly run
     scores 'a' (cluster 0, 3 votes), 'b' (cluster 0, 0 votes) and 'lone' (no cluster
@@ -267,7 +281,9 @@ class FakeAnomalyRepo(FakeRepoBase):
         if run_id != "ar1":
             return None
         return {
-            "run_id": "ar1", "target": "addr", "feature_set": self._feature_set,
+            "run_id": "ar1",
+            "target": "addr",
+            "feature_set": self._feature_set,
             "created_at": "2026-01-01 10:00:00",
         }
 
@@ -314,18 +330,14 @@ def test_top_anomalies_auto_anomaly_and_normal_without_labels() -> None:
 
 def test_top_anomalies_explicit_label_overrides_high_votes() -> None:
     # 'a' has 3 votes but is labelled benign → benign wins (anomaly suppressed).
-    out = top_anomalies_with_verdicts(
-        FakeAnomalyRepo(explicit={"a": "benign"}), "ar1", limit=10
-    )
+    out = top_anomalies_with_verdicts(FakeAnomalyRepo(explicit={"a": "benign"}), "ar1", limit=10)
     assert _verdict_of(out["candidates"], "a") == "benign"
 
 
 def test_top_anomalies_cluster_label_inherits_to_member() -> None:
     # 'a' labelled malicious → its clustermate 'b' (cluster 0, no own label, 0 votes)
     # inherits malicious from the cluster.
-    out = top_anomalies_with_verdicts(
-        FakeAnomalyRepo(explicit={"a": "malicious"}), "ar1", limit=10
-    )
+    out = top_anomalies_with_verdicts(FakeAnomalyRepo(explicit={"a": "malicious"}), "ar1", limit=10)
     assert _verdict_of(out["candidates"], "b") == "malicious"
 
 

@@ -7,7 +7,7 @@ removed afterwards. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.db import postgres
 from app.db.postgres import get_connection
@@ -37,11 +37,9 @@ class TestLifecycle:
     def test_pending_to_confirmed_and_summary(self, pg_run):
         async def scenario():
             tx_id = f"livetest-{uuid.uuid4().hex}"
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             try:
-                await postgres.upsert_lifecycle_pending(
-                    tx_id, LIVE_NETWORK, first_seen_at=now
-                )
+                await postgres.upsert_lifecycle_pending(tx_id, LIVE_NETWORK, first_seen_at=now)
                 pending = await postgres.get_lifecycle_by_tx_id(tx_id)
                 assert pending is not None
                 assert pending["status"] == "PENDING"
@@ -59,9 +57,7 @@ class TestLifecycle:
 
                 summary = await postgres.get_lifecycle_summary(LIVE_NETWORK)
                 assert summary["confirmed_count"] >= 1
-                listed = await postgres.get_lifecycles_by_status(
-                    "CONFIRMED", LIVE_NETWORK
-                )
+                listed = await postgres.get_lifecycles_by_status("CONFIRMED", LIVE_NETWORK)
                 assert any(r["tx_id"] == tx_id for r in listed)
             finally:
                 await _rm_lifecycle(tx_id)
@@ -78,9 +74,7 @@ class TestEntityState:
                     "wallet", entity_id, {"flagged": True}, LIVE_NETWORK
                 )
                 # Returns the parsed JSON state itself, not a row wrapper.
-                state = await postgres.get_entity_state(
-                    "wallet", entity_id, LIVE_NETWORK
-                )
+                state = await postgres.get_entity_state("wallet", entity_id, LIVE_NETWORK)
                 assert state == {"flagged": True}
             finally:
                 async with get_connection() as conn:
@@ -96,9 +90,7 @@ class TestSyncCheckpoint:
     def test_save_then_get_roundtrip(self, pg_run):
         async def scenario():
             try:
-                await postgres.save_sync_point(
-                    LIVE_NETWORK, 12_345, "cd" * 32
-                )
+                await postgres.save_sync_point(LIVE_NETWORK, 12_345, "cd" * 32)
                 point = await postgres.get_sync_point(LIVE_NETWORK)
                 assert point is not None
                 assert point["slot"] == 12_345

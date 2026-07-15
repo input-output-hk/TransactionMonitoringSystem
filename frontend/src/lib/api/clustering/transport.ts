@@ -3,7 +3,12 @@
 import { fetchWithAuth } from "../fetch";
 import type { Validator } from "./validation";
 
-export const BASE = "/api/clustering";
+export const BASE = "/api/v1/clustering";
+
+/** The server-side maximum page size (`limit` is capped at le=1000). List hooks
+ *  that want the whole collection request one page at this limit so the API's
+ *  default page of 100 can never silently truncate what the UI shows. */
+export const MAX_PAGE_LIMIT = 1000;
 
 export async function get<T>(
 	path: string,

@@ -9,7 +9,7 @@ consumer can reuse this without importing a scorer.
 
 import logging
 from collections.abc import Mapping
-from typing import Any, List, Optional
+from typing import Any
 
 from app.analysis.features import get_cbor2
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _MAX_WALK_DEPTH = 64
 
 
-def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
+def decode_datum_strings(datum: Any, min_len: int) -> list[str]:
     """Walk a Plutus-Data inline datum and collect every UTF-8 decodable
     text span of at least ``min_len`` characters. Handles two
     representations produced by ingestion:
@@ -43,7 +43,7 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
         (``{"bytes": "..."}``, ``{"list": [...]}``, ``{"map": [...]}``,
         ``{"constructor": n, "fields": [...]}``). Recurse and decode.
     """
-    results: List[str] = []
+    results: list[str] = []
 
     def _emit_bytes(blob: bytes) -> None:
         """Try to UTF-8 decode and emit; fall back to a byte-scan of
@@ -60,9 +60,9 @@ def decode_datum_strings(datum: Any, min_len: int) -> List[str]:
         """Last-resort printable-ASCII scan. Only used when a byte
         string isn't valid UTF-8 so cbor2 / direct decode can't surface
         it cleanly."""
-        start: Optional[int] = None
+        start: int | None = None
         for i, b in enumerate(blob):
-            if 0x20 <= b < 0x7f:
+            if 0x20 <= b < 0x7F:
                 if start is None:
                     start = i
             else:
