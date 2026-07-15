@@ -149,13 +149,18 @@ services:
       - "1442"
       - --workdir
       - /kupo-db
-      # Match every address so any onboarded contract is answerable. KUPO_SINCE
-      # bounds the one-time index cost: 'origin' indexes the full chain (needed
-      # to backfill an OLD contract's complete history, but large on mainnet),
-      # or a 'slot.header_hash' point to only index from there forward. Set it
-      # in .env.${TMS_ENV}.
+      # What to index and from where; both set in .env.${TMS_ENV}.
+      # KUPO_MATCH defaults to '*' (every address, so any onboarded contract is
+      # answerable). A single narrower pattern (one address or credential) also
+      # works; multiple distinct patterns cannot be expressed through one env var
+      # in this exec-form command, so keep '*' unless you deliberately scope to one.
+      # KUPO_SINCE bounds the one-time index cost: 'origin' indexes the full chain
+      # (needed for an OLD contract's complete history, but large on mainnet), or a
+      # 'slot.header_hash' point to index only from there forward. The start point
+      # is fixed once the DB is built: going deeper later means wiping the volume
+      # and re-indexing.
       - --match
-      - "*"
+      - ${KUPO_MATCH:-*}
       - --since
       - ${KUPO_SINCE:-origin}
       # First-sync speedup: build the DB indexes once at the end of the initial
