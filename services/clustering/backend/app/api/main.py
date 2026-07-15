@@ -85,6 +85,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "authentication and signed model blobs. Set them, or unset "
                 "REQUIRE_AUTH for a local/demo run."
             )
+    # Blockfrost mode authenticates every request with a project id. An empty
+    # BLOCKFROST_PROJECT_ID would boot a healthy-looking sidecar (/api/health green)
+    # whose first download job fails with an opaque HTTP 403. Fail fast at startup
+    # naming the var, like the REQUIRE_AUTH guard above; host_ch never reads it.
+    if settings.chain_source == "blockfrost" and not settings.blockfrost_project_id:
+        raise RuntimeError(
+            "CHAIN_SOURCE=blockfrost but BLOCKFROST_PROJECT_ID is not set. The "
+            "Blockfrost adapter cannot authenticate without a project id; set "
+            "BLOCKFROST_PROJECT_ID (a mainnet/preprod/preview key from blockfrost.io) "
+            "or use CHAIN_SOURCE=host_ch."
+        )
     if not settings.model_signing_keys:
         logger.warning(
             "MODEL_SIGNING_KEYS is not set: stored model blobs are unsigned. "

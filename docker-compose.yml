@@ -330,7 +330,17 @@ services:
     environment:
       # Topology: read chain data from tms_analytics, write module state to the
       # tms_clustering database on the same ClickHouse server.
-      - CHAIN_SOURCE=host_ch
+      #
+      # CHAIN_SOURCE defaults to host_ch (the integrated topology above). Set
+      # CLUSTERING_CHAIN_SOURCE=blockfrost to instead download an arbitrary
+      # address's history over HTTP (no host_ch auto-feed; writes the downloaded
+      # txs into the sidecar's own tms_clustering tables). Requires
+      # BLOCKFROST_PROJECT_ID; see .env.example.
+      - CHAIN_SOURCE=${CLUSTERING_CHAIN_SOURCE:-host_ch}
+      - BLOCKFROST_PROJECT_ID=${BLOCKFROST_PROJECT_ID:-}
+      - BLOCKFROST_MAX_RPS=${BLOCKFROST_MAX_RPS:-10}
+      - BLOCKFROST_BURST=${BLOCKFROST_BURST:-500}
+      - BLOCKFROST_PAGE_SIZE=${BLOCKFROST_PAGE_SIZE:-100}
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_HTTP_PORT=8123
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
