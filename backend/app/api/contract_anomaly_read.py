@@ -32,7 +32,7 @@ from app.analysis.engine import _CLASS_NAMES
 from app.analysis.normalise import score_to_band
 from app.config import settings
 from app.db import clickhouse, clustering_queries
-from app.models.transaction import ClassScoreResult, RiskBand
+from app.models.transaction import ALERT_BANDS, ClassScoreResult, RiskBand
 from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
@@ -155,8 +155,10 @@ _BAND_COUNT_KEY = {
     "informational": "informational_count",
     "low": "informational_count",
 }
-# Bands the timeseries (and the Critical+High KPI) count as an alert.
-_ALERT_BANDS = frozenset({"high", "critical"})
+# Bands the timeseries (and the Critical+High KPI) count as an alert;
+# derived from the canonical pair so this overlay can never disagree with
+# the base predicate it adjusts (clickhouse_scores.get_alert_timeseries).
+_ALERT_BANDS = frozenset(band.lower() for band in ALERT_BANDS)
 
 
 async def _flagged_effective(

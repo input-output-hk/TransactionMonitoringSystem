@@ -90,8 +90,10 @@ Comments explain why a constant has its value (the threat model, the protocol li
 |---|---|---|
 | Backend | `cd backend && uv run pytest tests/` | Hermetic: no live ClickHouse, node, or network needed. |
 | Backend recall gate | `cd backend && uv run pytest tests/analysis/` | The attack-must-fire cases. Must stay green on every detection change. |
+| Backend live-DB tier | `cd backend && TMS_LIVE_DB_TESTS=1 uv run pytest tests/live_db/ -q` | Needs live ClickHouse and Postgres (`docker-compose up -d`). CI runs it in the `live-db` job of `.github/workflows/ci.yml` against pinned service containers. |
+| Backend performance tier | `cd backend && TMS_PERF_TESTS=1 uv run pytest tests/perf/ -q` | Benchmarks judged against `config/performance.yaml`; two of the three need live ClickHouse. The Locust load harness needs `uv sync --group perf`. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md). |
 | Clustering sidecar | `cd services/clustering/backend && uv run pytest -q` | Needs its own env (`uv sync --extra dev`). |
-| Frontend | `cd frontend && pnpm lint && pnpm build` | Lint, then the type-checked build. |
+| Frontend | `cd frontend && pnpm lint && pnpm test && pnpm build` | Lint, unit tests, then the type-checked build. CI runs all three. |
 | Lint + types (backend) | `uv run ruff check backend && uv run mypy backend/app` | Also `ruff format --check backend`. CI runs all three. |
 | Lint + types (sidecar) | `cd services/clustering/backend && uv run ruff check . && uv run mypy app` | The sidecar runs `disallow_untyped_defs` globally. |
 

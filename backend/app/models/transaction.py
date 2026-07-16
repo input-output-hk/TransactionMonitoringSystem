@@ -11,6 +11,10 @@ from app.utils.datetime_utils import UtcDateTime
 # Cardano networks the TMS understands. Enforced at the API boundary via
 # FastAPI's Query type validation. To add a new network, extend this tuple
 # and update `settings.CARDANO_NETWORK`'s docstring + .env.example.
+# NEVER add the performance tier's synthetic namespace ("perftest") here:
+# its isolation from operator dashboards relies on being rejected at this
+# boundary (see backend/perf/__init__.py and
+# tests/test_perf_network_isolation.py).
 NetworkType = Literal["mainnet", "preprod", "preview"]
 
 
@@ -63,6 +67,13 @@ class RiskBand(str, Enum):
         if isinstance(value, str) and value.lower() == "low":
             return cls.INFORMATIONAL
         return None
+
+
+# The bands that trigger alerting workflows: the alert timeseries predicate,
+# the dashboard alert widget's filter, and the performance tier's seeder and
+# load harness all derive from this pair, so a band-taxonomy change reprices
+# every consumer together instead of leaving stale string pairs behind.
+ALERT_BANDS: tuple[str, ...] = (RiskBand.HIGH.value, RiskBand.CRITICAL.value)
 
 
 class AttackClass(str, Enum):

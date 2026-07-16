@@ -1,0 +1,116 @@
+# Performance budgets and workload parameters for the opt-in performance
+# tier (backend/tests/perf, gated by TMS_PERF_TESTS=1) and the API load
+# harness (backend/perf). Loaded and validated by backend/perf/config.py.
+#
+# PROVISIONAL BASELINE STATUS: every budget below was derived from the first
+# measured baseline (2026-07-16, arm64 dev machine, ClickHouse 26.1.3 in
+# Docker; the exact numbers live in the performance report). Because the tier
+# also runs on shared CI runners, which are several times slower and far
+# noisier than the baseline machine, floors and ceilings carry a wide margin,
+# roughly 10x off the dev baseline, so only a genuine regression (an
+# accidental O(n^2), a query losing its index, I/O entering a compute path)
+# fails the tier, never runner weather. Once the scheduled CI job has
+# produced reference baselines, ratify tighter budgets with the customer
+# using two fixed rules against the REFERENCE environment:
+#   throughput floors  = 50% of the measured baseline
+#   latency ceilings   = 2x the measured p95
+# These are engineering guardrails, not contractual SLOs, and they are
+# updated here in one place.
+#
+# Workload sizes (batch counts, seeded row volumes) are preprod-scale: large
+# enough that per-operation overhead does not dominate the measurement, small
+# enough that the tier completes in minutes on a laptop and in CI.
+
+scoring:
+  # Transactions per timed batch. 500 matches the analysis engine's poll
+  # batch upper bound so the benchmark exercises the same batch shape the
+  # background task produces in production.
+  batch_size: 500
+  # Timed repetitions; the recorded throughput is the median so one GC pause
+  # or CPU-frequency dip does not decide pass/fail.
+  iterations: 5
+  # Floor for the pure scoring path (all 9 scorers, no I/O), in scored
+  # transactions per second. Dev baseline measured ~13,900 tps; the floor
+  # sits ~14x below it so CI slowness passes but a real regression fails.
+  min_throughput_tps: 1000
+
+ingestion:
+  # Replay workload shape: preprod blocks carry a few dozen transactions at
+  # busy periods; 200 blocks x 25 txs = 5000 txs keeps the replay minutes-long
+  # while dwarfing per-block setup overhead.
+  blocks: 200
+  txs_per_block: 25
+  # Floor for Ogmios JSON -> NormalizedTransaction parsing, in txs/second.
+  # Dev baseline measured ~63,000 tps; ~12x margin for CI.
+  min_parse_tps: 5000
+  # Floor for batched ClickHouse inserts of parsed transactions, in rows per
+  # second across the transactions + inputs + outputs tables. Dev baseline
+  # measured ~10,000 rows/s; ~10x margin because ClickHouse-in-a-container
+  # I/O is the most runner-sensitive measurement in the tier.
+  min_insert_rows_per_s: 1000
+
+query_latency:
+  seed:
+    # Seeded warehouse volume for query benchmarks. 100k transactions over 14
+    # days approximates two weeks of busy preprod traffic, the volume the
+    # dashboard queries actually face between retention sweeps.
+    transactions: 100000
+    span_days: 14
+    # Fraction of seeded transactions that carry an analysis score row;
+    # mirrors production where the engine lags ingestion only briefly.
+    scored_ratio: 0.9
+    # Fraction of scored rows that land in alerting bands, matching the
+    # observed preprod alert rate order of magnitude so band-filtered queries
+    # scan realistic selectivity.
+    alert_ratio: 0.02
+  # Timed samples per query; p95 over 20 samples is stable enough to compare
+  # against a ceiling without taking minutes per query.
+  samples: 20
+  # Ceilings in milliseconds, p95 per representative dashboard query at the
+  # seeded volume. Dev baselines: list 26ms, timeseries 27ms, stats summary
+  # 164ms, analysis results 124ms; each ceiling carries roughly a 6-10x
+  # margin, wider on the two aggregate-heavy queries whose scan windows
+  # dominate their cost.
+  budgets_ms:
+    transactions_list_p95: 250
+    alert_timeseries_p95: 250
+    stats_summary_p95: 1000
+    analysis_results_p95: 750
+
+api_load:
+  # Default target for the Locust harness: the compose app service on its
+  # documented host port. Override per run with --host.
+  host: "http://127.0.0.1:8000"
+  # Concurrency shape for the standard load scenario: 25 simultaneous
+  # dashboard users is well beyond a realistic operator count for a single
+  # deployment, so meeting budgets here leaves headroom.
+  users: 25
+  spawn_rate: 5
+  duration_seconds: 120
+  # Concurrent WebSocket feed subscribers held open for the run; exercises
+  # the broadcast fan-out path alongside REST load.
+  ws_subscribers: 50
+  # Reader think time: the SPA refreshes widgets every few seconds and an
+  # operator clicks at human pace. min_rps below is scenario arithmetic over
+  # this band and `users`, so the three are tuned together.
+  think_time_min_seconds: 1.0
+  think_time_max_seconds: 3.0
+  # Page sizes readers rotate through: dashboard widget pages up to the API
+  # default page limit (app/api/_params.py PageLimit).
+  page_sizes: [25, 50, 100]
+  budgets_ms:
+    # Ceiling for read-endpoint p95 under the standard scenario; the 2-user
+    # smoke measured 150ms p95 on the dev stack, so 300ms flags real
+    # degradation under the full 25-reader load.
+    read_p95: 300
+  # Ceiling on the fraction of read requests that may fail (HTTP errors or
+  # transport failures). The latency and rate checks alone are failure-blind:
+  # a run dominated by fast rejections (429s from an unraised server rate
+  # limit) would pass on p95 and rps while most traffic was refused.
+  max_read_failure_ratio: 0.01
+  # Floor for sustained aggregate request rate under the standard scenario.
+  # This is scenario arithmetic, not a server capability claim: 25 readers
+  # idling inside the think-time band above produce roughly 15 req/s when
+  # the server keeps up, so sustained throughput below 10 means requests
+  # are stalling.
+  min_rps: 10
