@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
     # Cardano Network Configuration
+    # Deliberately a plain str, not models.transaction.NetworkType: the
+    # performance load harness boots a server scoped to its synthetic
+    # namespace via CARDANO_NETWORK=perftest
+    # (tests/test_perf_network_isolation.py pins this contract).
     CARDANO_NETWORK: str = "mainnet"  # mainnet, preprod, preview, or testnet
 
     # Ogmios Configuration
