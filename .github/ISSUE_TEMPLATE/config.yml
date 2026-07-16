@@ -1,0 +1,10 @@
+# Steer security reports to private disclosure and keep the issue tracker for
+# non-sensitive bugs and requests. blank_issues_enabled stays true so
+# contributors can still open a free-form issue when no template fits.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/input-output-hk/TransactionMonitoringSystem/security/advisories/new
+    about: >-
+      Do not open a public issue for security problems. Use GitHub private
+      vulnerability reporting so only the maintainers see it. See SECURITY.md.
