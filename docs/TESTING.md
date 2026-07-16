@@ -12,10 +12,10 @@ latest commit.
 |---|---|---|---|---|
 | Backend hermetic | `backend/tests/` | 1053 | none (all I/O mocked) | Backend (pytest + recall gate) |
 | Recall gate | `backend/tests/analysis/` | subset of the above | none | Backend (run first, on its own) |
-| Live-DB tier | `backend/tests/live_db/` | 21 | ClickHouse + Postgres | Live-DB tier |
+| Live-DB tier | `backend/tests/live_db/` | 21 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
-| Clustering sidecar | `services/clustering/backend/tests/` | 349 | none | Clustering sidecar |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 40 | none | Frontend |
+| Clustering sidecar | `services/clustering/backend/tests/` | 349 | none | Clustering sidecar (pytest) |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 40 | none | Frontend (lint + build) |
 
 The default developer command, `pytest tests/` from `backend/`, runs the
 1053 hermetic backend tests and nothing that needs a database: the live-DB
@@ -44,8 +44,9 @@ uv run pytest tests/ -q --cov=app --cov-report=term-missing   # with coverage
 `backend/tests/analysis/` is the attack-must-fire tier: the tests that prove
 each detection scorer still fires on its real-attack case. CI runs it first
 and on its own so a recall regression is unambiguous, and the project's change
-rules require every detection-parameter change to keep it green. It is a
-required status check.
+rules require every detection-parameter change to keep it green. It is
+intended as a required status check on `main`; enabling that branch
+protection is a pending repository-admin step.
 
 ### Coverage
 
@@ -116,13 +117,14 @@ CI runs `pnpm lint`, `pnpm test`, and `pnpm build` in the Frontend job.
 
 ## Continuous integration
 
-Every push and pull request runs the `CI` workflow, with these jobs:
+Every pull request, and every push to `main`, runs the `CI` workflow, with
+these jobs:
 
-- **Python lint**: ruff format check, ruff lint, and mypy across both Python trees.
+- **Python lint (ruff + mypy)**: ruff format check, ruff lint, and mypy across both Python trees.
 - **Backend (pytest + recall gate)**: the recall gate, then the full hermetic suite with coverage.
-- **Live-DB tier**: the 21 live-DB tests against real ClickHouse + Postgres containers.
-- **Frontend**: lint, unit tests, and build.
-- **Clustering sidecar**: the sidecar suite.
+- **Live-DB tier (ClickHouse 26.x + Postgres)**: the 21 live-DB tests against real database containers.
+- **Frontend (lint + build)**: lint, unit tests, and build.
+- **Clustering sidecar (pytest)**: the sidecar suite.
 
 CodeQL runs separately on pushes and pull requests. The `Performance` workflow
 is dispatch/schedule-only (it needs its own database containers and is not on
