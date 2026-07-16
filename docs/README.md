@@ -17,6 +17,10 @@ Index of the project's documentation. For setup and day-to-day operations start 
 - [DATA-FLOW.md](DATA-FLOW.md): the runtime data flow as diagrams (chain-sync path, storage map, transaction lifecycle).
 - [DATA-FLOW-EXPLAINED.md](DATA-FLOW-EXPLAINED.md): the same data flow as a plain-English walkthrough.
 
+## Testing
+
+- [TESTING.md](TESTING.md): the test-suite inventory. What each tier covers (backend hermetic, recall gate, live-DB, performance, clustering sidecar, frontend), how to run each one, coverage, and how the tiers map to CI.
+
 ## Performance
 
 - [PERFORMANCE.md](PERFORMANCE.md): the performance methodology. What each benchmark tier measures and why, how to run each one, how the budgets in `config/performance.yaml` are derived, and where the result artifacts and the generated report land.
