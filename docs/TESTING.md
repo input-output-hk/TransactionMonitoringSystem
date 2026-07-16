@@ -2,7 +2,7 @@
 
 This document is the test-suite inventory for the Cardano Transaction
 Monitoring System: what each tier covers, how to run it, and how the tiers
-map to CI. Counts are current as of commit `54698c8` on `main` and move as
+map to CI. Counts are current as of commit `fa6adca` on `main` and move as
 the suite grows; the exact numbers are always whatever CI reports on the
 latest commit.
 
@@ -52,7 +52,7 @@ protection is a pending repository-admin step.
 
 CI measures line coverage on the full backend suite (`--cov=app`) and reports
 it in the job summary; there is no enforced threshold yet (report-only). At
-commit `54698c8` backend coverage is 76% and the clustering sidecar is 82%.
+commit `fa6adca` backend coverage is 76% and the clustering sidecar is 82%.
 
 ## Live-DB integration tier
 
