@@ -38,7 +38,7 @@ Build-time variables are read from Vite's `import.meta.env` and must be prefixed
 
 | Variable | Values | Default | Purpose |
 |---|---|---|---|
-| `VITE_NETWORK` | `mainnet` \| `preprod` \| `preview` | `preprod` | The Cardano network the dashboard targets. It is sent as the `network` query param on `/api/v1/analysis/*` and `/api/v1/archive/*`, and the default matches the backend's default. |
+| `VITE_NETWORK` | `mainnet` \| `preprod` \| `preview` | `preprod` | The Cardano network the dashboard targets. It is sent as the `network` query param on `/api/v1/analysis/*` and `/api/v1/archive/*`. Note the backend's own built-in default is `mainnet`, so set both sides explicitly (the Docker build arg defaults to `preprod` for the bundled testnet setup). |
 | `VITE_USE_MOCK_ARCHIVE_API` | `"true"` to enable | unset (real backend) | Dev-only opt-in to a `localStorage`-backed mock of the archive API, for working offline when the backend is not reachable. It is honored only when `import.meta.env.DEV` is true; production builds always use the real client, so a stray flag cannot switch a deployment to `localStorage`. |
 
 Note: there is no `VITE_TMS_API_KEY`. It was removed because a build-time API key gets baked into the public JS bundle, where anyone can read it from DevTools and call the API directly. Browser authentication is now the magic-link session cookie (`tms_session`, set by the backend), with a CSRF double-submit cookie on mutating requests; the SPA never carries an API key. (The backend still accepts an `API_KEYS` env for server-to-server callers such as the CLI, but the dashboard does not send one.) If you find `VITE_TMS_API_KEY` referenced anywhere, it is stale and should be removed.

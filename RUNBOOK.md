@@ -200,8 +200,9 @@ docker compose logs -f clickhouse
 
 Under Docker Compose, container logs are rotated by the shared `json-file`
 logging driver defined once at the top of `docker-compose.yml` (`x-logging`)
-and applied to every service: `max-size: "50m"`, `max-file: "5"`, so each
-container keeps at most ~250 MB of logs before the oldest chunk is discarded.
+and applied to every service except the optional `mailpit` dev mail-catcher:
+`max-size: "50m"`, `max-file: "5"`, so each container keeps at most ~250 MB
+of logs before the oldest chunk is discarded.
 Without it the `json-file` driver grows unbounded, which is a real
 disk-exhaustion risk on a long-running deployment; leave it in place. To keep
 more or less history, edit the `x-logging` anchor (a single edit propagates to
@@ -282,7 +283,7 @@ Variables are layered across files:
 
 | Variable | Default | Description |
 |---|---|---|
-| `CARDANO_NETWORK` | `mainnet` | `mainnet`, `preprod`, or `preview`. The bundled per-network templates (`.env.preprod`, `.env.preview`) set this to their network; with no per-network file the built-in default is mainnet |
+| `CARDANO_NETWORK` | `mainnet` | `mainnet`, `preprod`, or `preview`. The bundled per-network templates (`.env.preprod.example`, `.env.preview.example`, copied to `.env.preprod` / `.env.preview`) set this to their network; with no per-network file the built-in default is mainnet |
 | `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
 | `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; requires `TMS_ALLOW_DEV_MODE=1` or the app refuses to start |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
@@ -331,16 +332,16 @@ groups below document the rest of the settings surface (defaults shown are
 the code defaults from `app/config.py`; Docker Compose overrides some of
 them). Most never need changing, but they are here so nothing is a black box.
 
-**Data retention.** All retention windows default to `0`, meaning keep
-forever. Set a positive day count to prune. The retention sweep runs on the
-housekeeping tick.
+**Data retention.** Every retention window except `NOTIFY_DEDUP_RETENTION_DAYS`
+defaults to `0`, meaning keep forever. Set a positive day count to prune. The
+retention sweep runs on the housekeeping tick.
 
 | Variable | Default | Description |
 |---|---|---|
 | `CH_RETENTION_DAYS_TRANSACTIONS` | `0` | Prune ClickHouse `transactions` rows older than N days |
-| `CH_RETENTION_DAYS_IO` | `0` | Prune `transaction_inputs` / `transaction_outputs` older than N days |
+| `CH_RETENTION_DAYS_IO` | `0` | Prune `transaction_inputs` / `transaction_outputs` / `address_transactions` older than N days |
 | `CH_RETENTION_DAYS_FEATURES` | `0` | Prune the analysis feature tables older than N days |
-| `LIFECYCLE_RETENTION_DAYS` | `0` | Prune terminal (`CONFIRMED`/`ROLLED_BACK`/`DROPPED`) Postgres lifecycle rows older than N days |
+| `LIFECYCLE_RETENTION_DAYS` | `0` | Prune `DROPPED` / `ROLLED_BACK` Postgres lifecycle rows older than N days. `CONFIRMED` rows are never pruned: they are the canonical lifecycle record |
 | `MEMPOOL_COLLISION_RETENTION_DAYS` | `0` | Prune mempool-collision bookkeeping older than N days |
 | `RAW_STORE_RETENTION_DAYS` | `0` | Prune raw Data-Lake blobs older than N days. Refused when `RAW_DATA_MAX_BYTES > 0` (pick size-based OR age-based pruning, not both). At mainnet volume the raw store grows roughly 0.5-2 GB/day, so set one of the two before long runs |
 | `RETENTION_SWEEP_INTERVAL_HOURS` | `24` | How often the retention sweep runs |
@@ -375,7 +376,7 @@ analysis is deferred and retried.
 | Variable | Default | Description |
 |---|---|---|
 | `RAW_FALLBACK_ENABLED` | `true` | Retry failed warehouse writes from the raw store |
-| `RAW_FALLBACK_MAX_ATTEMPTS` | `3` | Counted fallback attempts before a row is abandoned |
+| `RAW_FALLBACK_MAX_ATTEMPTS` | `3` | Counted fallback attempts per row; after the budget the tx is scored anyway, degraded, with a `raw_data_unavailable` evidence marker, so a lost blob cannot park it in the pending queue forever |
 | `RAW_DATA_MAX_BYTES` | `0` | Size cap for the raw store; `0` = unbounded (see `RAW_STORE_RETENTION_DAYS`) |
 | `ANALYSIS_DEFER_ENABLED` | `true` | Defer + retry scoring when enrichment inputs are missing |
 | `ANALYSIS_DEFER_MAX_ATTEMPTS` | `3` | Deferred-scoring attempts before the class is persisted as not-applicable |
@@ -442,7 +443,7 @@ above): older than DEGRADED is `DEGRADED`, older than DOWN is `DOWN`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `WS_CLIENT_QUEUE_SIZE` | `100` | Per-client outbound broadcast queue depth before a slow client is dropped |
+| `WS_CLIENT_QUEUE_SIZE` | `100` | Per-client outbound broadcast queue depth; when the queue is full the oldest queued event is discarded and the client stays connected (a lagging dashboard wants the newest state) |
 | `WS_MAX_CONNECTIONS` | `100` | Max concurrent dashboard WebSocket connections |
 
 **Mempool bookkeeping.**
@@ -687,17 +688,19 @@ dedup migration below, which the startup guard will demand explicitly.
 
 1. Back up first (see "Backup & restore"): a schema-changing release is the
    moment a rollback path matters most.
-2. Pull the new image (or rebuild): `docker compose pull app` (or
-   `docker compose build app` when building locally), which also rebuilds the
-   embedded dashboard.
+2. Rebuild the image: `docker compose build app`, which also rebuilds the
+   embedded dashboard. The `app` service is built from this repository (no
+   registry image is published), so `docker compose pull app` is a no-op and
+   would silently redeploy the old image.
 3. Recreate the app container: `docker compose --profile app up -d app`.
    Databases keep running; only the app restarts. Startup applies any additive
    schema changes itself.
 4. If the app refuses to start and names `scripts/migrate_dedup_schema.py`, run
    the one-shot migration below, then start again.
-5. Verify: `curl -s localhost:8000/health/detail` should report
-   `pipeline_state: OK` once ingestion catches up from the sync checkpoint (a
-   brief `DEGRADED` while it replays the gap is normal).
+5. Verify: `curl -s -H "X-API-Key: $TMS_API_KEY" localhost:8000/health/detail`
+   (the endpoint requires an API key) should report `pipeline_state: OK` once
+   ingestion catches up from the sync checkpoint (a brief `DEGRADED` while it
+   replays the gap is normal).
 
 To roll back, redeploy the previous image tag and restart. Additive schema
 changes are backward compatible with the prior release; a release that
