@@ -90,3 +90,4 @@ demo-dashboard/
 # Performance tier result artifacts (perf.results); collated into the
 # performance report, never committed raw.
 perf-results/
+coverage.json

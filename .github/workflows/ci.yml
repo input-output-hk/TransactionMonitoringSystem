@@ -71,11 +71,22 @@ jobs:
         run: uv sync
       - name: Recall gate (attack-must-fire tests)
         # Run first and on its own so a recall regression is unambiguous.
+        # Deliberately NOT under coverage: it is a subset run and its whole
+        # value is being a fast, single-purpose gate.
         working-directory: backend
         run: uv run pytest tests/analysis/ -q
-      - name: Full backend suite
+      - name: Full backend suite (with coverage)
+        # Coverage is measured on the full suite only; --cov=app naturally
+        # scopes to the application package (tests/ and perf/ are siblings).
+        # Report-only for now: the number feeds the milestone test report;
+        # a fail_under ratchet is a post-approval decision.
         working-directory: backend
-        run: uv run pytest tests/ -q
+        run: uv run pytest tests/ -q --cov=app --cov-report=term-missing --cov-report=json:coverage.json
+      - name: Coverage summary
+        working-directory: backend
+        run: |
+          pct=$(uv run python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
+          echo "Backend line coverage: **${pct}%** (app package, full hermetic suite)" >> "$GITHUB_STEP_SUMMARY"
 
   live-db:
     # The hermetic suite mocks every CH/PG call, which has let ClickHouse
@@ -181,6 +192,13 @@ jobs:
       - name: Sync dev dependencies
         working-directory: services/clustering/backend
         run: uv sync --extra dev
-      - name: Test
+      - name: Test (with coverage)
+        # Report-only coverage, mirroring the backend job; the sidecar is an
+        # installable package so --cov=app resolves without sys.path help.
         working-directory: services/clustering/backend
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=app --cov-report=term --cov-report=json:coverage.json
+      - name: Coverage summary
+        working-directory: services/clustering/backend
+        run: |
+          pct=$(uv run python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
+          echo "Clustering sidecar line coverage: **${pct}%**" >> "$GITHUB_STEP_SUMMARY"
