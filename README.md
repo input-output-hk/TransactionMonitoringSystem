@@ -1,5 +1,8 @@
 # Cardano Transaction Monitoring System
 
+[![CI](https://github.com/input-output-hk/TransactionMonitoringSystem/actions/workflows/ci.yml/badge.svg)](https://github.com/input-output-hk/TransactionMonitoringSystem/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Real-time transaction monitoring system for the Cardano blockchain. Ingests blocks and mempool events via Ogmios, tracks full transaction lifecycle (PENDING → CONFIRMED → ROLLED_BACK), scores transactions against 9 Polimi attack classes (Token Dust, Large Value, Large Datum, Multiple Satisfaction, Front-Running, Sandwich, Circular Transfers, Fake Token, Phishing), and exposes a REST API and live WebSocket feed. Access is gated two ways: programmatic clients authenticate with a `X-API-Key` header, while the operator dashboard uses magic-link email login with role-based accounts (Admin / Reviewer) backed by PostgreSQL.
 
 **For step-by-step setup and operations see [RUNBOOK.md](RUNBOOK.md).**

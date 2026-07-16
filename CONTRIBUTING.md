@@ -4,7 +4,7 @@ Thanks for your interest in the Cardano Transaction Monitoring System (TMS). Thi
 
 ## Code of conduct
 
-Be respectful and constructive. Assume good faith, keep discussion technical, and help newcomers. Harassment or abuse of any kind is not tolerated.
+Be respectful and constructive. Assume good faith, keep discussion technical, and help newcomers. Harassment or abuse of any kind is not tolerated. Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Project layout
 
