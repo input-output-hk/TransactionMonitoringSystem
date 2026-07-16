@@ -20,7 +20,7 @@ The `cardano-node`, `ogmios`, and `kupo` services in `docker-compose.yml` are ga
 | **Local full stack** | Place node config at `./cardano-config/preprod/` (or set `CARDANO_CONFIG_DIR`), keep default `OGMIOS_WS_URL=ws://localhost:1337`, then `docker compose --profile app --profile ingestion up` | Self-contained local development; requires ~30 GB disk and initial chain sync |
 | **No ingestion** | `docker compose --profile app up` with no reachable Ogmios | API/dashboard work against whatever has already been ingested (an empty database on first run) |
 
-`CARDANO_CONFIG_DIR` must contain `config.json` and `topology.json` for the target network. Defaults to `./cardano-config/preprod`.
+`CARDANO_CONFIG_DIR` must contain `config.json` and `topology.json` for the target network, plus the genesis files they reference (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. Download the official set for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html (preprod, preview, and mainnet each have their own directory). Defaults to `./cardano-config/preprod`.
 
 ## Setup
 

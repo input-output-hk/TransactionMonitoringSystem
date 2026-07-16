@@ -724,6 +724,10 @@ Several sub-scores are placeholders pending cross-tx analysis infrastructure:
 - `sender_recurrence` (all scorers): always 0.0
 - `url_hash_recurrence`, `targeting_score`, `sender_recurrence` (Phishing delivery): always 0.0; delivery score uses `recipient_count` as sole active signal
 
+Two further axes are not computed on-chain and are disclosed here as known coverage limits:
+- `swap_rate_delta`, `price_impact` (Sandwich): the on-chain swap economics are not decoded, so `swap_rate_victim`, `swap_rate_baseline`, and `price_impact_a` are hardcoded to `0.0` in `analysis/dex.py`, and both sub-scores are therefore always 0. These are the two largest economic axes (weights 0.30 and 0.20, i.e. 0.50 of the class total combined). The `profit` axis is the one economic signal that is actually computed (attacker net ADA via `dex._attacker_net_ada`), and it is ADA-only: profit realised in a non-ADA token is not captured. Consequence: with half the class weight pinned at zero, the sandwich score saturates at 50.0 even when link, profit, and recurrence are all maxed, so the class is structurally capped in the Moderate band and cannot reach High (`>= 60.0`) or Critical (`>= 80.0`) on economic magnitude. Pending DEX order/pool datum decoding (see the deferred-work register, `docs/follow-ups/`).
+- `datum_bytes` (Large Datum): a UTxO that references its datum by hash instead of inlining it reports `datum_bytes = 0` to the `large_datum` scorer whenever the datum preimage is not also carried in the transaction's witness set (`features._extract_datum_info` returns byte size 0 for a hash-only output whose preimage is absent; when the preimage is present in the same tx it is sized from it). Known coverage gap: datum bloat hidden behind a bare datum hash is invisible to the byte-size axis, and closing it needs a standalone datum indexer.
+
 ### Weight Deviations from Polimi Spec
 - **Fake Token**: `policy_age_slots` assumes the policy is new (age=1 slot) for minting transactions. A policy registry lookup would provide the actual first-seen slot.
 

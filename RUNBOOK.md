@@ -9,7 +9,7 @@ The TMS connects to a Cardano node through Ogmios, a WebSocket bridge. You must 
 Two options:
 
 - **External infrastructure (recommended for production/staging):** run node + Ogmios separately and point `OGMIOS_WS_URL` at the remote endpoint. The details below describe this path.
-- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json` and `topology.json`, plus ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
+- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json`, `topology.json`, and the genesis files they reference (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. Download the official set for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html. Also needs ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
 
 | Component | Version | Notes |
 |---|---|---|
@@ -196,6 +196,23 @@ docker compose logs -f postgres
 docker compose logs -f clickhouse
 ```
 
+#### Log rotation
+
+Under Docker Compose, container logs are rotated by the shared `json-file`
+logging driver defined once at the top of `docker-compose.yml` (`x-logging`)
+and applied to every service except the optional `mailpit` dev mail-catcher:
+`max-size: "50m"`, `max-file: "5"`, so each container keeps at most ~250 MB
+of logs before the oldest chunk is discarded.
+Without it the `json-file` driver grows unbounded, which is a real
+disk-exhaustion risk on a long-running deployment; leave it in place. To keep
+more or less history, edit the `x-logging` anchor (a single edit propagates to
+all services).
+
+When the app runs on the host (Option A) rather than in a container, log
+rotation is the operator's responsibility: pipe stdout to a rotated file
+(`logrotate`, `svlogd`, or your service manager's journal) or run it under a
+supervisor that handles rotation. Set `LOG_FORMAT=json` for a log collector.
+
 ### Database access
 
 ```bash
@@ -266,7 +283,7 @@ Variables are layered across files:
 
 | Variable | Default | Description |
 |---|---|---|
-| `CARDANO_NETWORK` | `preprod` | `mainnet`, `preprod`, or `preview` |
+| `CARDANO_NETWORK` | `mainnet` | `mainnet`, `preprod`, or `preview`. The bundled per-network templates (`.env.preprod.example`, `.env.preview.example`, copied to `.env.preprod` / `.env.preview`) set this to their network; with no per-network file the built-in default is mainnet |
 | `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
 | `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; requires `TMS_ALLOW_DEV_MODE=1` or the app refuses to start |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
@@ -297,7 +314,7 @@ Variables are layered across files:
 | `SANDWICH_SIMPLIFIED_ENABLED` | `true` | Enable structural sandwich pattern detection |
 | `BASELINE_MIN_SAMPLES` | `200` | Minimum samples before per-entity baseline is valid |
 | `SMTP_ENABLED` | `true` | Send magic-link emails over SMTP; `false` logs the link instead |
-| `SMTP_HOST` / `SMTP_PORT` | `mailpit` / `1025` (compose) | SMTP relay. The compose default is the bundled Mailpit catch-all, see "Magic-link email in production" below |
+| `SMTP_HOST` / `SMTP_PORT` | `mailpit` / `1025` (compose; code default `localhost` / `1025`) | SMTP relay. The compose default is the bundled Mailpit catch-all, see "Magic-link email in production" below |
 | `SMTP_FROM_EMAIL` | `noreply@tms.local` | Sender address (code default; `.env.example` ships `noreply@example.com`). Not validated, but set a real domain in production: special-use domains like `.local`/`.test` are rejected by many receivers |
 | `APP_BASE_URL` | `http://localhost:8000` | Base URL baked into emailed magic links. Must be the public dashboard URL in production or links will not resolve |
 | `MAGIC_LINK_TTL_MINUTES` | `15` | Magic-link token lifetime |
@@ -308,7 +325,182 @@ Variables are layered across files:
 | `HOUSEKEEPING_INTERVAL_SECONDS` | `30` | Tick of the stale-PENDING sweep, retention, and auth purge; runs whether or not `ANALYSIS_ENGINE_ENABLED` is set |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
-Database variables (`POSTGRES_*`, `CLICKHOUSE_*`) default to the values used by Docker Compose and rarely need changing.
+### Additional configuration reference
+
+The table above covers the variables an operator changes most often. The
+groups below document the rest of the settings surface (defaults shown are
+the code defaults from `app/config.py`; Docker Compose overrides some of
+them). Most never need changing, but they are here so nothing is a black box.
+
+**Data retention.** Every retention window except `NOTIFY_DEDUP_RETENTION_DAYS`
+defaults to `0`, meaning keep forever. Set a positive day count to prune. The
+retention sweep runs on the housekeeping tick.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CH_RETENTION_DAYS_TRANSACTIONS` | `0` | Prune ClickHouse `transactions` rows older than N days |
+| `CH_RETENTION_DAYS_IO` | `0` | Prune `transaction_inputs` / `transaction_outputs` / `address_transactions` older than N days |
+| `CH_RETENTION_DAYS_FEATURES` | `0` | Prune the analysis feature tables older than N days |
+| `LIFECYCLE_RETENTION_DAYS` | `0` | Prune `DROPPED` / `ROLLED_BACK` Postgres lifecycle rows older than N days. `CONFIRMED` rows are never pruned: they are the canonical lifecycle record |
+| `MEMPOOL_COLLISION_RETENTION_DAYS` | `0` | Prune mempool-collision bookkeeping older than N days |
+| `RAW_STORE_RETENTION_DAYS` | `0` | Prune raw Data-Lake blobs older than N days. Refused when `RAW_DATA_MAX_BYTES > 0` (pick size-based OR age-based pruning, not both). At mainnet volume the raw store grows roughly 0.5-2 GB/day, so set one of the two before long runs |
+| `RETENTION_SWEEP_INTERVAL_HOURS` | `24` | How often the retention sweep runs |
+| `NOTIFY_DEDUP_RETENTION_DAYS` | `30` | Prune the notification dedup ledger older than N days |
+
+**Detection toggles.** Every scorer ships enabled. Disable one only to
+isolate a noisy class during tuning; a disabled scorer cannot miss its
+attack. `FAKE_TOKEN_TESTNET_MODE` MUST stay `false` in production: it
+force-enables the mainnet token registry on testnets and floods Moderate with
+false positives.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCORER_PHISHING_ENABLED` ... `SCORER_CIRCULAR_ENABLED` | `true` | Per-class kill switches: `SCORER_{PHISHING,TOKEN_DUST,LARGE_VALUE,LARGE_DATUM,MULTIPLE_SAT,FAKE_TOKEN,FRONT_RUNNING,SANDWICH,CIRCULAR}_ENABLED` |
+| `COLLISION_DETECTION_ENABLED` | `true` | Enable mempool-collision (front-running precursor) detection |
+| `FAKE_TOKEN_TESTNET_MODE` | `false` | Testnet-only harness flag; keep `false` in production (see warning above) |
+
+**Clustering sidecar (host side).** See the [Clustering module](README.md#clustering-module-optional) section; these are the host-side knobs.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLUSTERING_ENABLED` | `false` | Wire in the `/api/v1/clustering/*` proxy and merge `contract_anomaly` verdicts |
+| `CLUSTERING_DB` | `tms_clustering` | ClickHouse database holding the sidecar's state |
+| `CLUSTERING_SIDECAR_URL` | `http://clustering:8000` | Sidecar base URL the proxy forwards to |
+| `CLUSTERING_SIDECAR_API_KEY` | _(empty)_ | Key forwarded to the sidecar as `X-API-Key` when it requires auth |
+
+**Ingestion resilience: raw-store fallback and analysis deferral.** When a
+ClickHouse write fails, the transaction is parked and retried from the raw
+store rather than dropped; when scoring inputs are not yet available, the
+analysis is deferred and retried.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RAW_FALLBACK_ENABLED` | `true` | Retry failed warehouse writes from the raw store |
+| `RAW_FALLBACK_MAX_ATTEMPTS` | `3` | Counted fallback attempts per row; after the budget the tx is scored anyway, degraded, with a `raw_data_unavailable` evidence marker, so a lost blob cannot park it in the pending queue forever |
+| `RAW_DATA_MAX_BYTES` | `0` | Size cap for the raw store; `0` = unbounded (see `RAW_STORE_RETENTION_DAYS`) |
+| `ANALYSIS_DEFER_ENABLED` | `true` | Defer + retry scoring when enrichment inputs are missing |
+| `ANALYSIS_DEFER_MAX_ATTEMPTS` | `3` | Deferred-scoring attempts before the class is persisted as not-applicable |
+| `ANALYSIS_DEFER_RETRY_SECONDS` | `30` | Spacing between deferred-scoring attempts |
+
+**Analysis engine internals.** Tuning knobs for the scoring loop; the
+defaults suit preprod. On mainnet, set `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS`
+to bound the periodic full rescan to a recent window (0 = rescan all history,
+which grows unbounded).
+
+| Variable | Default | Description |
+|---|---|---|
+| `ANALYSIS_MAX_REF_TXS` | `2000` | Cap on reference txs pulled per enrichment fetch |
+| `ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK` | `20` | Batches drained per engine tick before yielding |
+| `ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS` | `0.5` | Pause between drained batches |
+| `UNANALYZED_OVERLAP_SECONDS` | `120` | Look-back overlap on the incremental unscored-tx query |
+| `UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS` | `600` | How often the safety-net full rescan runs |
+| `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` | `0` | Bound the full rescan to the last N seconds; `0` = all history (set a window on mainnet) |
+
+**Baselines.** Per-entity percentile baselines and the token registry.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BASELINE_BOOTSTRAP_ON_STARTUP` | `true` | Compute baselines at startup instead of waiting for the first recompute |
+| `BASELINE_RECOMPUTE_INTERVAL_HOURS` | `24` | Baseline recompute cadence |
+| `BASELINE_MAX_SCRIPTS` | `500` | Cap on per-script baselines held |
+| `BASELINE_CACHE_TTL_SECONDS` | `3600` | In-process baseline cache TTL |
+| `BASELINE_CACHE_MAX_ENTRIES` | `50000` | Baseline cache size cap |
+| `TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS` | `24` | Fake-token registry refresh cadence |
+
+**Database tuning.** Pool sizing, timeouts, and insert-retry backoff. The
+defaults match Docker Compose and rarely need changing; raise pool sizes and
+timeouts for high-volume mainnet ingestion.
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE` | `2` / `10` | asyncpg pool bounds |
+| `POSTGRES_POOL_MAX_IDLE_SECONDS` | `300` | Idle connection reaping |
+| `POSTGRES_STATEMENT_TIMEOUT_SECONDS` | `30` | Per-statement timeout |
+| `CLICKHOUSE_CONNECT_TIMEOUT_SECONDS` | `10` | ClickHouse connect timeout |
+| `CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS` | `120` | ClickHouse socket send/receive timeout |
+| `CLICKHOUSE_INSERT_MAX_RETRIES` | `5` | Batched-insert retries on transient failure |
+| `CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS` / `_MAX_DELAY_SECONDS` | `1` / `30` | Insert-retry exponential backoff bounds |
+
+**Ogmios and pipeline health.** The `PIPELINE_BLOCK_AGE_*` thresholds back
+the `pipeline_state` bands reported by `/health/detail` (see "Health checks"
+above): older than DEGRADED is `DEGRADED`, older than DOWN is `DOWN`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PIPELINE_STARTUP_GRACE_SECONDS` | `60` | Grace before block-age health is enforced after startup |
+| `PIPELINE_BLOCK_AGE_DEGRADED_SECONDS` | `120` | Last-block age that flips `pipeline_state` to `DEGRADED` |
+| `PIPELINE_BLOCK_AGE_DOWN_SECONDS` | `300` | Last-block age that flips `pipeline_state` to `DOWN` |
+| `OGMIOS_RECONNECT_MAX_DELAY` | `60` | Max reconnect backoff delay |
+| `OGMIOS_HEARTBEAT_INTERVAL` / `OGMIOS_HEARTBEAT_TIMEOUT` | `30` / `90` | Keepalive ping cadence and dead-connection timeout |
+| `OGMIOS_CIRCUIT_BREAKER_THRESHOLD` / `OGMIOS_CIRCUIT_BREAKER_COOLDOWN` | `5` / `120` | Consecutive failures before the breaker opens, and its cooldown |
+| `OGMIOS_CIRCUIT_OPEN_POLL_SECONDS` | `10` | Poll cadence while the breaker is open |
+| `OGMIOS_SESSION_STABLE_RESET_SECONDS` | `60` | Uptime after which a session counts as stable and the failure count resets |
+| `SUPERVISOR_BACKOFF_BASE_SECONDS` / `SUPERVISOR_BACKOFF_MAX_SECONDS` | `5` / `300` | Supervisor restart backoff bounds for the ingestion tasks |
+| `OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES` | `1048576` | Payload size above which parsing moves to a thread executor |
+| `OGMIOS_WS_MAX_FRAME_BYTES` | `67108864` | Max Ogmios WebSocket frame accepted (64 MiB) |
+
+**WebSocket feed.** The handshake rate-limit pair is in the main table above.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WS_CLIENT_QUEUE_SIZE` | `100` | Per-client outbound broadcast queue depth; when the queue is full the oldest queued event is discarded and the client stays connected (a lagging dashboard wants the newest state) |
+| `WS_MAX_CONNECTIONS` | `100` | Max concurrent dashboard WebSocket connections |
+
+**Mempool bookkeeping.**
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEMPOOL_PENDING_TTL_SECONDS` | `7200` | In-memory mempool-observation lifetime (mirrors `LIFECYCLE_PENDING_TTL_SECONDS`) |
+| `MEMPOOL_PRUNE_EVERY_N_TXS` | `100` | Prune the seen-tx set every N observations |
+| `MEMPOOL_SEEN_TXS_MAX` | `50000` | Cap on the mempool dedup set |
+
+**Historical backfill (Kupo).** Backs the on-demand `POST /api/v1/backfill`
+address history import. `KUPO_SINCE` and `KUPO_MATCH` are Compose-container
+settings for the bundled Kupo service, not app config. Requires a reachable
+Kupo instance (the `ingestion` profile starts one).
+
+| Variable | Default | Description |
+|---|---|---|
+| `KUPO_URL` | _(empty)_ | Kupo base URL for the address-to-tx index |
+| `KUPO_TIMEOUT_SECONDS` | `30` | Per-request timeout to Kupo |
+| `BACKFILL_DEFAULT_MAX_TXS` / `BACKFILL_MAX_TXS_CAP` | `500` / `5000` | Default and hard cap on txs imported per backfill job |
+| `BACKFILL_MAX_CONCURRENT` | `1` | Concurrent backfill jobs |
+| `BACKFILL_TIMEOUT_SECONDS` | `3600` | Per-job wall-clock timeout |
+| `BACKFILL_JOB_RETENTION` | `100` | Completed backfill-job records kept for status polling |
+
+**Notifications delivery.** Channel enable flags and delivery tuning; the
+webhook signing secret and internal-egress flag are in the Webhook section
+below.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMAIL_NOTIFY_ENABLED` / `WEBHOOK_NOTIFY_ENABLED` | `true` | Master enable per channel (routing matrix is set via the notifications config API) |
+| `NOTIFY_TOP_FEATURES` | `5` | Top contributing features included in an alert payload |
+| `NOTIFY_SEND_TIMEOUT_SECONDS` | `10` | Per-send timeout |
+| `NOTIFY_MAX_CONCURRENT_DELIVERIES` | `8` | Concurrent alert deliveries |
+| `WEBHOOK_TIMEOUT_SECONDS` | `8` | Per-webhook HTTP timeout |
+| `WEBHOOK_MAX_RETRIES` | `2` | Extra webhook attempts on 5xx / network error |
+| `WEBHOOK_RETRY_BACKOFF_SECONDS` | `1` | Webhook retry backoff base |
+| `NOTIFY_REPORT_CHECK_INTERVAL_SECONDS` | `60` | Scheduled digest-report check cadence |
+| `NOTIFY_REPORT_TOP_ALERTS` | `10` | Alerts included in a digest report |
+| `NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS` | `60` | Poll cadence for the contract-anomaly alert path |
+| `NOTIFY_CONTRACT_ANOMALY_MAX_ALERTS_PER_TICK` | `50` | Cap on contract-anomaly alerts emitted per poll |
+
+**Auth and SMTP (advanced).** The common auth variables are in the main
+table; these are the rest.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CSRF_PROTECTION_ENABLED` | `true` | Double-submit CSRF protection on session-cookie routes; leave on |
+| `SMTP_TIMEOUT_SECONDS` | `10` | SMTP send timeout |
+| `MAGIC_LINK_MAX_REDEMPTIONS` | `3` | Times one magic link can be redeemed before it is consumed |
+| `MAGIC_LINK_PER_EMAIL_WINDOW_SECONDS` | `900` | Window for the per-address magic-link request throttle |
+
+**Logging.**
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_FORMAT` | `text` | `text` for human-readable logs, `json` for structured logs a collector can parse |
 
 ### Running more than one instance
 
@@ -485,6 +677,35 @@ Restore:
 2. PostgreSQL: `gunzip -c postgres.sql.gz | docker exec -i tms-postgres psql -U $POSTGRES_USER $POSTGRES_DB`
 3. ClickHouse, per table: `gunzip -c clickhouse/<t>.native.gz | docker exec -i tms-clickhouse clickhouse-client --query "INSERT INTO tms_analytics.<t> FORMAT Native"`
 4. Restore the raw-store files into the volume, then start the app. The sync checkpoint in the Postgres dump makes ingestion resume from the backed-up slot; any gap replays from the chain.
+
+## Upgrading the application
+
+The app image bundles the backend and the built dashboard; databases and
+their schemas are separate. Schema changes are applied automatically at
+startup (idempotent `CREATE TABLE IF NOT EXISTS` / `ALTER ... IF NOT EXISTS`),
+so a routine upgrade is pull-and-restart. The one exception is the legacy
+dedup migration below, which the startup guard will demand explicitly.
+
+1. Back up first (see "Backup & restore"): a schema-changing release is the
+   moment a rollback path matters most.
+2. Rebuild the image: `docker compose build app`, which also rebuilds the
+   embedded dashboard. The `app` service is built from this repository (no
+   registry image is published), so `docker compose pull app` is a no-op and
+   would silently redeploy the old image.
+3. Recreate the app container: `docker compose --profile app up -d app`.
+   Databases keep running; only the app restarts. Startup applies any additive
+   schema changes itself.
+4. If the app refuses to start and names `scripts/migrate_dedup_schema.py`, run
+   the one-shot migration below, then start again.
+5. Verify: `curl -s -H "X-API-Key: $TMS_API_KEY" localhost:8000/health/detail`
+   (the endpoint requires an API key) should report `pipeline_state: OK` once
+   ingestion catches up from the sync checkpoint (a brief `DEGRADED` while it
+   replays the gap is normal).
+
+To roll back, redeploy the previous image tag and restart. Additive schema
+changes are backward compatible with the prior release; a release that
+required the dedup migration is not (keep the `<table>__legacy_<date>` tables
+until the new version is confirmed healthy).
 
 ## Schema migration (dedup-safe v2)
 
