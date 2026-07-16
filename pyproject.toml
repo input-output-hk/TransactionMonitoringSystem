@@ -12,6 +12,7 @@
 name = "tms-backend"
 version = "0.1.0"
 description = "Cardano transaction monitoring system: chain ingestion, detection scoring, and dashboard API"
+license = "Apache-2.0"
 requires-python = ">=3.13"
 dependencies = [
     # Core framework
