@@ -24,6 +24,11 @@ import os
 
 import pytest
 
+from tests.live_fixtures import (  # noqa: F401  (re-exported fixtures)
+    ch,
+    mock_clickhouse_baseline,
+)
+
 _LIVE_DB_ENV = "TMS_LIVE_DB_TESTS"
 
 # Namespace for rows these tests write: every read path is network-scoped,
@@ -32,13 +37,6 @@ LIVE_NETWORK = "livedbtest"
 
 if not os.environ.get(_LIVE_DB_ENV):
     collect_ignore_glob = ["test_*.py"]
-
-
-@pytest.fixture(autouse=True)
-def mock_clickhouse_baseline():
-    """Override the suite-wide autouse baseline mock: this tier must hit
-    the real ClickHouse, that is its entire purpose."""
-    yield
 
 
 @pytest.fixture
@@ -66,14 +64,3 @@ def pg_run():
         return asyncio.run(_wrapped())
 
     return runner
-
-
-@pytest.fixture(scope="module")
-def ch():
-    """Live ClickHouse client with the real schema applied."""
-    from app.db import clickhouse
-
-    clickhouse.init_client()
-    clickhouse.execute_schema()
-    yield clickhouse
-    clickhouse.close_client()
