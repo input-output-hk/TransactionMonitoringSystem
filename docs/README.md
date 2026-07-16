@@ -17,6 +17,10 @@ Index of the project's documentation. For setup and day-to-day operations start 
 - [DATA-FLOW.md](DATA-FLOW.md): the runtime data flow as diagrams (chain-sync path, storage map, transaction lifecycle).
 - [DATA-FLOW-EXPLAINED.md](DATA-FLOW-EXPLAINED.md): the same data flow as a plain-English walkthrough.
 
+## Performance
+
+- [PERFORMANCE.md](PERFORMANCE.md): the performance methodology. What each benchmark tier measures and why, how to run each one, how the budgets in `config/performance.yaml` are derived, and where the result artifacts and the generated report land.
+
 ## Legal
 
 - [LICENSES.md](LICENSES.md): third-party dependency and bundled-data licenses, plus the note on Ogmios (MPL-2.0, consumed as an external network service).

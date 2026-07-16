@@ -82,7 +82,8 @@ jobs:
     # 26.x runtime regressions (alias shadowing, projection-gate DDL) ship
     # with green tests. This job applies the real schema and runs the
     # tests/live_db/ tier against service containers pinned to the SAME
-    # image versions as docker-compose.yml; bump both together. The tier
+    # image versions as docker-compose.yml; bump all three together
+    # (docker-compose.yml, this job, .github/workflows/perf.yml). The tier
     # is env-gated (TMS_LIVE_DB_TESTS=1), so plain `pytest tests/` stays
     # hermetic for contributors without Docker.
     name: Live-DB tier (ClickHouse 26.x + Postgres)

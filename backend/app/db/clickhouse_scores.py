@@ -24,8 +24,14 @@ from functools import partial
 from typing import Any
 
 from app.config import settings
+from app.models.transaction import ALERT_BANDS
 
 logger = logging.getLogger(__name__)
+
+# SQL fragment for the alerting-band predicate, derived from the canonical
+# pair in app/models/transaction.py; also imported by the perf tier's seeder
+# so its seeded-alert counts always match what this module's queries scan.
+ALERT_BANDS_SQL = ", ".join(f"'{band.lower()}'" for band in ALERT_BANDS)
 
 # The nine per-class scorer columns, in tx_class_scores table order. Shared by
 # the score-query builders (filter validation, the stats aggregation, and the
@@ -799,7 +805,7 @@ def get_alert_timeseries(
             SELECT tx_hash, network
             FROM tx_class_scores FINAL
             WHERE network = %(network)s
-              AND lower(risk_band) IN ('high', 'critical')
+              AND lower(risk_band) IN ({ALERT_BANDS_SQL})
               {archive_clause}
         ) AS s
         INNER JOIN (

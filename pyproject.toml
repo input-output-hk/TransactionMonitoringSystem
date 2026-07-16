@@ -55,6 +55,14 @@ dev = [
     "ruff==0.15.21",
     "mypy==2.1.0",
 ]
+# Load-generation tooling for the opt-in performance tier (backend/tests/perf
+# benchmarks and the backend/perf API load harness). Kept out of `dev` so
+# `uv sync` stays lean for everyday work and the production image
+# (requirements.lock, the --no-dev export) is unaffected. Install with
+# `uv sync --group perf`.
+perf = [
+    "locust==2.45.0",
+]
 
 [tool.uv]
 # The backend is not an installable package: backend/conftest.py puts the app
@@ -75,7 +83,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app"]
+known-first-party = ["app", "perf"]
 
 [tool.ruff.lint.per-file-ignores]
 # Permanent, deliberate patterns:

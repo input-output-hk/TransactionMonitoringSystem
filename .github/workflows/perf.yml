@@ -1,0 +1,113 @@
+name: Performance
+
+# Produces the performance evidence trail: seeds the perftest namespace, runs
+# the TMS_PERF_TESTS benchmark tier against live service containers with the
+# config/performance.yaml budgets enforced, generates the markdown report, and
+# uploads perf-results/ (JSON artifacts plus the report) as a build artifact.
+#
+# The Locust API/WebSocket load harness (backend/perf/locustfile.py) is
+# deliberately NOT run here: it needs a running app service to generate load
+# against, which this workflow does not provision. Run
+# backend/perf/run_load.sh against a live deployment instead; see
+# docs/PERFORMANCE.md.
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly baseline, Mondays 03:43 UTC: off-peak for the team, and off the
+    # hour because on-the-hour crons queue behind everyone else's on GitHub's
+    # shared runner fleet.
+    - cron: "43 3 * * 1"
+
+# The job only checks out code, runs benchmarks, and uploads artifacts, so the
+# GITHUB_TOKEN never needs more than read access.
+permissions:
+  contents: read
+
+# Never cancel a measurement in flight: a half-finished baseline is wasted
+# runner time and a hole in the weekly trail. A second dispatch queues.
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  perf:
+    name: Perf tier (benchmarks + report)
+    runs-on: ubuntu-latest
+    # Service containers mirror ci.yml's live-db job: SAME pinned image
+    # versions as docker-compose.yml; bump all three files together.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: tms_user
+          POSTGRES_PASSWORD: tms_password
+          POSTGRES_DB: tms_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tms_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.1.3
+        env:
+          CLICKHOUSE_DB: tms_analytics
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+          - 9000:9000
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:8123/ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Connection settings for the service containers, shared by the seeder
+      # and the benchmark steps (same values as ci.yml's live-db job).
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: tms_user
+      POSTGRES_PASSWORD: tms_password
+      POSTGRES_DB: tms_db
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_PORT: "9000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      # Base + dev groups only: the perf dependency group holds Locust, and
+      # the load harness deliberately does not run in CI (no app service to
+      # target), so installing its native-heavy tree here would be waste.
+      - name: Sync dependencies
+        run: uv sync
+      - name: Seed the warehouse (perftest namespace, idempotent)
+        working-directory: backend
+        run: uv run python -m perf.seed
+      - name: Performance benchmarks (budgets enforced)
+        working-directory: backend
+        env:
+          TMS_PERF_TESTS: "1"
+        run: uv run pytest tests/perf/ -q
+      - name: Generate the performance report
+        # always(): benchmarks record their artifact before asserting, so a
+        # missed budget must still produce a report showing the FAIL.
+        if: always()
+        working-directory: backend
+        run: uv run python -m perf.report --output ../perf-results/PERFORMANCE-REPORT.md
+      - name: Upload results and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: perf-results/
+          if-no-files-found: error
+          # The approval trail budgets are ratified against: 90 days keeps a
+          # quarter's worth of weekly baselines reviewable.
+          retention-days: 90
