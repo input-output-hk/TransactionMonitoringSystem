@@ -1,0 +1,10 @@
+# Canonicalizes author identities in `git shortlog` / `git log --use-mailmap`
+# without rewriting history. The same contributor committed under several
+# name/email combinations (including a botched user.name of "--get" that
+# landed 14 commits); this collapses them to one identity each. Distinct
+# contributors are left untouched.
+Alessio <alessio@ap901.tech> <alessio.pagani@gmail.com>
+Alessio <alessio@ap901.tech> <alessio@felt.dev>
+Alessio <alessio@ap901.tech> El Luff <alessio.pagani@gmail.com>
+Alessio <alessio@ap901.tech> El Luff <alessio@ap901.tech>
+Alessio <alessio@ap901.tech> --get <alessio@ap901.tech>
