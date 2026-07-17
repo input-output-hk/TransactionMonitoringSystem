@@ -64,7 +64,7 @@ def _closed_auth_client(monkeypatch, *, current_user):
 _ADDR = "addr_test1qz3ql06nvc602eem2af4aefp7w5ce4ja7nuuarzavnkd06ljl64qlwnlynjwzevdrufxslpe29y47u5wxmv6nad026lqvehpe5"
 
 
-async def _fast(address, *, network, max_txs, progress):
+async def _fast(address, *, network, max_txs, created_before_slot=None, progress):
     """A backfill that completes immediately (no Ogmios/Kupo/DB)."""
     return BackfillResult(
         address, requested_txs=0, blocks_scanned=0, txs_ingested=0, missing_tx_hashes=[]
@@ -252,7 +252,7 @@ def test_post_writes_audit_row(client, monkeypatch):
 async def test_run_maps_result_to_done() -> None:
     job = _Job("running", _ADDR, "preprod", 100, "2026-07-15T00:00:00+00:00")
 
-    async def _fake(address, *, network, max_txs, progress):
+    async def _fake(address, *, network, max_txs, created_before_slot=None, progress):
         progress("working")
         return BackfillResult(
             address, requested_txs=3, blocks_scanned=5, txs_ingested=2, missing_tx_hashes=["cc"]
@@ -279,7 +279,7 @@ async def test_run_maps_result_to_done() -> None:
 async def test_run_surfaces_degraded_flags() -> None:
     job = _Job("running", _ADDR, "preprod", 100, "2026-07-15T00:00:00+00:00")
 
-    async def _degraded(address, *, network, max_txs, progress):
+    async def _degraded(address, *, network, max_txs, created_before_slot=None, progress):
         return BackfillResult(
             address,
             requested_txs=2,
@@ -379,3 +379,47 @@ def test_evicts_finished_jobs_over_retention(monkeypatch):
     assert ("preprod", "a0") not in finished  # oldest finished evicted
     assert len(finished) == 2
     assert ("preprod", "running") in backfill_api._jobs  # never evicted
+
+
+async def test_created_before_slot_forwarded_to_backfill(monkeypatch):
+    """The optional slot bound reaches backfill_address verbatim and is echoed
+    in the job view (the clustering sidecar polls it to track its trigger)."""
+    from app.api.backfill import BackfillRequest, start_backfill
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "KUPO_URL", "http://kupo.test:1442")
+    monkeypatch.setattr(settings, "CARDANO_NETWORK", "preprod")
+    monkeypatch.setattr(audit, "record", _noop_audit)
+    backfill_api._jobs.clear()
+
+    received: dict = {}
+
+    async def _recording(address, *, network, max_txs, created_before_slot=None, progress):
+        received["created_before_slot"] = created_before_slot
+        return BackfillResult(
+            address, requested_txs=0, blocks_scanned=0, txs_ingested=0, missing_tx_hashes=[]
+        )
+
+    monkeypatch.setattr(backfill_api, "backfill_address", _recording)
+
+    class _Req:
+        headers: dict = {}
+        client = None
+
+    resp = await start_backfill(
+        BackfillRequest(address=_ADDR, max_txs=10, created_before_slot=123_456),
+        _Req(),
+        principal="dev-mode",
+    )
+    assert resp["created_before_slot"] == 123_456
+    await backfill_api._jobs[("preprod", _ADDR)].task
+    assert received["created_before_slot"] == 123_456
+
+
+def test_created_before_slot_default_none_preserves_behavior(client, monkeypatch):
+    """Requests without the new field behave byte-identically to before."""
+    monkeypatch.setattr(backfill_api, "backfill_address", _fast)
+
+    resp = client.post("/api/v1/backfill", json={"address": _ADDR})
+    assert resp.status_code == 202
+    assert resp.json()["created_before_slot"] is None

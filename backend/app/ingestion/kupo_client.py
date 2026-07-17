@@ -107,9 +107,24 @@ class KupoClient:
             raise KupoError("Kupo /health did not return an object")
         return data
 
-    async def address_tx_points(self, address: str, *, max_txs: int | None = None) -> list[TxPoint]:
+    async def address_tx_points(
+        self,
+        address: str,
+        *,
+        max_txs: int | None = None,
+        created_before_slot: int | None = None,
+    ) -> list[TxPoint]:
         """The block points of the transactions touching ``address``, newest
         first, capped at ``max_txs`` distinct transactions.
+
+        ``created_before_slot`` bounds the walk above: only points strictly
+        below that slot are returned, so a caller can reach an address's older
+        history past its recent activity (the clustering sidecar's history
+        backfill anchors below the host's earliest ingested slot this way).
+        Kupo's ``created_before`` filters on match *creation*, so a pre-boundary
+        output spent post-boundary would still surface its spending tx; the
+        collected points are therefore also filtered client-side to guarantee
+        the strict bound.
 
         Both sides of the address's activity are included: the match's own
         ``transaction_id`` (the tx that *created* an output at the address) and
@@ -129,7 +144,10 @@ class KupoClient:
         # For a pathologically active address this can be large; it is bounded only
         # by KUPO_TIMEOUT_SECONDS today. A server-side limit (Kupo has no cursor on
         # /matches) or a streaming parse would tighten this if it ever bites.
-        matches = await self._get_json(f"/matches/{address}", params={"order": "most_recent_first"})
+        params: dict[str, str] = {"order": "most_recent_first"}
+        if created_before_slot is not None:
+            params["created_before"] = str(created_before_slot)
+        matches = await self._get_json(f"/matches/{address}", params=params)
         if not isinstance(matches, list):
             raise KupoError(f"Kupo /matches/{address} did not return a list")
 
@@ -145,6 +163,10 @@ class KupoClient:
         # Sort by slot descending; break ties on tx_hash so the ordering (and the
         # max_txs cut) is deterministic for a given set of matches.
         points = sorted(by_hash.values(), key=lambda p: (p.slot, p.tx_hash), reverse=True)
+        if created_before_slot is not None:
+            # Client-side guarantee of the strict bound (see docstring: spent_at
+            # points can postdate the server-side created_before filter).
+            points = [p for p in points if p.slot < created_before_slot]
         if max_txs is not None:
             points = points[:max_txs]
         return points

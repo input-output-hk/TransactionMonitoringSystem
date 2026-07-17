@@ -156,3 +156,29 @@ async def test_health_returns_dict() -> None:
 
     health = await _client(handler).health()
     assert health["connection_status"] == "connected"
+
+
+async def test_created_before_forwarded_and_strictly_filtered() -> None:
+    # The slot bound is forwarded to Kupo as created_before AND enforced
+    # client-side: a pre-boundary output SPENT post-boundary still surfaces its
+    # spending tx in the response (Kupo filters on match creation), and that
+    # point must not leak past the strict bound.
+    matches = [
+        _match(
+            "aa",
+            100,
+            "h100",
+            spent={"slot_no": 120, "header_hash": "h120", "transaction_id": "bb"},
+        ),
+        _match("cc", 90, "h90"),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("created_before") == "110"
+        return httpx.Response(200, json=matches)
+
+    points = await _client(handler).address_tx_points(
+        "addr_test1xyz", created_before_slot=110
+    )
+    # bb (slot 120) is dropped by the client-side strict filter.
+    assert [p.tx_hash for p in points] == ["aa", "cc"]

@@ -70,6 +70,12 @@ class BackfillRequest(BaseModel):
     address: str
     # None → BACKFILL_DEFAULT_MAX_TXS; the handler clamps to BACKFILL_MAX_TXS_CAP.
     max_txs: int | None = Field(default=None, ge=1)
+    # Optional upper slot bound: only transactions strictly below this slot are
+    # backfilled, so a caller can reach history OLDER than the address's recent
+    # activity (the default latest-N walk would just re-cover what tip-forward
+    # sync already ingested). None preserves the original latest-N behavior.
+    # Consumed by the clustering sidecar's kupo history backfill.
+    created_before_slot: int | None = Field(default=None, ge=1)
 
 
 @dataclass(slots=True)
@@ -79,6 +85,7 @@ class _Job:
     network: str
     max_txs: int
     started_at: str
+    created_before_slot: int | None = None
     result: dict | None = None
     error: str | None = None
     # Held so the fire-and-forget task is not garbage-collected mid-run.
@@ -96,6 +103,7 @@ def _public(job: _Job) -> dict:
         "address": job.address,
         "network": job.network,
         "max_txs": job.max_txs,
+        "created_before_slot": job.created_before_slot,
         "started_at": job.started_at,
         "result": job.result,
         "error": job.error,
@@ -144,6 +152,7 @@ async def _run(job: _Job) -> None:
                 job.address,
                 network=job.network,
                 max_txs=job.max_txs,
+                created_before_slot=job.created_before_slot,
                 progress=lambda m: logger.info("backfill[%s…]: %s", job.address[:_ADDR_PREVIEW], m),
             ),
             timeout=settings.BACKFILL_TIMEOUT_SECONDS,
@@ -204,7 +213,11 @@ async def start_backfill(
         action="start",
         entity_type="address",
         entity_id=req.address,
-        details={"network": network, "max_txs": max_txs},
+        details={
+            "network": network,
+            "max_txs": max_txs,
+            "created_before_slot": req.created_before_slot,
+        },
         request=request,
         actor=audit.actor_from_principal(principal),
     )
@@ -213,6 +226,7 @@ async def start_backfill(
         address=req.address,
         network=network,
         max_txs=max_txs,
+        created_before_slot=req.created_before_slot,
         started_at=datetime.now(UTC).isoformat(),
     )
     job.task = asyncio.create_task(_run(job))

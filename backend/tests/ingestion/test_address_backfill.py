@@ -110,10 +110,18 @@ class _StubKupo:
     def __init__(self, *_a, **_k) -> None:
         pass
 
-    async def address_tx_points(self, address: str, *, max_txs: int | None = None) -> list[TxPoint]:
-        # Mirror the real client: newest-first, then cap, so a test can assert the
-        # cap flows through backfill_address.
+    async def address_tx_points(
+        self,
+        address: str,
+        *,
+        max_txs: int | None = None,
+        created_before_slot: int | None = None,
+    ) -> list[TxPoint]:
+        # Mirror the real client: newest-first, bound, then cap, so a test can
+        # assert both flow through backfill_address.
         pts = sorted(_StubKupo.points, key=lambda p: (p.slot, p.tx_hash), reverse=True)
+        if created_before_slot is not None:
+            pts = [p for p in pts if p.slot < created_before_slot]
         if max_txs is not None:
             pts = pts[:max_txs]
         return pts
