@@ -284,9 +284,7 @@ class InMemoryChainSource:
             ):
                 # to_block composes with the recent window (anchor found inside
                 # the bounded set) — mirrors the Blockfrost adapter's behavior.
-                anchor = await self._recent_anchor(
-                    address, max_items, progress, to_block=to_block
-                )
+                anchor = await self._recent_anchor(address, max_items, progress, to_block=to_block)
             pages = self._address_pages(
                 address,
                 start_page=start_page,

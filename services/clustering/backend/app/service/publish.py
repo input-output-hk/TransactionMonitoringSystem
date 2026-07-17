@@ -77,6 +77,7 @@ def _host_known_only(repo: Repo, target: str, hashes: set[str]) -> set[str]:
         return hashes
     return hashes & repo.host_known_tx_hashes(target, hashes)
 
+
 # Verdicts that constitute the contract_anomaly attack surface (see module doc).
 _PUBLISHED = (VERDICT_MALICIOUS, VERDICT_ANOMALY)
 
@@ -278,7 +279,10 @@ def _publish_online(
         "iso_score, lof_score, consensus, votes, " + verdict_expr + ", model_id, "
         "toString(feature_set), '{}' AS evidence, toDateTime(scored_at), "
         "{pub:DateTime64(6)} AS published_at "
-        "FROM " + db + ".tx_classifications FINAL WHERE " + where
+        "FROM "
+        + db
+        + ".tx_classifications FINAL WHERE "
+        + where
         + " AND toString(tx_hash) IN {keep:Array(String)}",
         parameters=params,
     )

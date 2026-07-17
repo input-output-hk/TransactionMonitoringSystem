@@ -85,9 +85,7 @@ def _history_source_guards(settings: Settings) -> None:
             "Blockfrost adapter cannot authenticate without a project id; set "
             "BLOCKFROST_PROJECT_ID or unset HISTORY_SOURCE."
         )
-    if settings.history_source == "kupo" and not (
-        settings.host_api_url and settings.host_api_key
-    ):
+    if settings.history_source == "kupo" and not (settings.host_api_url and settings.host_api_key):
         raise RuntimeError(
             "HISTORY_SOURCE=kupo but HOST_API_URL and HOST_API_KEY are not both "
             "set. The kupo flavor triggers the host's POST /api/v1/backfill and "

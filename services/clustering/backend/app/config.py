@@ -190,9 +190,7 @@ class Settings(BaseSettings):
     # Per-request ceiling on the host-API round trip (trigger POST / status
     # GET). The POST returns 202 immediately (the host runs the scan in its own
     # background task), so this bounds a wedged connection, not the backfill.
-    host_api_timeout_seconds: float = Field(
-        default=30.0, ge=1, alias="HOST_API_TIMEOUT_SECONDS"
-    )
+    host_api_timeout_seconds: float = Field(default=30.0, ge=1, alias="HOST_API_TIMEOUT_SECONDS")
 
     # API security / ops. All optional so local/demo runs stay zero-config; set
     # API_KEY and CORS_ORIGINS to lock down a network-exposed deployment.

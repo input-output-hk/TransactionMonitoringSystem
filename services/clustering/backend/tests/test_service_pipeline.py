@@ -445,9 +445,7 @@ async def test_too_few_txs_with_history_pending_stays_pending(
     monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeHostSource())
     _patch_backfill(monkeypatch, _RecordingBackfill(status="pending", txs=0))
     repo = FakePipelineRepo(_shape_df(2), _addr_df(2))
-    result = await process_contract(
-        repo, target="addr1demo", target_type="address", max_txs=None
-    )
+    result = await process_contract(repo, target="addr1demo", target_type="address", max_txs=None)
     assert result["note"] == "too few transactions for clustering/anomaly"
     assert repo.contracts[-1]["status"] == "pending"
 
@@ -467,9 +465,7 @@ async def test_metadata_fallback_blockfrost(monkeypatch: pytest.MonkeyPatch) -> 
     # Host-unknown target + blockfrost history → onboarding proceeds with the
     # provider's real metadata instead of failing SourceNotFound.
     _enable_history(monkeypatch)
-    monkeypatch.setattr(
-        "app.service.pipeline.get_source", lambda settings: FakeSourceMissingHost()
-    )
+    monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeSourceMissingHost())
     _patch_backfill(monkeypatch, _RecordingBackfill())
 
     class _BFStub:
@@ -494,9 +490,7 @@ async def test_metadata_fallback_blockfrost(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr("app.blockfrost.source.BlockfrostSource", _BFStub)
     repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
-    result = await process_contract(
-        repo, target="addr1demo", target_type="address", max_txs=None
-    )
+    result = await process_contract(repo, target="addr1demo", target_type="address", max_txs=None)
     assert result["tx_count"] == 8
     assert repo.contracts[-1]["script_type"] == "plutusV2"
 
@@ -508,14 +502,10 @@ async def test_metadata_fallback_kupo_synthesizes_locally(
     # is synthesized from the address header (zero requests) and the
     # pending-retry loop finishes the job.
     _enable_history(monkeypatch, flavor="kupo")
-    monkeypatch.setattr(
-        "app.service.pipeline.get_source", lambda settings: FakeSourceMissingHost()
-    )
+    monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeSourceMissingHost())
     _patch_backfill(monkeypatch, _RecordingBackfill(status="pending", txs=0))
     repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
-    result = await process_contract(
-        repo, target="addr1demo", target_type="address", max_txs=None
-    )
+    result = await process_contract(repo, target="addr1demo", target_type="address", max_txs=None)
     assert result["tx_count"] == 8
     assert repo.contracts[-1]["exists"] is True
 

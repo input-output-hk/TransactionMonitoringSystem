@@ -541,9 +541,7 @@ async def test_foreign_cursor_ignored_by_source_name() -> None:
     # A cursor written by a different source is garbage to this one: the walk
     # must restart from the beginning instead of resuming, and re-ingest all txs.
     repo = FakeRepo()
-    repo._cursor = _cursor_row(
-        "addr1demo", "page:1", txs_seen=2, done=0, source="host_ch"
-    )
+    repo._cursor = _cursor_row("addr1demo", "page:1", txs_seen=2, done=0, source="host_ch")
     async with _named_source() as source:
         result = await ingest(repo=repo, source=source, address="addr1demo")
     assert result.status == "completed"
