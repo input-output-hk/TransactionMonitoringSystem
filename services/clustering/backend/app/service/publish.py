@@ -55,6 +55,28 @@ from app.storage.protocol import Repo
 
 logger = logging.getLogger(__name__)
 
+
+def _host_known_only(repo: Repo, target: str, hashes: set[str]) -> set[str]:
+    """``hashes`` intersected with the transactions the HOST actually knows.
+
+    The host's notifications poller alerts on EVERY flagged
+    tx_contract_anomaly row with no host-membership check and links to
+    /attacks/{tx_hash}, so publishing a hash the host never ingested (a
+    backfilled-history tx living only in the engine's own tables) would page
+    an operator to a page the host cannot render. Intersecting with HOST
+    membership is exact by construction, regardless of what the engine's local
+    tables contain: a host-known tx is never suppressed (recall is preserved
+    even against stale local rows left by an earlier blockfrost-primary run on
+    the same database), and a host-unknown tx is never published, even if the
+    HISTORY_SOURCE setting changed after its backfill. Pure host_ch and kupo
+    deployments pass through unchanged (every classified tx is a host row).
+    History txs keep their full verdicts INSIDE the module (the Validators UI
+    reads the module's own runs/classifications); only the host-facing
+    projection is bounded."""
+    if not hashes:
+        return hashes
+    return hashes & repo.host_known_tx_hashes(target, hashes)
+
 # Verdicts that constitute the contract_anomaly attack surface (see module doc).
 _PUBLISHED = (VERDICT_MALICIOUS, VERDICT_ANOMALY)
 
@@ -143,6 +165,8 @@ def _publish_batch(
     votes = _anomaly_votes(repo, target, feature_set, near=near)
     tx_verdict, _ = _resolve_verdicts(repo, target, cluster_of, votes)
     flagged = {tx: v for tx, v in tx_verdict.items() if v in _PUBLISHED}
+    kept = _host_known_only(repo, target, set(flagged))
+    flagged = {tx: v for tx, v in flagged.items() if tx in kept}
     if not flagged:
         return set()
 
@@ -238,17 +262,24 @@ def _publish_online(
             parameters=params,
         ).result_rows
     }
+    published = _host_known_only(repo, target, published)
     if not published:
         return set()
     # A human malicious label overrides the stored model verdict on publish.
     verdict_expr = "if(toString(tx_hash) IN " + malicious_sub + ", 'malicious', toString(verdict))"
+    # The INSERT is pinned to the precomputed kept set (not just the WHERE):
+    # this applies the history filter in-database AND closes the race where a
+    # row lands between the SELECT above and this INSERT — the returned set and
+    # the written rows must be the same set, or _retract_stale's keep drifts.
+    params["keep"] = sorted(published)
     repo.client.command(  # type: ignore[attr-defined]
         "INSERT INTO " + db + ".tx_contract_anomaly (" + ", ".join(_COLUMNS) + ") "
         "SELECT {net:String} AS network, toString(tx_hash), target, cluster_id, "
         "iso_score, lof_score, consensus, votes, " + verdict_expr + ", model_id, "
         "toString(feature_set), '{}' AS evidence, toDateTime(scored_at), "
         "{pub:DateTime64(6)} AS published_at "
-        "FROM " + db + ".tx_classifications FINAL WHERE " + where,
+        "FROM " + db + ".tx_classifications FINAL WHERE " + where
+        + " AND toString(tx_hash) IN {keep:Array(String)}",
         parameters=params,
     )
     return published
@@ -351,7 +382,12 @@ def _publish_labels(
             parameters={"tgt": target, "mal": VERDICT_MALICIOUS},
         ).result_rows
     }
-    fresh = labeled - exclude
+    # The INSERT is host-membership-bounded, but the RETURN value stays
+    # unfiltered: it feeds _retract_stale's keep set, and a host-unknown
+    # labeled tx was never published, so keeping it in keep is a harmless
+    # no-op. Unfiltered is the simpler contract ("all malicious-labeled
+    # hashes").
+    fresh = _host_known_only(repo, target, labeled - exclude)
     if fresh:
         rows = [
             [
