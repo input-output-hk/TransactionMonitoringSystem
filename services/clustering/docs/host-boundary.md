@@ -106,3 +106,49 @@ Behaviours observed live on ClickHouse 26.x that mocked tests cannot catch:
 - Because fakes never execute SQL, validate any DDL or query-text change
   against the live-database test tier before shipping:
   `backend/tests/live_db/`, opt-in via `TMS_LIVE_DB_TESTS=1`.
+
+## The history boundary and the host backfill trigger
+
+Two invariants added with the pre-deployment history backfill
+(`service/history.py`) sit exactly on this host boundary:
+
+**The immutability boundary.** The host's chain-rollback purge
+(`_handle_roll_backward` + `delete_clustering_rows`) deletes orphaned rows from
+the HOST tables and from the module's `tx_contract_anomaly` and
+`tx_classifications`, but never from the module's raw tables: nothing else ever
+wrote them under host_ch. A backfilled row near the tip could therefore become
+a fork ghost that re-enters every fit with no purge path. The backfill instead
+persists only rows strictly below
+`least(target's earliest host slot, host tip - ROLLBACK_SAFETY_SLOTS)`, with
+`ROLLBACK_SAFETY_SLOTS = 129600` (Cardano's stability window `3k/f`, about 36
+hours on mainnet) and the block-height twin `ROLLBACK_SAFETY_BLOCKS = 2160`
+(the security parameter k). History below that line is immutable by protocol,
+so the missing purge path is harmless, and the local rows are provably disjoint
+from the host rows, which the hybrid reads and the publish filter lean on.
+
+**The publish bound.** The host's contract_anomaly notifications poller alerts
+on EVERY flagged `tx_contract_anomaly` row, builds the alert purely from the
+verdict row, and links to `/attacks/{tx_hash}`: it has no host-membership
+check. A verdict published for a backfilled-history tx the host never ingested
+would page an operator to a page the host cannot render. Publishing therefore
+intersects the flagged set with what the HOST actually knows
+(`host_known_tx_hashes`, a query against the host's `address_transactions`),
+so a host-known transaction is never suppressed (recall first, even against
+stale local rows an earlier blockfrost-primary run left in the module's own
+tables) and a host-unknown one never leaks into the projection (regardless of
+the current `HISTORY_SOURCE` setting). History verdicts stay fully visible
+inside the module's own UI reads. Pure host_ch and kupo deployments pass
+through unchanged: every classified transaction is already a host row.
+
+**The kupo trigger contract.** `HISTORY_SOURCE=kupo` calls the host's
+`POST /api/v1/backfill` with `{address, max_txs, created_before_slot}` and the
+`X-API-Key` header (`HOST_API_URL`/`HOST_API_KEY`), trigger-and-continue: 202
+and 409 both mean "running" (a marker row in `ingest_cursor`, `source='kupo'`,
+tracks it; later classify ticks poll `GET /api/v1/backfill/{address}` and flip
+the marker), 503 means the host has no `KUPO_URL` and the attempt is deferred.
+`created_before_slot` is the boundary above, so the host walks pre-deployment
+history instead of re-covering what it already ingested. Two accepted,
+deliberate consequences of this flavor: the host detection engine ALSO scores
+the backfilled rows (fresh `ingestion_timestamp`) and can fire immediate alerts
+for old transactions, and host rows persist if the watched contract is later
+deleted from the module (the module's delete purges only its own tables).

@@ -367,6 +367,10 @@ false positives.
 | `CLUSTERING_DB` | `tms_clustering` | ClickHouse database holding the sidecar's state |
 | `CLUSTERING_SIDECAR_URL` | `http://clustering:8000` | Sidecar base URL the proxy forwards to |
 | `CLUSTERING_SIDECAR_API_KEY` | _(empty)_ | Key forwarded to the sidecar as `X-API-Key` when it requires auth |
+| `CLUSTERING_HISTORY_SOURCE` | _(empty)_ | Optional pre-deployment history backfill for watched contracts: `blockfrost` or `kupo`; see `services/clustering/docs/operations.md` |
+| `CLUSTERING_HISTORY_MAX_TXS` | `500` | Per-contract history depth (override per contract in the onboarding form) |
+| `CLUSTERING_HISTORY_MAX_TXS_CEILING` | `5000` | Clamp on per-contract history overrides |
+| `CLUSTERING_HOST_API_URL` / `CLUSTERING_HOST_API_KEY` | `http://app:8000` / _(empty)_ | kupo flavor only: how the sidecar reaches this app's `/api/v1/backfill` |
 
 **Ingestion resilience: raw-store fallback and analysis deferral.** When a
 ClickHouse write fails, the transaction is parked and retried from the raw
