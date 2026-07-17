@@ -128,6 +128,10 @@ export const validateConfig: Validator<ClusteringConfig> = (raw) => {
 		throw new ResponseShapeError("/config", 'field "host_backed" is not a boolean');
 	if (typeof raw.window_txs !== "number" || !Number.isFinite(raw.window_txs))
 		throw new ResponseShapeError("/config", 'field "window_txs" is not a finite number');
+	// history_source is optional (absent on not-yet-upgraded sidecars); when
+	// present it must be a string, since it gates the max-txs form control.
+	if (raw.history_source !== undefined && typeof raw.history_source !== "string")
+		throw new ResponseShapeError("/config", 'field "history_source" is not a string');
 	return raw as ClusteringConfig;
 };
 

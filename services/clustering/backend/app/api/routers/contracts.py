@@ -125,9 +125,16 @@ def list_contracts(
 
 @router.get("/contracts/{target}", response_model=ContractOut)
 def get_contract(target: str, repo: Repo = RepoDep) -> dict[str, Any]:
-    contract = repo.get_contract(normalize_target(target))
+    normalized = normalize_target(target)
+    contract = repo.get_contract(normalized)
     if contract is None:
         raise HTTPException(status_code=404, detail=f"contract {target} not found")
+    settings = get_settings()
+    if settings.history_enabled:
+        from app.service.history import history_status
+
+        contract["history_tx_count"] = repo.history_tx_count(normalized)
+        contract["history_status"] = history_status(settings, normalized)
     return contract
 
 

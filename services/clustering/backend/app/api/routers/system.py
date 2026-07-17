@@ -36,6 +36,7 @@ def config() -> ConfigOut:
     return ConfigOut(
         host_backed=s.host_backed,
         window_txs=s.clustering_window_txs,
+        history_source=s.history_source if s.history_enabled else "",
     )
 
 

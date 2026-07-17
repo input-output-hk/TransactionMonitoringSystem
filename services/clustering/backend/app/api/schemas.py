@@ -166,8 +166,12 @@ class ConfigOut(BaseModel):
     # there is no per-contract download to cap — fits run over the rolling
     # window of size window_txs instead. A per-contract "max txs" is meaningless
     # in that mode, so the form hides it.
+    # history_source: the deployment's secondary pre-deployment-history source
+    # ("" when disabled). When set, the form re-exposes "max txs" as the
+    # per-contract history depth.
     host_backed: bool
     window_txs: int
+    history_source: str = ""
 
 
 class IdentifyOut(BaseModel):
@@ -195,6 +199,13 @@ class ContractOut(BaseModel):
     # Trailing online-noise rate written by the incremental classifier; 0 until a
     # classify run has scored against this contract's model.
     drift_score: float = 0.0
+    # Pre-deployment history backfill visibility (HISTORY_SOURCE deployments).
+    # Both are derived at read time on the DETAIL endpoint only (0/"none" in
+    # list views): the count is the locally-stored history subset, the status
+    # comes from the backfill's cursor marker — "none" (never marked, or the
+    # feature is disabled), "in_progress", "complete".
+    history_tx_count: int = 0
+    history_status: str = "none"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
