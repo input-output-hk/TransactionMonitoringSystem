@@ -241,6 +241,35 @@ class HostBackedRepo(ClickHouseRepo):
         # registry, not the (empty) module-local transactions table.
         return self.count_contracts()
 
+    def history_tx_count(self, target: str) -> int:
+        # Pure host mode has no local rows by construction (the raw tables stay
+        # empty); the hybrid subclass overrides this with the local count.
+        return 0
+
+    # Membership-check chunk size: bounds each IN(...) array the same way the
+    # online classify path bounds its scoring chunks (_CLASSIFY_BATCH rationale).
+    _HOST_MEMBERSHIP_CHUNK = 1000
+
+    def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
+        """The subset of ``tx_hashes`` present in the HOST's address index for
+        the watched target. Exact regardless of what the engine's local tables
+        contain, which is what makes it safe as the publish bound: a host-known
+        tx is never suppressed (recall first), a host-unknown one never leaks
+        into the host-facing projection. Chunked so the IN array stays bounded."""
+        found: set[str] = set()
+        ordered = sorted(tx_hashes)
+        for start in range(0, len(ordered), self._HOST_MEMBERSHIP_CHUNK):
+            chunk = ordered[start : start + self._HOST_MEMBERSHIP_CHUNK]
+            rows = self.client.query(
+                f"SELECT DISTINCT toString(tx_hash) "
+                f"FROM {self._host_db}.address_transactions "
+                "WHERE network = {net:String} AND address = {tgt:String} "
+                "AND toString(tx_hash) IN {hs:Array(String)}",
+                parameters={"net": self._network, "tgt": target, "hs": chunk},
+            ).result_rows
+            found.update(str(r[0]) for r in rows)
+        return found
+
     # --- writes the sidecar must not perform (no download, no duplication) ----
 
     def insert_transactions(self, rows: Sequence[TxRecord]) -> None:
