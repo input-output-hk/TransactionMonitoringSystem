@@ -371,6 +371,7 @@ false positives.
 | `CLUSTERING_HISTORY_MAX_TXS` | `500` | Per-contract history depth (override per contract in the onboarding form) |
 | `CLUSTERING_HISTORY_MAX_TXS_CEILING` | `5000` | Clamp on per-contract history overrides |
 | `CLUSTERING_HOST_API_URL` / `CLUSTERING_HOST_API_KEY` | `http://app:8000` / _(empty)_ | kupo flavor only: how the sidecar reaches this app's `/api/v1/backfill` |
+| `CLUSTERING_HOST_API_TIMEOUT_SECONDS` | `30` | kupo flavor only: per-request ceiling on the sidecar's trigger/status calls to this app |
 
 **Ingestion resilience: raw-store fallback and analysis deferral.** When a
 ClickHouse write fails, the transaction is parked and retried from the raw

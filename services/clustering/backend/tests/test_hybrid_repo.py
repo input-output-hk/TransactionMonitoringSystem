@@ -2,9 +2,10 @@
 
 A fake client records SQL + parameters, so the union shapes, the parameter
 bindings and the factory routing are pinned without a real ClickHouse. The
-UNION SQL itself is additionally validated against a live ClickHouse 26.1
-before shipping (see the PR's verification notes): a mocked client cannot
-catch server-side type-unification or alias-resolution errors.
+UNION SQL itself is additionally executed against a live ClickHouse 26.x by
+the opt-in live tier (``tests/live_db/test_history_sql_live.py``, run in CI's
+live-db job): a mocked client cannot catch server-side type-unification or
+alias-resolution errors.
 """
 
 from __future__ import annotations

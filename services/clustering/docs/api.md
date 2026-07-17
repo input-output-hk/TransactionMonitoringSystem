@@ -126,8 +126,10 @@ rows inside the pagination envelope's `data`):
 the incremental classifier; `reclustering_suggested` is derived at read time,
 `true` once `drift_score ≥ RECLUSTER_NOISE_THRESHOLD` (default `0.25`), and the UI
 surfaces it as a "re-cluster recommended" badge. `history_tx_count` and
-`history_status` (`none`/`in_progress`/`complete`) describe the optional
-pre-deployment history backfill; both are derived on the DETAIL read only and
+`history_status` (`none`/`in_progress`/`complete`/`failed`) describe the
+optional pre-deployment history backfill; `complete` means done at the
+contract's history cap, `failed` means the kupo flavor exhausted its trigger
+budget (raise the cap to retry). Both are derived on the DETAIL read only and
 stay at their defaults in list rows and on deployments without a
 `HISTORY_SOURCE`.)
 

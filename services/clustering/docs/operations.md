@@ -60,7 +60,8 @@ them):
 | `CLUSTERING_HISTORY_MAX_TXS` | `HISTORY_MAX_TXS` | 500 | Per-contract history depth when the contract carries no cap of its own. |
 | `CLUSTERING_HISTORY_MAX_TXS_CEILING` | `HISTORY_MAX_TXS_CEILING` | 5000 | Clamp on per-contract overrides (mirrors the host's backfill cap). |
 | `CLUSTERING_HOST_API_URL` | `HOST_API_URL` | `http://app:8000` | kupo flavor only: the host API base. |
-| `CLUSTERING_HOST_API_KEY` | `HOST_API_KEY` | (empty) | kupo flavor only: a host API key. |
+| `CLUSTERING_HOST_API_KEY` | `HOST_API_KEY` | (empty) | kupo flavor only: a host API key (see the credential note below). |
+| `CLUSTERING_HOST_API_TIMEOUT_SECONDS` | `HOST_API_TIMEOUT_SECONDS` | 30 | kupo flavor only: per-request ceiling on the trigger/status round trip (the backfill itself runs host-side in the background). |
 
 The startup guards fail fast on invalid combinations (unknown value, a history
 source under a blockfrost primary, a flavor missing its credential). Recreate
@@ -73,9 +74,22 @@ Operational behavior worth knowing:
   `FEED_POLL_INTERVAL_SECONDS`); the completed case costs one cursor read.
   Diagnose a stalled backfill with
   `SELECT * FROM tms_clustering.ingest_cursor WHERE target = '<addr>'`:
-  `done = 0` with `source = 'blockfrost'` means the walk is mid-flight or
-  waiting out a provider daily limit; `source = 'kupo'` with `done = 0` means
-  the host job is still running (or the trigger will be re-checked next tick).
+  `done = 0` with `source = 'blockfrost'` and `txs_seen` below the cap means
+  the walk is mid-flight or waiting out a provider daily limit (`txs_seen` at
+  the cap means complete at that cap, resumable if the cap is raised);
+  `source = 'kupo'` with `done = 0` means the host job is still running (or
+  the trigger will be re-checked next tick).
+- A kupo backfill that keeps failing host-side gives up after a bounded number
+  of triggers: the contract detail then reports `history_status: "failed"`
+  (the marker cursor carries a `;gave_up` flag) and a WARN names the address in
+  the sidecar logs. Fix the host-side cause (see the host's backfill logs) and
+  raise the contract's history cap to retry with a fresh trigger budget. A
+  wrong `CLUSTERING_HOST_API_KEY` is also warned by name on every attempt: the
+  startup guard checks presence, not validity.
+- `HOST_API_KEY` is a full host API credential (host keys are not scoped to
+  the backfill endpoint), so treat a compromise of the sidecar container as a
+  compromise of the host API: issue a dedicated key for the sidecar and rotate
+  it independently of operator keys.
 - Quota: an onboard at the default cap costs roughly `cap + cap/100` Blockfrost
   requests (per-tx fetches plus discovery pages). The single job worker
   serializes onboards, so mass-onboarding N contracts delays live classify
@@ -99,3 +113,14 @@ Operational behavior worth knowing:
   module-local raw tables (`transactions`, `tx_utxos`, `tx_utxo_assets`,
   `ingest_cursor` in `tms_clustering`): they carry no network column, so the
   old network's backfilled history would poison the union reads.
+- The same wipe applies when changing MODE on an existing volume, in
+  particular from `CHAIN_SOURCE=blockfrost` (primary) to
+  `CHAIN_SOURCE=host_ch` plus `HISTORY_SOURCE=blockfrost`: the old primary
+  run's cursors carry the same `source = 'blockfrost'` tag but different walk
+  semantics, so a done cursor would skip the bounded backfill entirely and
+  present the old unbounded download (including rows above the immutability
+  boundary, which have no purge path) as "history" in the union reads, while a
+  mid-flight cursor would resume with mismatched page semantics and leave
+  silent gaps. Reads and alerting stay guarded (host precedence and the
+  publish bound), but the fit window would ingest unvetted rows: wipe the four
+  tables above before switching.

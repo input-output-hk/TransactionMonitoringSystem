@@ -121,8 +121,11 @@ a fork ghost that re-enters every fit with no purge path. The backfill instead
 persists only rows strictly below
 `least(target's earliest host slot, host tip - ROLLBACK_SAFETY_SLOTS)`, with
 `ROLLBACK_SAFETY_SLOTS = 129600` (Cardano's stability window `3k/f`, about 36
-hours on mainnet) and the block-height twin `ROLLBACK_SAFETY_BLOCKS = 2160`
-(the security parameter k). History below that line is immutable by protocol,
+hours on mainnet) and the block-height twin `ROLLBACK_SAFETY_BLOCKS = 6480`
+(`3k`: the block count of that same 36-hour span at the active-slot rate
+`f = 0.05`; the security parameter `k = 2160` alone would span only a third of
+it and let the bounded walk fetch rows the slot guard then drops, burning the
+per-contract cap). History below that line is immutable by protocol,
 so the missing purge path is harmless, and the local rows are provably disjoint
 from the host rows, which the hybrid reads and the publish filter lean on.
 
@@ -146,6 +149,11 @@ through unchanged: every classified transaction is already a host row.
 and 409 both mean "running" (a marker row in `ingest_cursor`, `source='kupo'`,
 tracks it; later classify ticks poll `GET /api/v1/backfill/{address}` and flip
 the marker), 503 means the host has no `KUPO_URL` and the attempt is deferred.
+Re-triggers are bounded (`_KUPO_MAX_TRIGGERS`); exhausting the budget settles a
+gave-up marker surfaced as `history_status: "failed"`, and raising the
+per-contract cap re-opens it with a fresh budget. Auth failures from the host
+(401/403, a wrong `HOST_API_KEY`) are warned in the logs by name: the startup
+guard verifies the key is set, not that the host accepts it.
 `created_before_slot` is the boundary above, so the host walks pre-deployment
 history instead of re-covering what it already ingested. Two accepted,
 deliberate consequences of this flavor: the host detection engine ALSO scores
