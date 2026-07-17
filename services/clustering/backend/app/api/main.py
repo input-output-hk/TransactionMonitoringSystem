@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import get_request_repo, verify_api_key
 from app.api.routers import anomaly, contracts, jobs, labels, runs, system
-from app.config import get_settings, setup_logging
+from app.config import Settings, get_settings, setup_logging
 from app.jobs import JobManager
 from app.storage.clickhouse import ClickHouseRepo, select_repo_factory
 
@@ -55,6 +55,44 @@ def _guard_schema() -> None:
         raise RuntimeError(
             "ClickHouse schema is behind the code; run "
             "`docker exec <backend> python -m app.cli migrate`. Missing: " + ", ".join(missing)
+        )
+
+
+def _history_source_guards(settings: Settings) -> None:
+    """Fail fast on a misconfigured secondary history source.
+
+    The history source is a host_ch-only concept (the blockfrost primary
+    already downloads each contract's history itself), and each flavor has a
+    credential it cannot run without. Same fail-fast style as the REQUIRE_AUTH
+    and CHAIN_SOURCE guards in ``lifespan``: a misconfigured sidecar must not
+    boot healthy-looking only to fail its first backfill. A module-level
+    function (rather than inline) so the guard matrix is unit-testable without
+    driving the whole lifespan."""
+    if settings.history_source not in ("", "blockfrost", "kupo"):
+        raise RuntimeError(
+            f"HISTORY_SOURCE={settings.history_source!r} is not supported; "
+            "expected one of '', 'blockfrost', 'kupo'."
+        )
+    if settings.history_source and not settings.host_backed:
+        raise RuntimeError(
+            "HISTORY_SOURCE requires CHAIN_SOURCE=host_ch; the blockfrost "
+            "primary mode already downloads history itself. Unset HISTORY_SOURCE "
+            "or switch CHAIN_SOURCE to host_ch."
+        )
+    if settings.history_source == "blockfrost" and not settings.blockfrost_project_id:
+        raise RuntimeError(
+            "HISTORY_SOURCE=blockfrost but BLOCKFROST_PROJECT_ID is not set. The "
+            "Blockfrost adapter cannot authenticate without a project id; set "
+            "BLOCKFROST_PROJECT_ID or unset HISTORY_SOURCE."
+        )
+    if settings.history_source == "kupo" and not (
+        settings.host_api_url and settings.host_api_key
+    ):
+        raise RuntimeError(
+            "HISTORY_SOURCE=kupo but HOST_API_URL and HOST_API_KEY are not both "
+            "set. The kupo flavor triggers the host's POST /api/v1/backfill and "
+            "needs its base URL and an API key (the host itself also needs "
+            "KUPO_URL configured)."
         )
 
 
@@ -96,6 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "BLOCKFROST_PROJECT_ID (a mainnet/preprod/preview key from blockfrost.io) "
             "or use CHAIN_SOURCE=host_ch."
         )
+    _history_source_guards(settings)
     if not settings.model_signing_keys:
         logger.warning(
             "MODEL_SIGNING_KEYS is not set: stored model blobs are unsigned. "
