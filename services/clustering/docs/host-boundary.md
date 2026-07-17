@@ -104,8 +104,10 @@ Behaviours observed live on ClickHouse 26.x that mocked tests cannot catch:
   projection can reject DDL and lightweight deletes that pass against a plain
   table.
 - Because fakes never execute SQL, validate any DDL or query-text change
-  against the live-database test tier before shipping:
-  `backend/tests/live_db/`, opt-in via `TMS_LIVE_DB_TESTS=1`.
+  against a live-database test tier before shipping. This module's own tier is
+  `services/clustering/backend/tests/live_db/` (it executes the history/hybrid
+  query text); host-side changes belong in the host's `backend/tests/live_db/`.
+  Both opt in via `TMS_LIVE_DB_TESTS=1` and run in CI's Live-DB job.
 
 ## The history boundary and the host backfill trigger
 

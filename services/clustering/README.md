@@ -62,4 +62,8 @@ cd services/clustering/backend
 uv sync --extra dev
 uv run pytest -q
 uv run ruff check app tests
+
+# Opt-in live-DB tier (executes the history/hybrid query text against a real
+# ClickHouse; see docs/TESTING.md at the repo root for the schema setup):
+TMS_LIVE_DB_TESTS=1 uv run pytest tests/live_db/ -q
 ```
