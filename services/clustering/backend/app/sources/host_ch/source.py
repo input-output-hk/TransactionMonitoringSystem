@@ -56,7 +56,10 @@ _TARGET_PREVIEW = 24
 _EPOCH_YEAR = 1970
 
 
-def _payment_is_script(address: str) -> bool:
+def payment_is_script(address: str) -> bool:
+    """Whether the address's payment credential is a script, from the header
+    byte alone (no chain access). Shared with service/history.py, which
+    synthesizes host_ch-shaped metadata for host-unknown targets."""
     raw = _decode_address_bytes(address)
     if not raw:
         return False
@@ -109,7 +112,7 @@ class HostChainSource:
         # left to the host's own views (display-only here, not needed to fit).
         return {
             "exists": True,
-            "is_script": _payment_is_script(target),
+            "is_script": payment_is_script(target),
             "script_type": "",
             "balance_lovelace": 0,
             "asset_count": 0,

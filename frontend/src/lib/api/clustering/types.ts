@@ -37,7 +37,8 @@ export type Contract = {
 	updated_at: string;
 	/** Locally-backfilled pre-deployment rows (detail endpoint only; 0 in lists). */
 	history_tx_count?: number;
-	/** "none" | "in_progress" | "complete" (detail endpoint only). */
+	/** "none" | "in_progress" | "complete" | "failed" (detail endpoint only;
+	 *  "failed" = the kupo flavor gave up, raising the cap retries). */
 	history_status?: string;
 };
 

@@ -15,9 +15,13 @@ before its first fit:
 
 Everything in this module is deliberately NON-FATAL to the fit: a deferred or
 rate-limited backfill returns a status, never raises, because the fit can and
-should proceed on the host's tip-forward data alone. Resume is cursor-driven:
-``run()`` is cheap when there is nothing to do (one cursor read), so the
-online classify tick calls it every pass until the history completes.
+should proceed on the host's tip-forward data alone. Both flavors enforce this
+at the ``run()`` boundary itself (any unexpected exception — a ClickHouse
+hiccup in the boundary aggregates, a non-JSON host reply — degrades to
+``deferred``), so a backfill bug can never fail the onboarding job that
+carries it. Resume is cursor-driven: ``run()`` is cheap when there is nothing
+to do (one cursor read), so the online classify tick calls it every pass until
+the history completes.
 
 THE IMMUTABILITY BOUNDARY (the invariant everything else rests on): backfilled
 rows are only persisted strictly BELOW ``least(target's earliest host slot,
@@ -41,7 +45,7 @@ from app.config import Settings
 from app.ingest.ingester import ProgressFn, ingest
 from app.models import AssetRecord, TxRecord, UtxoRecord
 from app.sources.base import ChainSource, SourceNotFound, TargetMeta
-from app.sources.host_ch.source import _payment_is_script
+from app.sources.host_ch.source import payment_is_script
 from app.storage.clickhouse import ClickHouseRepo
 from app.storage.clickhouse.base import connect
 
@@ -238,21 +242,37 @@ class BlockfrostHistory:
             return HistoryResult(
                 "deferred", 0, "history backfill is address-only (no host policy index)"
             )
+        # The never-raise contract is enforced HERE, not by auditing every call
+        # below: an unexpected exception (cursor read, boundary aggregates,
+        # repo construction) must degrade to a deferred attempt, never fail the
+        # onboarding/classify job that carries this stage.
+        try:
+            return await self._run(
+                target=target, target_type=target_type, max_txs=max_txs, progress=progress
+            )
+        except Exception:
+            logger.exception("history backfill failed for %s", target[:24])
+            return HistoryResult("deferred", 0, "history source error; see server logs")
+
+    async def _run(
+        self, *, target: str, target_type: str, max_txs: int, progress: ProgressFn
+    ) -> HistoryResult:
         cap = min(int(max_txs), self._settings.history_max_txs_ceiling)
         repo = ClickHouseRepo(self._settings)
         try:
             # Skip-fast FIRST: the common already-complete case must cost one
-            # cursor read (the classify tick calls this every 30s). A raised cap
-            # (txs_seen < cap) intentionally falls through and re-walks wider —
-            # the recent-restart sizing invariant in the ingester handles it.
+            # cursor read (the classify tick calls this every 30s). ``done`` is
+            # deliberately NOT required: the ingester's max_reached leaves the
+            # cursor done=0 with txs_seen == cap (so a RAISED cap can resume
+            # from the stored page cursor), and that state is complete at the
+            # CURRENT cap. A raised cap (txs_seen < cap) intentionally falls
+            # through and resumes/re-walks wider — the resume and
+            # recent-restart sizing invariants in the ingester handle it.
             cur = repo.get_cursor(target)
-            if (
-                cur
-                and cur.get("source") == "blockfrost"
-                and cur.get("done")
-                and int(cur.get("txs_seen") or 0) >= cap
-            ):
-                return HistoryResult("skipped", int(cur["txs_seen"]), "history already complete")
+            if cur and cur.get("source") == "blockfrost" and int(cur.get("txs_seen") or 0) >= cap:
+                return HistoryResult(
+                    "skipped", int(cur["txs_seen"]), "history complete at this cap"
+                )
 
             boundary = host_history_boundary(self._settings, target)
             if boundary is None:
@@ -268,8 +288,11 @@ class BlockfrostHistory:
             # only at host_tx_count >= window (below that, history still
             # occupies the window's tail and is read by every fit). Marked done
             # at the current cap so later ticks skip-fast (the host count only
-            # grows, so the window never frees up); a raised cap falls through
-            # the guard and re-evaluates.
+            # grows, so the window never frees up); a raised per-contract cap
+            # falls through the guard and re-evaluates. A raised
+            # CLUSTERING_WINDOW_TXS alone does NOT re-open a settled marker —
+            # accepted: the host rows that filled the old window still fill the
+            # new one's head, and the cap is the operator's re-open lever.
             window = int(self._settings.clustering_window_txs)
             if window > 0 and boundary.host_tx_count >= window:
                 self._mark_done(repo, target, target_type, cap)
@@ -302,11 +325,9 @@ class BlockfrostHistory:
                 # nothing to backfill is a completed outcome, not an error. The
                 # ingester wrote no cursor (discovery raised before any page),
                 # so mark done here or every later tick would re-ask upstream.
+                # (Any other exception is the run() wrapper's business.)
                 self._mark_done(repo, target, target_type, cap)
                 return HistoryResult("completed", 0, "no pre-deployment history upstream")
-            except Exception:
-                logger.exception("history backfill failed for %s", target[:24])
-                return HistoryResult("deferred", 0, "history source error; see server logs")
 
             if result.status == "rate_limited":
                 # Cursor already persisted by the ingester; the next classify
@@ -338,23 +359,34 @@ class BlockfrostHistory:
 # Cap on kupo trigger attempts per contract-and-cap: a host that keeps failing
 # or returning degraded scans must not be re-driven through a full Kupo/Ogmios
 # chain scan every 30s classify tick forever. Three attempts ride out a
-# transient failure; a persistent one gives up loudly (WARN + marker settled at
-# the cap, so a raised cap deliberately re-opens the question).
+# transient failure; a persistent one gives up loudly (WARN + a gave-up marker
+# settled at the cap, surfaced as history_status "failed"; a raised cap
+# re-opens the question with a fresh trigger budget).
 _KUPO_MAX_TRIGGERS = 3
 
 # Marker-cursor encoding for the kupo flavor: the cursor column is free-form
-# (source-owned), so it carries the trigger-attempt counter.
+# (source-owned), so it carries the trigger-attempt counter, plus a gave-up
+# flag when the attempt budget was exhausted (so the settled marker is
+# distinguishable from a genuinely landed backfill in history_status).
 _KUPO_ATTEMPTS_PREFIX = "attempts:"
+_KUPO_GAVE_UP_SUFFIX = ";gave_up"
 
 
 def _kupo_attempts(cur: dict[str, Any] | None) -> int:
     raw = (cur or {}).get("cursor") or ""
     if isinstance(raw, str) and raw.startswith(_KUPO_ATTEMPTS_PREFIX):
+        # The counter is the first ';'-separated segment after the prefix (the
+        # gave-up flag, when present, rides behind it).
         try:
-            return int(raw[len(_KUPO_ATTEMPTS_PREFIX) :])
+            return int(raw[len(_KUPO_ATTEMPTS_PREFIX) :].split(";", 1)[0])
         except ValueError:
             return 0
     return 0
+
+
+def _kupo_gave_up(cur: dict[str, Any] | None) -> bool:
+    raw = (cur or {}).get("cursor") or ""
+    return isinstance(raw, str) and raw.endswith(_KUPO_GAVE_UP_SUFFIX)
 
 
 class KupoHistory:
@@ -382,6 +414,20 @@ class KupoHistory:
             return HistoryResult(
                 "deferred", 0, "history backfill is address-only (no host policy index)"
             )
+        # Same never-raise enforcement as the blockfrost flavor: cursor reads,
+        # boundary aggregates and host-API response parsing may all fail in
+        # unexpected ways, and none of them may fail the carrying job.
+        try:
+            return await self._run(
+                target=target, target_type=target_type, max_txs=max_txs, progress=progress
+            )
+        except Exception:
+            logger.exception("history backfill failed for %s", target[:24])
+            return HistoryResult("deferred", 0, "history source error; see server logs")
+
+    async def _run(
+        self, *, target: str, target_type: str, max_txs: int, progress: ProgressFn
+    ) -> HistoryResult:
         cap = min(int(max_txs), self._settings.history_max_txs_ceiling)
         repo = ClickHouseRepo(self._settings)
         try:
@@ -392,12 +438,25 @@ class KupoHistory:
                 # Same raised-cap semantics as the blockfrost flavor: done at a
                 # smaller txs_seen than the (new) cap falls through and re-runs.
                 if cur.get("done") and int(cur.get("txs_seen") or 0) >= cap:
+                    if _kupo_gave_up(cur):
+                        return HistoryResult(
+                            "skipped",
+                            0,
+                            "gave up after earlier host failures; raise the cap to retry",
+                        )
                     return HistoryResult(
                         "skipped",
                         int(cur.get("txs_seen") or 0),
                         "history already backfilled via host",
                     )
-                if not cur.get("done"):
+                if cur.get("done"):
+                    # Falling past the skip guard on a done marker means the cap
+                    # was raised: the question re-opens with a FRESH trigger
+                    # budget. The stored counter belongs to the settled attempt
+                    # (gave-up or landed alike) — keeping it would let the
+                    # attempts wall below re-close the re-open on the same tick.
+                    attempts = 0
+                else:
                     # A trigger is outstanding: ask the host how it went.
                     checked = await self._check_host_job(repo, target, target_type, cap)
                     if checked is not None:
@@ -411,9 +470,18 @@ class KupoHistory:
                     target[:24],
                     attempts,
                 )
-                # Settle at the cap so later ticks skip-fast; a raised cap
-                # deliberately re-opens the question (txs_seen < new cap).
-                self._mark(repo, target, target_type, done=True, txs_seen=cap, attempts=attempts)
+                # Settle at the cap so later ticks skip-fast, flagged gave-up so
+                # history_status reports "failed" rather than a landed backfill;
+                # a raised cap re-opens it (txs_seen < new cap, budget reset).
+                self._mark(
+                    repo,
+                    target,
+                    target_type,
+                    done=True,
+                    txs_seen=cap,
+                    attempts=attempts,
+                    gave_up=True,
+                )
                 return HistoryResult(
                     "skipped", 0, f"giving up after {attempts} host backfill attempts"
                 )
@@ -472,6 +540,23 @@ class KupoHistory:
             )
         if resp.status_code == 503:
             return HistoryResult("deferred", 0, "host KUPO_URL not configured")
+        # Any other status is a misconfiguration the startup guards cannot
+        # catch (they verify the key is SET, not that it is valid), and the
+        # deferred retry loop would otherwise churn on it invisibly forever —
+        # so it must be loud in the logs, auth failures by name.
+        if resp.status_code in (401, 403):
+            logger.warning(
+                "host backfill API rejected the trigger for %s (HTTP %d); "
+                "check HOST_API_KEY against the host's API keys",
+                target[:24],
+                resp.status_code,
+            )
+            return HistoryResult("deferred", 0, f"host API auth failed (HTTP {resp.status_code})")
+        logger.warning(
+            "host backfill trigger for %s returned unexpected HTTP %d",
+            target[:24],
+            resp.status_code,
+        )
         return HistoryResult("deferred", 0, f"host backfill returned HTTP {resp.status_code}")
 
     async def _check_host_job(
@@ -495,7 +580,12 @@ class KupoHistory:
             return None  # host restarted (in-memory job store): re-POST
         if resp.status_code != 200:
             return HistoryResult("pending", 0, f"host status returned HTTP {resp.status_code}")
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError:
+            # A 200 that is not JSON (a proxy error page, say) is a transient
+            # infrastructure answer, not a job verdict: keep waiting.
+            return HistoryResult("pending", 0, "host status returned non-JSON; will re-check")
         status = body.get("status")
         if status == "running":
             return HistoryResult("pending", 0, "host backfill still running")
@@ -541,11 +631,13 @@ class KupoHistory:
         done: bool,
         txs_seen: int,
         attempts: int,
+        gave_up: bool = False,
     ) -> None:
+        suffix = _KUPO_GAVE_UP_SUFFIX if gave_up else ""
         repo.upsert_cursor(
             target,
             target_type,
-            cursor=f"{_KUPO_ATTEMPTS_PREFIX}{attempts}",
+            cursor=f"{_KUPO_ATTEMPTS_PREFIX}{attempts}{suffix}",
             last_tx_hash="",
             txs_seen=txs_seen,
             done=done,
@@ -553,38 +645,57 @@ class KupoHistory:
         )
 
 
-def history_status(settings: Settings, target: str) -> str:
+# The cursor sources the history markers may carry; anything else (a primary
+# CHAIN_SOURCE cursor on a reused database, say) is not a history marker.
+_HISTORY_SOURCES = ("blockfrost", "kupo")
+
+
+def _marker_complete(cur: dict[str, Any] | None, cap: int) -> bool:
+    """Whether the stored marker says there is nothing left to do at this cap:
+    explicitly done, or an at-cap walk. The second arm exists because the
+    ingester's max_reached leaves done=0 with the page cursor intact (so a
+    RAISED cap can resume mid-walk) — at the CURRENT cap that state is
+    complete, and treating it as outstanding would re-run the boundary
+    aggregates every classify tick forever."""
+    if not cur or cur.get("source") not in _HISTORY_SOURCES:
+        return False
+    return bool(cur.get("done")) or int(cur.get("txs_seen") or 0) >= cap
+
+
+def _read_marker(settings: Settings, target: str) -> dict[str, Any] | None:
+    """One cursor read on a short-lived base repo — cheap enough for the 30s
+    classify tick that drives resume (host-backed request/worker repos no-op
+    cursor reads, so a dedicated base repo is the only way to see the marker)."""
+    repo = ClickHouseRepo(settings)
+    try:
+        return repo.get_cursor(target)
+    finally:
+        repo.close()
+
+
+def history_status(settings: Settings, target: str, cap: int) -> str:
     """Operator-facing state of the target's history backfill, derived from the
     cursor marker at read time (no schema change): "none" when the feature is
     disabled or no attempt has been marked yet, "in_progress" while a walk or a
-    host-side job is outstanding, "complete" once marked done."""
+    host-side job is outstanding, "complete" once done at ``cap``, "failed"
+    when the kupo flavor exhausted its trigger budget and gave up (raising the
+    per-contract cap re-opens it)."""
     if not settings.history_enabled:
         return "none"
-    repo = ClickHouseRepo(settings)
-    try:
-        cur = repo.get_cursor(target)
-    finally:
-        repo.close()
-    if cur is None or cur.get("source") not in ("blockfrost", "kupo"):
+    cur = _read_marker(settings, target)
+    if cur is None or cur.get("source") not in _HISTORY_SOURCES:
         return "none"
-    return "complete" if cur.get("done") else "in_progress"
+    if _kupo_gave_up(cur):
+        return "failed"
+    return "complete" if _marker_complete(cur, cap) else "in_progress"
 
 
-def history_incomplete(settings: Settings, target: str) -> bool:
-    """Whether the target's history backfill still has work outstanding (no
-    marker at all counts: deferred attempts write no cursor and must retry).
-    One cursor read on a short-lived base repo — cheap enough for the 30s
-    classify tick that drives resume."""
-    repo = ClickHouseRepo(settings)
-    try:
-        cur = repo.get_cursor(target)
-    finally:
-        repo.close()
-    if cur is None:
-        return True
-    if cur.get("source") not in ("blockfrost", "kupo"):
-        return True
-    return not cur.get("done")
+def history_incomplete(settings: Settings, target: str, cap: int) -> bool:
+    """Whether the target's history backfill still has work outstanding at this
+    cap (no marker at all counts: deferred attempts write no cursor and must
+    retry). The gave-up marker counts as settled — the classify tick must not
+    retry it; only a raised cap re-opens it."""
+    return not _marker_complete(_read_marker(settings, target), cap)
 
 
 async def resolve_metadata(
@@ -613,7 +724,7 @@ async def resolve_metadata(
                 return await bf.metadata(target, target_type)
         return {
             "exists": True,
-            "is_script": _payment_is_script(target),
+            "is_script": payment_is_script(target),
             "script_type": "",
             "balance_lovelace": 0,
             "asset_count": 0,

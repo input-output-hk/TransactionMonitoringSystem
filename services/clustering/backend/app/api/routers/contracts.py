@@ -133,8 +133,12 @@ def get_contract(target: str, repo: Repo = RepoDep) -> dict[str, Any]:
     if settings.history_enabled:
         from app.service.history import history_status
 
+        # The status is cap-relative (a walk stopped at the cap is complete at
+        # that cap); the contract row carries the per-contract override, 0
+        # meaning the configured default — same resolution as the backfill.
+        cap = int(contract.get("requested_max_txs") or 0) or settings.history_max_txs
         contract["history_tx_count"] = repo.history_tx_count(normalized)
-        contract["history_status"] = history_status(settings, normalized)
+        contract["history_status"] = history_status(settings, normalized, cap)
     return contract
 
 

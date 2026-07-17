@@ -203,7 +203,9 @@ class ContractOut(BaseModel):
     # Both are derived at read time on the DETAIL endpoint only (0/"none" in
     # list views): the count is the locally-stored history subset, the status
     # comes from the backfill's cursor marker — "none" (never marked, or the
-    # feature is disabled), "in_progress", "complete".
+    # feature is disabled), "in_progress", "complete" (done at the contract's
+    # cap), "failed" (the kupo flavor exhausted its trigger budget; raising
+    # the cap retries).
     history_tx_count: int = 0
     history_status: str = "none"
 

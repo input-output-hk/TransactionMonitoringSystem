@@ -226,24 +226,28 @@ async def update_contract(
         # the classify tick is the retry loop for a rate-limited walk, a pending
         # host-side kupo job, or an earlier deferral (run() is skip-fast when
         # complete — one cursor read — and never raises; see service/history.py).
-        if host_backed and settings.history_enabled and history_incomplete(settings, target):
-            backfill = get_history_backfill(settings)
-            if backfill is not None:
-                row = repo.get_contract(target)
-                cap = (
-                    int((row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
-                )
-                set_stage("downloading", "resuming pre-deployment history backfill")
-                hist = await backfill.run(
-                    target=target,
-                    target_type=target_type,
-                    max_txs=cap,
-                    progress=lambda m: set_stage("downloading", m),
-                )
-                if hist.status != "skipped":
-                    set_stage(
-                        "downloading", f"history: {hist.status} ({hist.txs_ingested} txs)"
+        # The cap is computed BEFORE the incompleteness check because the check
+        # is cap-relative: a walk stopped at the cap (the ingester's max_reached,
+        # done=0) is complete at that cap and must not re-run every tick, while
+        # a raised cap (config default or per-contract) re-opens it here
+        # automatically on the next tick.
+        if host_backed and settings.history_enabled:
+            row = repo.get_contract(target)
+            cap = int((row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
+            if history_incomplete(settings, target, cap):
+                backfill = get_history_backfill(settings)
+                if backfill is not None:
+                    set_stage("downloading", "resuming pre-deployment history backfill")
+                    hist = await backfill.run(
+                        target=target,
+                        target_type=target_type,
+                        max_txs=cap,
+                        progress=lambda m: set_stage("downloading", m),
                     )
+                    if hist.status != "skipped":
+                        set_stage(
+                            "downloading", f"history: {hist.status} ({hist.txs_ingested} txs)"
+                        )
 
         set_stage("scoring", "classifying new transactions")
         out = classify_new_transactions(repo, target)

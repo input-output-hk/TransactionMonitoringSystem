@@ -193,8 +193,12 @@ def test_slot_capped_repo_drops_rows_at_or_above_boundary_and_their_utxos() -> N
     capped.insert_transactions([keep, drop])
     capped.insert_utxos(
         [
-            UtxoRecord(target="t", tx_hash=keep.tx_hash, role="input", idx=0, address="a", lovelace=1),
-            UtxoRecord(target="t", tx_hash=drop.tx_hash, role="input", idx=0, address="a", lovelace=1),
+            UtxoRecord(
+                target="t", tx_hash=keep.tx_hash, role="input", idx=0, address="a", lovelace=1
+            ),
+            UtxoRecord(
+                target="t", tx_hash=drop.tx_hash, role="input", idx=0, address="a", lovelace=1
+            ),
         ]
     )
     capped.insert_assets(
@@ -212,9 +216,7 @@ def _patch_repo(monkeypatch: pytest.MonkeyPatch, repo: _RecordingRepo) -> None:
     monkeypatch.setattr("app.service.history.ClickHouseRepo", lambda settings: repo)
 
 
-def _patch_boundary(
-    monkeypatch: pytest.MonkeyPatch, boundary: HostBoundary | None
-) -> None:
+def _patch_boundary(monkeypatch: pytest.MonkeyPatch, boundary: HostBoundary | None) -> None:
     monkeypatch.setattr(
         "app.service.history.host_history_boundary", lambda settings, target: boundary
     )
@@ -230,6 +232,30 @@ async def test_skip_fast_on_done_cursor_at_cap(monkeypatch: pytest.MonkeyPatch) 
     _patch_repo(monkeypatch, repo)
     # Boundary must NOT be consulted on the fast path (it costs three queries).
     _patch_boundary(monkeypatch, None)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "skipped" and out.txs_ingested == 500
+
+
+async def test_skip_fast_on_max_reached_cursor_at_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ingester's max_reached terminal state — done=0, txs_seen == cap, page
+    # cursor kept for a future raised-cap resume — is the COMMON outcome for an
+    # address with more pre-boundary history than its cap. It must skip-fast
+    # exactly like a done marker: without this, every classify tick recomputes
+    # the boundary and re-enters ingest forever.
+    repo = _RecordingRepo(
+        cursor={"source": "blockfrost", "done": 0, "txs_seen": 500, "cursor": "page:5;from:100"}
+    )
+    _patch_repo(monkeypatch, repo)
+    _patch_boundary(monkeypatch, None)  # must not be consulted
+
+    async def _boom(**kw: Any) -> IngestResult:
+        raise AssertionError("ingest must not run on an at-cap cursor")
+
+    monkeypatch.setattr("app.service.history.ingest", _boom)
     out = await BlockfrostHistory(_BF_SETTINGS).run(
         target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
     )
@@ -455,7 +481,9 @@ async def test_kupo_status_poll_flips_cursor_done_on_our_complete_job(
 ) -> None:
     # An outstanding marker (done=0) checks the host job; OUR complete job
     # (created_before_slot present, result.complete) flips the marker.
-    repo = _RecordingRepo(cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"})
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"}
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -482,7 +510,9 @@ async def test_kupo_foreign_done_job_not_adopted(monkeypatch: pytest.MonkeyPatch
     # A finished job with NO created_before_slot is an operator's manual
     # backfill: adopting it would freeze our bounded history as complete. It
     # must be ignored and our own bounded job triggered instead.
-    repo = _RecordingRepo(cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"})
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"}
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
@@ -503,7 +533,9 @@ async def test_kupo_foreign_done_job_not_adopted(monkeypatch: pytest.MonkeyPatch
 async def test_kupo_degraded_done_job_retriggers(monkeypatch: pytest.MonkeyPatch) -> None:
     # OUR job finished DEGRADED (result.complete False): re-trigger rather than
     # freeze a partial history as complete.
-    repo = _RecordingRepo(cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"})
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"}
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
@@ -527,11 +559,18 @@ async def test_kupo_degraded_done_job_retriggers(monkeypatch: pytest.MonkeyPatch
 
 async def test_kupo_gives_up_after_max_triggers(monkeypatch: pytest.MonkeyPatch) -> None:
     # A persistently failing backfill must not re-scan the host forever: after
-    # _KUPO_MAX_TRIGGERS attempts it settles done (skip) with no further HTTP.
+    # _KUPO_MAX_TRIGGERS attempts it settles done (skip) with no further HTTP,
+    # and the marker carries the gave-up flag so history_status says "failed"
+    # instead of presenting the settled marker as a landed backfill.
     from app.service.history import _KUPO_MAX_TRIGGERS
 
     repo = _RecordingRepo(
-        cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": f"attempts:{_KUPO_MAX_TRIGGERS}"}
+        cursor={
+            "source": "kupo",
+            "done": 0,
+            "txs_seen": 0,
+            "cursor": f"attempts:{_KUPO_MAX_TRIGGERS}",
+        }
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -545,13 +584,48 @@ async def test_kupo_gives_up_after_max_triggers(monkeypatch: pytest.MonkeyPatch)
     assert out.status == "skipped" and "giving up" in out.note
     assert [r.method for r in requests] == ["GET"]  # checked, but did NOT re-POST
     assert repo.cursors[-1]["done"] is True
+    assert repo.cursors[-1]["cursor"] == f"attempts:{_KUPO_MAX_TRIGGERS};gave_up"
+
+
+async def test_kupo_gave_up_marker_skips_with_distinct_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A settled gave-up marker at the same cap must not read as a landed
+    # backfill: the skip carries the gave-up note (and zero txs), no HTTP.
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 1, "txs_seen": 500, "cursor": "attempts:3;gave_up"}
+    )
+    flavor, requests = _kupo(monkeypatch, repo, lambda r: httpx.Response(500, json={}))
+    out = await flavor.run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "skipped" and "gave up" in out.note and out.txs_ingested == 0
+    assert requests == []
+
+
+async def test_kupo_raised_cap_after_give_up_gets_fresh_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Raising the cap re-opens a gave-up marker WITH a fresh trigger budget:
+    # keeping the exhausted counter would re-close the question on the same
+    # tick without ever re-POSTing.
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 1, "txs_seen": 500, "cursor": "attempts:3;gave_up"}
+    )
+    flavor, requests = _kupo(monkeypatch, repo, lambda r: httpx.Response(202, json={}))
+    out = await flavor.run(
+        target="addr1demo", target_type="address", max_txs=1000, progress=lambda _m: None
+    )
+    assert out.status == "pending"
+    assert [r.method for r in requests] == ["POST"]
+    assert repo.cursors[-1]["cursor"] == "attempts:1"  # fresh budget, flag cleared
 
 
 async def test_kupo_lost_host_job_retriggers(monkeypatch: pytest.MonkeyPatch) -> None:
     # 404 on the status check (host restarted, in-memory job store) → re-POST.
-    repo = _RecordingRepo(cursor={"source": "kupo", "done": 0, "txs_seen": 0})
-
-    repo = _RecordingRepo(cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"})
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"}
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
@@ -566,16 +640,123 @@ async def test_kupo_lost_host_job_retriggers(monkeypatch: pytest.MonkeyPatch) ->
     assert [r.method for r in requests] == ["GET", "POST"]
 
 
-# --- history_incomplete --------------------------------------------------------------
+# --- history_incomplete / history_status ---------------------------------------------
 
 
 def test_history_incomplete_states(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _with_cursor(cur: dict[str, Any] | None) -> bool:
+    def _with_cursor(cur: dict[str, Any] | None, cap: int = 500) -> bool:
         _patch_repo(monkeypatch, _RecordingRepo(cursor=cur))
-        return history_incomplete(_BF_SETTINGS, "addr1demo")
+        return history_incomplete(_BF_SETTINGS, "addr1demo", cap)
 
     assert _with_cursor(None) is True  # deferred attempts write no marker
     assert _with_cursor({"source": "blockfrost", "done": 0, "txs_seen": 10}) is True
     assert _with_cursor({"source": "blockfrost", "done": 1, "txs_seen": 500}) is False
+    # The ingester's max_reached terminal state (done=0 at the cap) is complete
+    # AT that cap — the classify tick must stop resuming it…
+    assert _with_cursor({"source": "blockfrost", "done": 0, "txs_seen": 500}) is False
+    # …while a raised cap re-opens it automatically on the next tick.
+    assert _with_cursor({"source": "blockfrost", "done": 0, "txs_seen": 500}, cap=1000) is True
     assert _with_cursor({"source": "kupo", "done": 1, "txs_seen": 42}) is False
+    # A settled gave-up marker is NOT outstanding: only a raised cap retries it.
+    assert (
+        _with_cursor({"source": "kupo", "done": 1, "txs_seen": 500, "cursor": "attempts:3;gave_up"})
+        is False
+    )
     assert _with_cursor({"source": "host_ch", "done": 1, "txs_seen": 9}) is True
+
+
+def test_history_status_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.service.history import history_status
+
+    def _with_cursor(cur: dict[str, Any] | None, cap: int = 500) -> str:
+        _patch_repo(monkeypatch, _RecordingRepo(cursor=cur))
+        return history_status(_BF_SETTINGS, "addr1demo", cap)
+
+    assert _with_cursor(None) == "none"
+    assert _with_cursor({"source": "blockfrost", "done": 0, "txs_seen": 10}) == "in_progress"
+    assert _with_cursor({"source": "blockfrost", "done": 1, "txs_seen": 500}) == "complete"
+    # max_reached at the cap reads "complete", not a forever "in_progress".
+    assert _with_cursor({"source": "blockfrost", "done": 0, "txs_seen": 500}) == "complete"
+    assert (
+        _with_cursor({"source": "blockfrost", "done": 0, "txs_seen": 500}, cap=1000)
+        == "in_progress"
+    )
+    # The kupo give-up is reported as failed, not as a landed backfill.
+    assert (
+        _with_cursor({"source": "kupo", "done": 1, "txs_seen": 500, "cursor": "attempts:3;gave_up"})
+        == "failed"
+    )
+    assert _with_cursor({"source": "host_ch", "done": 1, "txs_seen": 9}) == "none"
+    # Feature disabled: always "none", no repo constructed.
+    assert history_status(Settings(CHAIN_SOURCE="host_ch"), "addr1demo", 500) == "none"
+
+
+# --- the never-raise contract ---------------------------------------------------------
+
+
+async def test_blockfrost_run_never_raises_on_boundary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A ClickHouse hiccup in the boundary aggregates must degrade to a deferred
+    # attempt: the onboarding/classify job carrying this stage must not fail.
+    _patch_repo(monkeypatch, _RecordingRepo())
+
+    def _boom(settings: Any, target: str) -> HostBoundary:
+        raise RuntimeError("simulated ClickHouse failure")
+
+    monkeypatch.setattr("app.service.history.host_history_boundary", _boom)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "deferred"
+
+
+async def test_kupo_run_never_raises_on_cursor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BrokenRepo(_RecordingRepo):
+        def get_cursor(self, target: str) -> dict[str, Any] | None:
+            raise RuntimeError("simulated ClickHouse failure")
+
+    _patch_repo(monkeypatch, _BrokenRepo())
+    out = await KupoHistory(_KUPO_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "deferred"
+
+
+async def test_kupo_non_json_status_reply_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 200 that is not JSON (a proxy error page) is an infrastructure answer,
+    # not a job verdict: keep waiting instead of raising or re-triggering.
+    repo = _RecordingRepo(
+        cursor={"source": "kupo", "done": 0, "txs_seen": 0, "cursor": "attempts:1"}
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>Bad Gateway</html>")
+
+    flavor, requests = _kupo(monkeypatch, repo, handler)
+    out = await flavor.run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "pending" and "non-JSON" in out.note
+    assert [r.method for r in requests] == ["GET"]
+    assert repo.cursors == []  # marker untouched: nothing was learned
+
+
+async def test_kupo_auth_failure_defers_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A wrong HOST_API_KEY passes the startup guard (presence, not validity):
+    # the trigger loop must say so in the logs instead of churning invisibly.
+    repo = _RecordingRepo()
+    flavor, _ = _kupo(monkeypatch, repo, lambda r: httpx.Response(401, json={"detail": "bad key"}))
+    with caplog.at_level("WARNING", logger="app.service.history"):
+        out = await flavor.run(
+            target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+        )
+    assert out.status == "deferred" and "auth" in out.note
+    assert repo.cursors == []  # not an attempt: OUR job never started
+    assert any("HOST_API_KEY" in r.message for r in caplog.records)

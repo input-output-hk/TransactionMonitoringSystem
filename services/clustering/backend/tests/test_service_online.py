@@ -296,16 +296,14 @@ def _enable_history_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # The host_backed path publishes after classify; publishing has its own
     # tests and needs the real repo surface — stub it here like the pipeline
     # suite does.
-    monkeypatch.setattr(
-        "app.service.publish.publish_contract_anomaly", lambda *a, **k: None
-    )
+    monkeypatch.setattr("app.service.publish.publish_contract_anomaly", lambda *a, **k: None)
 
 
 async def test_resume_runs_backfill_before_classify_when_cursor_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _enable_history_env(monkeypatch)
-    monkeypatch.setattr("app.service.online.history_incomplete", lambda s, t: True)
+    monkeypatch.setattr("app.service.online.history_incomplete", lambda s, t, c: True)
     calls: list[int] = []
 
     class _Backfill:
@@ -330,7 +328,7 @@ async def test_resume_runs_backfill_before_classify_when_cursor_incomplete(
 
 async def test_no_resume_when_history_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_history_env(monkeypatch)
-    monkeypatch.setattr("app.service.online.history_incomplete", lambda s, t: False)
+    monkeypatch.setattr("app.service.online.history_incomplete", lambda s, t, c: False)
 
     def _explode(_s: Any) -> Any:
         raise AssertionError("backfill must not be constructed when history is complete")
