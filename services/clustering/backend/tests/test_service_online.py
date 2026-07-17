@@ -281,3 +281,65 @@ async def test_update_contract_rate_limited_fails_without_classifying(
     _job_id, changes = repo.job_updates[-1]
     assert changes["status"] == "failed"
     assert "request limit" in changes["error"]
+
+
+# --- history resume hook -------------------------------------------------------
+
+
+def _enable_history_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import get_settings
+
+    monkeypatch.setenv("CHAIN_SOURCE", "host_ch")
+    monkeypatch.setenv("HISTORY_SOURCE", "blockfrost")
+    monkeypatch.setenv("BLOCKFROST_PROJECT_ID", "k")
+    get_settings.cache_clear()
+    # The host_backed path publishes after classify; publishing has its own
+    # tests and needs the real repo surface — stub it here like the pipeline
+    # suite does.
+    monkeypatch.setattr(
+        "app.service.publish.publish_contract_anomaly", lambda *a, **k: None
+    )
+
+
+async def test_resume_runs_backfill_before_classify_when_cursor_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_history_env(monkeypatch)
+    monkeypatch.setattr("app.service.online.history_incomplete", lambda s, t: True)
+    calls: list[int] = []
+
+    class _Backfill:
+        async def run(self, *, target: str, target_type: str, max_txs: int, progress: Any):
+            from app.service.history import HistoryResult
+
+            calls.append(max_txs)
+            return HistoryResult("completed", 3)
+
+    monkeypatch.setattr("app.service.online.get_history_backfill", lambda s: _Backfill())
+    repo = _DriftRepo()
+    out = await update_contract(
+        repo,  # type: ignore[arg-type]
+        target="addr1demo",
+        target_type="address",
+        job_id="job-hr",
+    )
+    # The contract row carries no cap → the configured default; classify ran after.
+    assert calls == [500]
+    assert "n_new" in out
+
+
+async def test_no_resume_when_history_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_history_env(monkeypatch)
+    monkeypatch.setattr("app.service.online.history_incomplete", lambda s, t: False)
+
+    def _explode(_s: Any) -> Any:
+        raise AssertionError("backfill must not be constructed when history is complete")
+
+    monkeypatch.setattr("app.service.online.get_history_backfill", _explode)
+    repo = _DriftRepo()
+    out = await update_contract(
+        repo,  # type: ignore[arg-type]
+        target="addr1demo",
+        target_type="address",
+    )
+    assert "n_new" in out

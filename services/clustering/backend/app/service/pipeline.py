@@ -21,6 +21,7 @@ from app.service._common import (
     load_clustering_input,
 )
 from app.service.analysis import _cluster_ci, _detect_ci
+from app.service.history import get_history_backfill, resolve_metadata
 from app.sources.factory import get_source
 from app.storage.protocol import Repo
 
@@ -54,17 +55,28 @@ async def process_contract(
     }
 
     set_stage = _make_set_stage(repo, job_id, progress)
+    settings = get_settings()
+    # Outcome of the optional history-backfill stage ("" when it did not run);
+    # read by the too-few-transactions branch below to keep the contract
+    # retryable while its history is still outstanding.
+    hist_status = ""
 
     try:
-        async with get_source(get_settings()) as source:
+        async with get_source(settings) as source:
             set_stage("checking", f"fetching metadata for {target[:20]}…")
-            meta = await source.metadata(target, target_type)
+            meta = await resolve_metadata(source, settings, target, target_type)
             # A user-supplied name (pending row) or an existing label wins;
             # otherwise fall back to the registry. Keeps custom names through
             # reprocess while still labelling newly-recognised contracts.
             existing = repo.get_contract(target)
             preset = (existing or {}).get("label") or ""
             meta["label"] = preset or lookup_label(target, target_type)
+            # The feed's refit jobs carry max_txs=0; without this line a refit
+            # would clobber the persisted per-contract cap (the history stage's
+            # depth) back to 0, the same way `label` is preserved above.
+            contract["requested_max_txs"] = max_txs or int(
+                (existing or {}).get("requested_max_txs") or 0
+            )
             contract.update(meta)
             contract["status"] = "processing"
             repo.save_contract(contract)
@@ -77,6 +89,32 @@ async def process_contract(
             # straight from storage below. (getattr: stub sources in tests need
             # not declare the attribute; absent means "downloading", the default.)
             host_backed = getattr(source, "host_backed", False)
+
+            # Optional pre-deployment history backfill (HISTORY_SOURCE set).
+            # Runs REGARDLESS of `reprocess`: reprocess means "do not re-download
+            # the primary data", while this stage is cursor-guarded (skip-fast)
+            # so a refit re-entry costs one cursor read when complete — and the
+            # refit is exactly the resume vehicle after a rate limit or deferral.
+            # Never fatal: a deferred/rate-limited backfill must not fail the
+            # onboard (the fit proceeds on the host's tip-forward data).
+            if host_backed and settings.history_enabled:
+                backfill = get_history_backfill(settings)
+                if backfill is not None:
+                    cap = int(contract["requested_max_txs"]) or settings.history_max_txs
+                    set_stage("downloading", "backfilling pre-deployment history")
+                    hist = await backfill.run(
+                        target=target,
+                        target_type=target_type,
+                        max_txs=cap,
+                        progress=lambda m: set_stage("downloading", m),
+                    )
+                    hist_status = hist.status
+                    note = f" — {hist.note}" if hist.note else ""
+                    set_stage(
+                        "downloading",
+                        f"history: {hist.status} ({hist.txs_ingested} txs){note}",
+                    )
+
             if not reprocess and not host_backed:
 
                 def on_download(msg: str) -> None:
@@ -110,9 +148,19 @@ async def process_contract(
         result: dict[str, Any] = {"target": target, "target_type": target_type, "tx_count": n}
 
         if n < _MIN_TXS_FOR_ANALYSIS:
-            contract.update(status="done", tx_count=n)
+            # With history still outstanding (pending host job, deferred, or a
+            # rate-limited walk), a `done` row would dead-end: a model-less done
+            # contract is never re-onboarded by the feed (drift needs a model).
+            # Stay `pending` so the feed retries once the history lands.
+            history_outstanding = hist_status in ("pending", "deferred", "rate_limited")
+            contract.update(status="pending" if history_outstanding else "done", tx_count=n)
             repo.save_contract(contract)
-            set_stage("done", f"only {n} transaction(s); skipped clustering/anomaly", txs_done=n)
+            suffix = "; history backfill outstanding, will retry" if history_outstanding else ""
+            set_stage(
+                "done",
+                f"only {n} transaction(s); skipped clustering/anomaly{suffix}",
+                txs_done=n,
+            )
             return {**result, "note": "too few transactions for clustering/anomaly"}
 
         eps, min_samples = _recommended_params(evaluate(shape_ci))

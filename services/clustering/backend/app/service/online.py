@@ -29,6 +29,7 @@ from app.service._common import (
     _raise_if_incomplete,
     _safe_error,
 )
+from app.service.history import get_history_backfill, history_incomplete
 from app.service.verdicts import VERDICT_ANOMALY, VERDICT_MALICIOUS, compute_verdicts
 from app.sources.factory import get_source
 from app.storage.protocol import Repo
@@ -220,6 +221,29 @@ async def update_contract(
             # cursor saved (done=False); don't classify a partial catch-up or mark
             # the job done — fail so a re-run resumes and classifies everything.
             _raise_if_incomplete(ingest_result)
+
+        # Resume an outstanding pre-deployment history backfill before scoring:
+        # the classify tick is the retry loop for a rate-limited walk, a pending
+        # host-side kupo job, or an earlier deferral (run() is skip-fast when
+        # complete — one cursor read — and never raises; see service/history.py).
+        if host_backed and settings.history_enabled and history_incomplete(settings, target):
+            backfill = get_history_backfill(settings)
+            if backfill is not None:
+                row = repo.get_contract(target)
+                cap = (
+                    int((row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
+                )
+                set_stage("downloading", "resuming pre-deployment history backfill")
+                hist = await backfill.run(
+                    target=target,
+                    target_type=target_type,
+                    max_txs=cap,
+                    progress=lambda m: set_stage("downloading", m),
+                )
+                if hist.status != "skipped":
+                    set_stage(
+                        "downloading", f"history: {hist.status} ({hist.txs_ingested} txs)"
+                    )
 
         set_stage("scoring", "classifying new transactions")
         out = classify_new_transactions(repo, target)
