@@ -102,10 +102,13 @@ class _IngestMixin(_RepoBase):
         last_tx_hash: str,
         txs_seen: int,
         done: bool,
+        source: str = "",
     ) -> None:
         """Persist the source-owned resume cursor. ``source`` records which
-        CHAIN_SOURCE produced it so a cursor is never replayed into a different
-        provider; ``last_page`` is a dead legacy column (left at 0 on new rows)."""
+        source produced it (``ChainSource.name``) so a cursor is never replayed
+        into a different provider; empty falls back to the primary CHAIN_SOURCE
+        for callers predating the secondary-history-source split. ``last_page``
+        is a dead legacy column (left at 0 on new rows)."""
         self._insert(
             "ingest_cursor",
             ["target", "target_type", "cursor", "source", "last_tx_hash", "txs_seen", "done"],
@@ -114,7 +117,7 @@ class _IngestMixin(_RepoBase):
                     target,
                     target_type,
                     cursor,
-                    self.settings.chain_source,
+                    source or self.settings.chain_source,
                     last_tx_hash,
                     txs_seen,
                     int(done),
@@ -219,8 +222,27 @@ class _IngestMixin(_RepoBase):
         )
 
     def count_transactions(self, target: str) -> int:
+        return self._local_tx_count(target)
+
+    def _local_tx_count(self, target: str) -> int:
+        """Rows in the ENGINE's own transactions table for ``target``. Shared by
+        ``count_transactions`` (on the base repo every row is local) and
+        ``history_tx_count`` (on multi-source repos only this subset is)."""
         rows = self.client.query(
             f"SELECT count() FROM {self._db}.transactions FINAL WHERE target = {{t:String}}",
             parameters={"t": target},
         ).result_rows
         return int(rows[0][0]) if rows else 0
+
+    def history_tx_count(self, target: str) -> int:
+        """Locally-stored (backfilled/downloaded) rows for ``target``. Equals
+        count_transactions on the base repo; host-backed repos return 0 and the
+        hybrid repo returns just the local-history subset."""
+        return self._local_tx_count(target)
+
+    def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
+        """The subset of ``tx_hashes`` the HOST TMS knows (bounds what the
+        publish reconciliation may project host-side). A standalone deployment
+        has no host boundary, so every hash passes; the host-backed repos
+        override this with a real membership query."""
+        return set(tx_hashes)

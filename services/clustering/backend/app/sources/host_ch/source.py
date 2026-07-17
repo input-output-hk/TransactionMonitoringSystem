@@ -71,6 +71,10 @@ class HostChainSource:
     # hard error here). The pipeline keys off this to skip the download path.
     host_backed = True
 
+    # Cursor tag (see ChainSource.name). Host-backed repos no-op cursors, so this
+    # is never written today; declared for protocol completeness.
+    name = "host_ch"
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._host_db = settings.host_clickhouse_db

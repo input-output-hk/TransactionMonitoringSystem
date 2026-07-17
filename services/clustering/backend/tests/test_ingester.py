@@ -58,9 +58,16 @@ class FakeRepo(FakeRepoBase):
         last_tx_hash: str,
         txs_seen: int,
         done: bool,
+        source: str = "",
     ) -> None:
         self.cursors.append(
-            {"cursor": cursor, "last_tx_hash": last_tx_hash, "txs_seen": txs_seen, "done": done}
+            {
+                "cursor": cursor,
+                "last_tx_hash": last_tx_hash,
+                "txs_seen": txs_seen,
+                "done": done,
+                "source": source,
+            }
         )
 
 
@@ -72,15 +79,16 @@ def _cursor_row(
     done: int,
     target_type: str = "address",
     last_tx_hash: str = "",
+    source: str | None = None,
 ) -> dict[str, Any]:
     """A stored ingest_cursor row, as get_cursor() returns it."""
     return {
         "target": target,
         "target_type": target_type,
         "cursor": cursor,
-        # Match the active source so the cursor isn't treated as foreign and
-        # re-walked (see ingester._plan_walk's CHAIN_SOURCE check).
-        "source": get_settings().chain_source,
+        # Default to the active source so the cursor isn't treated as foreign
+        # and re-walked (see ingester._plan_walk's source-name check).
+        "source": get_settings().chain_source if source is None else source,
         "last_tx_hash": last_tx_hash,
         "txs_seen": txs_seen,
         "done": done,
@@ -491,3 +499,81 @@ def test_discovery_max_items_address_resume_uses_remaining() -> None:
         )
         == 10
     )
+
+
+class _NamedSource(InMemoryChainSource):
+    """The in-memory source posing as a Blockfrost adapter: pins that the cursor
+    tag comes from the SOURCE's name, not the global CHAIN_SOURCE (the secondary
+    history source runs Blockfrost under a host_ch primary)."""
+
+    name = "blockfrost"
+
+
+def _named_source(*, page_size: int = 2) -> _NamedSource:
+    return _NamedSource(
+        address_txs=ADDRESS_TXS,
+        policy_assets=POLICY_ASSETS,
+        asset_txs=ASSET_TXS,
+        page_size=page_size,
+    )
+
+
+async def test_cursor_tagged_with_source_name() -> None:
+    repo = FakeRepo()
+    async with _named_source() as source:
+        result = await ingest(repo=repo, source=source, address="addr1demo")
+    assert result.status == "completed"
+    assert repo.cursors, "expected cursor writes"
+    assert all(c["source"] == "blockfrost" for c in repo.cursors)
+
+
+async def test_unnamed_source_cursor_falls_back_to_chain_source() -> None:
+    # A bare source without a name keeps today's behavior: the cursor is tagged
+    # with the primary CHAIN_SOURCE.
+    repo = FakeRepo()
+    async with _source() as source:
+        await ingest(repo=repo, source=source, address="addr1demo")
+    assert repo.cursors
+    assert all(c["source"] == get_settings().chain_source for c in repo.cursors)
+
+
+async def test_foreign_cursor_ignored_by_source_name() -> None:
+    # A cursor written by a different source is garbage to this one: the walk
+    # must restart from the beginning instead of resuming, and re-ingest all txs.
+    repo = FakeRepo()
+    repo._cursor = _cursor_row(
+        "addr1demo", "page:1", txs_seen=2, done=0, source="host_ch"
+    )
+    async with _named_source() as source:
+        result = await ingest(repo=repo, source=source, address="addr1demo")
+    assert result.status == "completed"
+    assert {t.tx_hash for t in repo.txs} == set(TX_HASHES)
+    assert repo.cursors[-1]["source"] == "blockfrost"
+
+
+async def test_recent_with_to_block_allowed() -> None:
+    # recent + to_block = "the most recent N txs at or below the bound" (the
+    # history backfill's shape). addr1recent heights: g1:10 g2:20 g3:30 n1:40
+    # n2:50; bound 30 + recent 2 anchors at 20 and ingests exactly [g2, g3].
+    repo = FakeRepo()
+    async with _source() as source:
+        result = await ingest(
+            repo=repo, source=source, address="addr1recent", max_txs=2, recent=True, to_block="30"
+        )
+    assert result.status in ("completed", "max_reached")
+    assert [t.tx_hash for t in repo.txs] == ["g2", "g3"]
+
+
+async def test_recent_with_from_block_still_rejected() -> None:
+    # from_block fights the recent window's own anchor for the lower bound.
+    repo = FakeRepo()
+    async with _source() as source:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            await ingest(
+                repo=repo,
+                source=source,
+                address="addr1recent",
+                max_txs=2,
+                recent=True,
+                from_block="10",
+            )

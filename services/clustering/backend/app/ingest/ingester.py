@@ -147,21 +147,27 @@ class _WalkPlan:
 
 
 def _plan_walk(
-    repo: Repo, target: str, *, resume: bool, from_tip: bool, progress: ProgressFn
+    repo: Repo,
+    target: str,
+    *,
+    resume: bool,
+    from_tip: bool,
+    progress: ProgressFn,
+    source_name: str,
 ) -> _WalkPlan:
     """Resolve the stored cursor into a walk plan.
 
     Provider-neutral logic only: what the cursor MEANS is the source's business.
-    A cursor written by a different CHAIN_SOURCE is treated as absent (a page-based
-    adapter's page number is garbage to a node adapter; restarting is safe because
-    inserts are idempotent)."""
+    A cursor written by a different source (matched on ``ChainSource.name``, not
+    the global CHAIN_SOURCE, so a secondary history source keeps its own cursors)
+    is treated as absent (a page-based adapter's page number is garbage to a node
+    adapter; restarting is safe because inserts are idempotent)."""
     mode: DiscoveryMode
     cursor_row = repo.get_cursor(target) if resume else None
-    chain_source = get_settings().chain_source
-    if cursor_row and cursor_row.get("source") and cursor_row["source"] != chain_source:
+    if cursor_row and cursor_row.get("source") and cursor_row["source"] != source_name:
         progress(
             f"ignoring cursor from source {cursor_row['source']!r} "
-            f"(current CHAIN_SOURCE is {chain_source!r}); re-walking."
+            f"(current source is {source_name!r}); re-walking."
         )
         cursor_row = None
 
@@ -197,6 +203,7 @@ class _CursorTracker:
     mode: DiscoveryMode
     stored_cursor: str | None
     seen: int
+    source_name: str
     completed_cursor: str | None = None
 
     def save(self, *, cursor: str, done: bool, last_tx_hash: str = "") -> None:
@@ -207,6 +214,7 @@ class _CursorTracker:
             last_tx_hash=last_tx_hash,
             txs_seen=self.seen,
             done=done,
+            source=self.source_name,
         )
 
     def page_done(self, cursor: str, *, seen: int, last_tx_hash: str) -> None:
@@ -384,8 +392,12 @@ async def ingest(
 ) -> IngestResult:
     if (address is None) == (policy_id is None):
         raise ValueError("Provide exactly one of address or policy_id.")
-    if recent and (from_block is not None or to_block is not None):
-        raise ValueError("recent is mutually exclusive with from_block/to_block.")
+    # recent + to_block is a valid combination: "the most recent N txs at or
+    # below to_block" (the history backfill's shape — see service/history.py).
+    # recent + from_block stays rejected: both want to be the walk's lower
+    # bound, and the recent window computes its own anchor.
+    if recent and from_block is not None:
+        raise ValueError("recent is mutually exclusive with from_block.")
 
     if batch_size is None:
         batch_size = get_settings().ingest_batch_size
@@ -396,7 +408,15 @@ async def ingest(
 
     window = _resolve_window(address=address, recent=recent, max_txs=max_txs, progress=progress)
 
-    plan = _plan_walk(repo, target, resume=resume, from_tip=from_tip, progress=progress)
+    # The cursor tag comes from the source itself, not the global CHAIN_SOURCE:
+    # a history walk can run a Blockfrost source under a host_ch primary, and its
+    # cursor must round-trip to that same source. getattr keeps bare test stubs
+    # working (same convention as ``host_backed`` in the pipeline).
+    source_name = getattr(source, "name", "") or get_settings().chain_source
+
+    plan = _plan_walk(
+        repo, target, resume=resume, from_tip=from_tip, progress=progress, source_name=source_name
+    )
 
     remaining = None if max_txs is None else max(0, max_txs - plan.seen)
     if remaining == 0:
@@ -411,6 +431,7 @@ async def ingest(
         mode=plan.mode,
         stored_cursor=plan.stored_cursor,
         seen=plan.seen,
+        source_name=source_name,
     )
 
     page_max_items = _discovery_max_items(
