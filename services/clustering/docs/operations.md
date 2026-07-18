@@ -79,6 +79,14 @@ Operational behavior worth knowing:
   the cap means complete at that cap, resumable if the cap is raised);
   `source = 'kupo'` with `done = 0` means the host job is still running (or
   the trigger will be re-checked next tick).
+- Raising the cap re-opens work differently by marker state. A paused walk
+  (`done = 0` with `txs_seen` at the cap) resumes automatically on the next
+  classify tick once the effective cap rises: a higher per-contract value, or
+  a raised `CLUSTERING_HISTORY_MAX_TXS` for contracts without an override. A
+  settled marker (`done = 1`, landed or gave-up) is never retried by the tick;
+  it re-opens only when a job re-enters the history stage, that is a
+  re-onboard with a higher "History txs", a reprocess, or the next
+  drift-triggered refit.
 - A kupo backfill that keeps failing host-side gives up after a bounded number
   of triggers: the contract detail then reports `history_status: "failed"`
   (the marker cursor carries a `;gave_up` flag) and a WARN names the address in
