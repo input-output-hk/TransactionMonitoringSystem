@@ -9,9 +9,9 @@ bound, and the source-tagged ``ingest_cursor`` round trip. A fake client
 cannot catch server-side rejection of any of them.
 
 The local arm is seeded through the module's own insert path under a
-throwaway UUID target; the host arm stays empty (reads filter on the
-``livedbtest`` network), which still forces the server to parse, type-unify
-and execute the full union text.
+throwaway UUID target; the host arm stays empty (reads filter on this tier's
+own network namespace, which nothing else ever writes), which still forces
+the server to parse, type-unify and execute the full union text.
 """
 
 from __future__ import annotations

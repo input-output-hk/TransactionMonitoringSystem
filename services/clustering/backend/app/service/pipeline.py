@@ -21,7 +21,7 @@ from app.service._common import (
     load_clustering_input,
 )
 from app.service.analysis import _cluster_ci, _detect_ci
-from app.service.history import get_history_backfill, resolve_metadata
+from app.service.history import get_history_backfill, history_cap, resolve_metadata
 from app.sources.factory import get_source
 from app.storage.protocol import Repo
 
@@ -100,7 +100,7 @@ async def process_contract(
             if host_backed and settings.history_enabled:
                 backfill = get_history_backfill(settings)
                 if backfill is not None:
-                    cap = int(contract["requested_max_txs"]) or settings.history_max_txs
+                    cap = history_cap(contract, settings)
                     set_stage("downloading", "backfilling pre-deployment history")
                     hist = await backfill.run(
                         target=target,

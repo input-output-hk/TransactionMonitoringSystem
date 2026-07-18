@@ -9,6 +9,7 @@ docs/online-classification-design.md. Shape feature set only for now.
 from __future__ import annotations
 
 import logging
+from itertools import batched
 from typing import Any
 
 from app.clustering.model import (
@@ -29,7 +30,7 @@ from app.service._common import (
     _raise_if_incomplete,
     _safe_error,
 )
-from app.service.history import get_history_backfill, history_incomplete
+from app.service.history import get_history_backfill, history_cap, history_incomplete
 from app.service.verdicts import VERDICT_ANOMALY, VERDICT_MALICIOUS, compute_verdicts
 from app.sources.factory import get_source
 from app.storage.protocol import Repo
@@ -149,9 +150,8 @@ def classify_new_transactions(repo: Repo, target: str) -> dict[str, Any]:
     n_flagged = 0
     # Score in chunks so the per-fetch IN(...) array and in-memory matrix stay
     # bounded when a contract has a large backlog of unclassified transactions.
-    for start in range(0, len(new_hashes), _CLASSIFY_BATCH):
-        chunk = new_hashes[start : start + _CLASSIFY_BATCH]
-        classifications = score_shape(model, repo.fetch_shape_features_for(target, chunk))
+    for chunk in batched(new_hashes, _CLASSIFY_BATCH, strict=False):
+        classifications = score_shape(model, repo.fetch_shape_features_for(target, list(chunk)))
         repo.save_tx_classifications(
             [
                 (
@@ -233,7 +233,7 @@ async def update_contract(
         # automatically on the next tick.
         if host_backed and settings.history_enabled:
             row = repo.get_contract(target)
-            cap = int((row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
+            cap = history_cap(row, settings)
             if history_incomplete(settings, target, cap):
                 backfill = get_history_backfill(settings)
                 if backfill is not None:

@@ -53,8 +53,7 @@ class HybridHistoryRepo(HostBackedRepo):
             SELECT tx_hash FROM (
                 SELECT tx_hash, max(s) AS s2 FROM (
                     SELECT toString(tx_hash) AS tx_hash, max(slot) AS s
-                    FROM {self._host_db}.address_transactions
-                    WHERE network = {{net:String}} AND address = {{tgt:String}}
+                    FROM {self._host_addr_index()}
                     GROUP BY tx_hash
                     UNION ALL
                     SELECT toString(tx_hash) AS tx_hash, max(slot) AS s
@@ -99,9 +98,7 @@ class HybridHistoryRepo(HostBackedRepo):
             WHERE target = {{tgt:String}}
               AND toString(tx_hash) IN {hashes_expr}
               AND toString(tx_hash) NOT IN (
-                  SELECT toString(tx_hash)
-                  FROM {self._host_db}.address_transactions
-                  WHERE network = {{net:String}} AND address = {{tgt:String}}
+                  SELECT toString(tx_hash) FROM {self._host_addr_index()}
               )
         )"""
 

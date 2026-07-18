@@ -33,6 +33,7 @@ downloads).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import batched
 from typing import Any
 
 import pandas as pd
@@ -56,6 +57,17 @@ class HostBackedRepo(ClickHouseRepo):
 
     # --- target -> windowed tx_hash subquery ----------------------------------
 
+    def _host_addr_index(self) -> str:
+        """FROM/WHERE core of "the host's address-index rows for the watched
+        target": the one scoping predicate the window reads, the hybrid's host
+        arms and the publish bound all share, kept in one place so the sites
+        cannot drift apart. Callers prepend their own projection and may append
+        further AND clauses; every site binds ``{net}``/``{tgt}``."""
+        return (
+            f"{self._host_db}.address_transactions "
+            "WHERE network = {net:String} AND address = {tgt:String}"
+        )
+
     def _hashes_expr(self) -> str:
         """An in-SQL subquery yielding the most recent ``CLUSTERING_WINDOW_TXS``
         distinct tx_hashes that touched the watched address ``{tgt}``, newest
@@ -66,8 +78,7 @@ class HostBackedRepo(ClickHouseRepo):
         return f"""(
             SELECT tx_hash FROM (
                 SELECT tx_hash, max(slot) AS s
-                FROM {self._host_db}.address_transactions
-                WHERE network = {{net:String}} AND address = {{tgt:String}}
+                FROM {self._host_addr_index()}
                 GROUP BY tx_hash ORDER BY s DESC {limit}
             )
         )"""
@@ -257,15 +268,11 @@ class HostBackedRepo(ClickHouseRepo):
         tx is never suppressed (recall first), a host-unknown one never leaks
         into the host-facing projection. Chunked so the IN array stays bounded."""
         found: set[str] = set()
-        ordered = sorted(tx_hashes)
-        for start in range(0, len(ordered), self._HOST_MEMBERSHIP_CHUNK):
-            chunk = ordered[start : start + self._HOST_MEMBERSHIP_CHUNK]
+        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
             rows = self.client.query(
-                f"SELECT DISTINCT toString(tx_hash) "
-                f"FROM {self._host_db}.address_transactions "
-                "WHERE network = {net:String} AND address = {tgt:String} "
+                f"SELECT DISTINCT toString(tx_hash) FROM {self._host_addr_index()} "
                 "AND toString(tx_hash) IN {hs:Array(String)}",
-                parameters={"net": self._network, "tgt": target, "hs": chunk},
+                parameters={"net": self._network, "tgt": target, "hs": list(chunk)},
             ).result_rows
             found.update(str(r[0]) for r in rows)
         return found

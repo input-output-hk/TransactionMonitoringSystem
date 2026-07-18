@@ -14,8 +14,8 @@ from the normal ``CLICKHOUSE_*`` environment (the repo docker-compose defaults
 apply otherwise), and both databases must exist with their schemas applied —
 ``tms_clustering`` (the module's init SQL) and ``tms_analytics`` (the host's).
 
-Everything these tests write is scoped to a throwaway UUID target and the
-``livedbtest`` network namespace, so pointing them at a dev database does not
+Everything these tests write is scoped to a throwaway UUID target and this
+tier's own network namespace, so pointing them at a dev database does not
 pollute operator-visible data (every production read path is target- or
 network-scoped).
 """
@@ -26,8 +26,12 @@ _LIVE_DB_ENV = "TMS_LIVE_DB_TESTS"
 
 # Namespace for the host-side (network-scoped) reads; nothing is ever written
 # to the host tables, but the synthetic network keeps even the reads disjoint
-# from real data.
-LIVE_NETWORK = "livedbtest"
+# from real data. Deliberately DISTINCT from the host tier's "livedbtest":
+# both tiers run in the same CI job against the same ClickHouse, the host tier
+# writes tall transactions under its namespace, and the boundary aggregates
+# are network-scoped but address-independent — sharing the name would let
+# host-tier rows establish a tip and flip this tier's boundary assertion.
+LIVE_NETWORK = "livedbtest_clustering"
 
 if not os.environ.get(_LIVE_DB_ENV):
     collect_ignore_glob = ["test_*.py"]

@@ -15,13 +15,13 @@ before its first fit:
 
 Everything in this module is deliberately NON-FATAL to the fit: a deferred or
 rate-limited backfill returns a status, never raises, because the fit can and
-should proceed on the host's tip-forward data alone. Both flavors enforce this
-at the ``run()`` boundary itself (any unexpected exception — a ClickHouse
-hiccup in the boundary aggregates, a non-JSON host reply — degrades to
-``deferred``), so a backfill bug can never fail the onboarding job that
-carries it. Resume is cursor-driven: ``run()`` is cheap when there is nothing
-to do (one cursor read), so the online classify tick calls it every pass until
-the history completes.
+should proceed on the host's tip-forward data alone. The shared flavor shell
+(``_HistoryFlavor.run``) enforces this at the boundary itself — any unexpected
+exception (a ClickHouse hiccup in the boundary aggregates, a non-JSON host
+reply) degrades to ``deferred`` — so a backfill bug can never fail the
+onboarding job that carries it. Resume is cursor-driven: ``run()`` is cheap
+when there is nothing to do (one cursor read), so the online classify tick
+calls it every pass until the history completes.
 
 THE IMMUTABILITY BOUNDARY (the invariant everything else rests on): backfilled
 rows are only persisted strictly BELOW ``least(target's earliest host slot,
@@ -119,6 +119,18 @@ def get_history_backfill(settings: Settings) -> HistoryBackfill | None:
     if settings.history_source == "kupo":
         return KupoHistory(settings)
     return None
+
+
+def history_cap(contract_row: dict[str, Any] | None, settings: Settings) -> int:
+    """The contract's effective history depth: its persisted per-contract cap
+    (``requested_max_txs``), falling back to the configured default when the
+    row carries none — 0 or absent, which is what host-backed feed onboarding
+    leaves. The single definition of this resolution: the pipeline stage, the
+    online resume gate and the API detail read must all agree on it, or the
+    completeness checks drift from the walk they gate. The ceiling clamp is
+    applied later by the flavor's ``run()``, so callers pass this straight
+    through as ``max_txs``."""
+    return int((contract_row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
 
 
 def host_history_boundary(settings: Settings, target: str) -> HostBoundary | None:
@@ -226,11 +238,23 @@ class _SlotCappedRepo:
         self._repo.insert_assets([r for r in rows if str(r.tx_hash) not in self._dropped])
 
 
-class BlockfrostHistory:
-    """Blockfrost flavor: download the most recent N txs strictly below the
-    boundary into the engine's own raw tables, via a directly-constructed base
-    ``ClickHouseRepo`` — the request/worker repo is host-backed with no-op
-    writes by design, and this is the one path that must write."""
+# Returned by both flavors when the immutability boundary cannot be computed
+# yet; one definition so the two retry paths cannot drift apart.
+_BOUNDARY_DEFERRED_NOTE = (
+    "host tip not established (or younger than the rollback safety window); retrying on later ticks"
+)
+
+
+class _HistoryFlavor:
+    """Shared shell of a history-backfill flavor.
+
+    The pieces every flavor must get right live here once: the address-only
+    guard (there is no host policy index to backfill from), the per-contract
+    ceiling clamp, and the never-raise enforcement — an unexpected exception
+    anywhere in a flavor (cursor read, boundary aggregates, host-API parsing,
+    repo construction) must degrade to a deferred attempt, never fail the
+    onboarding/classify job that carries the stage. Subclasses implement only
+    the flavor-specific ``_run`` and receive the already-clamped ``cap``."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -242,22 +266,32 @@ class BlockfrostHistory:
             return HistoryResult(
                 "deferred", 0, "history backfill is address-only (no host policy index)"
             )
-        # The never-raise contract is enforced HERE, not by auditing every call
-        # below: an unexpected exception (cursor read, boundary aggregates,
-        # repo construction) must degrade to a deferred attempt, never fail the
-        # onboarding/classify job that carries this stage.
         try:
             return await self._run(
-                target=target, target_type=target_type, max_txs=max_txs, progress=progress
+                target=target,
+                target_type=target_type,
+                cap=min(int(max_txs), self._settings.history_max_txs_ceiling),
+                progress=progress,
             )
         except Exception:
             logger.exception("history backfill failed for %s", target[:24])
             return HistoryResult("deferred", 0, "history source error; see server logs")
 
     async def _run(
-        self, *, target: str, target_type: str, max_txs: int, progress: ProgressFn
+        self, *, target: str, target_type: str, cap: int, progress: ProgressFn
     ) -> HistoryResult:
-        cap = min(int(max_txs), self._settings.history_max_txs_ceiling)
+        raise NotImplementedError
+
+
+class BlockfrostHistory(_HistoryFlavor):
+    """Blockfrost flavor: download the most recent N txs strictly below the
+    boundary into the engine's own raw tables, via a directly-constructed base
+    ``ClickHouseRepo`` — the request/worker repo is host-backed with no-op
+    writes by design, and this is the one path that must write."""
+
+    async def _run(
+        self, *, target: str, target_type: str, cap: int, progress: ProgressFn
+    ) -> HistoryResult:
         repo = ClickHouseRepo(self._settings)
         try:
             # Skip-fast FIRST: the common already-complete case must cost one
@@ -276,12 +310,7 @@ class BlockfrostHistory:
 
             boundary = host_history_boundary(self._settings, target)
             if boundary is None:
-                return HistoryResult(
-                    "deferred",
-                    0,
-                    "host tip not established (or younger than the rollback safety "
-                    "window); retrying on later ticks",
-                )
+                return HistoryResult("deferred", 0, _BOUNDARY_DEFERRED_NOTE)
             # Window-full pre-flight: once the host rows ALONE fill the rolling
             # window, downloaded history would be evicted from every read —
             # don't spend provider quota on permanently invisible rows. Fires
@@ -389,7 +418,7 @@ def _kupo_gave_up(cur: dict[str, Any] | None) -> bool:
     return isinstance(raw, str) and raw.endswith(_KUPO_GAVE_UP_SUFFIX)
 
 
-class KupoHistory:
+class KupoHistory(_HistoryFlavor):
     """Kupo flavor: trigger the HOST's own backfill and get out of the way.
 
     Trigger-and-continue: the host job can run up to an hour and the sidecar
@@ -404,31 +433,9 @@ class KupoHistory:
     ``_KUPO_MAX_TRIGGERS``; a lost host job (in-memory store, host restart →
     404) re-POSTs the same way."""
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-
-    async def run(
-        self, *, target: str, target_type: str, max_txs: int, progress: ProgressFn
-    ) -> HistoryResult:
-        if target_type != "address":
-            return HistoryResult(
-                "deferred", 0, "history backfill is address-only (no host policy index)"
-            )
-        # Same never-raise enforcement as the blockfrost flavor: cursor reads,
-        # boundary aggregates and host-API response parsing may all fail in
-        # unexpected ways, and none of them may fail the carrying job.
-        try:
-            return await self._run(
-                target=target, target_type=target_type, max_txs=max_txs, progress=progress
-            )
-        except Exception:
-            logger.exception("history backfill failed for %s", target[:24])
-            return HistoryResult("deferred", 0, "history source error; see server logs")
-
     async def _run(
-        self, *, target: str, target_type: str, max_txs: int, progress: ProgressFn
+        self, *, target: str, target_type: str, cap: int, progress: ProgressFn
     ) -> HistoryResult:
-        cap = min(int(max_txs), self._settings.history_max_txs_ceiling)
         repo = ClickHouseRepo(self._settings)
         try:
             cur = repo.get_cursor(target)
@@ -488,12 +495,7 @@ class KupoHistory:
 
             boundary = host_history_boundary(self._settings, target)
             if boundary is None:
-                return HistoryResult(
-                    "deferred",
-                    0,
-                    "host tip not established (or younger than the rollback safety "
-                    "window); retrying on later ticks",
-                )
+                return HistoryResult("deferred", 0, _BOUNDARY_DEFERRED_NOTE)
             return await self._trigger(
                 repo, target, target_type, cap, boundary, progress, attempts=attempts
             )

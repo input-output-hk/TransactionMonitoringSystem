@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from itertools import batched
 from typing import Any
 
 import clickhouse_connect
@@ -194,12 +195,8 @@ class _RepoBase:
     def _insert(self, table: str, columns: list[str], data: list[list[Any]]) -> None:
         """Batched insert into ``{self._db}.{table}``, chunked at ``_INSERT_CHUNK``
         rows; a no-op when ``data`` is empty."""
-        for start in range(0, len(data), self._INSERT_CHUNK):
-            self.client.insert(
-                f"{self._db}.{table}",
-                data[start : start + self._INSERT_CHUNK],
-                column_names=columns,
-            )
+        for chunk in batched(data, self._INSERT_CHUNK, strict=False):
+            self.client.insert(f"{self._db}.{table}", list(chunk), column_names=columns)
 
     def _insert_records(self, table: str, columns: list[str], records: Sequence[Any]) -> None:
         """Insert dataclass records, projecting each onto ``columns`` by attribute."""
