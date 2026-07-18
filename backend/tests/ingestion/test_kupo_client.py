@@ -177,8 +177,6 @@ async def test_created_before_forwarded_and_strictly_filtered() -> None:
         assert request.url.params.get("created_before") == "110"
         return httpx.Response(200, json=matches)
 
-    points = await _client(handler).address_tx_points(
-        "addr_test1xyz", created_before_slot=110
-    )
+    points = await _client(handler).address_tx_points("addr_test1xyz", created_before_slot=110)
     # bb (slot 120) is dropped by the client-side strict filter.
     assert [p.tx_hash for p in points] == ["aa", "cc"]
