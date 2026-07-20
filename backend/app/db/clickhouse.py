@@ -599,17 +599,46 @@ def insert_asset_policy_first_seen(rows: list[tuple]):
     )
 
 
+# In-process cache for policy first-seen lookups (the sibling of
+# _baseline_cache for the other per-tx scoring-path lookup). Only POSITIVE
+# results are stored: a known first-slot is immutable-downward (the backfill
+# can lower it, never raise it), so a cached value is always >= the true
+# minimum and can only under-state age, which fails toward detection; no TTL
+# is needed. Misses are re-queried every call, so a policy that becomes known
+# (ingestion/backfill) is picked up immediately rather than negative-cached.
+# Established collections recur across transactions and are served from here.
+_policy_first_seen_cache: dict[tuple[str, str], int] = {}
+_policy_first_seen_cache_lock = threading.Lock()
+
+
 def get_policies_first_seen(network: str, policy_ids: list[str]) -> dict[str, int]:
     """Batched ``policy_id -> first-seen slot`` lookup for policy-age signals.
 
-    One IN query per scored tx (an 80-policy dust bundle must not become 80
-    point queries). Aggregates min() at read time so unmerged duplicate
-    parts never surface a later sighting. Policies with no row are absent
-    from the result; callers treat absence as "age unknown" and fail toward
-    detection (no cap).
+    Cache-first: known policies (the recurring established-collection case)
+    are served from the in-process cache; only the misses hit ClickHouse, in
+    a single IN query (an 80-policy dust bundle must not become 80 point
+    queries). Aggregates min() at read time so unmerged duplicate parts never
+    surface a later sighting. Policies with no row are absent from the result;
+    callers treat absence as "age unknown" and fail toward detection (no cap).
     """
     if not policy_ids:
         return {}
+
+    cache_on = settings.POLICY_FIRST_SEEN_CACHE_MAX_ENTRIES > 0
+    result: dict[str, int] = {}
+    misses = list(policy_ids)
+    if cache_on:
+        misses = []
+        with _policy_first_seen_cache_lock:
+            for policy_id in policy_ids:
+                hit = _policy_first_seen_cache.get((network, policy_id))
+                if hit is not None:
+                    result[policy_id] = hit
+                else:
+                    misses.append(policy_id)
+        if not misses:
+            return result
+
     rows = _get_client().execute(
         """
         SELECT policy_id, min(first_slot)
@@ -617,9 +646,19 @@ def get_policies_first_seen(network: str, policy_ids: list[str]) -> dict[str, in
         WHERE network = %(network)s AND policy_id IN %(policy_ids)s
         GROUP BY policy_id
         """,
-        {"network": network, "policy_ids": list(policy_ids)},
+        {"network": network, "policy_ids": misses},
     )
-    return {policy_id: int(first_slot) for policy_id, first_slot in rows}
+    found = {policy_id: int(first_slot) for policy_id, first_slot in rows}
+    if cache_on and found:
+        with _policy_first_seen_cache_lock:
+            if len(_policy_first_seen_cache) >= settings.POLICY_FIRST_SEEN_CACHE_MAX_ENTRIES:
+                # Blunt overflow policy, same as _baseline_cache: drop all and
+                # let the hot policies refill.
+                _policy_first_seen_cache.clear()
+            for policy_id, first_slot in found.items():
+                _policy_first_seen_cache[(network, policy_id)] = first_slot
+    result.update(found)
+    return result
 
 
 # ---------------------------------------------------------------------------

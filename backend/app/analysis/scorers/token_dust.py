@@ -28,6 +28,7 @@ from app.analysis.normalise import (
     BAND_MODERATE_MAX,
     normalise,
     normalise_inverted,
+    resolve_policies_first_seen,
 )
 from app.analysis.scorer_config import (
     fraction_of_limit as _fraction_of_limit,
@@ -47,7 +48,6 @@ from app.analysis.scorers.base import (
     finalise_score,
     reduce_to_best,
 )
-from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ class TokenDustScorer(BaseScorer):
         if not bundle_policies or not _ESTABLISHED_ENABLED:
             return {}, mint_policies
         try:
-            first_seen_map = clickhouse.get_policies_first_seen(network, sorted(bundle_policies))
+            first_seen_map = resolve_policies_first_seen(network, sorted(bundle_policies))
         except Exception as e:
             logger.warning("policy first-seen lookup failed (no age cap applied): %s", e)
             return {}, mint_policies

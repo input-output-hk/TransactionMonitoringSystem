@@ -462,6 +462,19 @@ class TestNetNewHolderTargeting:
         )
         assert result.score >= BAND_HIGH_THRESHOLD
 
+    def test_same_url_in_metadata_and_self_change_asset_name_not_gated(self, scorer):
+        # Carrier-collision guard: the SAME URL string appears in a metadata
+        # message (a real delivery to victims) AND as a self-change asset
+        # name. The gate must recognise the metadata carrier and keep the
+        # bonuses; a string-difference against asset_name_urls would have
+        # wrongly classified it as asset-only and suppressed a genuine
+        # metadata phishing delivery.
+        result = scorer.score(
+            self._self_change_features(metadata={"674": "claim rewards Cniper.xyz"})
+        )
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
+
     def test_require_delivery_kill_switch(self, scorer, monkeypatch):
         # Config kill switch restores the pre-gate behaviour wholesale.
         import app.analysis.scorers.phishing as phishing_module

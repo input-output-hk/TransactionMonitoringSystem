@@ -393,11 +393,21 @@ class PhishingScorer(BaseScorer):
         # "claim rewards at evil.xyz" message is phishing regardless of
         # token movement. Kill switch:
         # phishing.asset_name_carrier.require_delivery_for_bonuses.
-        non_asset_urls = [u for u in urls if u not in set(asset_name_urls)]
+        # "Asset names are the SOLE URL carrier" is decided from the
+        # metadata/datum carriers directly, NOT by subtracting asset_name_urls
+        # from the full set: a URL that appears in both a metadata message and
+        # a self-change asset name is still metadata-delivered and must keep
+        # its bonuses (string-differencing would have wrongly treated it as
+        # asset-only and suppressed a genuine metadata phishing delivery).
+        metadata_datum_urls = (
+            _validate_candidates(self._metadata_datum_url_candidates(features))
+            if asset_name_urls
+            else urls
+        )
         suppress_bonuses = (
             _REQUIRE_DELIVERY_FOR_BONUSES
             and bool(asset_name_urls)
-            and not non_asset_urls
+            and not metadata_datum_urls
             and url_pairs_total > 0
             and url_pairs_net_new == 0
         )
@@ -531,6 +541,26 @@ class PhishingScorer(BaseScorer):
         scheme-prefixed URLs in every carrier, then filtered through the PSL
         snapshot so bare-word matches like ``3.14`` don't survive.
         """
+        candidates = list(self._metadata_datum_url_candidates(features))
+
+        # --- Carrier 3: decoded native-asset names -----------------------
+        if _ASSET_CARRIER_ENABLED:
+            candidates.extend(self._asset_name_candidates(features))
+
+        return _validate_candidates(candidates)
+
+    def _metadata_datum_url_candidates(self, features: dict[str, Any]) -> list[str]:
+        """Un-validated URL candidates from carriers 1 and 2 only (tx-level
+        metadata labels + inline datums), excluding asset names.
+
+        Split out so the self-change bonus gate can ask "did a
+        metadata/datum carrier produce a URL?" directly, instead of
+        string-differencing the full URL set against the asset-name set: a
+        URL that happens to appear in BOTH a metadata message and a
+        self-change asset name must still count as metadata-delivered (and
+        so keep its bonuses), which the string-difference could not tell
+        apart.
+        """
         candidates: list[str] = []
 
         # --- Carrier 1: tx-level metadata labels ------------------------
@@ -562,11 +592,7 @@ class PhishingScorer(BaseScorer):
                 for decoded in _decode_datum_strings(datum):
                     candidates.extend(_url_candidates(decoded))
 
-        # --- Carrier 3: decoded native-asset names -----------------------
-        if _ASSET_CARRIER_ENABLED:
-            candidates.extend(self._asset_name_candidates(features))
-
-        return _validate_candidates(candidates)
+        return candidates
 
     def _asset_name_candidates(self, features: dict[str, Any]) -> list[str]:
         """Raw URL/domain regex hits inside decoded asset names (un-validated)."""
