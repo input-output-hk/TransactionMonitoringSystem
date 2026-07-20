@@ -277,6 +277,13 @@ class Settings(BaseSettings):
     BASELINE_CACHE_TTL_SECONDS: int = 3600
     # ~500 scripts x 8 features with generous headroom; overflow clears.
     BASELINE_CACHE_MAX_ENTRIES: int = 50_000
+    # Policy first-seen lookup cache (0 disables). Sized for the distinct
+    # policy count seen across a scoring window; only positive (known)
+    # results are cached, and a known first-slot is immutable-downward
+    # (backfill can only lower it, never raise it), so no TTL is needed:
+    # a stale entry can only under-state age, which fails toward detection.
+    # Overflow clears.
+    POLICY_FIRST_SEEN_CACHE_MAX_ENTRIES: int = 100_000
     # Token-registry refresh cadence (background task only; the scoring
     # path never fetches). Matches the registry cache TTL.
     TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS: int = 24

@@ -128,6 +128,18 @@ def resolve_baseline(
     return 0.0, 1.0, "missing"
 
 
+def resolve_policies_first_seen(network: str, policy_ids: list[str]) -> dict[str, int]:
+    """Resolve ``policy_id -> first-seen slot`` for the given policies.
+
+    The scorer-facing entry point for policy-age signals, alongside
+    :func:`resolve_baseline`: scorers reach ClickHouse-backed data through
+    this resolution layer (which owns caching and the DB dependency) rather
+    than importing ``app.db`` directly. Missing policies are omitted from the
+    result; callers treat absence as "age unknown".
+    """
+    return clickhouse.get_policies_first_seen(network, policy_ids)
+
+
 # Risk-band thresholds, exported so scorers that floor or cap their score to
 # a specific band (e.g. multiple_sat's lazy-validator floor, front_running's
 # high_band_cap) can key off the same numeric values rather than duplicating

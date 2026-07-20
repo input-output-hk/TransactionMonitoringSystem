@@ -469,16 +469,62 @@ scorers:
     # Below this, the contract carry-forward cost is negligible.
     dos_asset_min: 15
     allowlist_policies:
-      # Empty by design. The `dos_asset_min` structural discriminator
+      # Empty by default. The `dos_asset_min` structural discriminator
       # (above) caps low-asset-count bundles at the top of Moderate
       # regardless of policy, so per-policy suppression is not needed for
       # protocol multi-asset shapes (Lenfi/Aada loan offers, DEX pool
       # state, etc.). Populate only when a verified protocol's UTxOs
       # carry >= dos_asset_min distinct pairs AND require explicit
       # whitelisting; this should be rare.
-      mainnet: []
+      #
+      # Mainnet entries verified 2026-07-20: adversarial triage of the five
+      # July mainnet token_dust High alerts (Koios tx-level provenance:
+      # per-user L4VA staking-vault scripts rolling 40-50 CIP-68 NFTs,
+      # CSWAP NFT AMM pool trades, a Wayup bulk listing). Policy
+      # allowlisting is attacker-proof here because _is_allowlisted_utxo
+      # requires EVERY non-ADA policy in the bundle to be allowlisted: an
+      # attacker cannot mint dust under these policy ids, and smuggling
+      # dust alongside them un-allowlists the bundle. A prefix allowlist on
+      # these permissionless marketplace/pool scripts would instead
+      # suppress real dust deposits to them (recall loss) and is
+      # deliberately avoided.
+      #
+      # Known limitation, accepted: the CSWAP pool trades rotating
+      # collections (SpaceBudz, MallardOrder, ... observed), so unlisted
+      # collections still alert until the established_collection age cap
+      # (below) covers them.
+      mainnet:
+        - "14296258677a869366d6bb01568f31f7b2e690208739b7bcdca444b2"  # L4VA Relics of Magma: The Porta
+        - "94ec588251e710b7660dfd7765f08c87742a3012cce802897a3ebd28"  # L4VA Relics of Magma: The Vita
+        - "afa1a5285da6f5c0708c30315ef9afc2ee8b891bda171b8c25017bc5"  # Squeaker
+        - "99b750541529ba5cc684f9e1d43911c68913128d45a7004d9344343b"  # CSWAP Allies
+        - "55daa23e0e243bb4dda613c9d06a78da955f26160b13320999f912e2"  # AdaRealm Lazy Island
       preprod: []
       preview: []
+    # Established-collection band cap. The value-bloat threat model mints
+    # worthless names and forces a contract to carry them; established NFT
+    # collections moving in bulk (staking-vault rollovers, NFT AMM pools,
+    # marketplace bulk listings) produce the same mechanical shape from
+    # policies that have existed on-chain for months. When EVERY policy in
+    # the bundle was first seen at least min_policy_age_slots ago (per the
+    # asset_policy_first_seen lookup) AND nothing in the bundle is minted
+    # in this tx (an old open policy minting fresh junk names stays
+    # uncapped), the score is capped at the top of Moderate: recorded,
+    # reported, corroboration-eligible, never High-paged, NEVER suppressed.
+    # Every degraded-data path fails open to no cap: missing slot, missing
+    # any policy row, lookup error.
+    #
+    # 2_592_000 slots = 30 days of mainnet wall clock (1 slot = 1 s
+    # post-Shelley): long enough that a dust campaign cannot mint-and-fire,
+    # short enough that real collections (months to years old) all
+    # qualify. Documented residual, accepted: an attacker who pre-mints a
+    # junk policy and waits out the window lands top-of-Moderate instead
+    # of High; the finding is still visible everywhere, the whole policy
+    # set must be aged in advance, and this knob can be raised if aged
+    # campaigns are observed.
+    established_collection:
+      enabled: true
+      min_policy_age_slots: 2_592_000
     reason_threshold: 0.5
 
   # ------------------------------------------------------------------
@@ -727,8 +773,10 @@ scorers:
       # so 2 matches = 0.30 raw). Prior anchor p99=0.60 required 4 matches,
       # which is rare: most phishing txs carry 2-3 patterns.
       social_score:   { p50: 0.0,     p99: 0.30 }
-      # `targeting` anchors will be wired up when the
-      # recipient-to-protocol interaction graph lands (§5.3 is deferred).
+      # `targeting` needs no anchor: it is the net-new-holder delivery
+      # fraction (already in [0, 1]); see asset_name_carrier below. The
+      # spec's recipient-to-protocol interaction graph (§5.3) remains
+      # deferred and would refine, not replace, this signal.
     bootstrap_anchors:
       recipient_count: { p50: 1, p99: 50 }
     similarity_suspicious_range:
@@ -766,6 +814,19 @@ scorers:
     # only; thresholds are shared with the other carriers.
     asset_name_carrier:
       enabled: true
+      # Gate the two social_engineering bonuses on net-new-holder delivery
+      # when asset names are the SOLE URL carrier. A URL-named token that
+      # only rides in self-change (the sender's own inputs already held it
+      # and every recipient of it is a prior holder, e.g. DEX-aggregator
+      # change bags carrying a previously acquired scam-named token) earns
+      # no bonus; any net-new recipient, any freshly minted URL token, or
+      # any missing input value keeps them (fail open toward detection).
+      # Metadata/datum-carried URLs are never gated: a "claim rewards"
+      # message with a link is phishing regardless of token movement.
+      # Verified 2026-07-20 against the mainnet DexHunter self-change
+      # cluster (3 High FPs at 61.4 -> Informational) with the URL-token
+      # airdrop recall case preserved above High.
+      require_delivery_for_bonuses: true
     # Minimum length for a decoded datum text span to be kept for URL and
     # social-engineering scanning; shorter spans are CBOR structural noise.
     min_decoded_string_len: 4

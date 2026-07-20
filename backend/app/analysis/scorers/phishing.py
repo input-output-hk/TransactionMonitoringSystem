@@ -71,6 +71,10 @@ _REASON_T = _CFG["reason_thresholds"]
 _CRITICAL_T = float(_CFG["critical_threshold"])
 _RELEVANT_LABELS = set(str(x) for x in _CFG["metadata_labels"])
 _ASSET_CARRIER_ENABLED = bool(_CFG["asset_name_carrier"]["enabled"])
+# Withhold the two stacking bonuses when asset names are the only URL
+# carrier and the tokens are positively proven pure self-change (see
+# _url_token_delivery_stats and the gating block in score()).
+_REQUIRE_DELIVERY_FOR_BONUSES = bool(_CFG["asset_name_carrier"]["require_delivery_for_bonuses"])
 # Minimum length for a decoded datum text span to be kept for URL / SE
 # scanning. Shorter spans are CBOR structural noise, not content.
 _MIN_DECODED_STR_LEN = int(_CFG["min_decoded_string_len"])
@@ -158,6 +162,91 @@ def _sender_addresses(features: dict[str, Any]) -> list[str]:
             if isinstance(addr, str) and addr:
                 senders.append(addr)
     return senders
+
+
+def _url_token_delivery_stats(raw_data: Any) -> tuple[int, int]:
+    """``(total, net_new)`` counts over (URL-named asset, recipient) pairs.
+
+    A pair is one distinct URL-bearing ``(policy_id, asset_name_hex)``
+    reaching one distinct output address. The pair is *net-new* when the
+    asset is minted in this tx (mint quantity > 0; an unparseable quantity
+    counts as minted, toward detection) OR the recipient address did not
+    already hold that exact asset in this tx's inputs (``inp["value"]``,
+    attached by ``enrich_inputs_with_resolved_addresses``).
+
+    Fail-open is structural, not a flag: classifying a pair as self-change
+    requires POSITIVE proof of prior holding, so a missing input ``value``
+    (originating tx absent from the warehouse, or the batch exceeded
+    ``ANALYSIS_MAX_REF_TXS``), a missing input ``address``, or an absent
+    ``inputs`` list can only shrink the prior-holder set and push the pair
+    toward net-new (fail open toward detection, recall-first).
+
+    Matching is on the FULL output address, not the stake credential: an
+    attacker can mint an address from their own payment credential plus the
+    victim's stake credential and pre-hold the token there, so stake-cred
+    matching would let them fake self-change; holding the token at the
+    victim's exact address as a *spent input* requires the victim's own
+    witness. Known limitation: a wallet consolidating to a different
+    self-owned address counts as net-new (entity clustering, when it lands,
+    is the fix).
+    """
+    if not isinstance(raw_data, dict):
+        return 0, 0
+
+    url_named: dict[str, bool] = {}
+
+    def _is_url_named(hex_name: str) -> bool:
+        if hex_name not in url_named:
+            decoded = decode_hex_asset_name(hex_name)
+            url_named[hex_name] = bool(_validate_candidates(_url_candidates(decoded)))
+        return url_named[hex_name]
+
+    def _url_assets_in(bundle: Any):
+        if not isinstance(bundle, dict):
+            return
+        for policy, token_map in bundle.items():
+            if policy in ("ada", "lovelace") or not isinstance(token_map, dict):
+                continue
+            for hex_name, qty in token_map.items():
+                if _is_url_named(str(hex_name)):
+                    yield (str(policy), str(hex_name)), qty
+
+    minted: set[tuple[str, str]] = set()
+    for key, qty in _url_assets_in(raw_data.get("mint")):
+        try:
+            if int(qty) <= 0:
+                # A pure burn cannot deliver; do not let it override the
+                # prior-holding proof for the amount still self-changing.
+                continue
+        except (TypeError, ValueError):
+            pass  # unparseable quantity counts as minted (toward detection)
+        minted.add(key)
+
+    prior_holders: dict[tuple[str, str], set[str]] = {}
+    for inp in raw_data.get("inputs") or []:
+        if not isinstance(inp, dict):
+            continue
+        addr = inp.get("address")
+        if not isinstance(addr, str) or not addr:
+            continue
+        for key, _qty in _url_assets_in(inp.get("value")):
+            prior_holders.setdefault(key, set()).add(addr)
+
+    pairs: set[tuple[tuple[str, str], str]] = set()
+    for out in raw_data.get("outputs") or []:
+        if not isinstance(out, dict):
+            continue
+        addr = out.get("address")
+        if not isinstance(addr, str) or not addr:
+            continue  # unattributable recipient: no pair to classify
+        for key, _qty in _url_assets_in(out.get("value")):
+            pairs.add((key, addr))
+
+    total = len(pairs)
+    net_new = sum(
+        1 for key, addr in pairs if key in minted or addr not in prior_holders.get(key, ())
+    )
+    return total, net_new
 
 
 class PhishingScorer(BaseScorer):
@@ -262,15 +351,24 @@ class PhishingScorer(BaseScorer):
         s_url_recur = 0.0
 
         # Sub-score 2c: targeting_score (weight 0.25 of delivery)
-        # Requires recipient-to-protocol interaction graph (deferred to mainnet)
-        s_targeting = 0.0
+        # Net-new-holder delivery: the fraction of (URL-named asset,
+        # recipient) pairs where the recipient did not already hold that
+        # exact asset in this tx's inputs. A real URL-token airdrop is all
+        # net-new (1.0); a URL-named token riding in the sender's own
+        # change is 0.0. Already in [0, 1], so no anchor/normalise pass.
+        # (The spec's recipient-to-protocol interaction graph remains
+        # deferred; this is the delivery-side targeting signal.)
+        url_pairs_total, url_pairs_net_new = (
+            _url_token_delivery_stats(raw_data_field) if _ASSET_CARRIER_ENABLED else (0, 0)
+        )
+        s_targeting = (url_pairs_net_new / url_pairs_total) if url_pairs_total > 0 else 0.0
 
         # Sub-score 2d: sender_recurrence (weight 0.15 of delivery)
         # Requires entity clustering (deferred to mainnet)
         s_recurrence = 0.0
 
         # Spec weights: recipients 0.35, url_recur 0.25, targeting 0.25,
-        # recurrence 0.15. Sub-scores 2b-2d are deferred (0.0).
+        # recurrence 0.15. Sub-scores 2b and 2d are deferred (0.0).
         delivery_score = (
             float(_W_DELIVERY["recipients"]) * s_recipients
             + float(_W_DELIVERY["url_recur"]) * s_url_recur
@@ -284,6 +382,36 @@ class PhishingScorer(BaseScorer):
             + float(_W_OVERALL["delivery"]) * delivery_score
         )
 
+        # Bonus gating on delivery: when asset names are the SOLE URL
+        # carrier and every (URL-asset, recipient) pair is positively proven
+        # self-change (the recipient already held the exact asset in this
+        # tx's inputs, nothing minted), the tx is a holder moving their own
+        # bag, not a delivery, and the two stacking bonuses are withheld.
+        # Suppression requires positive proof: any net-new pair, any minted
+        # URL token, or any missing input value keeps the bonuses (fail open
+        # toward detection). Metadata/datum-carried URLs never gate: a
+        # "claim rewards at evil.xyz" message is phishing regardless of
+        # token movement. Kill switch:
+        # phishing.asset_name_carrier.require_delivery_for_bonuses.
+        # "Asset names are the SOLE URL carrier" is decided from the
+        # metadata/datum carriers directly, NOT by subtracting asset_name_urls
+        # from the full set: a URL that appears in both a metadata message and
+        # a self-change asset name is still metadata-delivered and must keep
+        # its bonuses (string-differencing would have wrongly treated it as
+        # asset-only and suppressed a genuine metadata phishing delivery).
+        metadata_datum_urls = (
+            _validate_candidates(self._metadata_datum_url_candidates(features))
+            if asset_name_urls
+            else urls
+        )
+        suppress_bonuses = (
+            _REQUIRE_DELIVERY_FOR_BONUSES
+            and bool(asset_name_urls)
+            and not metadata_datum_urls
+            and url_pairs_total > 0
+            and url_pairs_net_new == 0
+        )
+
         # Combo bonus: on-chain metadata that carries BOTH a URL AND Tier-2
         # phishing text is substantially more suspicious than either signal
         # alone. Individual signals are ambiguous (a bare URL could be a
@@ -292,7 +420,7 @@ class PhishingScorer(BaseScorer):
         # appears in legitimate traffic. The bonus pushes the clearer cases
         # into the High band without overreliance on blacklist / brand
         # matching. Magnitude tunable via phishing.social_engineering.
-        if len(urls) > 0 and s_social >= float(_REASON_T["social"]):
+        if not suppress_bonuses and len(urls) > 0 and s_social >= float(_REASON_T["social"]):
             raw += _URL_COMBO_BONUS
 
         # Additional bonus: phishing-prone TLDs (.xyz / .top / .click / ...
@@ -300,7 +428,11 @@ class PhishingScorer(BaseScorer):
         # don't live in these TLDs; a URL on one of them paired with Tier-2
         # text is very high-signal, so this bonus stacks on top of the URL
         # combo. Magnitude tunable via phishing.social_engineering.
-        if s_social >= float(_REASON_T["social"]) and any(_has_phishing_prone_tld(u) for u in urls):
+        if (
+            not suppress_bonuses
+            and s_social >= float(_REASON_T["social"])
+            and any(_has_phishing_prone_tld(u) for u in urls)
+        ):
             raw += _PHISHING_TLD_BONUS
 
         final_score = finalise_score(raw)
@@ -361,21 +493,29 @@ class PhishingScorer(BaseScorer):
                 }
             )
 
+        evidence = {
+            "severity": severity,
+            "se_tier": se_tier,
+            "urls": url_records,
+            "url_count": len(urls),
+            "asset_name_urls": asset_name_urls,
+            "recipient_count": recipient_count,
+            "metadata_labels": metadata_labels,
+        }
+        if asset_name_urls:
+            evidence["url_token_delivery"] = {
+                "recipient_pairs_total": url_pairs_total,
+                "recipient_pairs_net_new": url_pairs_net_new,
+                "bonuses_suppressed": suppress_bonuses,
+            }
+
         return ScorerResult(
             score=final_score,
             sub_scores=sub_scores,
             reasons=reasons,
             baseline_source=bl_source,
             severity=severity,
-            evidence={
-                "severity": severity,
-                "se_tier": se_tier,
-                "urls": url_records,
-                "url_count": len(urls),
-                "asset_name_urls": asset_name_urls,
-                "recipient_count": recipient_count,
-                "metadata_labels": metadata_labels,
-            },
+            evidence=evidence,
         )
 
     # -----------------------------------------------------------------
@@ -400,6 +540,26 @@ class PhishingScorer(BaseScorer):
         Bare-domain forms (``cardano-drop.io/claim``) are matched alongside
         scheme-prefixed URLs in every carrier, then filtered through the PSL
         snapshot so bare-word matches like ``3.14`` don't survive.
+        """
+        candidates = list(self._metadata_datum_url_candidates(features))
+
+        # --- Carrier 3: decoded native-asset names -----------------------
+        if _ASSET_CARRIER_ENABLED:
+            candidates.extend(self._asset_name_candidates(features))
+
+        return _validate_candidates(candidates)
+
+    def _metadata_datum_url_candidates(self, features: dict[str, Any]) -> list[str]:
+        """Un-validated URL candidates from carriers 1 and 2 only (tx-level
+        metadata labels + inline datums), excluding asset names.
+
+        Split out so the self-change bonus gate can ask "did a
+        metadata/datum carrier produce a URL?" directly, instead of
+        string-differencing the full URL set against the asset-name set: a
+        URL that happens to appear in BOTH a metadata message and a
+        self-change asset name must still count as metadata-delivered (and
+        so keep its bonuses), which the string-difference could not tell
+        apart.
         """
         candidates: list[str] = []
 
@@ -432,11 +592,7 @@ class PhishingScorer(BaseScorer):
                 for decoded in _decode_datum_strings(datum):
                     candidates.extend(_url_candidates(decoded))
 
-        # --- Carrier 3: decoded native-asset names -----------------------
-        if _ASSET_CARRIER_ENABLED:
-            candidates.extend(self._asset_name_candidates(features))
-
-        return _validate_candidates(candidates)
+        return candidates
 
     def _asset_name_candidates(self, features: dict[str, Any]) -> list[str]:
         """Raw URL/domain regex hits inside decoded asset names (un-validated)."""

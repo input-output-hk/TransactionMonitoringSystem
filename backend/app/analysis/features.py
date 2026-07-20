@@ -363,6 +363,33 @@ def count_assets(value: dict[str, Any]) -> tuple[int, int]:
     return len(policies), token_count
 
 
+def tx_policy_ids(raw_data: dict[str, Any]) -> set[str]:
+    """Every policy id a transaction touches: output value bundles + mint map.
+
+    Feeds the ``asset_policy_first_seen`` lookup (policy-age signals). The
+    lovelace keys of both Ogmios shapes are skipped; malformed entries are
+    ignored rather than raised because the caller runs on the best-effort
+    ingestion feature path.
+    """
+    policies: set[str] = set()
+    if not isinstance(raw_data, dict):
+        return policies
+    outputs = raw_data.get("outputs")
+    if isinstance(outputs, list):
+        for out in outputs:
+            value = out.get("value") if isinstance(out, dict) else None
+            if isinstance(value, dict):
+                for key in value:
+                    if key not in ("lovelace", "ada"):
+                        policies.add(str(key))
+    mint = raw_data.get("mint")
+    if isinstance(mint, dict):
+        for key in mint:
+            if key not in ("lovelace", "ada"):
+                policies.add(str(key))
+    return policies
+
+
 def _extract_datum_info(
     output: dict[str, Any],
     datums: dict[str, Any] | None = None,

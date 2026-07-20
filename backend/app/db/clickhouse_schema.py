@@ -140,6 +140,26 @@ SCHEMA_DDL: dict[str, str] = {
         ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
         ORDER BY (network, address, slot, tx_hash)
     """,
+    # Policy-id first-sighting lookup: (network, policy_id) -> min slot ever
+    # observed carrying the policy (output value bundles + mint maps).
+    # Backs policy-age signals (token_dust established-collection cap; the
+    # fake_token policy-age follow-up reads the same table). One tiny row per
+    # policy. AggregatingMergeTree + SimpleAggregateFunction(min) instead of
+    # a ReplacingMergeTree: RMT keeps the max-version row, but the historical
+    # backfill inserts OLDER slots after live ingestion has already written
+    # newer ones for the same policy, and correctness must not depend on
+    # insert order or merge timing. Plain UInt64 inserts are valid for a
+    # SimpleAggregateFunction column; readers aggregate min() over unmerged
+    # parts (see get_policies_first_seen).
+    "asset_policy_first_seen": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            network     String,
+            policy_id   String,
+            first_slot  SimpleAggregateFunction(min, UInt64),
+            INDEX idx_policy policy_id TYPE bloom_filter GRANULARITY 1
+        ) ENGINE = AggregatingMergeTree
+        ORDER BY (network, policy_id)
+    """,
     # Extended UTxO-level features, populated inline during ingestion.
     # One row per output per transaction.
     "utxo_features": """
@@ -613,6 +633,11 @@ def _create_address_lookup(client: Client) -> None:
 def _create_detection_tables(client: Client) -> None:
     """Multi-class detection tables: UTxO/script features, the scoring output
     (+ its column migrations), and the admin archive."""
+    # Policy-id first-sighting lookup (policy-age signals). See SCHEMA_DDL
+    # for the engine rationale; populated inline during ingestion plus the
+    # one-off historical backfill script.
+    client.execute(SCHEMA_DDL["asset_policy_first_seen"].format(table="asset_policy_first_seen"))
+
     # Extended UTxO-level features, populated inline during ingestion.
     # One row per output per transaction.
     client.execute(SCHEMA_DDL["utxo_features"].format(table="utxo_features"))

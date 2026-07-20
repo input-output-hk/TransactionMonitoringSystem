@@ -3,7 +3,12 @@
 import pytest
 
 from app.analysis.features import _estimate_value_cbor_bytes
-from app.analysis.normalise import BAND_HIGH_THRESHOLD
+from app.analysis.normalise import (
+    BAND_HIGH_THRESHOLD,
+    BAND_MODERATE_MAX,
+    BAND_MODERATE_THRESHOLD,
+)
+from app.analysis.scorer_config import get as _get_cfg
 from app.analysis.scorers.token_dust import _DOS_VALUE_CBOR_MIN, TokenDustScorer
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
@@ -271,3 +276,155 @@ class TestDosAssetThresholdDiscriminator:
         assert "script_value_bloat_dos" not in result.reasons
         assert result.sub_scores["max_assets_per_policy"] == 2.0
         assert result.score < BAND_HIGH_THRESHOLD  # capped below High
+
+
+class TestShippedMainnetAllowlist:
+    """The five mainnet collection policies shipped in detection.yaml
+    (verified 2026-07-20 by adversarial triage of the July mainnet
+    token_dust High alerts). These read the parsed module maps, so a YAML
+    edit that breaks or truncates an entry fails here, not silently in
+    production.
+    """
+
+    def _mainnet_features(self, outputs):
+        # features_for_outputs pins preprod; the shipped entries are
+        # mainnet-scoped, so build the dict for the mainnet network.
+        return {
+            "tx_hash": "shipped-allowlist-test",
+            "network": "mainnet",
+            "raw_data": {"outputs": outputs},
+        }
+
+    def test_shipped_mainnet_policies_are_well_formed(self):
+        # A truncated or typo'd hash would never match on-chain policy ids
+        # and leave the FP cluster alive with no error anywhere.
+        from app.analysis.scorers.token_dust import _ALLOWLIST_POLICIES
+
+        shipped = _ALLOWLIST_POLICIES.get("mainnet", frozenset())
+        assert shipped, "expected the five verified mainnet collection policies"
+        for policy in shipped:
+            assert len(policy) == 56, f"policy id must be 28 bytes hex: {policy}"
+            int(policy, 16)  # raises on non-hex
+
+    def test_shipped_mainnet_policies_suppress_pure_bundle(self, scorer):
+        # A bundle made exclusively of the verified collections (the L4VA
+        # vault / CSWAP pool / Wayup listing shape) is suppressed on mainnet.
+        from app.analysis.scorers.token_dust import _ALLOWLIST_POLICIES
+
+        shipped = sorted(_ALLOWLIST_POLICIES.get("mainnet", frozenset()))
+        policies = {p: {f"tok{i:02d}": 1 for i in range(4)} for p in shipped}
+        out = _make_output(SCRIPT_ADDR, lovelace=2_000_000, policies=policies)
+        result = scorer.score(self._mainnet_features([out]))
+        assert result.score == 0.0
+        assert result.reasons == []
+
+    def test_shipped_allowlist_plus_attacker_policy_still_fires(self, scorer):
+        # Recall guard: smuggling attacker dust alongside the verified
+        # collections un-allowlists the bundle and the scorer runs.
+        from app.analysis.scorers.token_dust import _ALLOWLIST_POLICIES
+
+        shipped = sorted(_ALLOWLIST_POLICIES.get("mainnet", frozenset()))
+        policies = {p: {f"tok{i:02d}": 1 for i in range(4)} for p in shipped}
+        policies["a" * 56] = {f"dust{i:02d}": 1 for i in range(3)}
+        out = _make_output(SCRIPT_ADDR, lovelace=2_000_000, policies=policies)
+        result = scorer.score(self._mainnet_features([out]))
+        assert result.score > 0.0
+
+
+class TestEstablishedCollectionCap:
+    """Established-collection Moderate cap (token_dust.established_collection).
+
+    A bundle made entirely of policies first seen >= min_policy_age_slots
+    ago, with nothing minted in this tx, is the NFT-protocol bulk shape
+    (vault rollover, NFT AMM pool, bulk listing) and is capped at the top
+    of Moderate: recorded, never suppressed, never High. Every
+    degraded-data path must fail open (no cap), which is what keeps the
+    CTF-06 fresh-policy attack pins intact.
+    """
+
+    _SLOT = 200_000_000
+    _MIN_AGE = int(_get_cfg("token_dust")["established_collection"]["min_policy_age_slots"])
+
+    def _dust_features(self, policies, slot=_SLOT, mint=None):
+        out = _make_output(SCRIPT_ADDR, lovelace=1_200_000, policies=policies)
+        feats = _features([out])
+        feats["slot"] = slot
+        if mint is not None:
+            feats["raw_data"]["mint"] = mint
+        return feats
+
+    def _eighty_pair_bundle(self, policy="e" * 56):
+        # The CTF-06 shape: 80 distinct names under one policy.
+        return {policy: {f"{i:03d}{'ab' * 6}": 1 for i in range(80)}}
+
+    def _patch_first_seen(self, monkeypatch, mapping):
+        from app.db import clickhouse
+
+        monkeypatch.setattr(clickhouse, "get_policies_first_seen", lambda net, pids: mapping)
+
+    def test_established_collections_cap_to_moderate(self, scorer, monkeypatch):
+        policy = "e" * 56
+        self._patch_first_seen(monkeypatch, {policy: self._SLOT - (self._MIN_AGE + 1)})
+        result = scorer.score(self._dust_features(self._eighty_pair_bundle(policy)))
+        # Capped, not suppressed: band drops out of High but the finding,
+        # its saturated sub-scores, and the composite reason all stand.
+        assert BAND_MODERATE_THRESHOLD < result.score <= BAND_MODERATE_MAX
+        assert "script_value_bloat_dos" in result.reasons
+        assert "established_collection_cap" in result.reasons
+        assert result.evidence["policy_ages_known"] is True
+        assert result.evidence["min_policy_age_slots_observed"] == self._MIN_AGE + 1
+
+    def test_fresh_policy_not_capped(self, scorer, monkeypatch):
+        # ATTACK-MUST-FIRE twin of the CTF-06 pin: a policy first seen
+        # minutes ago is exactly the mint-and-fire dust campaign.
+        policy = "e" * 56
+        self._patch_first_seen(monkeypatch, {policy: self._SLOT - 600})
+        result = scorer.score(self._dust_features(self._eighty_pair_bundle(policy)))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "established_collection_cap" not in result.reasons
+
+    def test_minted_in_tx_never_capped(self, scorer, monkeypatch):
+        # ATTACK-MUST-FIRE: an old OPEN policy minting fresh junk names in
+        # this very tx must stay uncapped regardless of policy age.
+        policy = "e" * 56
+        self._patch_first_seen(monkeypatch, {policy: self._SLOT - (self._MIN_AGE * 10)})
+        result = scorer.score(
+            self._dust_features(
+                self._eighty_pair_bundle(policy),
+                mint={policy: {"deadbeef": 80}},
+            )
+        )
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "established_collection_cap" not in result.reasons
+
+    def test_partial_age_data_fails_open(self, scorer, monkeypatch):
+        # Two policies in the bundle, only one has a first-seen row: age is
+        # not proven for the whole bundle, so no cap.
+        p_known, p_unknown = "e" * 56, "f" * 56
+        self._patch_first_seen(monkeypatch, {p_known: self._SLOT - (self._MIN_AGE * 10)})
+        policies = {
+            p_known: {f"{i:03d}{'ab' * 6}": 1 for i in range(40)},
+            p_unknown: {f"{i:03d}{'cd' * 6}": 1 for i in range(40)},
+        }
+        result = scorer.score(self._dust_features(policies))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "established_collection_cap" not in result.reasons
+        assert result.evidence["policy_ages_known"] is False
+
+    def test_missing_slot_fails_open(self, scorer, monkeypatch):
+        policy = "e" * 56
+        self._patch_first_seen(monkeypatch, {policy: 1})
+        result = scorer.score(self._dust_features(self._eighty_pair_bundle(policy), slot=None))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "established_collection_cap" not in result.reasons
+
+    def test_lookup_exception_fails_open(self, scorer, monkeypatch):
+        from app.db import clickhouse
+
+        def _boom(net, pids):
+            raise RuntimeError("clickhouse down")
+
+        monkeypatch.setattr(clickhouse, "get_policies_first_seen", _boom)
+        result = scorer.score(self._dust_features(self._eighty_pair_bundle()))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "established_collection_cap" not in result.reasons

@@ -1,15 +1,25 @@
 # Follow-up: Fake-Token Policy Age
 
-## Status: deferred (UI hidden, scorer hardcoded)
+## Status: infrastructure shipped (2026-07); fake_token wiring still deferred
 
-The fake_token scorer's `policy_age_inverted` sub-score is currently
-backed by a constant (`policy_age_slots = 1`). The "New Policy" donut
-and the "Age" line in the FAKE TOKEN row are hidden in the UI so
-operators don't read the hardcoded value as real signal.
+The `asset_policy_first_seen` table, ingester hook, batched
+`get_policies_first_seen` helper, and the one-off backfill script now
+exist: they shipped with the token_dust established-collection cap, which
+consumes the same primitive. Two deviations from the plan below, both
+deliberate: the engine is `AggregatingMergeTree` +
+`SimpleAggregateFunction(min, UInt64)` instead of a ReplacingMergeTree
+(RMT keeps the max-version row, and the historical backfill inserts older
+slots after live ingestion has written newer ones, so RMT could lose the
+true first sighting), and the helper is batched
+(`get_policies_first_seen(network, policy_ids) -> dict`) because
+token_dust looks up whole bundles; call it with a one-element list here.
 
-To re-enable: ship an indexed `asset_policy_first_seen` lookup table,
-wire it into the scorer, surface the real age in evidence, and re-add
-the donut + Age row to the UI.
+Still open for fake_token: the scorer integration (section 3), evidence
+fields, the UI re-enable (section 4), and the band-shift recalibration
+window flagged in the cost table. The fake_token scorer's
+`policy_age_inverted` sub-score remains backed by a constant
+(`policy_age_slots = 1`) and the "New Policy" donut and "Age" line stay
+hidden in the UI until that lands.
 
 ## Why deferred
 
