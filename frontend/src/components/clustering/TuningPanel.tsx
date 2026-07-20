@@ -22,10 +22,13 @@ import {
 import {
 	type FeatureSet,
 	type Run,
+	isPermissionDenied,
 	useEvaluation,
 	useRunCluster,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { AdminOnlyGate } from "./adminOnly";
 import { FeatureSetSelect } from "./FeatureSetSelect";
 import { KDistanceChart } from "./KDistanceChart";
 
@@ -48,6 +51,7 @@ export function TuningPanel({
 		activeRun?.min_samples ?? 5,
 	);
 
+	const { isAdmin } = useAuth();
 	const evaluation = useEvaluation(target, featureSet);
 	const runCluster = useRunCluster();
 	const evalData = evaluation.data;
@@ -309,24 +313,30 @@ export function TuningPanel({
 							}}
 						/>
 					</div>
-					<Button
-						disabled={runCluster.isPending || !eps || !minSamples}
-						onClick={() =>
-							runCluster.mutate({
-								target,
-								feature_set: featureSet,
-								eps,
-								min_samples: minSamples,
-							})
-						}
-					>
-						{runCluster.isPending ? "Running DBSCAN…" : "Run custom clustering"}
-					</Button>
+					<AdminOnlyGate gated={!isAdmin}>
+						<Button
+							disabled={!isAdmin || runCluster.isPending || !eps || !minSamples}
+							onClick={() =>
+								runCluster.mutate({
+									target,
+									feature_set: featureSet,
+									eps,
+									min_samples: minSamples,
+								})
+							}
+						>
+							{runCluster.isPending
+								? "Running DBSCAN…"
+								: "Run custom clustering"}
+						</Button>
+					</AdminOnlyGate>
 				</div>
 
 				{runCluster.isError && (
 					<p className="text-destructive text-sm">
-						Clustering run failed. Check the parameters and retry.
+						{isPermissionDenied(runCluster.error)
+							? runCluster.error.message
+							: "Clustering run failed. Check the parameters and retry."}
 					</p>
 				)}
 				{runCluster.isSuccess && runCluster.data && (

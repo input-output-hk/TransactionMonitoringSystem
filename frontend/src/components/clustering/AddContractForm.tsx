@@ -12,10 +12,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
 	MAX_TXS_CAP,
+	isPermissionDenied,
 	useAddContract,
 	useClusteringConfig,
 	useIdentify,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
+import { AdminOnlyGate } from "./adminOnly";
 
 // Default onboarding window: import the most recent 500 txs unless the analyst
 // asks for more (0 = all history). Keeps first onboarding fast.
@@ -40,6 +43,7 @@ function useDebounced<T>(value: T, ms: number): T {
 // the watchlist/jobs polls) never hits /api/v1/clustering/* until health confirms
 // the module is on.
 export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
+	const { isAdmin } = useAuth();
 	const add = useAddContract();
 	const config = useClusteringConfig(enabled);
 	// On a host-backed deployment the engine reads txs from the host tables and
@@ -166,9 +170,14 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 						/>
 						Reprocess only
 					</label>
-					<Button onClick={onAdd} disabled={add.isPending || !target.trim()}>
-						{add.isPending ? "Adding…" : reprocess ? "Re-analyze" : "Onboard"}
-					</Button>
+					<AdminOnlyGate gated={!isAdmin}>
+						<Button
+							onClick={onAdd}
+							disabled={!isAdmin || add.isPending || !target.trim()}
+						>
+							{add.isPending ? "Adding…" : reprocess ? "Re-analyze" : "Onboard"}
+						</Button>
+					</AdminOnlyGate>
 				</div>
 				{config.data && (
 					<p className="text-muted-foreground text-xs">
@@ -193,7 +202,9 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 				)}
 				{add.isError && (
 					<p className="text-destructive text-sm">
-						Could not add the contract. Check the address and try again.
+						{isPermissionDenied(add.error)
+							? add.error.message
+							: "Could not add the contract. Check the address and try again."}
 					</p>
 				)}
 			</CardContent>

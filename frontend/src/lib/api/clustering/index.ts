@@ -18,3 +18,12 @@
  */
 export * from "./types";
 export * from "./hooks";
+// The transport is otherwise internal, but its typed error surface is public:
+// mutation UIs branch on `isPermissionDenied` to tell a role rejection (403
+// for a read-only Reviewer session) apart from a parameter/server failure.
+export {
+	ClusteringApiError,
+	HTTP_FORBIDDEN,
+	isPermissionDenied,
+	PERMISSION_DENIED_MESSAGE,
+} from "./transport";

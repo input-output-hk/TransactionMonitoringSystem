@@ -27,9 +27,12 @@ import {
 import {
 	type AnomalyRun,
 	type FeatureSet,
+	isPermissionDenied,
 	useDeleteAnomalyRun,
 	useDetectAnomaly,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
+import { AdminOnlyGate } from "./adminOnly";
 import { FeatureSetSelect } from "./FeatureSetSelect";
 
 function runLabel(r: AnomalyRun): string {
@@ -50,13 +53,15 @@ export function AnomalyRunControls({
 	selectedRunId,
 	onSelectRun,
 }: Props) {
+	const { isAdmin } = useAuth();
 	const [featureSet, setFeatureSet] = useState<FeatureSet>("shape");
 	const [confirmDelete, setConfirmDelete] = useState(false);
 	const detect = useDetectAnomaly();
 	const remove = useDeleteAnomalyRun();
 
 	const selectedRun = runs.find((r) => r.run_id === selectedRunId) ?? null;
-	const canDelete = selectedRun?.origin === "custom";
+	// Deleting a run is Admin-only at the proxy; only offer it to an Admin.
+	const canDelete = isAdmin && selectedRun?.origin === "custom";
 
 	const onDetect = () =>
 		detect.mutate(
@@ -115,9 +120,11 @@ export function AnomalyRunControls({
 						value={featureSet}
 						onChange={setFeatureSet}
 					/>
-					<Button disabled={detect.isPending} onClick={onDetect}>
-						{detect.isPending ? "Detecting…" : "Detect anomalies"}
-					</Button>
+					<AdminOnlyGate gated={!isAdmin}>
+						<Button disabled={!isAdmin || detect.isPending} onClick={onDetect}>
+							{detect.isPending ? "Detecting…" : "Detect anomalies"}
+						</Button>
+					</AdminOnlyGate>
 					{canDelete && (
 						<Button
 							variant="outline"
@@ -155,7 +162,9 @@ export function AnomalyRunControls({
 
 				{detect.isError && (
 					<p className="text-destructive w-full text-sm">
-						Detection failed. The clustering service may be slow or unavailable.
+						{isPermissionDenied(detect.error)
+							? detect.error.message
+							: "Detection failed. The clustering service may be slow or unavailable."}
 					</p>
 				)}
 			</div>
