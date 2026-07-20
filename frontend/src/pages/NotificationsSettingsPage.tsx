@@ -20,6 +20,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
 	type ChannelConfig,
 	type NotificationConfig,
@@ -28,8 +29,9 @@ import {
 	fetchNotificationConfig,
 	updateNotificationConfig,
 } from "@/lib/api/notifications";
+import { cn } from "@/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, X } from "lucide-react";
+import { Mail, Plus, Trash2, Webhook, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { BANDS, configWarnings } from "@/lib/notification-warnings";
@@ -165,20 +167,116 @@ function StringList({
 	);
 }
 
+/**
+ * `emphasis` marks the one section the rest of the page depends on (Channels,
+ * the master gate): brand-tinted double border + header wash, while plain
+ * sections keep a single hairline border so the hierarchy is visible at a
+ * glance.
+ */
 function Section({
 	title,
+	subtitle,
+	headerRight,
+	emphasis = false,
 	children,
 }: {
 	title: string;
+	subtitle?: string;
+	headerRight?: React.ReactNode;
+	emphasis?: boolean;
 	children: React.ReactNode;
 }) {
 	return (
-		<section className="border-border bg-card rounded-lg border-2">
-			<header className="border-border border-b px-5 py-3">
-				<h2 className="text-foreground text-sm font-semibold">{title}</h2>
+		<section
+			className={cn(
+				"bg-card rounded-lg",
+				emphasis ? "border-brand/40 border-2" : "border-border border",
+			)}
+		>
+			<header
+				className={cn(
+					"border-border rounded-t-[inherit] border-b px-5 py-3",
+					// The wash needs more alpha in dark mode: brand at 5% over the
+					// 0.27-lightness card is imperceptible there.
+					emphasis && "border-brand/25 bg-brand/5 dark:bg-brand/10",
+				)}
+			>
+				<div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+					<h2 className="text-foreground text-sm font-semibold">{title}</h2>
+					{headerRight}
+				</div>
+				{subtitle && (
+					<p className="text-muted-foreground mt-1 text-xs">{subtitle}</p>
+				)}
 			</header>
 			<div className="flex flex-col gap-4 px-5 py-4">{children}</div>
 		</section>
+	);
+}
+
+/**
+ * One channel's master block: identity and env-secret status on the left, the
+ * enable switch on the right, destination fields below. The switch is the
+ * master gate the rest of the page depends on (dispatch skips a disabled
+ * channel), so it gets a distinct control type from the routing checkboxes in
+ * the trigger sections.
+ */
+function ChannelCard({
+	icon: Icon,
+	name,
+	secretStatus,
+	enabled,
+	onEnabledChange,
+	children,
+}: {
+	icon: React.ComponentType<{ className?: string }>;
+	name: string;
+	secretStatus: string;
+	enabled: boolean;
+	onEnabledChange: (v: boolean) => void;
+	children: React.ReactNode;
+}) {
+	return (
+		<div className="border-border flex flex-col gap-3 rounded-md border p-4">
+			<div className="flex items-center justify-between gap-3">
+				<div className="flex items-center gap-3">
+					<Icon className="text-muted-foreground h-4 w-4 shrink-0" />
+					<div className="flex flex-col">
+						<span className="text-foreground text-sm font-medium">{name}</span>
+						<span className="text-muted-foreground text-xs">
+							{secretStatus}
+						</span>
+					</div>
+				</div>
+				<div className="flex shrink-0 items-center gap-2">
+					<span className="text-muted-foreground text-xs">
+						{enabled ? "On" : "Off"}
+					</span>
+					<Switch
+						checked={enabled}
+						onCheckedChange={onEnabledChange}
+						aria-label={`${name} channel enabled`}
+					/>
+				</div>
+			</div>
+			{children}
+		</div>
+	);
+}
+
+/** Compact per-channel on/off readout for the Channels section header. */
+function ChannelStateChip({ name, on }: { name: string; on: boolean }) {
+	return (
+		<span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+			<span
+				aria-hidden
+				className={cn(
+					"h-1.5 w-1.5 rounded-full",
+					on ? "bg-status-online" : "bg-muted-foreground/40",
+				)}
+			/>
+			{name} {on ? "on" : "off"}
+		</span>
 	);
 }
 
@@ -259,32 +357,40 @@ export function NotificationsSettingsPage() {
 				</div>
 			)}
 
-			{/* Channels */}
-			<Section title="Channels">
-				<p className="text-muted-foreground text-xs">
-					Turn a channel on here and give it a destination (recipients for
-					email, a Default URL for webhook). A channel that is off is skipped
-					everywhere: ticking it in a band default or a rule below does nothing
-					until it is enabled here.
-				</p>
-				<div className="flex flex-col gap-2">
-					<div className="flex items-center justify-between">
-						<Toggle
-							checked={!!cfg.channels.email?.enabled}
-							onChange={(v) =>
-								patch((d) => {
-									d.channels.email = { ...d.channels.email, enabled: v };
-								})
-							}
-							label="Email enabled"
-						/>
-						<span className="text-muted-foreground text-xs">
-							SMTP{" "}
-							{data?.secrets_status.smtp_configured
-								? "configured ✓"
-								: "not configured ✗"}
-						</span>
+			{/* Channels — the master gate: dispatch skips any channel disabled here
+			    (backend triggers.resolve_dispatch / reports.report_dispatches), so
+			    this section gets the emphasized treatment. */}
+			<Section
+				title="Channels"
+				emphasis
+				subtitle="Master switches: a channel that is off here never fires, no matter what the triggers below route to it."
+				headerRight={
+					<div className="flex items-center gap-3">
+						{channelNames.map((c) => (
+							<ChannelStateChip
+								key={c}
+								name={c}
+								on={!!cfg.channels[c]?.enabled}
+							/>
+						))}
 					</div>
+				}
+			>
+				<ChannelCard
+					icon={Mail}
+					name="Email"
+					secretStatus={
+						data?.secrets_status.smtp_configured
+							? "SMTP configured ✓"
+							: "SMTP not configured ✗"
+					}
+					enabled={!!cfg.channels.email?.enabled}
+					onEnabledChange={(v) =>
+						patch((d) => {
+							d.channels.email = { ...d.channels.email, enabled: v };
+						})
+					}
+				>
 					<Label className="text-muted-foreground text-xs">
 						Default recipients (plain address or `group:&lt;name&gt;`)
 					</Label>
@@ -297,26 +403,23 @@ export function NotificationsSettingsPage() {
 						}
 						placeholder="ops@example.com or group:soc-team"
 					/>
-				</div>
+				</ChannelCard>
 
-				<div className="border-border flex flex-col gap-2 border-t pt-4">
-					<div className="flex items-center justify-between">
-						<Toggle
-							checked={!!cfg.channels.webhook?.enabled}
-							onChange={(v) =>
-								patch((d) => {
-									d.channels.webhook = { ...d.channels.webhook, enabled: v };
-								})
-							}
-							label="Webhook enabled"
-						/>
-						<span className="text-muted-foreground text-xs">
-							Signing secret{" "}
-							{data?.secrets_status.webhook_signing_secret_configured
-								? "set ✓"
-								: "not set ✗"}
-						</span>
-					</div>
+				<ChannelCard
+					icon={Webhook}
+					name="Webhook"
+					secretStatus={
+						data?.secrets_status.webhook_signing_secret_configured
+							? "Signing secret set ✓"
+							: "Signing secret not set ✗"
+					}
+					enabled={!!cfg.channels.webhook?.enabled}
+					onEnabledChange={(v) =>
+						patch((d) => {
+							d.channels.webhook = { ...d.channels.webhook, enabled: v };
+						})
+					}
+				>
 					<Label className="text-muted-foreground text-xs">
 						Default URL (where webhook alerts are POSTed; required unless a rule
 						sets its own URL)
@@ -335,7 +438,7 @@ export function NotificationsSettingsPage() {
 						placeholder="https://hooks.example.com/tms"
 						className="h-9 max-w-130"
 					/>
-				</div>
+				</ChannelCard>
 			</Section>
 
 			{/* Groups */}
@@ -386,8 +489,8 @@ export function NotificationsSettingsPage() {
 			<Section title="Triggers — defaults (band → channels)">
 				<p className="text-muted-foreground text-xs">
 					The baseline: which channels fire for each band. Only channels enabled
-					under Channels above fire; a column marked (off) is ignored. A matching
-					per-class rule below replaces the row for that class.
+					under Channels above fire; a column marked (off) is ignored. A
+					matching per-class rule below replaces the row for that class.
 				</p>
 				<div className="overflow-x-auto">
 					<table className="text-sm">
@@ -411,7 +514,9 @@ export function NotificationsSettingsPage() {
 								const chans = cfg.triggers.defaults[band] ?? [];
 								return (
 									<tr key={band} className="border-border border-t">
-										<td className="text-foreground px-3 py-1.5">{bandLabel(band)}</td>
+										<td className="text-foreground px-3 py-1.5">
+											{bandLabel(band)}
+										</td>
 										{channelNames.map((c) => (
 											<td key={c} className="px-3 py-1.5">
 												<input
