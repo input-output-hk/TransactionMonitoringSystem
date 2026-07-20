@@ -12,6 +12,12 @@ Sub-scores (Polimi Section 4.1.3):
   unique_assetclass_count (0.35): distinct asset classes across policies
   lovelace_amount       (0.15): inverted; low ADA relative to asset count
   sender_recurrence     (0.15): repeated deposits from same cluster
+
+Established-collection cap: a bundle whose policies are ALL older than
+``established_collection.min_policy_age_slots`` (asset_policy_first_seen
+lookup) with nothing minted in this tx is capped at the top of Moderate,
+never suppressed; see _score_utxo and the detection.yaml block for the
+threat-model argument and the documented residual.
 """
 
 import logging
@@ -41,6 +47,7 @@ from app.analysis.scorers.base import (
     finalise_score,
     reduce_to_best,
 )
+from app.db import clickhouse
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,9 @@ _BOOT = _CFG["bootstrap_anchors"]
 _REASON_T = float(_CFG["reason_threshold"])
 _MIN_TOKEN_COUNT = int(_CFG["gate"]["min_token_count"])
 _DOS_ASSET_MIN = int(_CFG["dos_asset_min"])
+_ESTABLISHED = _CFG["established_collection"]
+_ESTABLISHED_ENABLED = bool(_ESTABLISHED["enabled"])
+_ESTABLISHED_MIN_AGE_SLOTS = int(_ESTABLISHED["min_policy_age_slots"])
 
 # Serialized-Value CBOR floor that, on its own, qualifies a bundle as a
 # plausible value-bloat DoS regardless of pair count. Derived from the ledger's
@@ -157,7 +167,7 @@ class TokenDustScorer(BaseScorer):
         network = features.get("network", "")
         outputs = raw_data.get("outputs", [])
 
-        candidates = []
+        eligible = []
 
         for out in outputs:
             addr = out.get("address", "")
@@ -182,9 +192,63 @@ class TokenDustScorer(BaseScorer):
                 # the scorer must be suppressed by config rather than logic.
                 continue
 
-            candidates.append(self._score_utxo(out, addr, network, policy_count, token_count))
+            eligible.append((out, addr, policy_count, token_count))
+
+        if not eligible:
+            return reduce_to_best([])
+
+        first_seen_map, mint_policies = self._policy_age_context(raw_data, network, eligible)
+        current_slot = features.get("slot")
+
+        candidates = [
+            self._score_utxo(
+                out,
+                addr,
+                network,
+                policy_count,
+                token_count,
+                current_slot,
+                mint_policies,
+                first_seen_map,
+            )
+            for out, addr, policy_count, token_count in eligible
+        ]
 
         return reduce_to_best(candidates)
+
+    @staticmethod
+    def _policy_age_context(
+        raw_data: dict,
+        network: str,
+        eligible: list[tuple],
+    ) -> tuple[dict[str, int], frozenset]:
+        """First-seen slots for every policy the eligible bundles carry, plus
+        this tx's mint-map policies, both feeding the established-collection
+        cap.
+
+        One batched lookup per tx (an 80-policy bundle must not become 80
+        point queries). A lookup failure degrades to an empty map (no cap,
+        detection stands) WITHOUT marking the tx enrichment-failed: this is
+        a precision-only signal, and deferring the tx would delay detection
+        for data whose absence already fails toward recall.
+        """
+        mint = raw_data.get("mint")
+        mint_policies = frozenset(
+            str(p) for p in (mint if isinstance(mint, dict) else {}) if p not in ("ada", "lovelace")
+        )
+        bundle_policies: set[str] = set()
+        for out, _addr, _pc, _tc in eligible:
+            value = out.get("value")
+            if isinstance(value, dict):
+                bundle_policies.update(p for p in value if p not in ("ada", "lovelace"))
+        if not bundle_policies or not _ESTABLISHED_ENABLED:
+            return {}, mint_policies
+        try:
+            first_seen_map = clickhouse.get_policies_first_seen(network, sorted(bundle_policies))
+        except Exception as e:
+            logger.warning("policy first-seen lookup failed (no age cap applied): %s", e)
+            return {}, mint_policies
+        return first_seen_map, mint_policies
 
     def _score_utxo(
         self,
@@ -193,6 +257,9 @@ class TokenDustScorer(BaseScorer):
         network: str,
         policy_count: int,
         token_count: int,
+        current_slot: int | None,
+        mint_policies: frozenset,
+        first_seen_map: dict[str, int],
     ) -> ScorerResult:
         value = output.get("value", {})
         if not isinstance(value, dict):
@@ -290,6 +357,40 @@ class TokenDustScorer(BaseScorer):
         if token_count < _DOS_ASSET_MIN:
             final = min(final, BAND_MODERATE_MAX)
 
+        # Established-collection cap. The threat model mints worthless
+        # names; a bundle made entirely of policies first seen on-chain at
+        # least min_policy_age_slots ago, with nothing minted in this tx,
+        # is the NFT-protocol bulk shape (vault rollover, NFT AMM pool,
+        # bulk listing), not a mint-and-fire dust campaign. Capped at the
+        # top of Moderate, NEVER suppressed: sub-scores, reasons, and
+        # evidence stand, and the finding stays report- and
+        # corroboration-visible. Every degraded-data path fails open (no
+        # cap): unknown slot, any policy missing from the lookup, lookup
+        # failure upstream (empty map). The mint check is policy-level so
+        # an old OPEN policy minting fresh junk names in this tx stays
+        # uncapped. Residual documented in detection.yaml: a pre-aged junk
+        # policy lands here instead of High.
+        bundle_policies = {str(p) for p in value if p not in ("ada", "lovelace")}
+        ages_known = bool(bundle_policies) and all(p in first_seen_map for p in bundle_policies)
+        min_age_observed = None
+        if current_slot is not None and bundle_policies:
+            known_ages = [
+                int(current_slot) - first_seen_map[p]
+                for p in bundle_policies
+                if p in first_seen_map
+            ]
+            if known_ages:
+                min_age_observed = min(known_ages)
+        if (
+            _ESTABLISHED_ENABLED
+            and ages_known
+            and min_age_observed is not None
+            and min_age_observed >= _ESTABLISHED_MIN_AGE_SLOTS
+            and not (bundle_policies & mint_policies)
+        ):
+            final = min(final, BAND_MODERATE_MAX)
+            reasons.append("established_collection_cap")
+
         return ScorerResult(
             score=final,
             sub_scores={
@@ -308,5 +409,7 @@ class TokenDustScorer(BaseScorer):
                 "max_assets_per_policy": int(max_per_policy),
                 "lovelace_amount": int(ada_amount),
                 "target_script_address": address,
+                "policy_ages_known": ages_known,
+                "min_policy_age_slots_observed": min_age_observed,
             },
         )

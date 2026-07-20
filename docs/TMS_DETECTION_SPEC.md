@@ -105,11 +105,12 @@ score_token_dust(utxo):
 
 ### False Positive Mitigation
 - **Legitimate multi-asset bundles**: marketplace contracts, asset vaults, batch settlement validators routinely handle many assets. Per-script baseline normalisation handles this (their p99 is already high).
-- **Per-script allowlist**: known batch-handling contracts bypass scoring or get adjusted weights.
+- **Per-script allowlist**: known batch-handling contracts bypass scoring or get adjusted weights. The policy-side allowlist (`allowlist_policies`, network-scoped) suppresses bundles made ENTIRELY of verified collection policies: an attacker cannot mint under those policy ids, and smuggling dust alongside them un-allowlists the bundle. Address-prefix allowlisting of permissionless marketplace scripts is deliberately avoided (it would suppress real dust deposits to them).
+- **Established-collection cap** (`established_collection`): when every policy in the bundle was first seen at least `min_policy_age_slots` ago (per the `asset_policy_first_seen` lookup, populated inline at ingestion) and nothing in the bundle is minted in this tx, the score is capped at the top of Moderate, never suppressed. The threat model mints worthless names and fires; established collections moving in bulk (staking-vault rollovers, NFT AMM pools, marketplace bulk listings) produce the same mechanical shape from months-old policies. Every degraded-data path fails open to no cap (unknown slot, missing lookup row, lookup error), and the policy-level mint check keeps an old open policy minting fresh junk uncapped. Documented residual: a pre-aged junk policy lands top-of-Moderate instead of High; the finding stays recorded, reported, and corroboration-eligible.
 - **Novelty gate**: if all sub-scores < 0.5, suppress the final score.
 
 ### Reason Flags
-Primary reasons (per sub-score, fired when above `reason_threshold`, default 0.5): `high_value_cbor_bytes`, `many_distinct_assets`, `low_lovelace_amount`.
+Primary reasons (per sub-score, fired when above `reason_threshold`, default 0.5): `high_value_cbor_bytes`, `many_distinct_assets`, `low_lovelace_amount`. `established_collection_cap` marks a Moderate-capped established-collection bundle.
 
 Composite reason `script_value_bloat_dos`: emitted when all three primary signals saturate at the same script-address output. The shape is the canonical value-bloat denial-of-service signature (many unique native tokens locked at a contract UTxO with minimal ADA cushion, forcing every future spender to carry them forward and pushing min-UTxO and tx-size limits). The class column stays `token_dust` because the underlying observable is correctly "many tokens, low ADA, large CBOR"; the reason flag lets analysts distinguish "bloat a contract" from "spray dust at random addresses" without a schema migration. The score conveys severity; the reason conveys shape.
 
@@ -586,8 +587,10 @@ Two stacking bonuses are applied to the content sub-score when a URL and Tier-2 
 |---------|------|------------|
 | `recipient_count` | Distinct addresses receiving the TX/token. Per-cluster baseline. | 0.35 |
 | `url_hash_recurrence` | How many TXs in the window share the same URL(s). Per-cluster baseline. | 0.25 |
-| `targeting_score` | Fraction of recipients with prior interactions with the impersonated protocol. **Anchors: p50=0.05, p99=0.50.** | 0.25 |
+| `targeting_score` | Net-new-holder delivery: fraction of (URL-named asset, recipient) pairs where the recipient did not already hold that exact asset in the tx's own inputs (or the asset is minted in this tx). Already in [0, 1], no anchors. A real airdrop is all net-new (1.0); a URL-named token riding in the sender's own change is 0.0. The spec's original recipient-to-protocol interaction graph remains deferred and would refine this signal. | 0.25 |
 | `sender_recurrence` | Contextual | 0.15 |
+
+**Self-change bonus gate**: when asset names are the SOLE URL carrier and every (URL-asset, recipient) pair is positively proven prior-held (pure self-change, nothing minted), the two stacking bonuses (`url_combo_bonus`, `phishing_tld_bonus`) are withheld; content and delivery scoring are untouched. Suppression needs positive proof per pair, so missing input values, missing addresses, or an absent inputs list all fail open toward detection. Matching is on the full output address, not the stake credential (a stake-cred match is attacker-forgeable by minting an address from the attacker's payment credential plus the victim's stake credential). Metadata- and datum-carried URLs never gate. Kill switch: `phishing.asset_name_carrier.require_delivery_for_bonuses`.
 
 ### Severity Classification
 - **KNOWN_BAD**: `url_blacklist_match == 1.0` (confirmed by mature feed)
@@ -722,7 +725,7 @@ The Front-Running scorer maps `TX_B_CONFIRMED=1.0` (front-run signal) and `TX_A_
 ### Placeholder Sub-Scores
 Several sub-scores are placeholders pending cross-tx analysis infrastructure:
 - `sender_recurrence` (all scorers): always 0.0
-- `url_hash_recurrence`, `targeting_score`, `sender_recurrence` (Phishing delivery): always 0.0; delivery score uses `recipient_count` as sole active signal
+- `url_hash_recurrence`, `sender_recurrence` (Phishing delivery): always 0.0; `targeting_score` is live as the net-new-holder delivery fraction (see Attack 9), so delivery scoring uses `recipient_count` plus `targeting_score`
 
 Two further axes are not computed on-chain and are disclosed here as known coverage limits:
 - `swap_rate_delta`, `price_impact` (Sandwich): the on-chain swap economics are not decoded, so `swap_rate_victim`, `swap_rate_baseline`, and `price_impact_a` are hardcoded to `0.0` in `analysis/dex.py`, and both sub-scores are therefore always 0. These are the two largest economic axes (weights 0.30 and 0.20, i.e. 0.50 of the class total combined). The `profit` axis is the one economic signal that is actually computed (attacker net ADA via `dex._attacker_net_ada`), and it is ADA-only: profit realised in a non-ADA token is not captured. Consequence: with half the class weight pinned at zero, the sandwich score saturates at 50.0 even when link, profit, and recurrence are all maxed, so the class is structurally capped in the Moderate band and cannot reach High (`>= 60.0`) or Critical (`>= 80.0`) on economic magnitude. Pending DEX order/pool datum decoding (see the deferred-work register, `docs/follow-ups/`).

@@ -281,10 +281,15 @@ def insert_transactions_batch(transactions: list[NormalizedTransaction]):
         # ------------------------------------------------------------------
         # Populate extended feature tables from raw_data (best-effort)
         try:
-            from app.analysis.features import extract_tx_script_features, extract_utxo_features
+            from app.analysis.features import (
+                extract_tx_script_features,
+                extract_utxo_features,
+                tx_policy_ids,
+            )
 
             all_utxo_features = []
             all_script_features = []
+            policy_sightings: set[tuple[str, str, int]] = set()
             for tx in transactions:
                 if not tx.raw_data:
                     continue
@@ -296,6 +301,13 @@ def insert_transactions_batch(transactions: list[NormalizedTransaction]):
                 try:
                     utxo_rows = extract_utxo_features(tx.tx_hash, net, tx.raw_data)
                     script_row = extract_tx_script_features(tx.tx_hash, net, tx.raw_data)
+                    # Policy first-sightings feed the policy-age lookup
+                    # table. Mempool txs have no slot yet; the confirming
+                    # block re-inserts them with one, so skipping here
+                    # loses nothing.
+                    if tx.slot is not None:
+                        for policy_id in tx_policy_ids(tx.raw_data):
+                            policy_sightings.add((net, policy_id, int(tx.slot)))
                 except Exception as e:
                     logger.warning(
                         "Feature extraction failed for tx %s (non-fatal): %s",
@@ -311,6 +323,8 @@ def insert_transactions_batch(transactions: list[NormalizedTransaction]):
                 insert_utxo_features(all_utxo_features)
             if all_script_features:
                 insert_tx_script_features(all_script_features)
+            if policy_sightings:
+                insert_asset_policy_first_seen(sorted(policy_sightings))
         except Exception as e:
             # Feature INSERTS are still non-critical; log and continue
             logger.warning(f"Feature extraction failed (non-fatal): {e}")
@@ -568,6 +582,44 @@ def insert_tx_script_features(rows: list[tuple]):
         """,
         rows,
     )
+
+
+def insert_asset_policy_first_seen(rows: list[tuple]):
+    """Batch-insert ``(network, policy_id, slot)`` first-sighting candidates.
+
+    The AggregatingMergeTree keeps min(first_slot) per (network, policy_id)
+    across merges, so re-inserting an already-known policy (block replays,
+    the historical backfill) is harmless and requires no read-before-write.
+    """
+    if not rows:
+        return
+    _get_client().execute(
+        "INSERT INTO asset_policy_first_seen (network, policy_id, first_slot) VALUES",
+        rows,
+    )
+
+
+def get_policies_first_seen(network: str, policy_ids: list[str]) -> dict[str, int]:
+    """Batched ``policy_id -> first-seen slot`` lookup for policy-age signals.
+
+    One IN query per scored tx (an 80-policy dust bundle must not become 80
+    point queries). Aggregates min() at read time so unmerged duplicate
+    parts never surface a later sighting. Policies with no row are absent
+    from the result; callers treat absence as "age unknown" and fail toward
+    detection (no cap).
+    """
+    if not policy_ids:
+        return {}
+    rows = _get_client().execute(
+        """
+        SELECT policy_id, min(first_slot)
+        FROM asset_policy_first_seen
+        WHERE network = %(network)s AND policy_id IN %(policy_ids)s
+        GROUP BY policy_id
+        """,
+        {"network": network, "policy_ids": list(policy_ids)},
+    )
+    return {policy_id: int(first_slot) for policy_id, first_slot in rows}
 
 
 # ---------------------------------------------------------------------------

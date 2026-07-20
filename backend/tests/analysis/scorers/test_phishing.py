@@ -2,7 +2,11 @@
 
 import pytest
 
+from app.analysis.normalise import BAND_HIGH_THRESHOLD, BAND_INFORMATIONAL_MAX
+from app.analysis.scorer_config import get as _get_cfg
 from app.analysis.scorers.phishing import PhishingScorer
+
+_REASON_THRESHOLDS = _get_cfg("phishing")["reason_thresholds"]
 
 
 @pytest.fixture
@@ -305,12 +309,15 @@ class TestAssetNameCarrier:
 
     def test_url_named_airdrop_scores_and_flags(self, scorer):
         result = scorer.score(self._airdrop_features("claim-ada-reward.xyz"))
-        assert result.score > 0
+        assert result.score > BAND_INFORMATIONAL_MAX
         assert "url_in_asset_name" in result.reasons
         assert "claim-ada-reward.xyz" in result.evidence["asset_name_urls"]
         # 40 distinct recipients against the {p50: 1, p99: 50} bootstrap
         # anchor: the mass-distribution axis must be engaged.
-        assert result.sub_scores["recipients"] > 0.5
+        assert result.sub_scores["recipients"] > float(_REASON_THRESHOLDS["recipients"])
+        # Freshly minted URL token to 40 addresses that never held it: every
+        # delivery pair is net-new.
+        assert result.sub_scores["targeting"] == 1.0
 
     def test_outputs_only_redistribution_gates(self, scorer):
         # Re-distribution of a previously minted scam token: no mint map,
@@ -354,6 +361,115 @@ class TestAssetNameCarrier:
             ]
         }
         assert scorer.gate(_features(metadata=None, raw_data=raw)) is False
+
+
+class TestNetNewHolderTargeting:
+    """Net-new-holder delivery (sub-score 2c) and the self-change bonus gate.
+
+    A URL-named token that merely rides in the sender's own change (the
+    mainnet DexHunter FP cluster: the wallet's 88-asset bag carries a
+    scam-named token it already held) must not collect the two stacking
+    bonuses that alone push those txs into High. Suppression requires
+    positive proof of prior holding on every (URL-asset, recipient) pair;
+    every degraded-data path must fail open toward detection.
+    """
+
+    _P_URL = "c1" * 28
+    _P_BRAND = "d2" * 28
+    _SELF = "addr_test1qq_self_wallet_000"
+
+    def _bundle(self):
+        # 'Cniper.xyz' drives domain_suspicion; 'daedalus' is a Tier-3 brand
+        # match in an asset name so the SE reason threshold is met and the
+        # bonuses would fire without the delivery gate (the mainnet FP shape).
+        return {
+            "ada": {"lovelace": 5_000_000},
+            self._P_URL: {b"Cniper.xyz".hex(): 1},
+            self._P_BRAND: {b"daedalus".hex(): 1},
+        }
+
+    def _self_change_features(self, inputs=None, mint=None, metadata=None):
+        raw = {
+            "inputs": (
+                inputs if inputs is not None else [{"address": self._SELF, "value": self._bundle()}]
+            ),
+            "outputs": [{"address": self._SELF, "value": self._bundle()}],
+        }
+        if mint is not None:
+            raw["mint"] = mint
+        return _features(metadata=metadata, raw_data=raw, output_count=1)
+
+    def test_url_airdrop_with_se_name_recall_pin_high(self, scorer):
+        # ATTACK-MUST-FIRE band pin for the canonical in-the-wild scam: a
+        # freshly minted token whose name carries both Tier-2 bait and a
+        # phishing-prone TLD, airdropped to 40 wallets. Holds before and
+        # after the delivery gate (all pairs net-new -> bonuses kept).
+        carrier = TestAssetNameCarrier()
+        result = scorer.score(carrier._airdrop_features("claim rewards free-ada.xyz"))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert result.sub_scores["targeting"] == 1.0
+        assert "url_in_asset_name" in result.reasons
+
+    def test_self_change_url_token_below_high(self, scorer):
+        # The mainnet FP cluster shape: both URL-named tokens enter and
+        # leave at the same address. The finding survives (content signal
+        # intact) but the bonuses are withheld, dropping it out of High.
+        result = scorer.score(self._self_change_features())
+        assert result.score < BAND_HIGH_THRESHOLD
+        assert result.score > 0
+        assert result.sub_scores["domain_suspicion"] > 0
+        assert result.sub_scores["targeting"] == 0.0
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is True
+
+    def test_missing_input_value_fails_open(self, scorer):
+        # The two production silent-missing paths (originating tx absent,
+        # ANALYSIS_MAX_REF_TXS cap) surface as inputs without a "value" key:
+        # no positive proof of prior holding, so the bonuses must stay.
+        result = scorer.score(self._self_change_features(inputs=[{"address": self._SELF}]))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
+
+    def test_absent_inputs_fails_open(self, scorer):
+        result = scorer.score(self._self_change_features(inputs=[]))
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
+
+    def test_mint_overrides_prior_holding(self, scorer):
+        # Pre-seed evasion: an attacker holding their own scam token cannot
+        # neutralise the signal by minting more and "self-changing" it; a
+        # minted URL token makes every delivery pair net-new.
+        result = scorer.score(
+            self._self_change_features(mint={self._P_URL: {b"Cniper.xyz".hex(): 5}})
+        )
+        assert result.sub_scores["targeting"] == 1.0
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
+
+    def test_burn_does_not_override_prior_holding(self, scorer):
+        # A negative mint quantity is a burn, not a delivery; the self-change
+        # proof stands and the bonuses stay withheld.
+        result = scorer.score(
+            self._self_change_features(mint={self._P_URL: {b"Cniper.xyz".hex(): -1}})
+        )
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is True
+        assert result.score < BAND_HIGH_THRESHOLD
+
+    def test_metadata_carrier_never_gated(self, scorer):
+        # A metadata-carried URL plus SE text is phishing regardless of any
+        # token movement: the self-change proof must not touch the bonuses.
+        result = scorer.score(
+            self._self_change_features(metadata={"674": "claim rewards at free-ada.xyz"})
+        )
+        assert result.score >= BAND_HIGH_THRESHOLD
+
+    def test_require_delivery_kill_switch(self, scorer, monkeypatch):
+        # Config kill switch restores the pre-gate behaviour wholesale.
+        import app.analysis.scorers.phishing as phishing_module
+
+        monkeypatch.setattr(phishing_module, "_REQUIRE_DELIVERY_FOR_BONUSES", False)
+        result = scorer.score(self._self_change_features())
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
 
 
 class TestDefangedUrls:
