@@ -121,14 +121,23 @@ async def delete_session(session_id: str) -> None:
         )
 
 
-async def delete_all_sessions_for_user(user_id: UUID) -> int:
+async def delete_all_sessions_for_user(user_id: UUID, conn=None) -> int:
     """Revoke every session for a user — used when an admin disables or
-    deletes them. Returns the number of sessions revoked."""
-    async with get_connection() as conn:
-        result = await conn.execute(
-            "DELETE FROM user_sessions WHERE user_id = $1",
-            user_id,
-        )
+    deletes them. Returns the number of sessions revoked.
+
+    Pass an existing ``conn`` to run on the caller's connection (and inside
+    its transaction). ``delete_user`` must do this: it holds an
+    advisory-locked transaction, and acquiring a second pooled connection
+    here while other admin operations block on the lock holding their own
+    connections can exhaust the pool and deadlock. When ``conn`` is omitted,
+    a connection is acquired for the single DELETE.
+    """
+    sql = "DELETE FROM user_sessions WHERE user_id = $1"
+    if conn is not None:
+        result = await conn.execute(sql, user_id)
+    else:
+        async with get_connection() as own_conn:
+            result = await own_conn.execute(sql, user_id)
     try:
         return int(result.split()[-1])
     except (ValueError, IndexError):

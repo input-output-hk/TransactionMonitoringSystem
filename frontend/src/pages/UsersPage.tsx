@@ -31,9 +31,11 @@ import {
 	deleteUser,
 	listUsers,
 	resendInvite,
+	updateUser,
 	type User as ApiUser,
 	type UserRole,
 } from "@/lib/api/auth";
+import { useAuth } from "@/lib/auth";
 import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
 import { initials } from "@/lib/utils/strings";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -51,6 +53,13 @@ export function UsersPage() {
 	const [removeMode, setRemoveMode] = useState(false);
 	const [addOpen, setAddOpen] = useState(false);
 	const [pendingRemove, setPendingRemove] = useState<ApiUser | null>(null);
+	// Staged role change awaiting confirmation. Set when a row's Select
+	// changes; the PATCH only fires once the user confirms in the dialog.
+	const [pendingRoleChange, setPendingRoleChange] = useState<{
+		user: ApiUser;
+		nextRole: UserRole;
+	} | null>(null);
+	const { user: currentUser } = useAuth();
 	const qc = useQueryClient();
 
 	// Server-side pagination via `/api/v1/users?limit&offset` — see backend
@@ -92,6 +101,20 @@ export function UsersPage() {
 			toast.success("Invitation link resent — expires in 15 minutes."),
 		onError: (err) =>
 			toast.error(err instanceof Error ? err.message : "Resend failed"),
+	});
+
+	const updateMutation = useMutation({
+		mutationFn: ({ id, role }: { id: string; role: UserRole }) =>
+			updateUser(id, { role }),
+		onSuccess: (u) => {
+			// Re-fetch from the server so every row reflects the committed role.
+			// On error we deliberately don't invalidate: the Select is controlled
+			// by `u.role`, so it already shows the unchanged server value.
+			void qc.invalidateQueries({ queryKey: USERS_QUERY_KEY });
+			toast.success(`Role updated to ${u.role}`);
+		},
+		onError: (err) =>
+			toast.error(err instanceof Error ? err.message : "Role update failed"),
 	});
 
 	return (
@@ -136,7 +159,9 @@ export function UsersPage() {
 								<TableCell>
 									<div className="flex items-center gap-3">
 										<Avatar>
-											<AvatarFallback>{initials(u.full_name, 1)}</AvatarFallback>
+											<AvatarFallback>
+												{initials(u.full_name, 1)}
+											</AvatarFallback>
 										</Avatar>
 										<span className="text-foreground">{u.full_name}</span>
 									</div>
@@ -144,7 +169,32 @@ export function UsersPage() {
 								<TableCell className="text-foreground">{u.email}</TableCell>
 								<TableCell className="text-foreground">
 									<div className="flex items-center gap-2">
-										<span>{u.role}</span>
+										<Select
+											value={u.role}
+											// Own role can't be changed here — the backend rejects
+											// it (400) to avoid an admin demoting their own session.
+											disabled={u.id === currentUser?.id}
+											onValueChange={(v) => {
+												const next = v as UserRole;
+												if (next !== u.role) {
+													setPendingRoleChange({ user: u, nextRole: next });
+												}
+											}}
+										>
+											<SelectTrigger
+												aria-label={`Role for ${u.full_name}`}
+												className="bg-card h-9 w-[120px]"
+											>
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												{USER_ROLES.map((r) => (
+													<SelectItem key={r} value={r}>
+														{r}
+													</SelectItem>
+												))}
+											</SelectContent>
+										</Select>
 										{u.status === "pending" && (
 											<>
 												{/* Compact "PENDING" pill — keeps the admin aware
@@ -233,6 +283,15 @@ export function UsersPage() {
 					setPendingRemove(null);
 				}}
 			/>
+
+			<ChangeRoleDialog
+				change={pendingRoleChange}
+				onOpenChange={(open) => !open && setPendingRoleChange(null)}
+				onConfirm={({ user, nextRole }) => {
+					updateMutation.mutate({ id: user.id, role: nextRole });
+					setPendingRoleChange(null);
+				}}
+			/>
 		</div>
 	);
 }
@@ -295,15 +354,15 @@ function AddUserFlow({
 		>
 			<DialogContent
 				showClose={false}
-				className="max-w-md bg-dialog"
+				className="bg-dialog max-w-md"
 				aria-describedby={undefined}
 			>
 				{step === "form" ? (
 					<>
 						<DialogHeader>
 							<DialogTitle className="text-foreground text-sm font-normal">
-								To add a new user, fill in the details below. We'll email
-								them an invitation link to set up their account.
+								To add a new user, fill in the details below. We'll email them
+								an invitation link to set up their account.
 							</DialogTitle>
 						</DialogHeader>
 
@@ -418,9 +477,9 @@ function InvitationSentStep({
 			</div>
 
 			<p className="text-muted-foreground text-xs">
-				The recipient has 15 minutes to click the magic link in their email
-				to activate their account. Re-send the invite from the users list
-				if it expires.
+				The recipient has 15 minutes to click the magic link in their email to
+				activate their account. Re-send the invite from the users list if it
+				expires.
 			</p>
 
 			<DialogFooter className="justify-end">
@@ -459,10 +518,7 @@ function RemoveUserDialog({
 		<Dialog open={!!user} onOpenChange={onOpenChange}>
 			{/* Same #373D3F frame as the other confirm dialogs (Restore, Delete
 			    Attack, Add User). Title centered, two equal-width buttons. */}
-			<DialogContent
-				showClose={false}
-				className="max-w-xl gap-8 bg-dialog"
-			>
+			<DialogContent showClose={false} className="bg-dialog max-w-xl gap-8">
 				<DialogHeader>
 					<DialogTitle className="text-center text-base font-normal">
 						Are you sure you want to delete this user?
@@ -482,6 +538,53 @@ function RemoveUserDialog({
 					<Button
 						variant="outline"
 						onClick={() => user && onConfirm(user.id)}
+						className="bg-card flex-1"
+					>
+						Confirm
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+/* ---------- Change Role ---------- */
+
+function ChangeRoleDialog({
+	change,
+	onOpenChange,
+	onConfirm,
+}: {
+	change: { user: ApiUser; nextRole: UserRole } | null;
+	onOpenChange: (open: boolean) => void;
+	onConfirm: (change: { user: ApiUser; nextRole: UserRole }) => void;
+}) {
+	return (
+		<Dialog open={!!change} onOpenChange={onOpenChange}>
+			<DialogContent showClose={false} className="bg-dialog max-w-xl gap-8">
+				<DialogHeader>
+					<DialogTitle className="text-center text-base font-normal">
+						{change
+							? `Change ${change.user.full_name}'s role to ${change.nextRole}?`
+							: ""}
+					</DialogTitle>
+					<DialogDescription className="text-center">
+						{change?.nextRole === "Admin"
+							? "Admins can manage users and change detection settings."
+							: "Reviewers have read-only access to mutating controls."}
+					</DialogDescription>
+				</DialogHeader>
+				<DialogFooter className="flex-row gap-4 sm:justify-between">
+					<Button
+						variant="outline"
+						onClick={() => onOpenChange(false)}
+						className="bg-card flex-1"
+					>
+						Cancel
+					</Button>
+					<Button
+						variant="outline"
+						onClick={() => change && onConfirm(change)}
 						className="bg-card flex-1"
 					>
 						Confirm
