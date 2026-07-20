@@ -51,20 +51,33 @@ from app.storage.clickhouse.base import connect
 
 logger = logging.getLogger(__name__)
 
+# Cardano's security parameter: the protocol cannot reorganize blocks deeper
+# than this many blocks (Ouroboros Praos common-prefix guarantee). Cited by
+# name (not inlined) below since both rollback-safety constants derive from it.
+CARDANO_SECURITY_PARAMETER_K = 2_160
+
 # Cardano's stability window 3k/f = 3 * 2160 / 0.05 = 129,600 slots (~36h on
-# mainnet, where 1 slot = 1s): the protocol cannot reorganize blocks deeper
-# than k = 2160 blocks, and 3k/f slots is the settlement bound within which
-# those k blocks are guaranteed to have been produced. History at or below
+# mainnet, where 1 slot = 1s): 3k/f slots is the settlement bound within which
+# k blocks are guaranteed to have been produced. History at or below
 # (tip - this window) is immutable, so a backfilled row there can never be
 # orphaned by a rollback.
 ROLLBACK_SAFETY_SLOTS = 129_600
 # The block-height twin of the slot bound above: 3k = 6,480 blocks is the same
 # ~36h wall-clock at the active-slot rate f = 0.05 (one block per ~20 slots).
-# It must match the slot bound's TIME SPAN, not the security parameter k
-# alone: a shorter height bound would let the bounded walk fetch transactions
-# whose slots sit above the slot floor, burning the per-contract cap on rows
-# the slot guard then drops.
-ROLLBACK_SAFETY_BLOCKS = 3 * 2_160
+# It must match the slot bound's TIME SPAN, not k alone: a shorter height
+# bound would let the bounded walk fetch transactions whose slots sit above
+# the slot floor, burning the per-contract cap on rows the slot guard drops.
+ROLLBACK_SAFETY_BLOCKS = 3 * CARDANO_SECURITY_PARAMETER_K
+
+# The history flavor's OWN cursor tag: distinct from BlockfrostSource.name
+# ("blockfrost", the PRIMARY chain source's tag). A bounded history walk and an
+# unbounded CHAIN_SOURCE=blockfrost primary walk would otherwise share the
+# identical tag and cursor-string shape, so switching CHAIN_SOURCE from
+# blockfrost-primary to host_ch+HISTORY_SOURCE=blockfrost on an un-wiped volume
+# could let a leftover unbounded cursor satisfy the skip-fast check below and
+# silently skip the bounded backfill (docs/operations.md warns operators to
+# wipe first; this tag makes the two cursor spaces disjoint regardless).
+_BLOCKFROST_HISTORY_SOURCE_TAG = "blockfrost_history"
 
 HistoryStatus = Literal["completed", "rate_limited", "deferred", "pending", "skipped"]
 
@@ -182,6 +195,18 @@ def host_history_boundary(settings: Settings, target: str) -> HostBoundary | Non
             parameters=params,
         ).result_rows
         target_floor_height = int(height_rows[0][0]) if height_rows else 0
+        if target_floor_height == 0 and target_floor_slot > 0:
+            # The height join can come back empty even though the slot term is
+            # genuinely known: CH_RETENTION_DAYS_TRANSACTIONS and
+            # CH_RETENTION_DAYS_IO (address_transactions) are independently
+            # configurable, and the common direction is address_transactions
+            # outliving transactions. Falling back to the loose tip-safety
+            # height here (as if the target had no known history at all) would
+            # let to_block drift far looser than floor_slot, burning the whole
+            # per-contract cap on near-tip rows _SlotCappedRepo then drops.
+            # Estimate from the tip's own observed height/slot ratio instead,
+            # anchored to the slot term we DO trust.
+            target_floor_height = round(target_floor_slot * tip_height / tip_slot)
 
         safety_slot = tip_slot - ROLLBACK_SAFETY_SLOTS
         safety_height = tip_height - ROLLBACK_SAFETY_BLOCKS
@@ -303,7 +328,11 @@ class BlockfrostHistory(_HistoryFlavor):
             # through and resumes/re-walks wider — the resume and
             # recent-restart sizing invariants in the ingester handle it.
             cur = repo.get_cursor(target)
-            if cur and cur.get("source") == "blockfrost" and int(cur.get("txs_seen") or 0) >= cap:
+            if (
+                cur
+                and cur.get("source") == _BLOCKFROST_HISTORY_SOURCE_TAG
+                and int(cur.get("txs_seen") or 0) >= cap
+            ):
                 return HistoryResult(
                     "skipped", int(cur["txs_seen"]), "history complete at this cap"
                 )
@@ -338,6 +367,11 @@ class BlockfrostHistory(_HistoryFlavor):
             capped = _SlotCappedRepo(repo, boundary.floor_slot, progress)
             try:
                 async with BlockfrostSource(self._settings) as source:
+                    # Instance-level override: ingest() tags the cursor with
+                    # source.name, and this walk's cursor must never collide
+                    # with a primary CHAIN_SOURCE=blockfrost walk's (see
+                    # _BLOCKFROST_HISTORY_SOURCE_TAG above).
+                    source.name = _BLOCKFROST_HISTORY_SOURCE_TAG
                     result = await ingest(
                         repo=capped,  # type: ignore[arg-type]  # delegating proxy over Repo
                         source=source,
@@ -381,7 +415,7 @@ class BlockfrostHistory(_HistoryFlavor):
             last_tx_hash="",
             txs_seen=cap,
             done=True,
-            source="blockfrost",
+            source=_BLOCKFROST_HISTORY_SOURCE_TAG,
         )
 
 
@@ -396,16 +430,19 @@ _KUPO_MAX_TRIGGERS = 3
 # Marker-cursor encoding for the kupo flavor: the cursor column is free-form
 # (source-owned), so it carries the trigger-attempt counter, plus a gave-up
 # flag when the attempt budget was exhausted (so the settled marker is
-# distinguishable from a genuinely landed backfill in history_status).
+# distinguishable from a genuinely landed backfill in history_status), or a
+# no-job flag when the last attempt failed before the host ever created a job
+# (so the next tick re-triggers instead of polling a job that never started).
 _KUPO_ATTEMPTS_PREFIX = "attempts:"
 _KUPO_GAVE_UP_SUFFIX = ";gave_up"
+_KUPO_NO_JOB_SUFFIX = ";no_job"
 
 
 def _kupo_attempts(cur: dict[str, Any] | None) -> int:
     raw = (cur or {}).get("cursor") or ""
     if isinstance(raw, str) and raw.startswith(_KUPO_ATTEMPTS_PREFIX):
-        # The counter is the first ';'-separated segment after the prefix (the
-        # gave-up flag, when present, rides behind it).
+        # The counter is the first ';'-separated segment after the prefix (a
+        # gave-up/no-job flag, when present, rides behind it).
         try:
             return int(raw[len(_KUPO_ATTEMPTS_PREFIX) :].split(";", 1)[0])
         except ValueError:
@@ -416,6 +453,19 @@ def _kupo_attempts(cur: dict[str, Any] | None) -> int:
 def _kupo_gave_up(cur: dict[str, Any] | None) -> bool:
     raw = (cur or {}).get("cursor") or ""
     return isinstance(raw, str) and raw.endswith(_KUPO_GAVE_UP_SUFFIX)
+
+
+def _kupo_has_no_job(cur: dict[str, Any] | None) -> bool:
+    """Whether the marker's last attempt failed before the host ever created a
+    job (network-unreachable, 503, auth failure, or an unexpected status).
+    Distinguishes that state from a genuinely outstanding host job (also
+    ``done=False``): the former must re-trigger next tick, the latter must
+    poll ``_check_host_job`` — polling a job that was never created would
+    either 404 (harmless, but a wasted round trip) or, on the SAME class of
+    host-unreachable/auth failure, return early as "pending" and skip the
+    give-up counter check entirely, defeating ``_KUPO_MAX_TRIGGERS``."""
+    raw = (cur or {}).get("cursor") or ""
+    return isinstance(raw, str) and raw.endswith(_KUPO_NO_JOB_SUFFIX)
 
 
 class KupoHistory(_HistoryFlavor):
@@ -463,12 +513,15 @@ class KupoHistory(_HistoryFlavor):
                     # (gave-up or landed alike) — keeping it would let the
                     # attempts wall below re-close the re-open on the same tick.
                     attempts = 0
-                else:
+                elif not _kupo_has_no_job(cur):
                     # A trigger is outstanding: ask the host how it went.
                     checked = await self._check_host_job(repo, target, target_type, cap)
                     if checked is not None:
                         return checked
                     # failed / degraded / foreign / forgotten → re-trigger below.
+                # else: the last attempt failed before a job existed (no_job) —
+                # skip straight to the attempts-wall/re-trigger below rather than
+                # polling a job that was never created.
 
             if attempts >= _KUPO_MAX_TRIGGERS:
                 logger.warning(
@@ -525,6 +578,15 @@ class KupoHistory(_HistoryFlavor):
                 )
         except httpx.HTTPError:
             logger.warning("host backfill API unreachable for %s", target[:24])
+            self._mark(
+                repo,
+                target,
+                target_type,
+                done=False,
+                txs_seen=0,
+                attempts=attempts + 1,
+                no_job=True,
+            )
             return HistoryResult("deferred", 0, "host API unreachable; retrying on later ticks")
         if resp.status_code == 202:
             # Only a 202 counts as an attempt: OUR job is now running.
@@ -535,12 +597,26 @@ class KupoHistory(_HistoryFlavor):
             )
         if resp.status_code == 409:
             # A FOREIGN run (an operator's manual backfill) holds the
-            # same-address slot. Do not adopt it and do not write a marker:
-            # the next tick simply retries the trigger once it finishes.
+            # same-address slot. Not OUR failure (nothing to give up on) — do
+            # not adopt it and do not write a marker: the next tick simply
+            # retries the trigger once it finishes.
             return HistoryResult(
                 "pending", 0, "another backfill for this address is running; will retry"
             )
+        # Every path below is a failure to even start OUR job: mark it as a
+        # spent (no-job) attempt so a persistent misconfiguration eventually
+        # crosses _KUPO_MAX_TRIGGERS and surfaces as history_status "failed"
+        # (see _kupo_has_no_job) instead of retrying silently forever.
         if resp.status_code == 503:
+            self._mark(
+                repo,
+                target,
+                target_type,
+                done=False,
+                txs_seen=0,
+                attempts=attempts + 1,
+                no_job=True,
+            )
             return HistoryResult("deferred", 0, "host KUPO_URL not configured")
         # Any other status is a misconfiguration the startup guards cannot
         # catch (they verify the key is SET, not that it is valid), and the
@@ -553,11 +629,23 @@ class KupoHistory(_HistoryFlavor):
                 target[:24],
                 resp.status_code,
             )
+            self._mark(
+                repo,
+                target,
+                target_type,
+                done=False,
+                txs_seen=0,
+                attempts=attempts + 1,
+                no_job=True,
+            )
             return HistoryResult("deferred", 0, f"host API auth failed (HTTP {resp.status_code})")
         logger.warning(
             "host backfill trigger for %s returned unexpected HTTP %d",
             target[:24],
             resp.status_code,
+        )
+        self._mark(
+            repo, target, target_type, done=False, txs_seen=0, attempts=attempts + 1, no_job=True
         )
         return HistoryResult("deferred", 0, f"host backfill returned HTTP {resp.status_code}")
 
@@ -634,8 +722,12 @@ class KupoHistory(_HistoryFlavor):
         txs_seen: int,
         attempts: int,
         gave_up: bool = False,
+        no_job: bool = False,
     ) -> None:
-        suffix = _KUPO_GAVE_UP_SUFFIX if gave_up else ""
+        # Mutually exclusive: gave_up settles the marker terminally (done=True),
+        # no_job marks a failed-to-start attempt on an outstanding (done=False)
+        # marker. A caller never has a reason to pass both.
+        suffix = _KUPO_GAVE_UP_SUFFIX if gave_up else (_KUPO_NO_JOB_SUFFIX if no_job else "")
         repo.upsert_cursor(
             target,
             target_type,
@@ -649,7 +741,7 @@ class KupoHistory(_HistoryFlavor):
 
 # The cursor sources the history markers may carry; anything else (a primary
 # CHAIN_SOURCE cursor on a reused database, say) is not a history marker.
-_HISTORY_SOURCES = ("blockfrost", "kupo")
+_HISTORY_SOURCES = (_BLOCKFROST_HISTORY_SOURCE_TAG, "kupo")
 
 
 def _marker_complete(cur: dict[str, Any] | None, cap: int) -> bool:
@@ -724,6 +816,14 @@ async def resolve_metadata(
                 # A genuinely unknown address re-raises SourceNotFound here,
                 # which is the right answer for both sides.
                 return await bf.metadata(target, target_type)
+        # kupo: unlike blockfrost above, there is no synchronous existence
+        # check available here — the sidecar never queries the chain directly
+        # in this flavor (that capability lives on the HOST side; this call
+        # only trigger-and-continues the host's own backfill). A typo'd or
+        # never-existed address therefore onboards the same as a real one and
+        # simply never accumulates history — a dead watchlist entry, not a
+        # security or recall issue (it can never be flagged, since it has no
+        # transactions to score).
         return {
             "exists": True,
             "is_script": payment_is_script(target),

@@ -165,9 +165,12 @@ class BlockfrostSource:
     # member and routes ``select_repo_factory`` to the base (inserting) repo.
     host_backed = False
 
-    # Cursor tag (see ChainSource.name): a Blockfrost page cursor is only ever
-    # replayed into a Blockfrost walk, even when this source runs as the
-    # secondary history source under a host_ch primary.
+    # Cursor tag (see ChainSource.name) for this source's PRIMARY-mode use
+    # (CHAIN_SOURCE=blockfrost). The pre-deployment history flavor overrides
+    # this per-instance to a distinct tag (service/history.py) before handing
+    # the source to ingest(): its bounded walk's cursor must never collide with
+    # an unbounded primary walk's, e.g. across a CHAIN_SOURCE migration that
+    # left old cursors on an un-wiped volume.
     name = "blockfrost"
 
     def __init__(self, settings: Settings, *, client: AsyncBlockfrostClient | None = None) -> None:

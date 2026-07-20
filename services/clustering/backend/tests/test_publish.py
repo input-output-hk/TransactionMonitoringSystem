@@ -369,16 +369,37 @@ def test_batch_publish_bounds_to_host_known_hashes(monkeypatch: pytest.MonkeyPat
     assert [r[_TX_HASH_COL] for r in rows] == ["txLive"]
 
 
-def test_label_publish_bounds_but_keeps_for_retraction() -> None:
+def test_label_publish_bounds_both_the_insert_and_the_returned_keep_set() -> None:
+    # A host-unknown labeled hash (backfilled history, or any orphan) must be
+    # excluded from BOTH the insert and the returned keep-set: relying on "it
+    # was never published elsewhere either" to make an unfiltered keep-set
+    # harmless is exactly the kind of implicit invariant a future insert path
+    # could silently break.
     fake = FakeClient([[("txHist",), ("txNew",)]])
     labeled = _publish_labels(
         _repo_with_host(fake, {"txNew"}), "addr1", "preprod", "shape", _PUB, exclude=set()
     )
-    # Only the host-known tx is inserted…
     _table, rows, _cols = fake.inserts[0]
     assert [r[_TX_HASH_COL] for r in rows] == ["txNew"]
-    # …but the returned keep-set stays unfiltered (feeds _retract_stale).
-    assert labeled == {"txHist", "txNew"}
+    assert labeled == {"txNew"}
+
+
+def test_label_publish_keeps_excluded_hashes_even_if_host_unknown() -> None:
+    # A labeled hash already covered by `exclude` (published via the online or
+    # batch path) must still count toward this function's keep contribution,
+    # even though this call itself never inserts it — the caller's overall
+    # keep union must not shrink relative to today's committed behavior.
+    fake = FakeClient([[("txExcluded",)]])
+    labeled = _publish_labels(
+        _repo_with_host(fake, set()),
+        "addr1",
+        "preprod",
+        "shape",
+        _PUB,
+        exclude={"txExcluded"},
+    )
+    assert fake.inserts == []
+    assert labeled == {"txExcluded"}
 
 
 def test_identity_membership_passes_through() -> None:

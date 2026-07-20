@@ -364,7 +364,9 @@ def _publish_labels(
     exclude: set[str],
 ) -> set[str]:
     """Publish malicious MANUAL labels that neither the online nor batch path can
-    reach, and return ALL malicious-labeled hashes for this target.
+    reach, and return the hashes this target's ``keep`` set must cover on their
+    account: this call's own fresh (host-known) inserts, plus any labeled hash
+    already covered by ``exclude`` (the caller's other-path union).
 
     The online path reads ``tx_classifications`` and the batch path reads cluster
     membership, so a tx that was directly labeled malicious (``label_transaction``)
@@ -375,8 +377,8 @@ def _publish_labels(
 
     Source-agnostic: reads ``tx_labels`` directly (FINAL + deleted = 0, so a
     cleared label no longer applies). Inserts a synthesized malicious row (no
-    cluster/score data of its own) for any hash not already published this pass;
-    returns the full labeled set so the caller folds it into ``keep``."""
+    cluster/score data of its own) for any hash not already published this
+    pass."""
     db = repo._db  # type: ignore[attr-defined]
     labeled = {
         str(r[0])
@@ -386,11 +388,10 @@ def _publish_labels(
             parameters={"tgt": target, "mal": VERDICT_MALICIOUS},
         ).result_rows
     }
-    # The INSERT is host-membership-bounded, but the RETURN value stays
-    # unfiltered: it feeds _retract_stale's keep set, and a host-unknown
-    # labeled tx was never published, so keeping it in keep is a harmless
-    # no-op. Unfiltered is the simpler contract ("all malicious-labeled
-    # hashes").
+    # Host-known-bounded, same as every other publish path: the return value
+    # must not rely on "a host-unknown hash was never published elsewhere,
+    # so including it in keep is a no-op" holding forever — a future insert
+    # path that forgot to pre-filter would silently reopen exactly that gap.
     fresh = _host_known_only(repo, target, labeled - exclude)
     if fresh:
         rows = [
@@ -417,7 +418,7 @@ def _publish_labels(
             rows,
             column_names=_COLUMNS,
         )
-    return labeled
+    return fresh | (labeled & exclude)
 
 
 def publish_contract_anomaly(

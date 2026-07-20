@@ -789,7 +789,7 @@ def test_contract_detail_includes_history_fields(monkeypatch: pytest.MonkeyPatch
 
     class _MarkerRepo:
         def get_cursor(self, target: str) -> dict[str, Any]:
-            return {"source": "blockfrost", "done": 1, "txs_seen": 321}
+            return {"source": "blockfrost_history", "done": 1, "txs_seen": 321}
 
         def close(self) -> None:
             pass

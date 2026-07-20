@@ -26,6 +26,7 @@ from app.config import Settings
 from app.models import TxRecord, UtxoRecord
 from app.service.history import host_history_boundary
 from app.storage.clickhouse import ClickHouseRepo
+from app.storage.clickhouse.base import connect
 from app.storage.clickhouse.hybrid import HybridHistoryRepo
 
 from .conftest import LIVE_NETWORK
@@ -136,6 +137,52 @@ def test_host_membership_bound_executes_live(seeded: tuple[Settings, str, list[s
         repo.close()
 
 
+def test_host_membership_bound_matches_a_seeded_host_row() -> None:
+    # The sibling test above only proves the query correctly returns EMPTY
+    # against a live server; it never proves the query's IN {hs:Array(String)}
+    # clause correctly returns a MATCH. Given this project's history of
+    # live-only ClickHouse bugs mocks cannot catch (parameter binding, type
+    # coercion), an undetected defect here would silently zero out ALL
+    # contract_anomaly publishing — this seeds a real row directly into the
+    # HOST's own address_transactions table (this tier's one intentional
+    # exception to "nothing is ever written to the host tables") to close
+    # that gap.
+    settings = _live_settings()
+    target = f"livedbtest_hostmatch_{uuid.uuid4().hex[:16]}"
+    host_known, local_only = f"{0xAA:02x}" * 32, f"{0xBB:02x}" * 32
+    client = connect(settings, database=settings.host_clickhouse_db)
+    try:
+        client.insert(
+            "address_transactions",
+            [
+                [
+                    LIVE_NETWORK,
+                    target,
+                    100,
+                    host_known,
+                    datetime(2023, 11, 14, tzinfo=UTC),
+                    datetime.now(UTC),
+                ]
+            ],
+            column_names=[
+                "network",
+                "address",
+                "slot",
+                "tx_hash",
+                "timestamp",
+                "ingestion_timestamp",
+            ],
+        )
+    finally:
+        client.close()
+
+    repo = HybridHistoryRepo(settings)
+    try:
+        assert repo.host_known_tx_hashes(target, {host_known, local_only}) == {host_known}
+    finally:
+        repo.close()
+
+
 def test_boundary_aggregates_execute_live(seeded: tuple[Settings, str, list[str]]) -> None:
     # Empty host network → no tip → defer (None). The point is that all three
     # aggregates (tip max, minIf floor + uniqExact, height floor with the IN
@@ -157,11 +204,11 @@ def test_source_tagged_cursor_round_trips_live(seeded: tuple[Settings, str, list
             last_tx_hash="",
             txs_seen=3,
             done=False,
-            source="blockfrost",
+            source="blockfrost_history",
         )
         cur = repo.get_cursor(target)
         assert cur is not None
-        assert cur["source"] == "blockfrost"
+        assert cur["source"] == "blockfrost_history"
         assert cur["cursor"] == "page:5;from:100"
         assert int(cur["txs_seen"]) == 3 and not cur["done"]
     finally:

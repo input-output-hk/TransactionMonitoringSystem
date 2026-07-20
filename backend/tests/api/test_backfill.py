@@ -423,3 +423,51 @@ def test_created_before_slot_default_none_preserves_behavior(client, monkeypatch
     resp = client.post("/api/v1/backfill", json={"address": _ADDR})
     assert resp.status_code == 202
     assert resp.json()["created_before_slot"] is None
+
+
+def test_created_before_slot_rejects_implausibly_large_value(client, monkeypatch):
+    # Defense in depth: this endpoint is reachable by any API-key holder, not
+    # only the well-behaved clustering sidecar (which always derives the value
+    # from real host tip data), so an absurd slot is rejected at the door.
+    from app.api.backfill import _MAX_PLAUSIBLE_SLOT
+
+    monkeypatch.setattr(backfill_api, "backfill_address", _fast)
+    resp = client.post(
+        "/api/v1/backfill",
+        json={"address": _ADDR, "created_before_slot": _MAX_PLAUSIBLE_SLOT + 1},
+    )
+    assert resp.status_code == 422
+
+
+async def test_audit_failure_releases_the_reservation(monkeypatch):
+    """A failed audit write must not leave a permanent 'running' ghost job
+    blocking the same-address 409 guard forever: the slot reservation is made
+    BEFORE the audit await specifically to close a TOCTOU race, so a failure
+    on that await must roll the reservation back."""
+    from app.api.backfill import BackfillRequest, start_backfill
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "KUPO_URL", "http://kupo.test:1442")
+    monkeypatch.setattr(settings, "CARDANO_NETWORK", "preprod")
+    monkeypatch.setattr(backfill_api, "backfill_address", _fast)
+    backfill_api._jobs.clear()
+
+    async def _boom(*_a, **_k) -> None:
+        raise RuntimeError("simulated Postgres outage")
+
+    monkeypatch.setattr(audit, "record", _boom)
+
+    class _Req:
+        headers: dict = {}
+        client = None
+
+    with pytest.raises(RuntimeError):
+        await start_backfill(BackfillRequest(address=_ADDR), _Req(), principal="dev-mode")
+    assert ("preprod", _ADDR) not in backfill_api._jobs
+
+    # A retry (audit healthy again) must see no leftover reservation: no
+    # spurious 409 from the failed attempt above.
+    monkeypatch.setattr(audit, "record", _noop_audit)
+    resp = await start_backfill(BackfillRequest(address=_ADDR), _Req(), principal="dev-mode")
+    assert resp["status"] == "running"
+    await backfill_api._jobs[("preprod", _ADDR)].task
