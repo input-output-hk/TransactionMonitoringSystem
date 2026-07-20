@@ -47,3 +47,88 @@ through the host proxy on the same origin.
 `GET /api/health` (liveness, no DB access) and `GET /api/ready` (readiness,
 pings ClickHouse, **503** when unreachable) are auth-exempt by construction, so
 orchestrator probes keep working with authentication enabled.
+
+## The history backfill (HISTORY_SOURCE)
+
+Enable by setting, in the ROOT `.env` (these are compose interpolations, like
+`CLUSTERING_CHAIN_SOURCE`: a per-network `.env.<network>` file does not reach
+them):
+
+| Root .env variable | Sidecar env | Default | Meaning |
+|---|---|---|---|
+| `CLUSTERING_HISTORY_SOURCE` | `HISTORY_SOURCE` | (empty) | `blockfrost` or `kupo`; empty disables. host_ch only. |
+| `CLUSTERING_HISTORY_MAX_TXS` | `HISTORY_MAX_TXS` | 500 | Per-contract history depth when the contract carries no cap of its own. |
+| `CLUSTERING_HISTORY_MAX_TXS_CEILING` | `HISTORY_MAX_TXS_CEILING` | 5000 | Clamp on per-contract overrides (mirrors the host's backfill cap). |
+| `CLUSTERING_HOST_API_URL` | `HOST_API_URL` | `http://app:8000` | kupo flavor only: the host API base. |
+| `CLUSTERING_HOST_API_KEY` | `HOST_API_KEY` | (empty) | kupo flavor only: a host API key (see the credential note below). |
+| `CLUSTERING_HOST_API_TIMEOUT_SECONDS` | `HOST_API_TIMEOUT_SECONDS` | 30 | kupo flavor only: per-request ceiling on the trigger/status round trip (the backfill itself runs host-side in the background). |
+
+The startup guards fail fast on invalid combinations (unknown value, a history
+source under a blockfrost primary, a flavor missing its credential). Recreate
+the `clustering` service after changing them.
+
+Operational behavior worth knowing:
+
+- Resume is cursor-driven. A rate-limited Blockfrost walk or a pending host-side
+  kupo job is picked up again by the next classify tick (every
+  `FEED_POLL_INTERVAL_SECONDS`); the completed case costs one cursor read.
+  Diagnose a stalled backfill with
+  `SELECT * FROM tms_clustering.ingest_cursor WHERE target = '<addr>'`:
+  `done = 0` with `source = 'blockfrost'` and `txs_seen` below the cap means
+  the walk is mid-flight or waiting out a provider daily limit (`txs_seen` at
+  the cap means complete at that cap, resumable if the cap is raised);
+  `source = 'kupo'` with `done = 0` means the host job is still running (or
+  the trigger will be re-checked next tick).
+- Raising the cap re-opens work differently by marker state. A paused walk
+  (`done = 0` with `txs_seen` at the cap) resumes automatically on the next
+  classify tick once the effective cap rises: a higher per-contract value, or
+  a raised `CLUSTERING_HISTORY_MAX_TXS` for contracts without an override. A
+  settled marker (`done = 1`, landed or gave-up) is never retried by the tick;
+  it re-opens only when a job re-enters the history stage, that is a
+  re-onboard with a higher "History txs", a reprocess, or the next
+  drift-triggered refit.
+- A kupo backfill that keeps failing host-side gives up after a bounded number
+  of triggers: the contract detail then reports `history_status: "failed"`
+  (the marker cursor carries a `;gave_up` flag) and a WARN names the address in
+  the sidecar logs. Fix the host-side cause (see the host's backfill logs) and
+  raise the contract's history cap to retry with a fresh trigger budget. A
+  wrong `CLUSTERING_HOST_API_KEY` is also warned by name on every attempt: the
+  startup guard checks presence, not validity.
+- `HOST_API_KEY` is a full host API credential (host keys are not scoped to
+  the backfill endpoint), so treat a compromise of the sidecar container as a
+  compromise of the host API: issue a dedicated key for the sidecar and rotate
+  it independently of operator keys.
+- Quota: an onboard at the default cap costs roughly `cap + cap/100` Blockfrost
+  requests (per-tx fetches plus discovery pages). The single job worker
+  serializes onboards, so mass-onboarding N contracts delays live classify
+  jobs by roughly N times the per-contract walk time; onboard large watchlists
+  gradually.
+- One-time classify churn: when a backfill completes AFTER the contract's fit
+  (a rate-limit resume), the frozen model scores the history batch on the next
+  tick; a pre-deployment distribution can spike the drift signal and trigger
+  one re-fit, which then folds the history into the model. Expected, one-time.
+- Window eviction: the fit window keeps the most recent
+  `CLUSTERING_WINDOW_TXS` transactions across both sources, so once the host
+  rows alone fill the window the history is no longer read; new backfills are
+  then skipped up-front ("window full") instead of spending quota invisibly.
+- Recall gap by design: the backfill stops a safety margin (about 36 hours)
+  below the host's earliest data, so a target's last pre-deployment day may
+  stay uncovered until a later refit re-walks with a higher boundary.
+- Health: a deployment whose ONLY contract is history-only (no live traffic)
+  never publishes verdicts, so `/health/detail` on the host reports the
+  clustering block as `absent`; watch at least one live contract.
+- Changing `CARDANO_NETWORK` on an existing volume requires wiping the
+  module-local raw tables (`transactions`, `tx_utxos`, `tx_utxo_assets`,
+  `ingest_cursor` in `tms_clustering`): they carry no network column, so the
+  old network's backfilled history would poison the union reads.
+- The same wipe applies when changing MODE on an existing volume, in
+  particular from `CHAIN_SOURCE=blockfrost` (primary) to
+  `CHAIN_SOURCE=host_ch` plus `HISTORY_SOURCE=blockfrost`: the old primary
+  run's cursors carry the same `source = 'blockfrost'` tag but different walk
+  semantics, so a done cursor would skip the bounded backfill entirely and
+  present the old unbounded download (including rows above the immutability
+  boundary, which have no purge path) as "history" in the union reads, while a
+  mid-flight cursor would resume with mismatched page semantics and leave
+  silent gaps. Reads and alerting stay guarded (host precedence and the
+  publish bound), but the fit window would ingest unvetted rows: wipe the four
+  tables above before switching.

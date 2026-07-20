@@ -165,6 +165,14 @@ class BlockfrostSource:
     # member and routes ``select_repo_factory`` to the base (inserting) repo.
     host_backed = False
 
+    # Cursor tag (see ChainSource.name) for this source's PRIMARY-mode use
+    # (CHAIN_SOURCE=blockfrost). The pre-deployment history flavor overrides
+    # this per-instance to a distinct tag (service/history.py) before handing
+    # the source to ingest(): its bounded walk's cursor must never collide with
+    # an unbounded primary walk's, e.g. across a CHAIN_SOURCE migration that
+    # left old cursors on an un-wiped volume.
+    name = "blockfrost"
+
     def __init__(self, settings: Settings, *, client: AsyncBlockfrostClient | None = None) -> None:
         self._settings = settings
         self._client = client if client is not None else AsyncBlockfrostClient(settings)
@@ -205,15 +213,23 @@ class BlockfrostSource:
             yield _page_cursor(page, anchor), [it["tx_hash"] for it in items]
 
     async def _recent_anchor(
-        self, address: str, n: int, progress: Callable[[str], None]
+        self,
+        address: str,
+        n: int,
+        progress: Callable[[str], None],
+        *,
+        to_block: str | None = None,
     ) -> str | None:
         """Block height of the address's nth-newest transaction (a cheap
         hashes-only desc walk), or None when the address has fewer than ``n`` txs
         or the provider omits the height — an anchor-less full walk is then the
-        correct degradation."""
+        correct degradation. With ``to_block`` set the desc walk is bounded
+        above, so the anchor names the nth-newest tx AT OR BELOW that height
+        (how the history backfill windows itself strictly below the host's
+        earliest ingested block)."""
         count = 0
         async for _page, items in self._client.address_transactions(
-            address, order="desc", max_items=n
+            address, order="desc", max_items=n, to_block=to_block
         ):
             if count + len(items) >= n:
                 height = items[n - 1 - count].get("block_height")
@@ -321,7 +337,16 @@ class BlockfrostSource:
                     and mode != "tip"
                     and ((page, anchor) == (0, None) or mode == "restart")
                 ):
-                    anchor = await self._recent_anchor(address, max_items, progress)
+                    # ``to_block`` composes with the recent window: the anchor is
+                    # found inside the bounded set, so the walk covers the N most
+                    # recent txs at or below the bound. The bound is re-supplied
+                    # per call and only truncates the TOP of the asc walk, so if
+                    # it rises between runs, items append at the end of the
+                    # filtered set and earlier pages stay identical — an anchored
+                    # cursor therefore resumes safely across bound changes.
+                    anchor = await self._recent_anchor(
+                        address, max_items, progress, to_block=to_block
+                    )
                 pages = self._address_pages(
                     address,
                     start_page=start_page,

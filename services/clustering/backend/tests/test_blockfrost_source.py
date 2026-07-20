@@ -202,3 +202,84 @@ def test_parse_cursor_rejects_garbled_and_foreign_cursors(cursor: str | None) ->
     i.e. restart. Degrading a broken anchor to (page, None) would continue at page
     N of the UNFILTERED set, a different position, and could skip data."""
     assert _parse_cursor(cursor) == (0, None)
+
+
+# --- Bounded recent window (to_block) ---------------------------------------------
+
+
+class _RecordingListClient:
+    """Serves a canned address tx listing (with from/to filtering like the real
+    endpoint) and records each call's kwargs, so the recent-window anchoring's
+    use of ``to_block`` is pinned."""
+
+    def __init__(self, heights: list[int]) -> None:
+        self._heights = heights
+        self.calls: list[dict[str, Any]] = []
+
+    async def address_transactions(
+        self,
+        address: str,
+        *,
+        order: str = "asc",
+        start_page: int = 1,
+        max_items: int | None = None,
+        from_block: str | None = None,
+        to_block: str | None = None,
+    ) -> AsyncIterator[tuple[int, list[dict[str, Any]]]]:
+        self.calls.append(
+            {"order": order, "from_block": from_block, "to_block": to_block, "max_items": max_items}
+        )
+        hs = self._heights
+        if from_block is not None:
+            hs = [h for h in hs if h >= int(from_block)]
+        if to_block is not None:
+            hs = [h for h in hs if h <= int(to_block)]
+        if order == "desc":
+            hs = list(reversed(hs))
+        if max_items is not None:
+            hs = hs[:max_items]
+        yield 1, [{"tx_hash": f"h{h}", "block_height": h} for h in hs]
+
+
+async def _bounded_recent_pages(
+    client: _RecordingListClient, *, cursor: str | None
+) -> list[tuple[str, list[str]]]:
+    source = BlockfrostSource(Settings(BLOCKFROST_PROJECT_ID="t"), client=client)
+    out = []
+    async for page in source.tx_hash_pages(
+        address="addr1x",
+        policy_id=None,
+        cursor=cursor,
+        mode="restart",
+        max_items=2,
+        from_block=None,
+        to_block="30",
+        window="recent",
+        progress=lambda _m: None,
+    ):
+        out.append(page)
+    return out
+
+
+async def test_recent_anchor_honors_to_block() -> None:
+    # Heights 10..50; bound 30; recent 2 → the anchor is the 2nd-newest tx AT OR
+    # BELOW the bound (20), and the asc walk covers exactly [20, 30].
+    client = _RecordingListClient([10, 20, 30, 40, 50])
+    pages = await _bounded_recent_pages(client, cursor=None)
+
+    desc, asc = client.calls
+    assert desc["order"] == "desc" and desc["to_block"] == "30"
+    assert asc["order"] == "asc" and asc["from_block"] == "20" and asc["to_block"] == "30"
+    assert [h for _c, hs in pages for h in hs] == ["h20", "h30"]
+    assert pages[-1][0] == "page:1;from:20"
+
+
+async def test_recent_restart_reanchors_within_bound() -> None:
+    # A restart with a stored anchor ABOVE the bound must re-anchor inside the
+    # bounded set (20), not re-cover the stale window at 40.
+    client = _RecordingListClient([10, 20, 30, 40, 50])
+    pages = await _bounded_recent_pages(client, cursor="page:1;from:40")
+
+    asc = client.calls[-1]
+    assert asc["from_block"] == "20" and asc["to_block"] == "30"
+    assert [h for _c, hs in pages for h in hs] == ["h20", "h30"]

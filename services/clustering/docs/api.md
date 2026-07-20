@@ -63,6 +63,7 @@ Single-resource reads (`/api/contracts/{target}`, `/api/jobs/{job_id}`,
 |---|---|---|
 | GET | `/api/health` | Liveness. Always `{"status":"ok"}`; no DB access. Auth‑exempt. |
 | GET | `/api/ready` | Readiness. Pings ClickHouse → `{"status":"ready"}` or **503**. Auth‑exempt. |
+| GET | `/api/config` | Read‑only deployment facts the UI shapes its onboarding form with: `{host_backed, window_txs, history_source}`. `history_source` is `""` when no secondary pre‑deployment history source is configured; when set, the form re‑exposes "max txs" as the per‑contract history depth. Auth‑exempt. |
 
 ## Contracts & onboarding jobs
 
@@ -115,7 +116,8 @@ rows inside the pagination envelope's `data`):
   "balance_lovelace": 141000000, "asset_count": 0, "sample_tokens": "[]",
   "status": "done", "requested_max_txs": 0,
   "updated_at": "2026-06-05 09:25:57.360", "tx_count": 5000,
-  "drift_score": 0.0, "reclustering_suggested": false
+  "drift_score": 0.0, "reclustering_suggested": false,
+  "history_tx_count": 0, "history_status": "none"
 }
 ```
 
@@ -123,7 +125,13 @@ rows inside the pagination envelope's `data`):
 `[{unit, policy_id, name}]`. `drift_score` is the trailing online-noise rate from
 the incremental classifier; `reclustering_suggested` is derived at read time,
 `true` once `drift_score ≥ RECLUSTER_NOISE_THRESHOLD` (default `0.25`), and the UI
-surfaces it as a "re-cluster recommended" badge.)
+surfaces it as a "re-cluster recommended" badge. `history_tx_count` and
+`history_status` (`none`/`in_progress`/`complete`/`failed`) describe the
+optional pre-deployment history backfill; `complete` means done at the
+contract's history cap, `failed` means the kupo flavor exhausted its trigger
+budget (raise the cap to retry). Both are derived on the DETAIL read only and
+stay at their defaults in list rows and on deployments without a
+`HISTORY_SOURCE`.)
 
 **Job shape** (`GET /api/jobs/{job_id}` bare; the list returns these rows inside
 the pagination envelope's `data`):

@@ -137,11 +137,48 @@ makes this work (host_ch only, controlled by `FEED_ENABLED`):
     gets a windowed **re-fit**;
   - an otherwise-fitted contract gets an incremental **classify** of its new txs.
 - Per-tick work is capped (`FEED_MAX_CONTRACTS_PER_TICK`) so a large watchlist
-  cannot flood the worker, and a fitted model is refreshed at least every
-  `FEED_REFIT_MAX_AGE_SECONDS` even without a drift trigger.
+  cannot flood the worker. Re-fits are drift-driven only: a fitted model is
+  refreshed when its online drift crosses the threshold, not on a timer.
 - On completion the pipeline publishes flagged verdicts to `tx_contract_anomaly`
   (see [service/publish.py](../backend/app/service/publish.py)) for the host to
   surface as `contract_anomaly`.
+
+## The pre-deployment history backfill
+
+The host syncs tip-forward, so a watched contract's activity from before the
+deployment never reaches the host tables and the first fit sees only recent
+traffic. Setting `HISTORY_SOURCE` (host_ch deployments only; the startup guards
+reject other combinations) makes every onboarded contract automatically
+backfill up to its per-contract cap before its first fit, and the classify tick
+resumes any backfill that was deferred or rate-limited. Two flavors:
+
+- `blockfrost` downloads the history into the module's own raw tables. Reads
+  then go through `HybridHistoryRepo` (a third repo next to the base and
+  host-backed ones, selected by `select_repo_factory`): the windowed hash set,
+  the engine-shaped transaction columns and the address co-occurrence pairs all
+  become host-arm UNION local-arm queries. The rolling window applies over the
+  union, newest first, so history fills the window's TAIL and naturally ages
+  out as live traffic accumulates; once the host rows alone fill the window,
+  new backfills are skipped ("window full") rather than downloaded invisibly.
+- `kupo` triggers the HOST's own `POST /api/v1/backfill` (trigger-and-continue:
+  the sidecar never waits on the host job) and the full-fidelity rows land in
+  the HOST tables, so the plain host-backed reads pick them up with no read
+  changes at all.
+
+Everything the backfill persists sits strictly below a per-target immutability
+boundary, `least(target's earliest host slot, host tip minus the rollback
+safety window)`: the host's chain-rollback purge never touches the module's raw
+tables, so bounding the backfill to slots no rollback can reach is what makes
+the local rows safe (and, as a corollary, disjoint from the host rows, which
+the hybrid reads and the publish filter assume). See `service/history.py`.
+
+A rejected alternative, recorded so it is not relitigated: writing Blockfrost
+history into the HOST's `tms_analytics` instead. It would spare the union reads,
+but it makes the sidecar a second, lower-fidelity writer of the host's tables
+(no `raw_data`, no real inputs/outputs parse), silently feeds pre-deployment
+rows into the host DETECTION engine and its baselines, and duplicates what the
+kupo flavor already does properly through the host's own full-fidelity backfill
+path. The union read is the cheaper and cleaner seam.
 
 ## The background job system
 

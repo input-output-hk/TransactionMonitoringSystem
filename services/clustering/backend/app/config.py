@@ -160,12 +160,37 @@ class Settings(BaseSettings):
     # without the background feed.
     feed_enabled: bool = Field(default=True, alias="FEED_ENABLED")
     feed_poll_interval_seconds: int = Field(default=30, alias="FEED_POLL_INTERVAL_SECONDS")
-    # Re-fit a watched contract at least this often even without a drift trigger,
-    # so a slowly-drifting frozen model is refreshed on a bounded (windowed) fit.
-    feed_refit_max_age_seconds: int = Field(default=86_400, alias="FEED_REFIT_MAX_AGE_SECONDS")
     # Contracts enqueued per tick: bounds per-tick work so a large watchlist
     # cannot flood the single job worker (mirrors the host's per-tick drain cap).
     feed_max_contracts_per_tick: int = Field(default=4, alias="FEED_MAX_CONTRACTS_PER_TICK")
+
+    # Optional secondary HISTORY source (host_ch deployments only). The host
+    # syncs tip-forward, so a watched contract's pre-deployment history never
+    # reaches the host tables; when set, every onboarded contract automatically
+    # backfills up to its per-contract cap from this source before its first
+    # fit (see service/history.py). "" disables. "blockfrost" downloads into
+    # the engine's own raw tables, read via the hybrid repo; "kupo" triggers
+    # the host's own full-fidelity POST /api/v1/backfill (rows land in the
+    # host tables, no sidecar-local writes).
+    history_source: str = Field(default="", alias="HISTORY_SOURCE")
+    # Per-contract history depth when the contract row carries no
+    # requested_max_txs (host-backed feed onboarding leaves it 0). 500 mirrors
+    # the host's BACKFILL_DEFAULT_MAX_TXS so both flavors default to the same
+    # depth.
+    history_max_txs: int = Field(default=500, ge=1, alias="HISTORY_MAX_TXS")
+    # Clamp on per-contract overrides (the UI re-exposes "max txs" when history
+    # is enabled); mirrors the host's BACKFILL_MAX_TXS_CAP so neither flavor
+    # can request more history than the host's own backfill endpoint allows.
+    history_max_txs_ceiling: int = Field(default=5000, ge=1, alias="HISTORY_MAX_TXS_CEILING")
+    # Host API base URL and credential, consumed only by HISTORY_SOURCE=kupo:
+    # the sidecar triggers the host's backfill over the compose network (the
+    # host additionally needs its own KUPO_URL configured).
+    host_api_url: str = Field(default="", alias="HOST_API_URL")
+    host_api_key: str = Field(default="", alias="HOST_API_KEY")
+    # Per-request ceiling on the host-API round trip (trigger POST / status
+    # GET). The POST returns 202 immediately (the host runs the scan in its own
+    # background task), so this bounds a wedged connection, not the backfill.
+    host_api_timeout_seconds: float = Field(default=30.0, ge=1, alias="HOST_API_TIMEOUT_SECONDS")
 
     # API security / ops. All optional so local/demo runs stay zero-config; set
     # API_KEY and CORS_ORIGINS to lock down a network-exposed deployment.
@@ -206,6 +231,14 @@ class Settings(BaseSettings):
         download, fits run over the rolling window. Single source of truth for
         the "host_ch" check so the many call sites can't drift."""
         return self.chain_source == "host_ch"
+
+    @property
+    def history_enabled(self) -> bool:
+        """True when a secondary source backfills watched contracts'
+        pre-deployment history. Only meaningful under host_ch (the blockfrost
+        primary already downloads history itself; startup rejects the combo).
+        Single source of truth, same rationale as ``host_backed`` above."""
+        return self.host_backed and bool(self.history_source)
 
     @property
     def blockfrost_base_url(self) -> str:

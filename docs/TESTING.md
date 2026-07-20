@@ -13,6 +13,7 @@ latest commit.
 | Backend hermetic | `backend/tests/` | 1053 | none (all I/O mocked) | Backend (pytest + recall gate) |
 | Recall gate | `backend/tests/analysis/` | subset of the above | none | Backend (run first, on its own) |
 | Live-DB tier | `backend/tests/live_db/` | 21 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 4 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
 | Clustering sidecar | `services/clustering/backend/tests/` | 349 | none | Clustering sidecar (pytest) |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 40 | none | Frontend (lint + build) |
@@ -68,8 +69,25 @@ cd backend
 TMS_LIVE_DB_TESTS=1 uv run pytest tests/live_db/ -q
 ```
 
-CI runs it in the Live-DB job against service containers pinned to the same
-image versions as `docker-compose.yml`.
+The clustering sidecar has its own tier under
+`services/clustering/backend/tests/live_db/` (same gate), which executes the
+query text introduced with the pre-deployment history backfill against a live
+ClickHouse: the hybrid host-UNION-local reads, the immutability-boundary
+aggregates, the host-membership publish bound, and the source-tagged cursor
+round trip. It needs both schemas applied; `app.cli migrate` creates the
+module's, and connection settings come from the `CLICKHOUSE_*` environment
+(with the repo docker-compose defaults that means `CLICKHOUSE_USER=default`,
+empty password, HTTP port 8123).
+
+```bash
+cd services/clustering/backend
+uv run python -m app.cli migrate --init-dir ../clickhouse/init
+TMS_LIVE_DB_TESTS=1 uv run pytest tests/live_db/ -q
+```
+
+CI runs both tiers in the Live-DB job against service containers pinned to the
+same image versions as `docker-compose.yml`; the sidecar step runs after the
+host step, which creates the `tms_analytics` tables its host arms read.
 
 ## Performance tier
 
@@ -94,7 +112,9 @@ artifact.
 
 The optional clustering sidecar keeps its own suite under
 `services/clustering/backend/tests/` (349 tests), covering its chain sources,
-storage layer, scoring pipeline, and API. It runs in its own CI job.
+storage layer, scoring pipeline, and API. It runs in its own CI job. Its
+opt-in live tier (`tests/live_db/`, gated like the host's) is described in
+the Live-DB section above.
 
 ```bash
 cd services/clustering/backend
@@ -122,7 +142,7 @@ these jobs:
 
 - **Python lint (ruff + mypy)**: ruff format check, ruff lint, and mypy across both Python trees.
 - **Backend (pytest + recall gate)**: the recall gate, then the full hermetic suite with coverage.
-- **Live-DB tier (ClickHouse 26.x + Postgres)**: the 21 live-DB tests against real database containers.
+- **Live-DB tier (ClickHouse 26.x + Postgres)**: the host live-DB tests, then the sidecar's live tier (schema via `app.cli migrate`), against real database containers.
 - **Frontend (lint + build)**: lint, unit tests, and build.
 - **Clustering sidecar (pytest)**: the sidecar suite.
 

@@ -33,6 +33,7 @@ downloads).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import batched
 from typing import Any
 
 import pandas as pd
@@ -56,6 +57,17 @@ class HostBackedRepo(ClickHouseRepo):
 
     # --- target -> windowed tx_hash subquery ----------------------------------
 
+    def _host_addr_index(self) -> str:
+        """FROM/WHERE core of "the host's address-index rows for the watched
+        target": the one scoping predicate the window reads, the hybrid's host
+        arms and the publish bound all share, kept in one place so the sites
+        cannot drift apart. Callers prepend their own projection and may append
+        further AND clauses; every site binds ``{net}``/``{tgt}``."""
+        return (
+            f"{self._host_db}.address_transactions "
+            "WHERE network = {net:String} AND address = {tgt:String}"
+        )
+
     def _hashes_expr(self) -> str:
         """An in-SQL subquery yielding the most recent ``CLUSTERING_WINDOW_TXS``
         distinct tx_hashes that touched the watched address ``{tgt}``, newest
@@ -66,8 +78,7 @@ class HostBackedRepo(ClickHouseRepo):
         return f"""(
             SELECT tx_hash FROM (
                 SELECT tx_hash, max(slot) AS s
-                FROM {self._host_db}.address_transactions
-                WHERE network = {{net:String}} AND address = {{tgt:String}}
+                FROM {self._host_addr_index()}
                 GROUP BY tx_hash ORDER BY s DESC {limit}
             )
         )"""
@@ -240,6 +251,31 @@ class HostBackedRepo(ClickHouseRepo):
         # Must count the same source list_targets pages over: the contracts
         # registry, not the (empty) module-local transactions table.
         return self.count_contracts()
+
+    def history_tx_count(self, target: str) -> int:
+        # Pure host mode has no local rows by construction (the raw tables stay
+        # empty); the hybrid subclass overrides this with the local count.
+        return 0
+
+    # Membership-check chunk size: bounds each IN(...) array the same way the
+    # online classify path bounds its scoring chunks (_CLASSIFY_BATCH rationale).
+    _HOST_MEMBERSHIP_CHUNK = 1000
+
+    def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
+        """The subset of ``tx_hashes`` present in the HOST's address index for
+        the watched target. Exact regardless of what the engine's local tables
+        contain, which is what makes it safe as the publish bound: a host-known
+        tx is never suppressed (recall first), a host-unknown one never leaks
+        into the host-facing projection. Chunked so the IN array stays bounded."""
+        found: set[str] = set()
+        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
+            rows = self.client.query(
+                f"SELECT DISTINCT toString(tx_hash) FROM {self._host_addr_index()} "
+                "AND toString(tx_hash) IN {hs:Array(String)}",
+                parameters={"net": self._network, "tgt": target, "hs": list(chunk)},
+            ).result_rows
+            found.update(str(r[0]) for r in rows)
+        return found
 
     # --- writes the sidecar must not perform (no download, no duplication) ----
 

@@ -52,6 +52,15 @@ def select_repo_factory(settings: Settings) -> type[ClickHouseRepo]:
     empty module tables and fails (an empty result yields a column-less frame).
     """
     if settings.host_backed:
+        if settings.history_source == "blockfrost":
+            # Blockfrost history lands in the ENGINE's own raw tables, so reads
+            # must union them with the host tables. (Kupo history lands in the
+            # HOST tables via its backfill endpoint, so plain host reads already
+            # see it and the plain HostBackedRepo below is correct for it.)
+            from app.storage.clickhouse.hybrid import HybridHistoryRepo
+
+            return HybridHistoryRepo
+
         from app.storage.clickhouse.host_backed import HostBackedRepo
 
         return HostBackedRepo

@@ -9,6 +9,7 @@ docs/online-classification-design.md. Shape feature set only for now.
 from __future__ import annotations
 
 import logging
+from itertools import batched
 from typing import Any
 
 from app.clustering.model import (
@@ -29,6 +30,7 @@ from app.service._common import (
     _raise_if_incomplete,
     _safe_error,
 )
+from app.service.history import get_history_backfill, history_cap, history_incomplete
 from app.service.verdicts import VERDICT_ANOMALY, VERDICT_MALICIOUS, compute_verdicts
 from app.sources.factory import get_source
 from app.storage.protocol import Repo
@@ -148,9 +150,8 @@ def classify_new_transactions(repo: Repo, target: str) -> dict[str, Any]:
     n_flagged = 0
     # Score in chunks so the per-fetch IN(...) array and in-memory matrix stay
     # bounded when a contract has a large backlog of unclassified transactions.
-    for start in range(0, len(new_hashes), _CLASSIFY_BATCH):
-        chunk = new_hashes[start : start + _CLASSIFY_BATCH]
-        classifications = score_shape(model, repo.fetch_shape_features_for(target, chunk))
+    for chunk in batched(new_hashes, _CLASSIFY_BATCH, strict=False):
+        classifications = score_shape(model, repo.fetch_shape_features_for(target, list(chunk)))
         repo.save_tx_classifications(
             [
                 (
@@ -220,6 +221,33 @@ async def update_contract(
             # cursor saved (done=False); don't classify a partial catch-up or mark
             # the job done — fail so a re-run resumes and classifies everything.
             _raise_if_incomplete(ingest_result)
+
+        # Resume an outstanding pre-deployment history backfill before scoring:
+        # the classify tick is the retry loop for a rate-limited walk, a pending
+        # host-side kupo job, or an earlier deferral (run() is skip-fast when
+        # complete — one cursor read — and never raises; see service/history.py).
+        # The cap is computed BEFORE the incompleteness check because the check
+        # is cap-relative: a walk stopped at the cap (the ingester's max_reached,
+        # done=0) is complete at that cap and must not re-run every tick, while
+        # a raised cap (config default or per-contract) re-opens it here
+        # automatically on the next tick.
+        if host_backed and settings.history_enabled:
+            row = repo.get_contract(target)
+            cap = history_cap(row, settings)
+            if history_incomplete(settings, target, cap):
+                backfill = get_history_backfill(settings)
+                if backfill is not None:
+                    set_stage("downloading", "resuming pre-deployment history backfill")
+                    hist = await backfill.run(
+                        target=target,
+                        target_type=target_type,
+                        max_txs=cap,
+                        progress=lambda m: set_stage("downloading", m),
+                    )
+                    if hist.status != "skipped":
+                        set_stage(
+                            "downloading", f"history: {hist.status} ({hist.txs_ingested} txs)"
+                        )
 
         set_stage("scoring", "classifying new transactions")
         out = classify_new_transactions(repo, target)

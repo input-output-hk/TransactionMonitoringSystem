@@ -164,12 +164,21 @@ class InMemoryChainSource:
     # --- discovery -------------------------------------------------------------
 
     async def _recent_anchor(
-        self, address: str, n: int, progress: Callable[[str], None]
+        self,
+        address: str,
+        n: int,
+        progress: Callable[[str], None],
+        *,
+        to_block: str | None = None,
     ) -> str | None:
         """Block height of the address's nth-newest transaction (a cheap desc
-        walk), or None when there are fewer than ``n`` txs."""
+        walk), or None when there are fewer than ``n`` txs. With ``to_block``
+        the anchor names the nth-newest tx AT OR BELOW that height (the
+        reference behavior for a bounded recent window)."""
         count = 0
-        async for _page, items in self._address_listing(address, order="desc", max_items=n):
+        async for _page, items in self._address_listing(
+            address, order="desc", max_items=n, to_block=to_block
+        ):
             if count + len(items) >= n:
                 height = items[n - 1 - count].get("block_height")
                 if not height:
@@ -273,7 +282,9 @@ class InMemoryChainSource:
                 and mode != "tip"
                 and ((page, anchor) == (0, None) or mode == "restart")
             ):
-                anchor = await self._recent_anchor(address, max_items, progress)
+                # to_block composes with the recent window (anchor found inside
+                # the bounded set) — mirrors the Blockfrost adapter's behavior.
+                anchor = await self._recent_anchor(address, max_items, progress, to_block=to_block)
             pages = self._address_pages(
                 address,
                 start_page=start_page,

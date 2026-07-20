@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.main import app, get_request_repo
+from app.api.main import _history_source_guards, app, get_request_repo
 from app.config import Settings
 from tests.fakes import FakeRepoBase
 
@@ -225,7 +225,7 @@ def test_config_reports_host_backed_and_window(monkeypatch: pytest.MonkeyPatch) 
         lambda: Settings(CHAIN_SOURCE="host_ch", CLUSTERING_WINDOW_TXS=12_345),
     )
     body = _client(FakeApiRepo()).get("/api/config").json()
-    assert body == {"host_backed": True, "window_txs": 12_345}
+    assert body == {"host_backed": True, "window_txs": 12_345, "history_source": ""}
 
 
 def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,7 +235,83 @@ def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda: Settings(CHAIN_SOURCE="other", CLUSTERING_WINDOW_TXS=500),
     )
     body = _client(FakeApiRepo()).get("/api/config").json()
-    assert body == {"host_backed": False, "window_txs": 500}
+    assert body == {"host_backed": False, "window_txs": 500, "history_source": ""}
+
+
+def test_config_exposes_history_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With a secondary history source configured, the UI re-exposes the max-txs
+    # field as the per-contract history depth.
+    monkeypatch.setattr(
+        "app.api.routers.system.get_settings",
+        lambda: Settings(
+            CHAIN_SOURCE="host_ch", CLUSTERING_WINDOW_TXS=500, HISTORY_SOURCE="blockfrost"
+        ),
+    )
+    body = _client(FakeApiRepo()).get("/api/config").json()
+    assert body == {"host_backed": True, "window_txs": 500, "history_source": "blockfrost"}
+
+
+# --- Startup guards for the secondary history source --------------------------
+
+
+def _guard_error(**env: str) -> str | None:
+    """Run the history-source startup guards against a Settings built from
+    ``env`` (alias kwargs); return the error message, or None when they pass."""
+    try:
+        _history_source_guards(Settings(**env))
+    except RuntimeError as exc:
+        return str(exc)
+    return None
+
+
+def test_history_guard_rejects_unknown_value() -> None:
+    msg = _guard_error(CHAIN_SOURCE="host_ch", HISTORY_SOURCE="dbsync")
+    assert msg is not None and "not supported" in msg
+
+
+def test_history_guard_rejects_blockfrost_primary_combo() -> None:
+    # HISTORY_SOURCE under a blockfrost primary is a config contradiction: that
+    # mode already downloads history itself.
+    msg = _guard_error(
+        CHAIN_SOURCE="blockfrost",
+        BLOCKFROST_PROJECT_ID="key",
+        HISTORY_SOURCE="blockfrost",
+    )
+    assert msg is not None and "CHAIN_SOURCE=host_ch" in msg
+
+
+def test_history_guard_blockfrost_requires_project_id() -> None:
+    msg = _guard_error(CHAIN_SOURCE="host_ch", HISTORY_SOURCE="blockfrost")
+    assert msg is not None and "BLOCKFROST_PROJECT_ID" in msg
+
+
+def test_history_guard_kupo_requires_host_api_url_and_key() -> None:
+    assert _guard_error(CHAIN_SOURCE="host_ch", HISTORY_SOURCE="kupo") is not None
+    msg = _guard_error(
+        CHAIN_SOURCE="host_ch", HISTORY_SOURCE="kupo", HOST_API_URL="http://app:8000"
+    )
+    assert msg is not None and "HOST_API_KEY" in msg
+
+
+def test_history_guard_valid_combos_pass() -> None:
+    assert _guard_error(CHAIN_SOURCE="host_ch") is None
+    assert (
+        _guard_error(
+            CHAIN_SOURCE="host_ch", HISTORY_SOURCE="blockfrost", BLOCKFROST_PROJECT_ID="key"
+        )
+        is None
+    )
+    assert (
+        _guard_error(
+            CHAIN_SOURCE="host_ch",
+            HISTORY_SOURCE="kupo",
+            HOST_API_URL="http://app:8000",
+            HOST_API_KEY="secret",
+        )
+        is None
+    )
+    # No history source under a blockfrost primary stays valid (today's mode).
+    assert _guard_error(CHAIN_SOURCE="blockfrost", BLOCKFROST_PROJECT_ID="key") is None
 
 
 # --- Reads -----------------------------------------------------------------
@@ -699,3 +775,41 @@ def test_wire_timestamps_are_z_suffixed_iso() -> None:
     assert _iso_z("2026-01-01 00:00:00") == "2026-01-01T00:00:00Z"
     assert _iso_z("2026-01-01T00:00:00Z") == "2026-01-01T00:00:00Z"
     assert _iso_z("2026-01-01T02:00:00+02:00") == "2026-01-01T02:00:00+02:00"
+
+
+def test_contract_detail_includes_history_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With a history source configured, the detail read surfaces the local
+    # backfill count and the marker-derived status; list rows stay at defaults.
+    from app.config import get_settings
+
+    monkeypatch.setenv("CHAIN_SOURCE", "host_ch")
+    monkeypatch.setenv("HISTORY_SOURCE", "blockfrost")
+    monkeypatch.setenv("BLOCKFROST_PROJECT_ID", "k")
+    get_settings.cache_clear()
+
+    class _MarkerRepo:
+        def get_cursor(self, target: str) -> dict[str, Any]:
+            return {"source": "blockfrost_history", "done": 1, "txs_seen": 321}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.service.history.ClickHouseRepo", lambda settings: _MarkerRepo())
+
+    repo = FakeApiRepo(contracts=[_contract_row(tx_count=5)])
+    repo.history_tx_count = lambda target: 321  # type: ignore[method-assign]
+    client = _client(repo)
+    # List first (the detail read decorates the shared fake row in place): list
+    # rows carry the schema defaults, the detail read the derived values.
+    listed = client.get("/api/contracts").json()["data"][0]
+    assert listed["history_tx_count"] == 0 and listed["history_status"] == "none"
+
+    body = client.get("/api/contracts/addr1a").json()
+    assert body["history_tx_count"] == 321
+    assert body["history_status"] == "complete"
+
+
+def test_contract_detail_history_defaults_when_disabled() -> None:
+    repo = FakeApiRepo(contracts=[_contract_row()])
+    body = _client(repo).get("/api/contracts/addr1a").json()
+    assert body["history_tx_count"] == 0 and body["history_status"] == "none"

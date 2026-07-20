@@ -110,10 +110,18 @@ class _StubKupo:
     def __init__(self, *_a, **_k) -> None:
         pass
 
-    async def address_tx_points(self, address: str, *, max_txs: int | None = None) -> list[TxPoint]:
-        # Mirror the real client: newest-first, then cap, so a test can assert the
-        # cap flows through backfill_address.
+    async def address_tx_points(
+        self,
+        address: str,
+        *,
+        max_txs: int | None = None,
+        created_before_slot: int | None = None,
+    ) -> list[TxPoint]:
+        # Mirror the real client: newest-first, bound, then cap, so a test can
+        # assert both flow through backfill_address.
         pts = sorted(_StubKupo.points, key=lambda p: (p.slot, p.tx_hash), reverse=True)
+        if created_before_slot is not None:
+            pts = [p for p in pts if p.slot < created_before_slot]
         if max_txs is not None:
             pts = pts[:max_txs]
         return pts
@@ -237,6 +245,34 @@ async def test_backfill_caps_at_max_txs(monkeypatch) -> None:
     assert {tx.tx_hash for tx in inserted} == {BB, CC}
     assert AA not in {tx.tx_hash for tx in inserted}
     assert result.missing_tx_hashes == []
+
+
+async def test_backfill_forwards_created_before_slot_and_excludes_at_or_above(
+    monkeypatch,
+) -> None:
+    # End-to-end: the orchestration call (backfill_address -> KupoClient) must
+    # actually pass created_before_slot through, not just the lower-level
+    # client filter it wraps (that layer is tested separately in
+    # test_kupo_client.py). AA sits at the boundary itself and must be
+    # excluded (strictly-below semantics), BB is below it and must survive.
+    _StubKupo.points = [
+        TxPoint(AA, 100, "h100"),  # at the boundary: excluded
+        TxPoint(BB, 90, "h90"),  # below the boundary: included
+    ]
+    _StubKupo.ancestor = ChainPoint(80, "h80")
+    script = [
+        ("backward", {"slot": 80, "id": "h80"}),
+        ("forward", _block(90, [BB])),
+        ("forward", _block(100, [])),  # > latest(90) → stop
+    ]
+    inserted: list = []
+    _patch_common(monkeypatch, _FakeWS(script, with_converter=True), inserted)
+
+    result = await backfill_address(AA, network="preprod", created_before_slot=100)
+
+    assert result.requested_txs == 1  # only BB passed the created_before_slot filter
+    assert {tx.tx_hash for tx in inserted} == {BB}
+    assert AA not in {tx.tx_hash for tx in inserted}
 
 
 async def test_backfill_anchor_none_flags_degraded_and_skips_earliest(monkeypatch) -> None:

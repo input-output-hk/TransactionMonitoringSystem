@@ -90,7 +90,7 @@ class ChainSource(Protocol):
     adapter: ``"page:42"``, or ``"page:42;from:10422911"`` when the walk is anchored
     to a recent window; a node adapter: ``"point:<slot>.<block_hash>"``). The engine
     persists and replays them verbatim, never doing arithmetic on them, and the
-    stored cursor is only replayed into the same ``CHAIN_SOURCE`` that produced it.
+    stored cursor is only replayed into the source whose ``name`` produced it.
     """
 
     # Whether this source's data already lives in storage the engine reads
@@ -101,6 +101,12 @@ class ChainSource(Protocol):
     # download path for it regardless of the per-job ``reprocess`` flag. A
     # downloading adapter (Kupo/db-sync) leaves it ``False`` (the default).
     host_backed: bool = False
+
+    # The tag persisted with ingest cursors; a cursor is only replayed into the
+    # source that produced it. Distinct from ``settings.chain_source`` because a
+    # deployment can run a secondary history source (see service/history.py)
+    # whose cursors must not be confused with the primary source's.
+    name: str = ""
 
     async def __aenter__(self) -> ChainSource: ...
 

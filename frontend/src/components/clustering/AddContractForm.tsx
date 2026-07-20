@@ -48,6 +48,10 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 	// loads (or if it errors) we treat host-backed as unknown: the cap control
 	// stays hidden and no max_txs is sent, rather than guessing.
 	const hostBacked = config.data?.host_backed ?? false;
+	// A configured secondary history source re-purposes "max txs" as the
+	// per-contract pre-deployment history depth, so the control comes back.
+	const historySource = config.data?.history_source ?? "";
+	const showMaxTxs = !hostBacked || Boolean(historySource);
 	const [target, setTarget] = useState("");
 	const [nameDraft, setNameDraft] = useState("");
 	const [nameTouched, setNameTouched] = useState(false);
@@ -71,9 +75,11 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 				label: displayName.trim() || undefined,
 				// 0 means "all history": omit max_txs so the backend onboards
 				// unbounded; otherwise clamp to the API cap. Only send it once
-				// config confirms a non-host-backed source — host-backed ignores
-				// max_txs, and an unknown (loading/errored) config sends nothing.
-				...(config.data && !hostBacked && maxTxs > 0
+				// config confirms the field is meaningful — a plain host-backed
+				// source ignores max_txs (with a history source it bounds the
+				// backfill depth), and an unknown (loading/errored) config sends
+				// nothing.
+				...(config.data && showMaxTxs && maxTxs > 0
 					? { max_txs: Math.min(maxTxs, MAX_TXS_CAP) }
 					: {}),
 				...(reprocess ? { reprocess: true } : {}),
@@ -131,10 +137,12 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 							}}
 						/>
 					</div>
-					{config.data && !hostBacked && (
+					{config.data && showMaxTxs && (
 						<div className="w-40 space-y-1.5">
 							<Label htmlFor="add-max-txs">
-								Max txs {maxTxs === 0 ? "(0 = all)" : ""}
+								{hostBacked
+									? "History txs"
+									: `Max txs ${maxTxs === 0 ? "(0 = all)" : ""}`}
 							</Label>
 							<Input
 								id="add-max-txs"
@@ -170,6 +178,9 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 								{config.data.window_txs.toLocaleString()} transactions already
 								monitored on-chain (the rolling fit window). Onboarding runs in
 								the background; the card below tracks progress.
+								{historySource
+									? " Pre-deployment history is backfilled automatically; History txs bounds its depth (default 500)."
+									: ""}
 							</>
 						) : (
 							<>

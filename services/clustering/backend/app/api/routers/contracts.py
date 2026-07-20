@@ -125,9 +125,21 @@ def list_contracts(
 
 @router.get("/contracts/{target}", response_model=ContractOut)
 def get_contract(target: str, repo: Repo = RepoDep) -> dict[str, Any]:
-    contract = repo.get_contract(normalize_target(target))
+    normalized = normalize_target(target)
+    contract = repo.get_contract(normalized)
     if contract is None:
         raise HTTPException(status_code=404, detail=f"contract {target} not found")
+    settings = get_settings()
+    if settings.history_enabled:
+        from app.service.history import history_cap, history_status
+
+        # The status is cap-relative (a walk stopped at the cap is complete at
+        # that cap); history_cap resolves the row's override the same way the
+        # backfill itself does.
+        contract["history_tx_count"] = repo.history_tx_count(normalized)
+        contract["history_status"] = history_status(
+            settings, normalized, history_cap(contract, settings)
+        )
     return contract
 
 

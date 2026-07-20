@@ -44,11 +44,21 @@ the chain data.
 
 The module's schema defines `transactions`, `tx_utxos`, `tx_utxo_assets`, and
 `ingest_cursor` in `tms_clustering` (they describe the column contract the feature
-builders expect). Under `host_ch` they are **never populated**: writes to them and to
-the ingest cursor are no-ops, since the sidecar reads from `tms_analytics` rather than
-downloading anything. Under `CHAIN_SOURCE=blockfrost` they **are** populated: the
-download path fetches each transaction from blockfrost.io and writes it here, and the
-feature builders read from these tables instead of `tms_analytics`.
+builders expect). Under plain `host_ch` they are **never populated**: writes to them
+and to the ingest cursor are no-ops, since the sidecar reads from `tms_analytics`
+rather than downloading anything. Under `CHAIN_SOURCE=blockfrost` they **are**
+populated: the download path fetches each transaction from blockfrost.io and writes
+it here, and the feature builders read from these tables instead of `tms_analytics`.
+
+With `HISTORY_SOURCE=blockfrost` (host_ch plus the optional history backfill) they
+are populated too, but only with each watched contract's pre-deployment history,
+all strictly below a rollback-safe boundary (see `service/history.py`). Reads then
+go through `HybridHistoryRepo`, which unions the host tables with these local rows;
+the rolling window applies over the union, newest first, so history occupies the
+window's tail. The cursor's `source` column tags which source produced each cursor
+(`ChainSource.name`): a Blockfrost history cursor is only ever replayed into a
+Blockfrost walk, even under a host_ch primary, and the kupo flavor reuses the table
+as a trigger marker (`source = 'kupo'`, no local raw writes).
 
 | Table | Engine | ORDER BY | Purpose |
 |---|---|---|---|

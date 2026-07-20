@@ -150,6 +150,23 @@ jobs:
           CLICKHOUSE_HOST: localhost
           CLICKHOUSE_PORT: "9000"
         run: uv run pytest tests/live_db/ -q
+      - name: Sidecar sync
+        working-directory: services/clustering/backend
+        run: uv sync --extra dev
+      # Runs AFTER the host tier: the sidecar's hybrid/history queries read the
+      # host tables (tms_analytics), which the host step's migrations create.
+      - name: Sidecar live-DB tests (history/hybrid query text)
+        working-directory: services/clustering/backend
+        env:
+          TMS_LIVE_DB_TESTS: "1"
+          CLICKHOUSE_HOST: localhost
+          CLICKHOUSE_HTTP_PORT: "8123"
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DB: tms_clustering
+        run: |
+          uv run python -m app.cli migrate --init-dir ../clickhouse/init
+          uv run pytest tests/live_db/ -q
 
   frontend:
     name: Frontend (lint + build)

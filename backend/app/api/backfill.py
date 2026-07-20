@@ -48,6 +48,15 @@ router = APIRouter(prefix="/backfill", tags=["backfill"])
 # Chars of the address echoed in progress log lines (see address_backfill._ADDR_PREVIEW).
 _ADDR_PREVIEW = 24
 
+# Sanity ceiling on `created_before_slot`, not a real chain bound: 1 slot = 1s,
+# so this is ~300 years past Shelley genesis (slot 0), comfortably past any
+# value a real caller could ever supply. The real bound (the address's actual
+# Kupo-indexed points) already makes an oversized value harmless in practice,
+# but this endpoint is reachable by any API-key holder, not only the
+# well-behaved clustering sidecar, so it is still rejected at the door rather
+# than left to the downstream Kupo query to shrug off.
+_MAX_PLAUSIBLE_SLOT = 10_000_000_000
+
 
 def _network_mismatch(address: str, network: str) -> str | None:
     """A client-facing error string when the address's network class cannot match
@@ -70,6 +79,12 @@ class BackfillRequest(BaseModel):
     address: str
     # None → BACKFILL_DEFAULT_MAX_TXS; the handler clamps to BACKFILL_MAX_TXS_CAP.
     max_txs: int | None = Field(default=None, ge=1)
+    # Optional upper slot bound: only transactions strictly below this slot are
+    # backfilled, so a caller can reach history OLDER than the address's recent
+    # activity (the default latest-N walk would just re-cover what tip-forward
+    # sync already ingested). None preserves the original latest-N behavior.
+    # Consumed by the clustering sidecar's kupo history backfill.
+    created_before_slot: int | None = Field(default=None, ge=1, le=_MAX_PLAUSIBLE_SLOT)
 
 
 @dataclass(slots=True)
@@ -79,6 +94,7 @@ class _Job:
     network: str
     max_txs: int
     started_at: str
+    created_before_slot: int | None = None
     result: dict | None = None
     error: str | None = None
     # Held so the fire-and-forget task is not garbage-collected mid-run.
@@ -96,6 +112,7 @@ def _public(job: _Job) -> dict:
         "address": job.address,
         "network": job.network,
         "max_txs": job.max_txs,
+        "created_before_slot": job.created_before_slot,
         "started_at": job.started_at,
         "result": job.result,
         "error": job.error,
@@ -144,6 +161,7 @@ async def _run(job: _Job) -> None:
                 job.address,
                 network=job.network,
                 max_txs=job.max_txs,
+                created_before_slot=job.created_before_slot,
                 progress=lambda m: logger.info("backfill[%s…]: %s", job.address[:_ADDR_PREVIEW], m),
             ),
             timeout=settings.BACKFILL_TIMEOUT_SECONDS,
@@ -199,24 +217,39 @@ async def start_backfill(
             status_code=429,
             detail="Too many backfills already running; retry once one finishes",
         )
-    await audit.record(
-        event_type="address_backfill",
-        action="start",
-        entity_type="address",
-        entity_id=req.address,
-        details={"network": network, "max_txs": max_txs},
-        request=request,
-        actor=audit.actor_from_principal(principal),
-    )
+    # Reserve the slot BEFORE the first await below: the same-address and
+    # concurrency checks above and this write must run as one atomic block (no
+    # yield point between them), or two concurrent requests for the same
+    # address can both pass the checks before either reserves the slot.
     job = _Job(
         status="running",
         address=req.address,
         network=network,
         max_txs=max_txs,
+        created_before_slot=req.created_before_slot,
         started_at=datetime.now(UTC).isoformat(),
     )
-    job.task = asyncio.create_task(_run(job))
     _jobs[key] = job
+    try:
+        await audit.record(
+            event_type="address_backfill",
+            action="start",
+            entity_type="address",
+            entity_id=req.address,
+            details={
+                "network": network,
+                "max_txs": max_txs,
+                "created_before_slot": req.created_before_slot,
+            },
+            request=request,
+            actor=audit.actor_from_principal(principal),
+        )
+    except Exception:
+        # An audit failure must not leave a permanent "running" ghost blocking
+        # this address's 409 guard forever: release the reservation.
+        _jobs.pop(key, None)
+        raise
+    job.task = asyncio.create_task(_run(job))
     _evict_finished_jobs()
     return _public(job)
 

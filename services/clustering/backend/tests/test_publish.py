@@ -39,6 +39,7 @@ class FakeClient:
     def __init__(self, query_rows: list[list[tuple[Any, ...]]] | None = None) -> None:
         self.inserts: list[tuple[str, list[list[Any]], list[str]]] = []
         self.commands: list[str] = []
+        self.command_params: list[dict[str, Any]] = []
         self.queries: list[str] = []
         self.query_params: list[dict[str, Any]] = []
         self._query_rows = list(query_rows or [])
@@ -56,10 +57,15 @@ class FakeClient:
 
     def command(self, sql: str, parameters: dict[str, Any] | None = None) -> None:
         self.commands.append(sql)
+        self.command_params.append(parameters or {})
 
 
 def _repo(client: FakeClient) -> Any:
-    return SimpleNamespace(client=client, _db="tms")
+    # Identity host-membership: every hash is host-known, so these tests pin
+    # the reconciliation logic itself (the bound is exercised separately below).
+    return SimpleNamespace(
+        client=client, _db="tms", host_known_tx_hashes=lambda target, hashes: set(hashes)
+    )
 
 
 def test_retract_stale_tombstones_only_dropped_hashes() -> None:
@@ -296,3 +302,109 @@ def test_reconciliation_version_tolerates_null_max() -> None:
     fake = FakeClient([[(None,)]])
     version = _reconciliation_version(_repo(fake), "addr1", "preprod")
     assert version.year > 1970
+
+
+# --- the host-membership publish bound -----------------------------------------
+
+
+def _repo_with_host(client: FakeClient, known: set[str]) -> Any:
+    """Publish-facing repo whose HOST membership is the given set."""
+    return SimpleNamespace(
+        client=client,
+        _db="tms",
+        host_known_tx_hashes=lambda target, hashes: known & set(hashes),
+    )
+
+
+def test_online_publish_bounds_to_host_known_hashes() -> None:
+    # A tx the host never ingested (backfilled history, or any orphan) must not
+    # reach the host-facing projection: the host's notifications poller alerts
+    # on every row with no membership check.
+    fake = FakeClient([[("txLive",), ("txHist",)]])
+    out = _publish_online(_repo_with_host(fake, {"txLive"}), "addr1", "preprod", "shape", _PUB)
+    assert out == {"txLive"}
+    assert "IN {keep:Array(String)}" in fake.commands[0]
+    assert fake.command_params[0]["keep"] == ["txLive"]
+
+
+def test_online_publish_never_suppresses_host_known_hashes() -> None:
+    # Recall first: a host-known tx passes the bound even if the engine's local
+    # tables also contain it (stale rows from an earlier blockfrost-primary run
+    # must not silence a live alert).
+    fake = FakeClient([[("txLive",), ("txAlsoLocal",)]])
+    out = _publish_online(
+        _repo_with_host(fake, {"txLive", "txAlsoLocal"}), "addr1", "preprod", "shape", _PUB
+    )
+    assert out == {"txLive", "txAlsoLocal"}
+
+
+def test_online_insert_pinned_to_precomputed_set() -> None:
+    # The INSERT stays pinned to the SELECTed set, closing the race where a row
+    # lands between the SELECT and the INSERT.
+    fake = FakeClient([[("txA",)]])
+    out = _publish_online(_repo(fake), "addr1", "preprod", "shape", _PUB)
+    assert out == {"txA"}
+    assert "IN {keep:Array(String)}" in fake.commands[0]
+    assert fake.command_params[0]["keep"] == ["txA"]
+
+
+def test_batch_publish_bounds_to_host_known_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.service.publish import _publish_batch
+
+    monkeypatch.setattr(
+        "app.service.publish._run_membership",
+        lambda repo, target, fs: ({"txLive": 1, "txHist": 1}, {"run_id": "r1", "created_at": _PUB}),
+    )
+    monkeypatch.setattr("app.service.publish._anomaly_votes", lambda *a, **k: {})
+    monkeypatch.setattr(
+        "app.service.publish._resolve_verdicts",
+        lambda *a, **k: ({"txLive": "anomaly", "txHist": "anomaly"}, {}),
+    )
+    fake = FakeClient([[]])
+    repo = _repo_with_host(fake, {"txLive"})
+    repo.latest_anomaly_run = lambda target, fs, near=None: None
+    out = _publish_batch(repo, "addr1", "preprod", "shape", _PUB)
+    assert out == {"txLive"}
+    _table, rows, _cols = fake.inserts[0]
+    assert [r[_TX_HASH_COL] for r in rows] == ["txLive"]
+
+
+def test_label_publish_bounds_both_the_insert_and_the_returned_keep_set() -> None:
+    # A host-unknown labeled hash (backfilled history, or any orphan) must be
+    # excluded from BOTH the insert and the returned keep-set: relying on "it
+    # was never published elsewhere either" to make an unfiltered keep-set
+    # harmless is exactly the kind of implicit invariant a future insert path
+    # could silently break.
+    fake = FakeClient([[("txHist",), ("txNew",)]])
+    labeled = _publish_labels(
+        _repo_with_host(fake, {"txNew"}), "addr1", "preprod", "shape", _PUB, exclude=set()
+    )
+    _table, rows, _cols = fake.inserts[0]
+    assert [r[_TX_HASH_COL] for r in rows] == ["txNew"]
+    assert labeled == {"txNew"}
+
+
+def test_label_publish_keeps_excluded_hashes_even_if_host_unknown() -> None:
+    # A labeled hash already covered by `exclude` (published via the online or
+    # batch path) must still count toward this function's keep contribution,
+    # even though this call itself never inserts it — the caller's overall
+    # keep union must not shrink relative to today's committed behavior.
+    fake = FakeClient([[("txExcluded",)]])
+    labeled = _publish_labels(
+        _repo_with_host(fake, set()),
+        "addr1",
+        "preprod",
+        "shape",
+        _PUB,
+        exclude={"txExcluded"},
+    )
+    assert fake.inserts == []
+    assert labeled == {"txExcluded"}
+
+
+def test_identity_membership_passes_through() -> None:
+    # Pure host_ch / kupo deployments: every classified tx is a host row, so
+    # the bound is a no-op by construction.
+    fake = FakeClient([[("txA",), ("txB",)]])
+    out = _publish_online(_repo(fake), "addr1", "preprod", "shape", _PUB)
+    assert out == {"txA", "txB"}

@@ -53,6 +53,7 @@ class FakeRepoBase:
         last_tx_hash: str,
         txs_seen: int,
         done: bool,
+        source: str = "",
     ) -> None:
         raise NotImplementedError
 
@@ -75,6 +76,12 @@ class FakeRepoBase:
         raise NotImplementedError
 
     def count_transactions(self, target: str) -> int:
+        raise NotImplementedError
+
+    def history_tx_count(self, target: str) -> int:
+        raise NotImplementedError
+
+    def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
         raise NotImplementedError
 
     # --- cluster runs & labels -------------------------------------------------

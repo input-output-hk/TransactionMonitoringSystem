@@ -15,10 +15,14 @@ export const FEATURE_SETS: FeatureSet[] = ["shape", "graph", "combined"];
 
 /** Read-only deployment config (`GET /config`). When `host_backed`, the engine
  *  reads txs from the host tables and fits over the rolling window `window_txs`,
- *  so the onboarding form hides the (no-op) per-contract "max txs" control. */
+ *  so the onboarding form hides the (no-op) per-contract "max txs" control —
+ *  unless `history_source` is set (a secondary pre-deployment history source),
+ *  which re-purposes "max txs" as the per-contract history depth. Absent on
+ *  not-yet-upgraded sidecars; treated as "" (disabled). */
 export type ClusteringConfig = {
 	host_backed: boolean;
 	window_txs: number;
+	history_source?: string;
 };
 
 export type Contract = {
@@ -31,6 +35,11 @@ export type Contract = {
 	drift_score: number;
 	reclustering_suggested: boolean;
 	updated_at: string;
+	/** Locally-backfilled pre-deployment rows (detail endpoint only; 0 in lists). */
+	history_tx_count?: number;
+	/** "none" | "in_progress" | "complete" | "failed" (detail endpoint only;
+	 *  "failed" = the kupo flavor gave up, raising the cap retries). */
+	history_status?: string;
 };
 
 export type RunOrigin = "system" | "custom";

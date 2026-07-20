@@ -180,16 +180,21 @@ async def backfill_address(
     *,
     network: str,
     max_txs: int | None = None,
+    created_before_slot: int | None = None,
     progress: Callable[[str], None] = _noop,
 ) -> BackfillResult:
-    """Backfill up to ``max_txs`` of the latest transactions for ``address``.
+    """Backfill up to ``max_txs`` of the latest transactions for ``address``,
+    optionally bounded to slots strictly below ``created_before_slot`` (so a
+    caller can reach history older than the address's recent activity).
 
     Raises ``KupoUnavailable`` when Kupo is not configured and ``BackfillError`` on
     an Ogmios failure. Returns a summary (see ``BackfillResult``); an empty Kupo
     result is a normal "nothing to do", not an error.
     """
     kupo = KupoClient()
-    points = await kupo.address_tx_points(address, max_txs=max_txs)
+    points = await kupo.address_tx_points(
+        address, max_txs=max_txs, created_before_slot=created_before_slot
+    )
     if not points:
         progress(f"Kupo has no matches for {address[:_ADDR_PREVIEW]}…; nothing to backfill")
         return BackfillResult(address, 0, 0, 0, [])
