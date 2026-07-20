@@ -1340,3 +1340,186 @@ class TestBaselinePoisoningResistance:
         result = scorer.score(_features(inputs, outputs, redeemers))
         assert result.score >= BAND_HIGH_THRESHOLD
         assert "lazy_validator_band_floor" in result.reasons
+
+
+def _saturated_heavy_cpu_drain(
+    n_inputs=10,
+    n_assets=10,
+    return_lovelace=0,
+    uniform=False,
+    cpu=23_000_000,
+    script=None,
+):
+    """Full drain of ``n_assets`` distinct NFTs across ``n_inputs`` same-script
+    inputs with a REAL (heavy-CPU) validator: the canonical heavy-CPU
+    double-satisfaction corner the saturation floor exists for. ``cpu`` is per
+    redeemer; the default sits above the exunits bootstrap p99 (10M) so
+    ``s_exunits_inv == 0`` and the lazy floor cannot carry the score.
+    ``return_lovelace > 0`` adds a script output to force the
+    state-continuation suppression arm; ``uniform`` collapses the redeemer
+    payloads to engage the sweep guard.
+    """
+    script = script or _SWEEP_SCRIPT
+    inputs = [
+        {
+            "address": script,
+            "value": {
+                "lovelace": 5_000_000,
+                **({_NFT_POLICY: {f"{i:02d}" * 4: 1}} if i < n_assets else {}),
+            },
+        }
+        for i in range(n_inputs)
+    ]
+    outputs = [
+        {
+            "address": WALLET,
+            "value": {
+                "lovelace": 5_000_000 * n_inputs - return_lovelace - 200_000,
+                _NFT_POLICY: {f"{i:02d}" * 4: 1 for i in range(n_assets)},
+            },
+        },
+    ]
+    if return_lovelace:
+        outputs.append({"address": script, "value": {"lovelace": return_lovelace}})
+    redeemers = [
+        {
+            "validator": {"index": i, "purpose": "spend"},
+            "redeemer": "d87980" if uniform else f"payload{i}",
+            "executionUnits": {"memory": 600, "cpu": cpu},
+        }
+        for i in range(n_inputs)
+    ]
+    return _features(inputs, outputs, redeemers)
+
+
+class TestSaturationBandFloor:
+    """Saturated-axes band floor (multiple_sat.saturation_floor).
+
+    The weighted-sum ceiling for a heavy-CPU double-sat is
+    w_extraction + w_inputs (recurrence has no producer; the inverted CPU
+    axis is ~0 when the validator does real work), which lands below the
+    High threshold: the scorer's strongest heavy-CPU detections could
+    never page. When the un-widened extraction floor signal and s_inputs
+    both saturate, the score must floor into High.
+    """
+
+    def test_saturated_heavy_cpu_double_sat_floors_to_high(self, scorer):
+        # ATTACK-MUST-FIRE: the mainnet 58.0 cohort's exact corner. Without
+        # the floor this shape's ceiling is the two live weights, which by
+        # config land strictly below the High band; the floor must promote it.
+        assert (_W_EXTRACTION + _W_INPUTS) * 100 < BAND_HIGH_THRESHOLD
+        result = scorer.score(_saturated_heavy_cpu_drain())
+        assert result.sub_scores["s_exunits_inv"] == 0.0  # not lazy
+        assert result.sub_scores["s_extraction"] == 1.0
+        assert result.sub_scores["s_inputs"] >= 0.99
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "saturation_band_floor" in result.reasons
+        assert "lazy_validator_band_floor" not in result.reasons
+
+    def test_sub_saturated_inputs_stays_weighted(self, scorer):
+        # 5 same-script inputs: s_inputs = (5-2)/8 = 0.375, well below the
+        # saturation threshold; the weighted score stands (~48, Moderate).
+        result = scorer.score(_saturated_heavy_cpu_drain(n_inputs=5, n_assets=5))
+        assert "saturation_band_floor" not in result.reasons
+        assert result.score < BAND_HIGH_THRESHOLD
+
+    def test_sub_saturated_extraction_stays_weighted(self, scorer):
+        # Lovelace-only drain: ~50M net against the 5M/500M bootstrap anchor
+        # normalises to ~0.09 on the extraction floor axis; no promotion.
+        result = scorer.score(_saturated_heavy_cpu_drain(n_assets=0))
+        assert result.sub_scores["s_extraction_floor"] < 0.99
+        assert "saturation_band_floor" not in result.reasons
+        assert result.score < BAND_HIGH_THRESHOLD
+
+    def test_uniform_sweep_exempt_from_saturation_floor(self, scorer):
+        # Identical redeemer payloads + no script return + n >= min_inputs:
+        # the sweep guard owns this shape (escape keeps it in Moderate); the
+        # saturation floor must not fight the sweep cap.
+        result = scorer.score(_saturated_heavy_cpu_drain(n_inputs=12, n_assets=12, uniform=True))
+        assert "uniform_script_sweep_guard" in result.reasons
+        assert "saturation_band_floor" not in result.reasons
+        assert result.score <= BAND_MODERATE_MAX
+
+    def test_allowlisted_exempt_from_saturation_floor(self, scorer):
+        # Known batchers legitimately saturate inputs and move many assets;
+        # the allowlist reweight path stands, no promotion.
+        from app.analysis.scorers.multiple_sat import _ALLOWLIST
+
+        mainnet_prefixes = _ALLOWLIST.get("mainnet", ())
+        assert mainnet_prefixes, "test requires at least one mainnet allowlist entry"
+        features = _saturated_heavy_cpu_drain(script=mainnet_prefixes[0])
+        features["network"] = "mainnet"
+        result = scorer.score(features)
+        assert "allowlisted_batch_script" in result.reasons
+        assert "saturation_band_floor" not in result.reasons
+        assert result.score < BAND_HIGH_THRESHOLD
+
+    def test_one_lovelace_return_saturated_drain_promotes_to_high(self, scorer):
+        # ATTACK-MUST-FIRE: 1 lovelace returned to the script forces the
+        # state-continuation suppression arm; before the saturation floor the
+        # escape banded this exactly Moderate. A saturated heavy-CPU drain is
+        # the scorer's strongest fingerprint and must now page High instead.
+        result = scorer.score(_saturated_heavy_cpu_drain(return_lovelace=1))
+        assert result.sub_scores["s_exunits_inv"] == 0.0
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "saturation_band_floor" in result.reasons
+        assert "extraction_escape_moderate_cap" not in result.reasons
+
+    def test_saturation_floor_resists_poisoned_baseline(self, scorer, monkeypatch):
+        # ATTACK-MUST-FIRE under baseline poisoning: a per-script n_assets
+        # baseline widened to p99=1e6 resolves, after the anchor caps, to
+        # (0.5, 10); the UN-widened floor signal for a 12-NFT drain is 1.0
+        # and must keep flooring. The headroom-widened axis would sit ~0.40
+        # and stay Moderate: this test fails if the predicate is ever
+        # switched to the widened s_extraction.
+        _plant_baselines(
+            monkeypatch,
+            {
+                ("per_script", "n_assets_out_of_script"): {
+                    "p50": 2.0,
+                    "p99": 1_000_000.0,
+                    "sample_count": 500,
+                },
+            },
+        )
+        result = scorer.score(_saturated_heavy_cpu_drain(n_inputs=12, n_assets=12))
+        assert result.sub_scores["s_extraction_floor"] >= 0.99
+        assert result.score >= BAND_HIGH_THRESHOLD
+        assert "saturation_band_floor" in result.reasons
+
+    def test_saturation_floor_boundary_at_thresholds(self):
+        # Predicate unit test at the exact configured thresholds: >= fires
+        # (recall-first), either exemption disarms, either axis below its
+        # threshold disarms.
+        from app.analysis.scorers.multiple_sat import (
+            _SAT_FLOOR_EXTRACTION_MIN,
+            _SAT_FLOOR_INPUTS_MIN,
+            _saturation_floor_applies,
+            _ScriptAxes,
+        )
+
+        def axes(extraction_floor, inputs):
+            return _ScriptAxes(
+                lovelace_in=0,
+                lovelace_out=0,
+                net_value=0,
+                n_assets_out=0,
+                exunits_per_input=0.0,
+                s_extraction_lov=0.0,
+                s_extraction_assets=0.0,
+                s_extraction=0.0,
+                s_extraction_floor=extraction_floor,
+                s_exunits_inv=0.0,
+                s_inputs=inputs,
+                s_recurrence=0.0,
+                bl_source="bootstrap",
+            )
+
+        at = axes(_SAT_FLOOR_EXTRACTION_MIN, _SAT_FLOOR_INPUTS_MIN)
+        assert _saturation_floor_applies(at, allowlisted=False, uniform_sweep=False)
+        assert not _saturation_floor_applies(at, allowlisted=True, uniform_sweep=False)
+        assert not _saturation_floor_applies(at, allowlisted=False, uniform_sweep=True)
+        below_ex = axes(_SAT_FLOOR_EXTRACTION_MIN - 0.001, _SAT_FLOOR_INPUTS_MIN)
+        assert not _saturation_floor_applies(below_ex, allowlisted=False, uniform_sweep=False)
+        below_in = axes(_SAT_FLOOR_EXTRACTION_MIN, _SAT_FLOOR_INPUTS_MIN - 0.001)
+        assert not _saturation_floor_applies(below_in, allowlisted=False, uniform_sweep=False)

@@ -229,6 +229,28 @@ class TestValidation:
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
+    def test_missing_saturation_floor_key_raises_with_path(self, tmp_path, monkeypatch):
+        # The saturation floor is a recall backstop; a silently absent leaf
+        # would disable it without a trace. Must fail with the dotted path.
+        cfg = _minimal_config()
+        del cfg["scorers"]["multiple_sat"]["saturation_floor"]["floor"]
+        with pytest.raises(
+            RuntimeError,
+            match=r"scorers\.multiple_sat\.saturation_floor\.floor",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_saturation_floor_below_high_band_raises(self, tmp_path, monkeypatch):
+        # The floor exists to promote saturated double-sat shapes into High;
+        # a value below the High threshold would silently re-open the gap.
+        cfg = _minimal_config()
+        cfg["scorers"]["multiple_sat"]["saturation_floor"]["floor"] = 59.0
+        with pytest.raises(
+            RuntimeError,
+            match=r"saturation_floor\.floor.*violates its band contract",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
     def test_missing_baselines_drift_leaf_raises_with_path(self, tmp_path, monkeypatch):
         # Leaf validation: a missing nested tunable must fail fast with its
         # full dotted path, not a raw KeyError at first use.

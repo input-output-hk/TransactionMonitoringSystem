@@ -286,6 +286,33 @@ scorers:
     suppression_escape:
       enabled: true
       extraction_floor_min: 0.10
+    # Saturated-axes band floor: recall backstop for the heavy-CPU
+    # double-satisfaction corner. Two of the four weighted axes are
+    # structurally unavailable when the validator does real work:
+    # recurrence has no producer yet (entity clustering deferred, always
+    # 0), and exunits_inv is the inverted-CPU signal, high only for lazy
+    # validators (when it saturates, lazy_validator_floor above already
+    # promotes to High). The achievable ceiling for a classic double-sat
+    # that executes the validator normally is therefore
+    # extraction + inputs = 0.42 + 0.16 = 0.58, i.e. score 58, two points
+    # below the High band threshold (60): the scorer's strongest heavy-CPU
+    # detections could never page. When the UN-WIDENED extraction floor
+    # signal (same s_extraction_floor as suppression_escape above, so
+    # neither per-script headroom nor a poisoned baseline can weaken this
+    # path) and s_inputs BOTH saturate, and the tx is neither allowlisted
+    # nor a uniform sweep, the score is floored into High. Mirrors
+    # lazy_validator_floor, keyed on the opposite CPU corner. Thresholds
+    # are 0.99, not 1.0: normalise() adds EPSILON to its denominator, so a
+    # value exactly at the resolved p99 lands a hair below 1.0; on the
+    # integer-stepped bootstrap anchors (n_assets p99=2, n_inputs p99=10)
+    # no integer value falls between 0.99 and 1.0, so 0.99 is exact
+    # saturation there. Compared with >=, not > (recall-first: an
+    # at-threshold signal must fire). The floor value must land in the
+    # High band (enforced by scorer_config._BAND_INVARIANTS).
+    saturation_floor:
+      extraction_min: 0.99
+      inputs_min: 0.99
+      floor: 60.0
 
   # ------------------------------------------------------------------
   large_datum:

@@ -44,6 +44,15 @@ operators triage on signal strength rather than dollar impact. Mirrors
 the mechanism in ``front_running`` (where ``high_band_cap`` *caps* scores
 when structural confirmation is weak). Allowlisted scripts are exempt.
 
+Saturated-axes band floor: the mirror backstop for the OPPOSITE corner, the
+heavy-CPU double-sat. Two weighted axes are structurally unavailable when
+the validator does real work (recurrence has no producer yet; the inverted
+CPU axis is ~0), so the weighted-sum ceiling for the classic exploit is
+``w_extraction + w_inputs``, below the High threshold. When the un-widened
+extraction floor signal and ``s_inputs`` both saturate, the score is floored
+into High. Same exemptions as the lazy floor (allowlist, uniform sweep);
+tunables under ``saturation_floor``.
+
 Uniform-sweep guard: the floor is also suppressed when the tx
 fingerprint is "owner sweeping their own script UTxOs" (many inputs with
 identical spend redeemers and no value returned to the same script).
@@ -55,10 +64,11 @@ guard is config-gated under ``uniform_sweep_guard`` so each leg
 Extraction sanity gate: the floor additionally requires
 ``s_extraction_floor > lazy_validator_extraction_min`` (the UN-widened
 extraction, so the per-script headroom in ``_extraction_anchor`` cannot weaken
-this high-confidence path). Double-satisfaction by definition needs value to
-leave the script; state-machine contracts that consume their own UTxOs and
-write state back have ``s_extraction_floor = 0`` and are not exploits even when
-execution is cheap.
+this high-confidence path; the saturation floor and the suppression escape
+read the same un-widened signal). Double-satisfaction by definition needs
+value to leave the script; state-machine contracts that consume their own
+UTxOs and write state back have ``s_extraction_floor = 0`` and are not
+exploits even when execution is cheap.
 
 All tunable constants live in ``config/detection.yaml`` under the
 ``scorers.multiple_sat`` section.
@@ -194,8 +204,12 @@ _SWEEP_MIN_INPUTS: int = int(_SWEEP_GUARD["min_inputs"])
 _SUPP_ESCAPE = _CFG["suppression_escape"]
 _SUPP_ESCAPE_ENABLED: bool = bool(_SUPP_ESCAPE["enabled"])
 _SUPP_ESCAPE_FLOOR_MIN: float = float(_SUPP_ESCAPE["extraction_floor_min"])
+_SAT_FLOOR = _CFG["saturation_floor"]
+_SAT_FLOOR_EXTRACTION_MIN: float = float(_SAT_FLOOR["extraction_min"])
+_SAT_FLOOR_INPUTS_MIN: float = float(_SAT_FLOOR["inputs_min"])
+_SAT_FLOOR_VALUE: float = float(_SAT_FLOOR["floor"])
 
-# The floor's band contract (must reach High) is enforced at config load:
+# Both floors' band contracts (must reach High) are enforced at config load:
 # scorer_config._BAND_INVARIANTS.
 
 
@@ -461,9 +475,9 @@ def _compute_axes(
     Per-script anchors get headroom (see _extraction_anchor) so an
     established contract's normal upper-range extraction does not saturate;
     bootstrap anchors are used as-is. ``s_extraction_floor`` is the
-    UN-WIDENED variant feeding the lazy-validator floor and the
-    suppression escape, so the per-script headroom cannot weaken either
-    high-confidence path.
+    UN-WIDENED variant feeding the lazy-validator floor, the saturation
+    floor, and the suppression escape, so the per-script headroom cannot
+    weaken any of the high-confidence paths.
     """
     inputs = raw_data.get("inputs", [])
     lovelace_in, lovelace_out = _compute_lovelace_flow(inputs, outputs, script_key)
@@ -558,6 +572,38 @@ def _floor_applies(axes: _ScriptAxes, allowlisted: bool, uniform_sweep: bool) ->
     )
 
 
+def _saturation_floor_applies(
+    axes: _ScriptAxes,
+    allowlisted: bool,
+    uniform_sweep: bool,
+) -> bool:
+    """Saturated-axes band floor predicate (heavy-CPU double-sat corner).
+
+    The weighted sum's ceiling for a double-satisfaction whose validator
+    does real work is ``w_extraction + w_inputs``: recurrence has no
+    producer yet (entity clustering deferred) and the inverted-CPU axis is
+    ~0 when execution is not lazy, so 0.42 of the weight mass is
+    structurally unreachable and the strongest heavy-CPU detections land
+    below the High threshold. When the un-widened extraction floor signal
+    and ``s_inputs`` both saturate, the structural fingerprint is at
+    maximum strength and the score is floored into High regardless of the
+    two dead axes. Allowlisted scripts are exempt (known batchers);
+    uniform sweeps keep their Moderate cap (owner consolidation). Uses
+    ``s_extraction_floor``, not the headroom-widened ``s_extraction``,
+    matching the lazy floor and the suppression escape: per-script
+    headroom and a capped-poisoned baseline must not weaken this
+    high-confidence path. Compared with >=, not > (recall-first: an
+    at-threshold signal must fire). Tunables:
+    multiple_sat.saturation_floor.
+    """
+    return (
+        not allowlisted
+        and not uniform_sweep
+        and axes.s_extraction_floor >= _SAT_FLOOR_EXTRACTION_MIN
+        and axes.s_inputs >= _SAT_FLOOR_INPUTS_MIN
+    )
+
+
 def _suppression_outcome(
     axes: _ScriptAxes,
     allowlisted: bool,
@@ -605,6 +651,7 @@ def _collect_reasons(
     allowlisted: bool,
     uniform_sweep: bool,
     escaped: bool,
+    sat_floored: bool,
 ) -> list[str]:
     """Operator-facing reason flags for a scored (non-suppressed) result."""
     reasons = []
@@ -616,6 +663,8 @@ def _collect_reasons(
         reasons.append("low_exunits_per_input")
     if floored:
         reasons.append("lazy_validator_band_floor")
+    if sat_floored:
+        reasons.append("saturation_band_floor")
     if axes.s_inputs > _REASON_T:
         reasons.append("high_n_inputs_same_script")
     if allowlisted:
@@ -767,6 +816,9 @@ class MultipleSatScorer(BaseScorer):
         floored = _floor_applies(axes, allowlisted, uniform_sweep)
         if floored:
             final = max(final, _LAZY_VALIDATOR_FLOOR)
+        sat_floored = _saturation_floor_applies(axes, allowlisted, uniform_sweep)
+        if sat_floored:
+            final = max(final, _SAT_FLOOR_VALUE)
 
         # When the sweep guard fires AND the script is also allowlisted,
         # the allowlist reweight redistributes the extraction weight onto
@@ -774,7 +826,8 @@ class MultipleSatScorer(BaseScorer):
         # large, p99=10). The reweighted score then climbs back above the
         # High threshold, undoing the guard's intent. Cap the final at the
         # top of Moderate so the sweep classification stands regardless of
-        # the allowlist path.
+        # the allowlist path. Both floors are False under uniform_sweep by
+        # predicate, so the cap never fights a floor.
         if uniform_sweep:
             final = min(final, BAND_MODERATE_MAX)
 
@@ -782,7 +835,7 @@ class MultipleSatScorer(BaseScorer):
             axes,
             allowlisted,
             uniform_sweep,
-            floored,
+            floored or sat_floored,
         )
         if suppressed:
             return ScorerResult.no_finding(
@@ -815,6 +868,7 @@ class MultipleSatScorer(BaseScorer):
                 "s_extraction": round(axes.s_extraction, 4),
                 "s_extraction_lov": round(axes.s_extraction_lov, 4),
                 "s_extraction_assets": round(axes.s_extraction_assets, 4),
+                "s_extraction_floor": round(axes.s_extraction_floor, 4),
                 "s_exunits_inv": round(axes.s_exunits_inv, 4),
                 "s_inputs": round(axes.s_inputs, 4),
                 "s_recurrence": round(axes.s_recurrence, 4),
@@ -827,6 +881,7 @@ class MultipleSatScorer(BaseScorer):
                 allowlisted,
                 uniform_sweep,
                 escaped,
+                sat_floored,
             ),
             baseline_source=axes.bl_source,
             evidence={
