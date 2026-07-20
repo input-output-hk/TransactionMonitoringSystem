@@ -27,11 +27,14 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import {
+	isPermissionDenied,
 	isTerminalJob,
 	useClassifyNow,
 	useJob,
 	useLatest,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
+import { AdminOnlyGate } from "./adminOnly";
 import { ClusterTag, CopyHash, VerdictBadge } from "./cells";
 import { formatAdaExact } from "@/lib/utils/numbers";
 import { formatTimeAgo } from "@/lib/utils/dates";
@@ -41,6 +44,7 @@ const LIMIT_OPTIONS = [50, 100, 200];
 
 export function LatestTable({ target }: { target: string }) {
 	const qc = useQueryClient();
+	const { isAdmin } = useAuth();
 	const [limit, setLimit] = useState(100);
 	const [jobId, setJobId] = useState<string | undefined>(undefined);
 
@@ -67,10 +71,13 @@ export function LatestTable({ target }: { target: string }) {
 	const running = classify.isPending || jobRunning;
 	// Surface a submit failure or a failed job; cleared implicitly when a new
 	// run starts (a fresh job id replaces the failed one's data).
+	// Only the role rejection is safe to show verbatim; any other transport
+	// error carries a raw `clustering POST … failed: N` string that must not
+	// leak to the user, so it collapses to a friendly generic message.
 	const errorMsg = classify.isError
-		? classify.error instanceof Error
+		? isPermissionDenied(classify.error)
 			? classify.error.message
-			: "Classification failed."
+			: "Classification failed. The clustering service may be slow or unavailable."
 		: job.data?.status === "failed"
 			? job.data.error || "Classification failed."
 			: null;
@@ -104,14 +111,16 @@ export function LatestTable({ target }: { target: string }) {
 					</Select>
 					stored
 				</label>
-				<Button
-					size="sm"
-					disabled={running}
-					onClick={fetchAndClassify}
-					title="Download this validator's newest transactions and score the ones not yet classified."
-				>
-					{running ? "Fetching & classifying…" : "↓ Fetch newer from chain"}
-				</Button>
+				<AdminOnlyGate gated={!isAdmin}>
+					<Button
+						size="sm"
+						disabled={!isAdmin || running}
+						onClick={fetchAndClassify}
+						title="Download this validator's newest transactions and score the ones not yet classified."
+					>
+						{running ? "Fetching & classifying…" : "↓ Fetch newer from chain"}
+					</Button>
+				</AdminOnlyGate>
 			</div>
 
 			<HelpDetails summary="What is this?">
@@ -152,7 +161,9 @@ export function LatestTable({ target }: { target: string }) {
 			) : isError ? (
 				<ErrorText>Failed to load the latest interactions.</ErrorText>
 			) : !rows.length ? (
-				<EmptyText>No transactions stored yet. Use “Fetch newer from chain”.</EmptyText>
+				<EmptyText>
+					No transactions stored yet. Use “Fetch newer from chain”.
+				</EmptyText>
 			) : (
 				<>
 					<p className="text-muted-foreground text-xs">

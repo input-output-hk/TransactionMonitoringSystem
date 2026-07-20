@@ -17,6 +17,7 @@ import {
 import { TableFooter } from "@/components/ui/table-footer";
 import { EmptyText, ErrorText, LoadingText } from "@/components/ui/status-text";
 import { type AnomalyCandidate, useTopAnomalies } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { CopyHash, VerdictBadge } from "./cells";
 import { WEEKDAYS, formatInt } from "./format";
@@ -31,23 +32,19 @@ const STRONG_VOTE_THRESHOLD = 2;
 type Props = { runId: string; target: string };
 
 export function AnomalyTable({ runId, target }: Props) {
+	const { isAdmin } = useAuth();
 	const { data, isLoading, isError } = useTopAnomalies(runId, 100);
 	const [showAll, setShowAll] = useState(false);
 	const [pageSize, setPageSize] = useState(25);
 	const [page, setPage] = useState(0);
 
-	if (isLoading)
-		return <LoadingText>Loading anomalies…</LoadingText>;
+	if (isLoading) return <LoadingText>Loading anomalies…</LoadingText>;
 	if (isError)
-		return (
-			<ErrorText>Failed to load anomalies for this run.</ErrorText>
-		);
+		return <ErrorText>Failed to load anomalies for this run.</ErrorText>;
 
 	const rows = data?.candidates ?? [];
 	if (!rows.length)
-		return (
-			<EmptyText>No flagged transactions in this run.</EmptyText>
-		);
+		return <EmptyText>No flagged transactions in this run.</EmptyText>;
 
 	const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
@@ -93,7 +90,9 @@ export function AnomalyTable({ runId, target }: Props) {
 							Dbscan
 						</TableHead>
 						<TableHead>Verdict</TableHead>
-						<TableHead className="text-right">Label</TableHead>
+						{/* Per-tx labelling is Admin-only; hide the column for a
+						    read-only Reviewer rather than show an empty one. */}
+						{isAdmin && <TableHead className="text-right">Label</TableHead>}
 						<TableHead className="text-right">Fee (₳)</TableHead>
 						{showAll && <TableHead className="text-right">Size</TableHead>}
 						{showAll && <TableHead className="text-right">In (₳)</TableHead>}
@@ -155,13 +154,15 @@ export function AnomalyTable({ runId, target }: Props) {
 							<TableCell>
 								<VerdictBadge verdict={a.verdict} />
 							</TableCell>
-							<TableCell className="text-right">
-								<TxLabelControl
-									target={target}
-									txHash={a.tx_hash}
-									ownLabel={a.label}
-								/>
-							</TableCell>
+							{isAdmin && (
+								<TableCell className="text-right">
+									<TxLabelControl
+										target={target}
+										txHash={a.tx_hash}
+										ownLabel={a.label}
+									/>
+								</TableCell>
+							)}
 							<TableCell className="text-right tabular-nums">
 								{formatAdaExact(a.fees, 0)}
 							</TableCell>

@@ -24,6 +24,7 @@ import {
 	useClusterSummary,
 	useLabelCluster,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { ClusterTag } from "./cells";
@@ -32,8 +33,10 @@ import { formatInt } from "./format";
 import { formatAdaExact } from "@/lib/utils/numbers";
 import { VERDICT_BADGE, VERDICT_LABEL } from "./verdict";
 
-// The grid has 9 columns; the expanded drill-down row spans all of them.
+// The grid has 9 columns; the expanded drill-down row spans all of them. The
+// last one (Label) is Admin-only, so a Reviewer's grid is one column narrower.
 const COLUMN_COUNT = 9;
+const COLUMN_COUNT_READONLY = COLUMN_COUNT - 1; // Label column hidden
 
 type Props = {
 	runId: string;
@@ -49,9 +52,11 @@ export function ClusterSummaryTable({
 	selectedCluster,
 	onSelectCluster,
 }: Props) {
+	const { isAdmin } = useAuth();
 	const { data: clusters, isLoading } = useClusterSummary(runId);
 	const label = useLabelCluster();
 	const clear = useClearClusterLabel();
+	const columnCount = isAdmin ? COLUMN_COUNT : COLUMN_COUNT_READONLY;
 	// Uncontrolled fallback when the parent doesn't lift selection.
 	const [localExpanded, setLocalExpanded] = useState<number | null>(null);
 	const expanded =
@@ -59,12 +64,8 @@ export function ClusterSummaryTable({
 	const setExpanded = (id: number | null) =>
 		onSelectCluster ? onSelectCluster(id) : setLocalExpanded(id);
 
-	if (isLoading)
-		return <LoadingText>Loading clusters…</LoadingText>;
-	if (!clusters?.length)
-		return (
-			<EmptyText>No clusters in this run.</EmptyText>
-		);
+	if (isLoading) return <LoadingText>Loading clusters…</LoadingText>;
+	if (!clusters?.length) return <EmptyText>No clusters in this run.</EmptyText>;
 
 	const toggle = (id: number) => setExpanded(expanded === id ? null : id);
 
@@ -80,7 +81,9 @@ export function ClusterSummaryTable({
 					<TableHead className="text-right">Avg out (₳)</TableHead>
 					<TableHead className="text-right">Avg in/out</TableHead>
 					<TableHead>Verdict</TableHead>
-					<TableHead className="text-right">Label</TableHead>
+					{/* Labelling is an Admin-only mutation; hide the column for a
+					    read-only Reviewer rather than show an empty one. */}
+					{isAdmin && <TableHead className="text-right">Label</TableHead>}
 				</TableRow>
 			</TableHeader>
 			<TableBody>
@@ -151,60 +154,63 @@ export function ClusterSummaryTable({
 										)}
 									</span>
 								</TableCell>
-								<TableCell
-									className="text-right"
-									onClick={(e) => e.stopPropagation()}
-								>
-									{c.cluster_id < 0 ? (
-										<span className="text-muted-foreground">—</span>
-									) : c.verdict ? (
-										<Button
-											variant="ghost"
-											size="sm"
-											disabled={clear.isPending}
-											onClick={() =>
-												clear.mutate({ runId, clusterId: c.cluster_id })
-											}
-										>
-											Clear
-										</Button>
-									) : (
-										<div className="flex justify-end gap-1">
+								{isAdmin && (
+									<TableCell
+										className="text-right"
+										onClick={(e) => e.stopPropagation()}
+									>
+										{c.cluster_id < 0 ? (
+											// Noise bucket: nothing to label.
+											<span className="text-muted-foreground">—</span>
+										) : c.verdict ? (
 											<Button
 												variant="ghost"
 												size="sm"
-												disabled={label.isPending}
+												disabled={clear.isPending}
 												onClick={() =>
-													label.mutate({
-														runId,
-														clusterId: c.cluster_id,
-														verdict: "malicious",
-													})
+													clear.mutate({ runId, clusterId: c.cluster_id })
 												}
 											>
-												Malicious
+												Clear
 											</Button>
-											<Button
-												variant="ghost"
-												size="sm"
-												disabled={label.isPending}
-												onClick={() =>
-													label.mutate({
-														runId,
-														clusterId: c.cluster_id,
-														verdict: "benign",
-													})
-												}
-											>
-												Benign
-											</Button>
-										</div>
-									)}
-								</TableCell>
+										) : (
+											<div className="flex justify-end gap-1">
+												<Button
+													variant="ghost"
+													size="sm"
+													disabled={label.isPending}
+													onClick={() =>
+														label.mutate({
+															runId,
+															clusterId: c.cluster_id,
+															verdict: "malicious",
+														})
+													}
+												>
+													Malicious
+												</Button>
+												<Button
+													variant="ghost"
+													size="sm"
+													disabled={label.isPending}
+													onClick={() =>
+														label.mutate({
+															runId,
+															clusterId: c.cluster_id,
+															verdict: "benign",
+														})
+													}
+												>
+													Benign
+												</Button>
+											</div>
+										)}
+									</TableCell>
+								)}
 							</TableRow>
 							{isOpen && (
 								<TableRow className={cn("hover:bg-transparent")}>
-									<TableCell colSpan={COLUMN_COUNT} className="p-2">
+									<TableCell colSpan={columnCount} className="p-2">
 										<ClusterTransactions
 											runId={runId}
 											target={target}

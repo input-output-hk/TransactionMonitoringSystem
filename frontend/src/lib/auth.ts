@@ -28,6 +28,11 @@ export function useAuth() {
 		user,
 		/** True only when /me resolved AND returned a user. */
 		isAuthenticated: user !== null,
+		/** True when the signed-in user has the Admin role. Reviewer sessions
+		 *  are read-only for mutating surfaces (e.g. clustering actions); UIs
+		 *  use this to disable those controls up front instead of letting the
+		 *  request fail with a 403. */
+		isAdmin: user?.role === "Admin",
 		/** Initial /me request still pending. Route guards should wait on this. */
 		isLoading,
 		/** /me has resolved at least once (regardless of result). */

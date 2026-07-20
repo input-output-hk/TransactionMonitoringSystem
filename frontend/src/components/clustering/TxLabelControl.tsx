@@ -13,6 +13,7 @@ import {
 	useClearTxLabel,
 	useLabelTx,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
 
 type Props = {
 	target: string;
@@ -24,9 +25,14 @@ type Props = {
 };
 
 export function TxLabelControl({ target, txHash, ownLabel }: Props) {
+	const { isAdmin } = useAuth();
 	const label = useLabelTx();
 	const clear = useClearTxLabel();
 	const busy = label.isPending || clear.isPending;
+
+	// Per-tx labelling is an Admin-only mutation at the proxy; a read-only
+	// Reviewer sees no action controls (the row's verdict badge still renders).
+	if (!isAdmin) return null;
 
 	return (
 		<div className="flex justify-end gap-1">

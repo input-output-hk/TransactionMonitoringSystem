@@ -51,6 +51,7 @@ import {
 	useDeleteContract,
 	useRenameContract,
 } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
 import { copyToClipboard } from "@/lib/utils/clipboard";
 
 function statusVariant(
@@ -242,6 +243,7 @@ function DeleteDialog({
 
 export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 	const navigate = useNavigate();
+	const { isAdmin } = useAuth();
 	const add = useAddContract();
 	const classify = useClassifyNow();
 	const [renaming, setRenaming] = useState(false);
@@ -270,14 +272,16 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 							<span className="truncate font-mono text-sm" title={c.target}>
 								{c.label || shortTarget(c.target)}
 							</span>
-							<button
-								type="button"
-								className="text-muted-foreground hover:text-foreground shrink-0"
-								title="Rename"
-								onClick={() => setRenaming(true)}
-							>
-								<Pencil className="h-3.5 w-3.5" />
-							</button>
+							{isAdmin && (
+								<button
+									type="button"
+									className="text-muted-foreground hover:text-foreground shrink-0"
+									title="Rename"
+									onClick={() => setRenaming(true)}
+								>
+									<Pencil className="h-3.5 w-3.5" />
+								</button>
+							)}
 						</span>
 					)}
 					<Badge variant={pillVariant}>{pillText}</Badge>
@@ -321,44 +325,55 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 				<Button size="sm" onClick={() => void open()}>
 					Explore
 				</Button>
-				<Button size="sm" variant="outline" onClick={() => void open("anomalies")}>
+				<Button
+					size="sm"
+					variant="outline"
+					onClick={() => void open("anomalies")}
+				>
 					Outliers
 				</Button>
-				<DropdownMenu>
-					<DropdownMenuTrigger asChild>
-						<Button size="sm" variant="ghost" aria-label="More actions">
-							<MoreVertical className="h-4 w-4" />
-						</Button>
-					</DropdownMenuTrigger>
-					<DropdownMenuContent align="end">
-						<DropdownMenuItem
-							disabled={busy}
-							onClick={() => classify.mutate(c.target)}
-						>
-							<RefreshCw className="h-4 w-4" /> Fetch recent
-						</DropdownMenuItem>
-						<DropdownMenuItem
-							disabled={busy}
-							onClick={() => add.mutate({ target: c.target, reprocess: true })}
-						>
-							<RefreshCw className="h-4 w-4" />
-							{jobFailed ? "Retry / re-analyze" : "Re-analyze"}
-						</DropdownMenuItem>
-						<DropdownMenuItem
-							disabled={busy || c.tx_count >= MAX_TXS_CAP}
-							onClick={() => setDownloadOpen(true)}
-						>
-							<Download className="h-4 w-4" /> Download more…
-						</DropdownMenuItem>
-						<DropdownMenuSeparator />
-						<DropdownMenuItem
-							className="text-destructive focus:text-destructive"
-							onClick={() => setDeleteOpen(true)}
-						>
-							<Trash2 className="h-4 w-4" /> Delete…
-						</DropdownMenuItem>
-					</DropdownMenuContent>
-				</DropdownMenu>
+				{/* Every action in this menu is a clustering mutation (Admin-only at
+				    the proxy), so a read-only Reviewer sees no menu rather than an
+				    all-disabled one. */}
+				{isAdmin && (
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button size="sm" variant="ghost" aria-label="More actions">
+								<MoreVertical className="h-4 w-4" />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end">
+							<DropdownMenuItem
+								disabled={busy}
+								onClick={() => classify.mutate(c.target)}
+							>
+								<RefreshCw className="h-4 w-4" /> Fetch recent
+							</DropdownMenuItem>
+							<DropdownMenuItem
+								disabled={busy}
+								onClick={() =>
+									add.mutate({ target: c.target, reprocess: true })
+								}
+							>
+								<RefreshCw className="h-4 w-4" />
+								{jobFailed ? "Retry / re-analyze" : "Re-analyze"}
+							</DropdownMenuItem>
+							<DropdownMenuItem
+								disabled={busy || c.tx_count >= MAX_TXS_CAP}
+								onClick={() => setDownloadOpen(true)}
+							>
+								<Download className="h-4 w-4" /> Download more…
+							</DropdownMenuItem>
+							<DropdownMenuSeparator />
+							<DropdownMenuItem
+								className="text-destructive focus:text-destructive"
+								onClick={() => setDeleteOpen(true)}
+							>
+								<Trash2 className="h-4 w-4" /> Delete…
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				)}
 			</CardFooter>
 
 			<DownloadMoreDialog

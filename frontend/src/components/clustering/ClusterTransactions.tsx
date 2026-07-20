@@ -12,6 +12,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { type TxRow, useClusterTransactions } from "@/lib/api/clustering";
+import { useAuth } from "@/lib/auth";
 import { CopyHash, VerdictBadge } from "./cells";
 import { formatAdaExact } from "@/lib/utils/numbers";
 import { formatTimeAgo } from "@/lib/utils/dates";
@@ -21,6 +22,7 @@ import { EmptyText, ErrorText, LoadingText } from "@/components/ui/status-text";
 type Props = { runId: string; target: string; clusterId: number };
 
 export function ClusterTransactions({ runId, target, clusterId }: Props) {
+	const { isAdmin } = useAuth();
 	const { data, isLoading, isError } = useClusterTransactions(runId, clusterId);
 
 	if (isLoading)
@@ -29,13 +31,17 @@ export function ClusterTransactions({ runId, target, clusterId }: Props) {
 		);
 	if (isError)
 		return (
-			<ErrorText className="px-4 py-3">Failed to load this cluster's transactions.</ErrorText>
+			<ErrorText className="px-4 py-3">
+				Failed to load this cluster's transactions.
+			</ErrorText>
 		);
 
 	const rows = data?.transactions ?? [];
 	if (!rows.length)
 		return (
-			<EmptyText className="px-4 py-3">No transactions in this cluster.</EmptyText>
+			<EmptyText className="px-4 py-3">
+				No transactions in this cluster.
+			</EmptyText>
 		);
 
 	return (
@@ -50,7 +56,9 @@ export function ClusterTransactions({ runId, target, clusterId }: Props) {
 						<TableHead className="text-right">Out (₳)</TableHead>
 						<TableHead className="text-right">In/Out</TableHead>
 						<TableHead className="text-right">Assets</TableHead>
-						<TableHead className="text-right">Label</TableHead>
+						{/* Per-tx labelling is Admin-only; hide the column for a
+						    read-only Reviewer rather than show an empty one. */}
+						{isAdmin && <TableHead className="text-right">Label</TableHead>}
 					</TableRow>
 				</TableHeader>
 				<TableBody>
@@ -77,13 +85,15 @@ export function ClusterTransactions({ runId, target, clusterId }: Props) {
 							<TableCell className="text-right tabular-nums">
 								{t.distinct_assets}
 							</TableCell>
-							<TableCell className="text-right">
-								<TxLabelControl
-									target={target}
-									txHash={t.tx_hash}
-									ownLabel={t.label}
-								/>
-							</TableCell>
+							{isAdmin && (
+								<TableCell className="text-right">
+									<TxLabelControl
+										target={target}
+										txHash={t.tx_hash}
+										ownLabel={t.label}
+									/>
+								</TableCell>
+							)}
 						</TableRow>
 					))}
 				</TableBody>
