@@ -46,6 +46,9 @@ _REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
         "uniform_sweep_guard.min_inputs",
         "suppression_escape.enabled",
         "suppression_escape.extraction_floor_min",
+        "saturation_floor.extraction_min",
+        "saturation_floor.inputs_min",
+        "saturation_floor.floor",
     ),
     "large_datum": (
         "gate",
@@ -562,6 +565,12 @@ _BAND_INVARIANTS: tuple[tuple[str, float, float | None, str], ...] = (
         BAND_HIGH_THRESHOLD,
         None,
         "the lazy-validator promotion must reach the High band",
+    ),
+    (
+        "scorers.multiple_sat.saturation_floor.floor",
+        BAND_HIGH_THRESHOLD,
+        None,
+        "the saturated extraction+inputs promotion must reach the High band",
     ),
     (
         "scorers.front_running.high_band_cap",

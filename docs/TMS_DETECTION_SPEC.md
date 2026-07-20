@@ -294,13 +294,25 @@ score_multiple_satisfaction(tx):
                      and s_extraction_floor > lazy_validator_extraction_min)
     if floor_applies:
         score = max(score, lazy_validator_floor)
+
+    # Saturated-axes band floor (see below): the heavy-CPU mirror of the
+    # lazy floor. Both the un-widened extraction signal and s_inputs at
+    # saturation is the strongest structural double-sat fingerprint the
+    # weighted sum can express, yet its ceiling (0.42 + 0.16 = 58) sits
+    # below the High threshold because the other two axes are dead here.
+    sat_floor_applies = (not allowlisted and not uniform_sweep
+                         and s_extraction_floor >= saturation_floor.extraction_min
+                         and s_inputs >= saturation_floor.inputs_min)
+    if sat_floor_applies:
+        score = max(score, saturation_floor.floor)
     if uniform_sweep:
         score = min(score, BAND_MODERATE_MAX)   # sweep classification stands even under allowlist reweight
 
     # Suppression: a benign multi-input spend that is NOT double-satisfaction
     # (owner sweep, or value returned to the script = state continuation) is
-    # dropped to no-finding (-1). Gated on `not floor_applies` so a floored
-    # lazy-validator exploit and the CTF-01 marketplace case (uniform=False,
+    # dropped to no-finding (-1). Gated on `not (floor_applies or
+    # sat_floor_applies)` so a floored lazy-validator exploit, a floored
+    # saturated drain, and the CTF-01 marketplace case (uniform=False,
     # value_returned=0) are never suppressed.
     # Escape hatch: both benign shapes are attacker-reachable (return 1
     # lovelace to force the state-continuation arm; an identical-redeemer
@@ -309,7 +321,7 @@ score_multiple_satisfaction(tx):
     # the finding is kept and banded exactly Moderate (floored and capped).
     escape = (suppression_escape.enabled and not allowlisted
               and s_extraction_floor >= suppression_escape.extraction_floor_min)
-    if not floor_applies and (uniform_sweep or value_returned_to_script > 0):
+    if not (floor_applies or sat_floor_applies) and (uniform_sweep or value_returned_to_script > 0):
         if not escape:
             return no_finding
         score = min(score, BAND_MODERATE_MAX)   # reason: extraction_escape_moderate_cap
@@ -324,6 +336,12 @@ When the gate has fired AND `s_exunits_inv` saturates above `lazy_validator_thre
 Allowlisted scripts are exempt: legitimate batch-processing contracts often run minimal per-input CPU by design (the validator runs once and amortises across all batched orders), so the lazy-validator fingerprint is part of their normal operation.
 
 The floor additionally requires `s_extraction_floor > lazy_validator_extraction_min` (the un-widened extraction, so the per-script headroom cannot weaken this high-confidence path) and `not uniform_sweep`. Double-satisfaction by definition needs value to leave the script: a state-machine contract that consumes its own UTxOs and writes state back has `s_extraction_floor = 0` and is not floored even when execution is cheap.
+
+### Saturated-Axes Band Floor
+
+The mirror backstop for the opposite corner: the heavy-CPU double-satisfaction. Two of the four weighted axes are structurally unavailable when the validator does real work: `sender_recurrence` has no producer yet (entity clustering deferred), and `s_exunits_inv` is the inverted-CPU signal, high only for lazy validators (when it saturates, the lazy-validator floor above already promotes). The weighted-sum ceiling for a classic double-sat that executes the validator normally is therefore `0.42 + 0.16 = 58`, two points below the High threshold: without a backstop, the scorer's strongest heavy-CPU detections could never page High (observed on mainnet as an all-time max of exactly 58.0 over the first 2,043 scored txs).
+
+When the un-widened extraction floor signal and `s_inputs` both reach `saturation_floor.extraction_min` / `inputs_min` (default 0.99: exact saturation on the integer-stepped bootstrap anchors, since `normalise()` adds EPSILON to its denominator and an at-p99 value lands a hair below 1.0), and the group is neither allowlisted nor a uniform sweep, the score floors to `saturation_floor.floor` (default 60.0, validated against the High band at config load). A floored finding is never suppressed and never escape-capped back into Moderate. The comparison is `>=`, not `>`: an at-threshold signal must fire (recall-first).
 
 ### Per-Script-Only Value Baselines
 
