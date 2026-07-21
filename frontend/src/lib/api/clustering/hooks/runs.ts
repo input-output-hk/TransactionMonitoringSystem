@@ -56,8 +56,8 @@ export function useClusterSummary(runId: string | undefined) {
 
 /**
  * Lazy parameter evaluation for a target + feature set (k-distance curve +
- * DBSCAN grid). `enabled: false` so it never runs on mount; the Tuning panel
- * triggers it with `refetch()`. High staleTime so a result sticks around while
+ * DBSCAN grid). `enabled: false` so it never runs on mount; the clustering
+ * control bar triggers it with `refetch()`. High staleTime so a result sticks around while
  * the analyst reads it.
  */
 export function useEvaluation(

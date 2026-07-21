@@ -18,13 +18,6 @@ import {
 } from "@/components/ui/dialog";
 import { HelpDetails } from "@/components/ui/help-details";
 import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
-import {
 	type AnomalyRun,
 	type FeatureSet,
 	isPermissionDenied,
@@ -32,12 +25,14 @@ import {
 	useDetectAnomaly,
 } from "@/lib/api/clustering";
 import { useAuth } from "@/lib/auth";
+import { DOCS_ANOMALY } from "@/lib/docs";
 import { AdminOnlyGate } from "./adminOnly";
+import { DocsCallout } from "./DocsCallout";
 import { FeatureSetSelect } from "./FeatureSetSelect";
+import { RunSelect } from "./RunSelect";
 
 function runLabel(r: AnomalyRun): string {
-	const origin = r.origin === "system" ? "System" : "Custom";
-	return `${r.feature_set} · ${origin} · ${r.n_flagged} flagged of ${r.n_points}`;
+	return `${r.feature_set} · ${r.n_flagged} flagged of ${r.n_points}`;
 }
 
 type Props = {
@@ -86,25 +81,21 @@ export function AnomalyRunControls({
 
 	return (
 		<div className="space-y-2">
+			<DocsCallout href={DOCS_ANOMALY}>
+				Advanced control. Re-running scores a separate run and never changes the
+				canonical scoring, but anomaly scores need interpretation (statistically
+				unusual is not proof of anything).
+			</DocsCallout>
+
 			<div className="flex flex-wrap items-center gap-3">
 				<div className="flex items-center gap-2">
 					<span className="text-muted-foreground text-sm">Run</span>
-					<Select
+					<RunSelect
+						runs={runs}
 						value={selectedRunId}
-						onValueChange={onSelectRun}
-						disabled={!runs.length}
-					>
-						<SelectTrigger className="h-9 w-[22rem] max-w-full">
-							<SelectValue placeholder="No runs yet" />
-						</SelectTrigger>
-						<SelectContent>
-							{runs.map((r) => (
-								<SelectItem key={r.run_id} value={r.run_id}>
-									{runLabel(r)}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
+						onChange={onSelectRun}
+						getLabel={runLabel}
+					/>
 					{selectedRun && (
 						<Badge
 							variant={selectedRun.origin === "system" ? "outline" : "medium"}
@@ -122,7 +113,7 @@ export function AnomalyRunControls({
 					/>
 					<AdminOnlyGate gated={!isAdmin}>
 						<Button disabled={!isAdmin || detect.isPending} onClick={onDetect}>
-							{detect.isPending ? "Detecting…" : "Detect anomalies"}
+							{detect.isPending ? "Scoring…" : "Re-run anomaly scoring"}
 						</Button>
 					</AdminOnlyGate>
 					{canDelete && (
@@ -173,19 +164,19 @@ export function AnomalyRunControls({
 				<p>
 					A <strong>run</strong> is one saved anomaly-detection pass over this
 					target's transactions. Each option reads{" "}
-					<em>feature set · origin · flagged of total</em>:
+					<em>feature set · flagged of total · time</em>:
 				</p>
 				<ul>
+					<li>
+						<strong>origin:</strong> the <em>Canonical</em> run is the
+						auto-tuned System run that drives scoring; a <em>Custom</em> run is
+						an experiment you ran, kept separate and safe to delete.
+					</li>
 					<li>
 						<strong>feature set:</strong> which signals are compared:{" "}
 						<em>shape</em> (per-tx value, size, in/out counts, ADA moved,
 						assets, time), <em>graph</em> (shared addresses), or{" "}
 						<em>combined</em>.
-					</li>
-					<li>
-						<strong>origin:</strong> <em>System</em> is the canonical,
-						auto-tuned run that drives scoring; <em>Custom</em> is an experiment
-						you ran, kept separate and safe to delete.
 					</li>
 					<li>
 						<strong>flagged of total:</strong> how many transactions the

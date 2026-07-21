@@ -1,5 +1,5 @@
-/** Shared feature-set picker, used by the Tuning panel and the anomaly-run
- *  controls so both stay in sync with the available feature sets. */
+/** Shared feature-set picker, used by the clustering and anomaly run controls
+ *  so both stay in sync with the available feature sets. */
 import {
 	Select,
 	SelectContent,
