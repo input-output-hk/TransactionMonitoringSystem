@@ -13,9 +13,9 @@ import { qpEnum, useQueryParamState } from "@/lib/url-state";
 import { AnomalyHelp } from "@/components/clustering/AnomalyHelp";
 import { AnomalyRunControls } from "@/components/clustering/AnomalyRunControls";
 import { AnomalyTable } from "@/components/clustering/AnomalyTable";
+import { ClusterRunControls } from "@/components/clustering/ClusterRunControls";
 import { ClusterSummaryTable } from "@/components/clustering/ClusterSummaryTable";
 import { LatestTable } from "@/components/clustering/LatestTable";
-import { TuningPanel } from "@/components/clustering/TuningPanel";
 // Cytoscape is heavy (~500 kB); code-split it so it loads only when the Graph
 // tab is opened, keeping it out of the main bundle.
 const ClusterGraph = lazy(() =>
@@ -35,8 +35,11 @@ const TAB_VALUES = [
 	"clusters",
 	"anomalies",
 	"latest",
-	"tuning",
 ] as const;
+
+// Tabs that view a cluster run; the clustering control bar (run picker +
+// re-cluster + delete) is shown above these and shares one run selection.
+const CLUSTER_TABS: readonly string[] = ["graph", "projection", "clusters"];
 import { VerdictLegend } from "@/components/clustering/VerdictLegend";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -176,12 +179,23 @@ export function ValidatorDetailPage() {
 	const setTab = (value: string) => setParam("tab", value);
 	// Lifted so a graph click can focus a cluster in the Clusters tab.
 	const [selectedCluster, setSelectedCluster] = useState<number | null>(null);
+	// Which cluster run the Graph/Projection/Clusters views + control bar show.
+	// Empty = follow the default (latest shape run); set by the run picker.
+	const [selectedRunId, setSelectedRunId] = useState("");
 
-	// Runs come newest-first; the latest shape run backs the clusters + graph.
+	// Runs come newest-first; the latest shape run is the default view, backing
+	// the clusters + graph until the analyst picks another via the control bar.
 	const latestRun = useMemo<Run | undefined>(
 		() => runs?.find((r) => r.feature_set === "shape") ?? runs?.[0],
 		[runs],
 	);
+	// Validate the selection against the current list so a run that vanished
+	// (deleted from another tab/session, or replaced by a re-onboard) can't leave
+	// the views querying a dead id; fall back to the default run instead.
+	const effectiveRunId = runs?.some((r) => r.run_id === selectedRunId)
+		? selectedRunId
+		: (latestRun?.run_id ?? "");
+	const activeRun = runs?.find((r) => r.run_id === effectiveRunId) ?? latestRun;
 
 	const focusCluster = (clusterId: number) => {
 		setSelectedCluster(clusterId);
@@ -198,20 +212,22 @@ export function ValidatorDetailPage() {
 					<h1 className="font-mono text-lg font-semibold break-all">
 						{decoded}
 					</h1>
-					{latestRun && (
+					{activeRun && (
 						<Badge
-							variant={latestRun.origin === "system" ? "outline" : "medium"}
+							variant={activeRun.origin === "system" ? "outline" : "medium"}
 						>
-							{latestRun.origin === "system" ? "System" : "Custom"}
+							{activeRun.origin === "system" ? "System" : "Custom"}
 						</Badge>
 					)}
 				</div>
-				{latestRun && (
+				{activeRun && (
 					<p className="text-muted-foreground text-sm">
-						{latestRun.n_points.toLocaleString()} transactions ·{" "}
-						{latestRun.n_clusters} clusters · {latestRun.n_noise} noise
-						{latestRun.silhouette != null &&
-							` · silhouette ${latestRun.silhouette.toFixed(3)}`}
+						{activeRun.n_points.toLocaleString()} transactions ·{" "}
+						{activeRun.n_clusters} clusters · {activeRun.n_noise} noise ·{" "}
+						{activeRun.feature_set} · eps {activeRun.eps} · min_samples{" "}
+						{activeRun.min_samples}
+						{activeRun.silhouette != null &&
+							` · silhouette ${activeRun.silhouette.toFixed(3)}`}
 					</p>
 				)}
 			</div>
@@ -238,11 +254,27 @@ export function ValidatorDetailPage() {
 						<TabsTrigger value="clusters">Clusters</TabsTrigger>
 						<TabsTrigger value="anomalies">Anomalies</TabsTrigger>
 						<TabsTrigger value="latest">Latest</TabsTrigger>
-						<TabsTrigger value="tuning">Tuning</TabsTrigger>
 					</TabsList>
 
+					{/* Shared clustering controls sit above the run's views (Graph /
+					    Projection / Clusters), mirroring how Anomalies co-locates its
+					    controls with its results. */}
+					{CLUSTER_TABS.includes(tab) && (
+						<div className="mt-4">
+							{/* Key by the focused run so the create-run form (feature set /
+							    eps / min_samples) re-seeds from whichever run is selected. */}
+							<ClusterRunControls
+								key={effectiveRunId}
+								target={decoded}
+								runs={runs ?? []}
+								selectedRunId={effectiveRunId}
+								onSelectRun={setSelectedRunId}
+							/>
+						</div>
+					)}
+
 					<TabsContent value="graph">
-						<GraphTab runId={latestRun.run_id} onFocusCluster={focusCluster} />
+						<GraphTab runId={effectiveRunId} onFocusCluster={focusCluster} />
 					</TabsContent>
 
 					<TabsContent value="projection">
@@ -253,13 +285,13 @@ export function ValidatorDetailPage() {
 								</p>
 							}
 						>
-							<ProjectionScatter runId={latestRun.run_id} />
+							<ProjectionScatter runId={effectiveRunId} />
 						</Suspense>
 					</TabsContent>
 
 					<TabsContent value="clusters">
 						<ClusterSummaryTable
-							runId={latestRun.run_id}
+							runId={effectiveRunId}
 							target={decoded}
 							selectedCluster={selectedCluster}
 							onSelectCluster={setSelectedCluster}
@@ -272,15 +304,6 @@ export function ValidatorDetailPage() {
 
 					<TabsContent value="latest">
 						<LatestTable target={decoded} />
-					</TabsContent>
-
-					<TabsContent value="tuning">
-						<p className="text-muted-foreground mb-4 text-sm">
-							Advanced, experimental controls. The system-tuned run remains
-							canonical for scoring; runs you create here are kept separate and
-							badged <span className="font-medium">Custom</span>.
-						</p>
-						<TuningPanel target={decoded} activeRun={latestRun ?? null} />
 					</TabsContent>
 				</Tabs>
 			)}

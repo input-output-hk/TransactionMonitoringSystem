@@ -6,6 +6,21 @@ export const Select = SelectPrimitive.Root;
 export const SelectGroup = SelectPrimitive.Group;
 export const SelectValue = SelectPrimitive.Value;
 
+export function SelectLabel({
+	className,
+	...props
+}: React.ComponentProps<typeof SelectPrimitive.Label>) {
+	return (
+		<SelectPrimitive.Label
+			className={cn(
+				"text-muted-foreground px-2 py-1.5 text-xs font-medium",
+				className,
+			)}
+			{...props}
+		/>
+	);
+}
+
 export function SelectTrigger({
 	className,
 	children,

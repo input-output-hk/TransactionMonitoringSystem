@@ -56,8 +56,8 @@ export function useClusterSummary(runId: string | undefined) {
 
 /**
  * Lazy parameter evaluation for a target + feature set (k-distance curve +
- * DBSCAN grid). `enabled: false` so it never runs on mount; the Tuning panel
- * triggers it with `refetch()`. High staleTime so a result sticks around while
+ * DBSCAN grid). `enabled: false` so it never runs on mount; the clustering
+ * control bar triggers it with `refetch()`. High staleTime so a result sticks around while
  * the analyst reads it.
  */
 export function useEvaluation(
@@ -87,6 +87,20 @@ export function useRunCluster() {
 			eps: number;
 			min_samples: number;
 		}) => send<Run>("POST", "/cluster", body),
+		onSuccess: () => qc.invalidateQueries({ queryKey: ["clustering"] }),
+	});
+}
+
+/** Delete a user-created (CUSTOM) cluster run and its per-tx cluster labels.
+ *  Admin-only at the proxy; the API rejects deleting a system (canonical) run. */
+export function useDeleteClusterRun() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (runId: string) =>
+			send<{ deleted: boolean }>(
+				"DELETE",
+				`/runs/${encodeURIComponent(runId)}`,
+			),
 		onSuccess: () => qc.invalidateQueries({ queryKey: ["clustering"] }),
 	});
 }
