@@ -322,7 +322,7 @@ services:
     build:
       context: ./services/clustering/backend
       target: ${CLUSTERING_BUILD_TARGET:-runtime}
-    container_name: tms-clustering-sidecar
+    container_name: clustering-sidecar
     env_file:
       - .env
       # Optional per-network override; absent it, built-in defaults apply.

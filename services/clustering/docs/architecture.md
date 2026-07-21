@@ -5,7 +5,7 @@
 This is the TMS's clustering module: the contract-anomaly detection subsystem of
 the Transaction Monitoring System. It runs as the `clustering` docker-compose
 service (enabled with `--profile clustering`, gated by the `CLUSTERING_ENABLED`
-flag) under the container name `tms-clustering-sidecar`. It is a first-party part
+flag) under the container name `clustering-sidecar`. It is a first-party part
 of the TMS, authored by the same team, not a standalone product.
 
 The module has one runtime service and shares the TMS's databases:
@@ -231,7 +231,7 @@ chain/feature reads come from `tms_analytics`, module state lives in
 ```
    tms-network (compose)
         host SPA ──▶ host TMS API ──/api/clustering proxy──▶ clustering:8000
-                                                                 │  (tms-clustering-sidecar)
+                                                                 │  (clustering-sidecar)
                                                                  ▼
                                                           clickhouse:8123
                                               ├── reads  tms_analytics  (host chain data)
