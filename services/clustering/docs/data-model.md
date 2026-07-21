@@ -241,7 +241,7 @@ self-idempotent** (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guard
 `UPDATE`), so re-running is always safe:
 
 ```bash
-docker exec tms-clustering-sidecar python -m app.cli migrate
+docker exec clustering-sidecar python -m app.cli migrate
 ```
 
 The backend **fails fast at startup** when the live schema is behind the code
