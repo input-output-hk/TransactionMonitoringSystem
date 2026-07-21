@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.api.deps import RepoDep, analysis_slot, run_or_404
 from app.api.schemas import (
@@ -13,6 +13,7 @@ from app.api.schemas import (
     LIST_LIMIT_MAX,
     ClusterRequest,
     ClusterRunAck,
+    ClusterRunDeleteAck,
     ClusterSummaryOut,
     ClusterTxPage,
     EvaluationOut,
@@ -130,3 +131,17 @@ def run_cluster(req: ClusterRequest, repo: Repo = RepoDep) -> dict[str, Any]:
             req.min_samples,
             notes=req.notes,
         )
+
+
+@router.delete("/runs/{run_id}", response_model=ClusterRunDeleteAck)
+def delete_run(run_id: str, repo: Repo = RepoDep) -> dict[str, Any]:
+    """Delete a user-created cluster run. System runs (produced by onboarding) are
+    canonical for the online model and may not be deleted."""
+    run = run_or_404(repo, run_id)
+    if run.get("origin") == "system":
+        raise HTTPException(
+            status_code=403,
+            detail="system-generated cluster runs cannot be deleted",
+        )
+    repo.delete_cluster_run(run_id)
+    return {"deleted": True, "run_id": run_id}

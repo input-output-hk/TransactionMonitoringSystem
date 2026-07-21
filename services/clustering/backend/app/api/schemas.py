@@ -259,6 +259,11 @@ class AnomalyRunDeleteAck(BaseModel):
     run_id: str
 
 
+class ClusterRunDeleteAck(BaseModel):
+    deleted: bool
+    run_id: str
+
+
 class ClusterTxOut(BaseModel):
     tx_hash: str
     block_time: UtcIsoStr

@@ -92,6 +92,22 @@ class _ClusterMixin(_RepoBase):
         rows = self.client.query(sql, parameters={"r": run_id}).result_rows
         return self._run_row_to_dict(rows[0]) if rows else None
 
+    def delete_cluster_run(self, run_id: str) -> None:
+        """Hard-purge a cluster run and its per-tx cluster labels.
+
+        Real row deletes (``ALTER … DELETE``, ``mutations_sync = 2``) like
+        ``delete_anomaly_run`` — the run and its labels are gone when this
+        returns. Scoped strictly to ``cluster_labels`` + ``cluster_runs`` (both
+        keyed by ``run_id``); the manual ``tx_labels`` verdicts are keyed by
+        ``target``, not ``run_id``, and deliberately survive a run deletion.
+        Origin/existence checks belong to the caller (the API guards system runs)."""
+        for table in ("cluster_labels", "cluster_runs"):
+            self.client.command(
+                f"ALTER TABLE {self._db}.{table} DELETE WHERE run_id = {{r:String}} "
+                f"SETTINGS mutations_sync = 2",
+                parameters={"r": run_id},
+            )
+
     @staticmethod
     def _run_row_to_dict(r: Sequence[Any]) -> dict[str, Any]:
         return _row_to_dict(

@@ -281,6 +281,17 @@ def test_save_cluster_run_fills_missing_with_none() -> None:
     assert data[0][cols.index("eps")] is None  # not provided
 
 
+def test_delete_cluster_run_scopes_to_run_tables_only() -> None:
+    repo, fake = _repo()
+    repo.delete_cluster_run("run1")
+    # Two hard deletes, child before parent; both keyed by run_id.
+    assert len(fake.commands) == 2
+    assert "tms.cluster_labels DELETE WHERE run_id" in fake.commands[0]
+    assert "tms.cluster_runs DELETE WHERE run_id" in fake.commands[1]
+    # tx_labels are target-scoped verdicts that must survive a run deletion.
+    assert all("tx_labels" not in sql for sql in fake.commands)
+
+
 # --- Query row-mapping -----------------------------------------------------
 
 
