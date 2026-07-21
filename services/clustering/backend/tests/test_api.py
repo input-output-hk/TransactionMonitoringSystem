@@ -43,6 +43,7 @@ class FakeApiRepo(FakeRepoBase):
         self.label_calls: list[tuple[str, list[str], str]] = []
         self.clear_calls: list[tuple[str, list[str]]] = []
         self.deleted_anomaly_runs: list[str] = []
+        self.deleted_cluster_runs: list[str] = []
 
     def ping(self) -> bool:
         if not self.ping_ok:
@@ -69,6 +70,9 @@ class FakeApiRepo(FakeRepoBase):
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self.runs.get(run_id)
+
+    def delete_cluster_run(self, run_id: str) -> None:
+        self.deleted_cluster_runs.append(run_id)
 
     def list_targets(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return []
@@ -659,6 +663,27 @@ def test_delete_missing_anomaly_run_404() -> None:
     r = _client(repo).delete("/api/anomaly-runs/nope")
     assert r.status_code == 404
     assert repo.deleted_anomaly_runs == []
+
+
+def test_delete_custom_cluster_run() -> None:
+    repo = FakeApiRepo(runs={"r1": {"run_id": "r1", "target": "addr", "origin": "custom"}})
+    r = _client(repo).delete("/api/runs/r1")
+    assert r.status_code == 200 and r.json()["deleted"] is True
+    assert repo.deleted_cluster_runs == ["r1"]
+
+
+def test_delete_system_cluster_run_forbidden() -> None:
+    repo = FakeApiRepo(runs={"r1": {"run_id": "r1", "target": "addr", "origin": "system"}})
+    r = _client(repo).delete("/api/runs/r1")
+    assert r.status_code == 403
+    assert repo.deleted_cluster_runs == []
+
+
+def test_delete_missing_cluster_run_404() -> None:
+    repo = FakeApiRepo()
+    r = _client(repo).delete("/api/runs/nope")
+    assert r.status_code == 404
+    assert repo.deleted_cluster_runs == []
 
 
 # --- Auth ------------------------------------------------------------------

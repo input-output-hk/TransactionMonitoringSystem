@@ -103,6 +103,9 @@ class FakeRepoBase:
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    def delete_cluster_run(self, run_id: str) -> None:
+        raise NotImplementedError
+
     def latest_cluster_run(
         self, target: str, feature_set: str, *, near: str | None = None
     ) -> dict[str, Any] | None:
