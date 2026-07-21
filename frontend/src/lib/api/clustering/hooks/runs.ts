@@ -91,6 +91,20 @@ export function useRunCluster() {
 	});
 }
 
+/** Delete a user-created (CUSTOM) cluster run and its per-tx cluster labels.
+ *  Admin-only at the proxy; the API rejects deleting a system (canonical) run. */
+export function useDeleteClusterRun() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (runId: string) =>
+			send<{ deleted: boolean }>(
+				"DELETE",
+				`/runs/${encodeURIComponent(runId)}`,
+			),
+		onSuccess: () => qc.invalidateQueries({ queryKey: ["clustering"] }),
+	});
+}
+
 export function useClusterGraph(runId: string | undefined, limit = 400) {
 	return useQuery({
 		queryKey: ["clustering", "graph", runId, limit],

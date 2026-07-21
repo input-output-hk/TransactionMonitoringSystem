@@ -280,7 +280,11 @@ export function ValidatorDetailPage() {
 							canonical for scoring; runs you create here are kept separate and
 							badged <span className="font-medium">Custom</span>.
 						</p>
-						<TuningPanel target={decoded} activeRun={latestRun ?? null} />
+						<TuningPanel
+							target={decoded}
+							runs={runs ?? []}
+							defaultRunId={latestRun?.run_id}
+						/>
 					</TabsContent>
 				</Tabs>
 			)}

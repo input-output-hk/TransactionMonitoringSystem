@@ -8,9 +8,24 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { HelpDetails } from "@/components/ui/help-details";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import {
 	Table,
 	TableBody,
@@ -23,6 +38,7 @@ import {
 	type FeatureSet,
 	type Run,
 	isPermissionDenied,
+	useDeleteClusterRun,
 	useEvaluation,
 	useRunCluster,
 } from "@/lib/api/clustering";
@@ -36,13 +52,28 @@ function fmtScore(v: number | null): string {
 	return v === null || Number.isNaN(v) ? "—" : v.toFixed(3);
 }
 
+function runLabel(r: Run): string {
+	const origin = r.origin === "system" ? "System-tuned" : "Custom";
+	return `${r.feature_set} · ${origin} · ${r.n_clusters} clusters`;
+}
+
 export function TuningPanel({
 	target,
-	activeRun,
+	runs,
+	defaultRunId,
 }: {
 	target: string;
-	activeRun: Run | null;
+	runs: Run[];
+	defaultRunId?: string;
 }) {
+	// Which run the panel is focused on. Defaults to the page's active run (the
+	// latest shape run); the selector lets an analyst focus any run, including a
+	// custom graph/combined run that the page's default view never surfaces, so
+	// every custom run is reachable for deletion. Empty string = use the default.
+	const [selectedRunId, setSelectedRunId] = useState("");
+	const effectiveRunId = selectedRunId || defaultRunId || runs[0]?.run_id || "";
+	const activeRun = runs.find((r) => r.run_id === effectiveRunId) ?? null;
+
 	const [featureSet, setFeatureSet] = useState<FeatureSet>(
 		activeRun?.feature_set ?? "shape",
 	);
@@ -50,31 +81,74 @@ export function TuningPanel({
 	const [minSamples, setMinSamples] = useState<number>(
 		activeRun?.min_samples ?? 5,
 	);
+	const [confirmDelete, setConfirmDelete] = useState(false);
 
 	const { isAdmin } = useAuth();
 	const evaluation = useEvaluation(target, featureSet);
 	const runCluster = useRunCluster();
+	const remove = useDeleteClusterRun();
 	const evalData = evaluation.data;
 	const rec = evalData?.recommended;
 	const isSystem = activeRun?.origin === "system";
+	// Deleting a run is Admin-only at the proxy, and only custom runs may be
+	// deleted (the system-tuned run is canonical for scoring).
+	const canDelete = isAdmin && activeRun?.origin === "custom";
 
 	const applyParams = (e: number, m: number) => {
 		setEps(e);
 		setMinSamples(m);
 	};
 
+	const onDelete = () => {
+		if (!activeRun) return;
+		remove.mutate(activeRun.run_id, {
+			onSuccess: () => {
+				setConfirmDelete(false);
+				// Drop back to the default focus; the ["clustering"] invalidation
+				// refetches the run list without the deleted run, so a stale
+				// selectedRunId would otherwise point at a run that no longer exists.
+				setSelectedRunId("");
+			},
+		});
+	};
+
 	return (
 		<div className="space-y-6">
 			{/* Current run summary */}
 			<div className="border-border space-y-2 rounded-md border p-4">
-				<div className="flex items-center gap-2">
+				<div className="flex flex-wrap items-center gap-2">
 					<h3 className="text-foreground text-sm font-semibold">
 						Active clustering
 					</h3>
+					{runs.length > 1 && (
+						<Select value={effectiveRunId} onValueChange={setSelectedRunId}>
+							<SelectTrigger className="h-8 w-[20rem] max-w-full">
+								<SelectValue placeholder="Select a run" />
+							</SelectTrigger>
+							<SelectContent>
+								{runs.map((r) => (
+									<SelectItem key={r.run_id} value={r.run_id}>
+										{runLabel(r)}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					)}
 					{activeRun && (
 						<Badge variant={isSystem ? "outline" : "medium"}>
 							{isSystem ? "System-tuned" : "Custom"}
 						</Badge>
+					)}
+					{canDelete && (
+						<Button
+							variant="outline"
+							size="sm"
+							className="ml-auto"
+							disabled={remove.isPending}
+							onClick={() => setConfirmDelete(true)}
+						>
+							Delete run
+						</Button>
 					)}
 				</div>
 				{activeRun ? (
@@ -347,7 +421,38 @@ export function TuningPanel({
 						system-tuned run remains canonical for scoring.
 					</p>
 				)}
+				{remove.isError && (
+					<p className="text-destructive text-sm">
+						{isPermissionDenied(remove.error)
+							? remove.error.message
+							: "Could not delete the run. Retry shortly."}
+					</p>
+				)}
 			</div>
+
+			<Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle>Delete this custom cluster run?</DialogTitle>
+						<DialogDescription>
+							This removes the run and its cluster labels. This cannot be undone.
+							The system-tuned run is unaffected.
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button variant="outline" onClick={() => setConfirmDelete(false)}>
+							Cancel
+						</Button>
+						<Button
+							variant="destructive"
+							disabled={remove.isPending}
+							onClick={onDelete}
+						>
+							{remove.isPending ? "Deleting…" : "Delete"}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
