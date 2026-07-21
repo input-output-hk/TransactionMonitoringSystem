@@ -60,6 +60,15 @@ def conn(monkeypatch):
     mock_conn.fetchrow = AsyncMock(return_value=None)
     mock_conn.fetchval = AsyncMock(return_value=0)
 
+    # update_user / delete_user run inside `conn.transaction()`; give the
+    # mock a real async-CM so `async with ... conn.transaction():` works.
+    # A fresh CM per call, since each request opens its own transaction.
+    @asynccontextmanager
+    async def _txn():
+        yield mock_conn
+
+    mock_conn.transaction = lambda *a, **k: _txn()
+
     @asynccontextmanager
     async def fake_get_connection():
         yield mock_conn
@@ -143,6 +152,83 @@ class TestCreateUser:
         assert client.post("/api/v1/users", json=payload).status_code == 422
 
 
+class TestUpdateUser:
+    def test_promote_reviewer_to_admin(self, client, as_admin, conn):
+        target_id = uuid.uuid4()
+        # First fetchrow = the current row (Reviewer); second = the
+        # UPDATE ... RETURNING row (now Admin).
+        conn.fetchrow.side_effect = [
+            {"role": "Reviewer", "status": "active"},
+            _user_row(role="Admin", user_id=target_id),
+        ]
+
+        r = client.patch(f"/api/v1/users/{target_id}", json={"role": "Admin"})
+
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "Admin"
+
+    def test_demote_admin_to_reviewer(self, client, as_admin, conn):
+        target_id = uuid.uuid4()
+        conn.fetchrow.side_effect = [
+            {"role": "Admin", "status": "active"},
+            _user_row(role="Reviewer", user_id=target_id),
+        ]
+        conn.fetchval.return_value = 1  # another active Admin remains
+
+        r = client.patch(f"/api/v1/users/{target_id}", json={"role": "Reviewer"})
+
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "Reviewer"
+
+    def test_cannot_change_own_role(self, client, as_admin, conn):
+        r = client.patch(f"/api/v1/users/{ADMIN_ID}", json={"role": "Reviewer"})
+        assert r.status_code == 400
+        assert "own role" in r.json()["detail"]
+
+    def test_missing_user_404(self, client, as_admin, conn):
+        conn.fetchrow.return_value = None
+        r = client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Admin"})
+        assert r.status_code == 404
+
+    def test_deleted_between_select_and_update_404(self, client, as_admin, conn):
+        # Row exists at the existence check but a concurrent delete removes
+        # it before the UPDATE ... RETURNING, which then matches no row.
+        conn.fetchrow.side_effect = [
+            {"role": "Reviewer", "status": "active"},
+            None,
+        ]
+        r = client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Admin"})
+        assert r.status_code == 404
+
+    def test_cannot_demote_last_active_admin(self, client, as_admin, conn):
+        conn.fetchrow.return_value = {"role": "Admin", "status": "active"}
+        conn.fetchval.return_value = 0  # no other active Admin
+
+        r = client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Reviewer"})
+
+        assert r.status_code == 400
+        assert "last active Admin" in r.json()["detail"]
+
+    def test_invalid_role_rejected(self, client, as_admin, conn):
+        r = client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Root"})
+        assert r.status_code == 422
+
+    def test_takes_admin_invariant_lock(self, client, as_admin, conn):
+        # The last-Admin guard is only safe if the check+write are serialized;
+        # assert the transaction-scoped advisory lock is actually acquired.
+        conn.fetchrow.side_effect = [
+            {"role": "Admin", "status": "active"},
+            _user_row(role="Reviewer"),
+        ]
+        conn.fetchval.return_value = 1
+
+        client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Reviewer"})
+
+        assert any(
+            "pg_advisory_xact_lock" in call.args[0] for call in conn.execute.await_args_list
+        ), "expected the admin-invariant advisory lock to be taken"
+
+
 class TestDeleteUser:
     def test_cannot_delete_self(self, client, as_admin, conn):
         r = client.delete(f"/api/v1/users/{ADMIN_ID}")
@@ -185,6 +271,23 @@ class TestDeleteUser:
         delete_sql, delete_arg = conn.execute.await_args.args
         assert "DELETE FROM users" in delete_sql
         assert delete_arg == target
+
+    def test_takes_lock_and_reuses_conn_for_revoke(self, client, as_admin, conn, monkeypatch):
+        # Delete must (a) take the admin-invariant advisory lock and (b) revoke
+        # sessions on THIS transaction's connection, not a second pooled one
+        # (a nested acquire under the lock can exhaust the pool and deadlock).
+        conn.fetchrow.return_value = {"role": "Reviewer", "status": "active"}
+        revoke = AsyncMock(return_value=0)
+        monkeypatch.setattr(users_api, "delete_all_sessions_for_user", revoke)
+
+        target = uuid.uuid4()
+        r = client.delete(f"/api/v1/users/{target}")
+
+        assert r.status_code == 204
+        assert any(
+            "pg_advisory_xact_lock" in call.args[0] for call in conn.execute.await_args_list
+        ), "expected the admin-invariant advisory lock on the delete path"
+        assert revoke.await_args.args == (target, conn)
 
 
 class TestResendInvite:
@@ -240,6 +343,8 @@ class TestAccessControl:
     def test_reviewer_forbidden(self, client, as_reviewer, conn):
         assert client.get("/api/v1/users").status_code == 403
         assert client.delete(f"/api/v1/users/{uuid.uuid4()}").status_code == 403
+        r = client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Admin"})
+        assert r.status_code == 403
 
     def test_anonymous_unauthorized(self, client, conn):
         assert client.get("/api/v1/users").status_code == 401
@@ -252,3 +357,5 @@ class TestAccessControl:
             },
         )
         assert r.status_code == 401
+        patch = client.patch(f"/api/v1/users/{uuid.uuid4()}", json={"role": "Admin"})
+        assert patch.status_code == 401

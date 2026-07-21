@@ -65,9 +65,9 @@ export async function verifyToken(token: string): Promise<User> {
 		`/api/v1/auth/verify?token=${encodeURIComponent(token)}`,
 	);
 	if (!res.ok) {
-		const err = (await res.json().catch(() => null)) as
-			| { detail?: string }
-			| null;
+		const err = (await res.json().catch(() => null)) as {
+			detail?: string;
+		} | null;
 		throw new Error(err?.detail ?? `Verification failed (${res.status})`);
 	}
 	return (await res.json()) as User;
@@ -126,10 +126,31 @@ export async function createUser(payload: CreateUserPayload): Promise<User> {
 		body: JSON.stringify(payload),
 	});
 	if (!res.ok) {
-		const err = (await res.json().catch(() => null)) as
-			| { detail?: string }
-			| null;
+		const err = (await res.json().catch(() => null)) as {
+			detail?: string;
+		} | null;
 		throw new Error(err?.detail ?? `create user failed (${res.status})`);
+	}
+	return (await res.json()) as User;
+}
+
+export async function updateUser(
+	id: string,
+	payload: { role: UserRole },
+): Promise<User> {
+	// PATCH is a mutating method, so fetchWithAuth attaches the CSRF header
+	// automatically. Non-2xx come back as JSON with a `detail` (e.g. 400
+	// "cannot change your own role" / "last active Admin", 403, 404).
+	const res = await fetchWithAuth(`/api/v1/users/${encodeURIComponent(id)}`, {
+		method: "PATCH",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(payload),
+	});
+	if (!res.ok) {
+		const err = (await res.json().catch(() => null)) as {
+			detail?: string;
+		} | null;
+		throw new Error(err?.detail ?? `update user failed (${res.status})`);
 	}
 	return (await res.json()) as User;
 }
@@ -142,9 +163,9 @@ export async function deleteUser(id: string): Promise<void> {
 	// statuses come back as JSON with a `detail` (e.g. 400 "cannot delete
 	// your own account", 404, 403).
 	if (!res.ok) {
-		const err = (await res.json().catch(() => null)) as
-			| { detail?: string }
-			| null;
+		const err = (await res.json().catch(() => null)) as {
+			detail?: string;
+		} | null;
 		throw new Error(err?.detail ?? `delete user failed (${res.status})`);
 	}
 }
@@ -155,9 +176,9 @@ export async function resendInvite(id: string): Promise<void> {
 		{ method: "POST" },
 	);
 	if (!res.ok) {
-		const err = (await res.json().catch(() => null)) as
-			| { detail?: string }
-			| null;
+		const err = (await res.json().catch(() => null)) as {
+			detail?: string;
+		} | null;
 		throw new Error(err?.detail ?? `resend invite failed (${res.status})`);
 	}
 }

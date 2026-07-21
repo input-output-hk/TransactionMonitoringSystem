@@ -227,9 +227,18 @@ class Settings(BaseSettings):
     # Arbitrary fixed key identifying "the TMS ingestion+analysis leader"
     # advisory lock. Must stay constant across deploys (a value that changes
     # would let two processes both "win" a stale vs. new key) and must not
-    # collide with another advisory lock class this app takes (there are
-    # none today).
+    # collide with another advisory lock class this app takes (only
+    # ADMIN_INVARIANT_LOCK_KEY below).
     LEADER_LOCK_KEY: int = 8737367427
+    # Arbitrary fixed key for the transaction-scoped advisory lock that
+    # serializes every mutation able to reduce the active-Admin count (role
+    # demotion in update_user, deletion in delete_user). Without it the
+    # count-then-write "last active Admin" guard is a TOCTOU: two concurrent
+    # operations each observe another active Admin and both commit, stranding
+    # the system with zero Admins. Admin management is rare, so serializing
+    # these globally is free. Must stay constant across deploys and must not
+    # collide with LEADER_LOCK_KEY.
+    ADMIN_INVARIANT_LOCK_KEY: int = 8737367428
     # How often a standby instance retries to acquire the lock (e.g. after
     # the leader crashes or is redeployed).
     LEADER_LOCK_RETRY_SECONDS: float = 15.0

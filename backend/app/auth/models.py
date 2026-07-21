@@ -48,6 +48,14 @@ class UserCreate(BaseModel):
     role: UserRole
 
 
+class UserUpdate(BaseModel):
+    """Admin payload for ``PATCH /api/users/{id}``. Only the role is
+    mutable here; an out-of-range value is rejected by ``UserRole``
+    validation (422) before any DB call."""
+
+    role: UserRole
+
+
 # Maximum total length of an email address: RFC 5321 §4.5.3.1 path limit
 # minus angle brackets (erratum 1690).
 _EMAIL_MAX_LEN = 254
