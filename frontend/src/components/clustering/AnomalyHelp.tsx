@@ -81,7 +81,9 @@ export function AnomalyHelp({ showColumnKey }: { showColumnKey: boolean }) {
 							<em>anomaly</em> when ≥2 detectors agree, else <em>normal</em>. So
 							a high-scoring tx can read benign (a reviewed false positive) and
 							a low-scoring one malicious: the human has the last word, not a
-							4th detector.
+							4th detector. Labeling a tx malicious also sends it to the main
+							Attacks page as a contract_anomaly alert; this works from any run,
+							including a custom one.
 						</li>
 					</ul>
 					<p>

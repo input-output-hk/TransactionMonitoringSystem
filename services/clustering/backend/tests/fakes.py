@@ -158,6 +158,9 @@ class FakeRepoBase:
     ) -> str | None:
         raise NotImplementedError
 
+    def latest_canonical_anomaly_run(self, target: str, feature_set: str) -> str | None:
+        raise NotImplementedError
+
     def save_anomaly_run(self, run: dict[str, Any]) -> None:
         raise NotImplementedError
 

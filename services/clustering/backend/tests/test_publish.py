@@ -15,10 +15,12 @@ from typing import Any
 
 import pytest
 
+from app.anomaly.detect import FLAG_VOTE_THRESHOLD
 from app.config import Settings
 from app.service.publish import (
     _COLUMNS,
     _VERSION_EPSILON,
+    _publish_batch,
     _publish_labels,
     _publish_online,
     _reconciliation_version,
@@ -26,6 +28,7 @@ from app.service.publish import (
     publish_contract_anomaly,
 )
 from app.service.verdicts import VERDICT_MALICIOUS
+from tests.fakes import FakeRepoBase
 
 _VERDICT_COL = _COLUMNS.index("verdict")
 _TX_HASH_COL = _COLUMNS.index("tx_hash")
@@ -261,6 +264,97 @@ def test_publish_labels_noop_when_all_already_published() -> None:
     assert fake.inserts == []  # nothing fresh to insert
 
 
+class _BatchRepo(FakeRepoBase):
+    """A target with a canonical (System) run flagging ``txSYS`` and a LATER Custom
+    run flagging ``txCUST``. The origin-blind lookups deliberately return the Custom
+    run, so a regression that dropped canonical scoping would publish ``txCUST``;
+    the canonical lookups return the System run. Lets ``_publish_batch`` prove it
+    resolves the System run, not the newest-of-any-origin run."""
+
+    _SYS_CLUSTER = "cluster-shape-sys"
+    _CUST_CLUSTER = "cluster-shape-cust"
+    _SYS_ANOMALY = "anomaly-shape-sys"
+    _CUST_ANOMALY = "anomaly-shape-cust"
+
+    def __init__(self, client: FakeClient) -> None:
+        self.client = client
+        self._db = "tms"
+
+    # Canonical vs origin-blind CLUSTER resolution.
+    def latest_canonical_run(self, target: str, feature_set: str) -> dict[str, Any] | None:
+        return {"run_id": self._SYS_CLUSTER, "created_at": "2026-06-01 00:00:00.000000"}
+
+    def latest_cluster_run(
+        self, target: str, feature_set: str, *, near: str | None = None
+    ) -> dict[str, Any] | None:
+        return {"run_id": self._CUST_CLUSTER, "created_at": "2026-06-02 00:00:00.000000"}
+
+    def run_tx_labels(self, run_id: str) -> dict[str, int]:
+        return {"txSYS": 0} if run_id == self._SYS_CLUSTER else {"txCUST": 0}
+
+    # Canonical vs origin-blind ANOMALY resolution.
+    def latest_canonical_anomaly_run(self, target: str, feature_set: str) -> str | None:
+        return self._SYS_ANOMALY
+
+    def latest_anomaly_run(
+        self, target: str, feature_set: str, *, near: str | None = None
+    ) -> str | None:
+        return self._CUST_ANOMALY
+
+    def anomaly_votes_for_run(self, run_id: str) -> dict[str, int]:
+        tx = "txSYS" if run_id == self._SYS_ANOMALY else "txCUST"
+        return {tx: FLAG_VOTE_THRESHOLD}  # flagged at the auto-anomaly vote bar
+
+    def labels_for_target(self, target: str) -> dict[str, str]:
+        return {}
+
+    def cluster_labeled_hashes(self, target: str) -> set[str]:
+        return set()
+
+    def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
+        return set(tx_hashes)
+
+
+def test_publish_batch_publishes_system_run_not_custom() -> None:
+    # Recall preserved: the System run's flagged tx reaches the host feed.
+    # Leak closed: a later Custom run's flagged tx never does, even though the
+    # origin-blind lookups would have surfaced it.
+    fake = FakeClient([[("txSYS", 0.9, 0.8, 0.85)]])  # scores for the canonical anomaly run
+    published = _publish_batch(_BatchRepo(fake), "addr1", "preprod", "shape", _PUB)
+    assert published == {"txSYS"}
+    table, rows, _ = fake.inserts[0]
+    assert table == "tms.tx_contract_anomaly"
+    assert {r[_TX_HASH_COL] for r in rows} == {"txSYS"}
+    assert rows[0][_VERDICT_COL] == "anomaly"
+
+
+def test_publish_batch_skips_when_no_canonical_run() -> None:
+    # A target with only Custom runs (no System run) publishes nothing from the
+    # batch path: custom auto-verdicts must never leak into the feed.
+    class _OnlyCustom(_BatchRepo):
+        def latest_canonical_run(self, target: str, feature_set: str) -> dict[str, Any] | None:
+            return None
+
+    fake = FakeClient()
+    published = _publish_batch(_OnlyCustom(fake), "addr1", "preprod", "shape", _PUB)
+    assert published == set()
+    assert fake.inserts == []
+
+
+def test_custom_run_malicious_label_still_publishes_via_labels() -> None:
+    # Escalation preserved: labeling a tx malicious still reaches the host feed even
+    # when the tx exists only in a Custom run (absent from the canonical batch
+    # membership), because _publish_labels is membership-agnostic. This is the
+    # intended way to promote a reviewed finding, independent of the canonical-only
+    # batch path fixed above.
+    fake = FakeClient([[("txCUSTOM_LABELED",)]])  # tx_labels malicious hashes
+    labeled = _publish_labels(_repo(fake), "addr1", "preprod", "shape", _PUB, exclude=set())
+    assert "txCUSTOM_LABELED" in labeled
+    _, rows, _ = fake.inserts[0]
+    assert rows[0][_TX_HASH_COL] == "txCUSTOM_LABELED"
+    assert rows[0][_VERDICT_COL] == VERDICT_MALICIOUS
+
+
 def test_reconciliation_version_is_wall_clock_when_ahead_of_table_max() -> None:
     # Normal operation: the table MAX is in the past, so the version is a fresh
     # wall-clock stamp, not the stale MAX plus epsilon.
@@ -353,16 +447,18 @@ def test_batch_publish_bounds_to_host_known_hashes(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(
         "app.service.publish._run_membership",
-        lambda repo, target, fs: ({"txLive": 1, "txHist": 1}, {"run_id": "r1", "created_at": _PUB}),
+        lambda repo, target, fs, **kw: (
+            {"txLive": 1, "txHist": 1},
+            {"run_id": "r1", "created_at": _PUB},
+        ),
     )
-    monkeypatch.setattr("app.service.publish._anomaly_votes", lambda *a, **k: {})
     monkeypatch.setattr(
         "app.service.publish._resolve_verdicts",
         lambda *a, **k: ({"txLive": "anomaly", "txHist": "anomaly"}, {}),
     )
     fake = FakeClient([[]])
     repo = _repo_with_host(fake, {"txLive"})
-    repo.latest_anomaly_run = lambda target, fs, near=None: None
+    repo.latest_canonical_anomaly_run = lambda target, fs: None
     out = _publish_batch(repo, "addr1", "preprod", "shape", _PUB)
     assert out == {"txLive"}
     _table, rows, _cols = fake.inserts[0]
