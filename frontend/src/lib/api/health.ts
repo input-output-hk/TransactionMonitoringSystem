@@ -25,7 +25,9 @@ export type OgmiosHealth = {
 
 export type ClusteringHealth = {
 	state: OpenEnum<"ok" | "stale" | "absent" | "error">;
-	last_scored_at: string | null;
+	// Job-heartbeat timestamp (sidecar's last feed tick), not the last published
+	// anomaly: the dot tracks "clustering is running", not "an anomaly was seen".
+	last_activity_at: string | null;
 	age_seconds?: number;
 };
 

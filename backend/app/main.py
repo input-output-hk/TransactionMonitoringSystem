@@ -548,29 +548,33 @@ async def health_detail(api_key: str = Security(verify_api_key)):
 
 
 async def _clustering_health() -> dict:
-    """Freshness of the clustering sidecar's verdicts (best-effort).
+    """Liveness of the clustering sidecar via its job heartbeat (best-effort).
 
-    With CLUSTERING_ENABLED set but the sidecar down or never run, the read-merge
-    would silently serve stale/empty contract_anomaly verdicts. This surfaces
-    that as a degraded state instead: ``absent`` when the sibling table is
-    unreachable/empty, ``stale`` when the newest verdict is older than the
-    configured freshness window, else ``ok``.
+    The sidecar's automatic feed updates a job row for every watched contract
+    each poll (~30s), so the jobs-table heartbeat advances continuously while
+    clustering is healthy. Keying the dot on that heartbeat rather than the last
+    published anomaly keeps it green for a healthy-but-quiet contract with no
+    recent anomaly: the prior scored_at signal went stale after the freshness
+    window even while clustering was actively (and correctly) finding nothing.
+    ``absent`` when the jobs table is unreachable/empty (never onboarded, or the
+    sidecar is down at first contact); ``stale`` when the heartbeat is older than
+    the configured freshness window (feed stopped / sidecar down); else ``ok``.
     """
     from datetime import datetime
 
-    from app.analysis.contract_anomaly import freshness_seconds
+    from app.analysis.contract_anomaly import heartbeat_stale_seconds
     from app.db import clustering_queries
 
     try:
-        latest = await clustering_queries.latest_scored_at_async(settings.CARDANO_NETWORK)
+        latest = await clustering_queries.latest_activity_at_async()
     except Exception:
-        return {"state": "error", "last_scored_at": None}
+        return {"state": "error", "last_activity_at": None}
     if latest is None:
-        return {"state": "absent", "last_scored_at": None}
-    window = freshness_seconds()
+        return {"state": "absent", "last_activity_at": None}
+    window = heartbeat_stale_seconds()
     age = (datetime.now(UTC) - to_aware_utc(latest)).total_seconds()
     state = "stale" if (window and age > window) else "ok"
-    return {"state": state, "last_scored_at": str(latest), "age_seconds": round(age)}
+    return {"state": state, "last_activity_at": str(latest), "age_seconds": round(age)}
 
 
 # SPA mount goes LAST so /api/*, /health, /ws, etc. still match their routes

@@ -236,21 +236,35 @@ async def flagged_for_network_async(
     return await _run(partial(flagged_for_network, network, limit, raise_on_error))
 
 
-def latest_scored_at(network: str) -> Any | None:
-    """Most recent ``scored_at`` across the sidecar's verdicts for a network.
+def latest_activity_at() -> Any | None:
+    """Most recent SUCCESSFUL job-completion timestamp from the sidecar's
+    ``jobs`` table: the clustering heartbeat behind the host ``/health/detail``
+    dot.
 
-    Powers the host ``/health/detail`` freshness probe. Returns None if the
-    table is empty or unreachable."""
+    The sidecar's automatic feed (FEED_ENABLED) completes a classify job for
+    every watched contract each poll (~30s), so ``max(updated_at)`` over the
+    DONE rows advances continuously while clustering is healthy, whether or not
+    any anomaly was published. Keying the dot on this heartbeat (not the last
+    published verdict) keeps it green for a healthy-but-quiet contract with no
+    recent anomaly. Filtering to ``status = 'done'`` (the jobs enum's success
+    value) is deliberate: counting any-status rows would keep the dot green even
+    while every feed tick FAILS (a failed job still stamps ``updated_at``),
+    masking a broken sidecar. A dead or stuck feed thus goes stale correctly; a
+    deployment with the feed disabled or nothing onboarded has no heartbeat and
+    reads absent/stale.
+
+    Single-network per deployment (one CLUSTERING_DB per network), so no network
+    filter; ``CLUSTERING_DB`` is a trusted config constant, interpolated as in
+    ``_table``. Returns None if empty/unreachable (best-effort)."""
     try:
         rows = _client().execute(
-            f"SELECT max(scored_at) FROM {_table()} WHERE network = %(network)s",
-            {"network": network},
+            f"SELECT max(updated_at) FROM {settings.CLUSTERING_DB}.jobs WHERE status = 'done'",
         )
     except Exception as e:
-        logger.debug("contract_anomaly freshness probe failed: %s", e)
+        logger.debug("clustering heartbeat probe failed: %s", e)
         return None
     return rows[0][0] if rows and rows[0][0] else None
 
 
-async def latest_scored_at_async(network: str) -> Any | None:
-    return await _run(latest_scored_at, network)
+async def latest_activity_at_async() -> Any | None:
+    return await _run(latest_activity_at)

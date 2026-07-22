@@ -56,3 +56,50 @@ class TestHealthDetail:
         body = r.json()
         assert "network" in body
         assert "pipeline_state" in body
+
+
+class TestClusteringHealthHeartbeat:
+    """The clustering dot tracks a job heartbeat (clustering is running), not
+    the last published anomaly, so a healthy-but-quiet contract stays green."""
+
+    @pytest.fixture(autouse=True)
+    def _dev_open(self, monkeypatch):
+        from app.auth import api_key
+
+        monkeypatch.setattr(api_key, "_valid_keys", [])
+        monkeypatch.setattr(api_key, "_dev_mode", True)
+
+    def _clustering(self, client, monkeypatch, heartbeat):
+        from app.config import settings
+        from app.db import clustering_queries
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+
+        async def _fake_heartbeat():
+            return heartbeat
+
+        monkeypatch.setattr(clustering_queries, "latest_activity_at_async", _fake_heartbeat)
+        return client.get("/health/detail").json()["clustering"]
+
+    def test_recent_heartbeat_is_ok_without_any_anomaly(self, client, monkeypatch):
+        # The regression guard: a fresh feed heartbeat means clustering is
+        # running, so the dot is green even though NO anomaly was published.
+        from datetime import UTC, datetime
+
+        c = self._clustering(client, monkeypatch, datetime.now(UTC).replace(tzinfo=None))
+        assert c["state"] == "ok"
+
+    def test_old_heartbeat_is_stale(self, client, monkeypatch):
+        from datetime import UTC, datetime, timedelta
+
+        from app.analysis.contract_anomaly import heartbeat_stale_seconds
+
+        stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+            seconds=heartbeat_stale_seconds() + 60
+        )
+        c = self._clustering(client, monkeypatch, stale)
+        assert c["state"] == "stale"
+
+    def test_no_heartbeat_is_absent(self, client, monkeypatch):
+        c = self._clustering(client, monkeypatch, None)
+        assert c["state"] == "absent"

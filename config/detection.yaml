@@ -80,6 +80,11 @@ contract_anomaly:
   # worth keeping visible, recall-first) but stamps contract_anomaly_scored_at
   # so the UI can mark it. 0 disables the staleness stamp.
   freshness_seconds: 3600
+  # The clustering health dot keys off the sidecar's job heartbeat (its last
+  # successful feed completion), which advances ~every 30s. Older than this and
+  # the feed is treated as down. Tighter than freshness_seconds so a dead
+  # sidecar surfaces in minutes, not an hour. 0 disables the staleness check.
+  heartbeat_stale_seconds: 300
 
 # Baseline-resolution tunables shared by every percentile-baselined scorer
 # (consumed by normalise.py / scorer_config.py, not by a single scorer).

@@ -42,7 +42,7 @@ describe("deriveModules", () => {
 		const modules = deriveModules(
 			healthFixture({
 				clustering_enabled: true,
-				clustering: { state: "ok", last_scored_at: "2026-01-01T00:00:00Z" },
+				clustering: { state: "ok", last_activity_at: "2026-01-01T00:00:00Z" },
 			}),
 		);
 		expect(modules).toContainEqual({ name: "Clustering", online: true });
@@ -54,7 +54,7 @@ describe("deriveModules", () => {
 			const modules = deriveModules(
 				healthFixture({
 					clustering_enabled: true,
-					clustering: { state, last_scored_at: null },
+					clustering: { state, last_activity_at: null },
 				}),
 			);
 			expect(modules).toContainEqual({ name: "Clustering", online: false });

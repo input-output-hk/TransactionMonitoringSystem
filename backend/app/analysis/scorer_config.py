@@ -336,6 +336,7 @@ _REQUIRED_CONTRACT_ANOMALY: tuple[str, ...] = (
     "consensus_scale",
     "corroboration_threshold",
     "freshness_seconds",
+    "heartbeat_stale_seconds",
 )
 
 # Dotted leaves so a missing nested tunable fails fast with its full path
