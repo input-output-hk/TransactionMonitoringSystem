@@ -229,6 +229,29 @@ class TestValidation:
         ):
             _reload_module(monkeypatch, tmp_path, cfg)
 
+    def test_anomaly_consensus_scale_at_or_above_high_band_raises(self, tmp_path, monkeypatch):
+        # The auto-anomaly scale must stay below the High threshold or a bare
+        # shape-outlier (consensus up to 1.0) would page High/Critical on its own,
+        # re-opening the false-positive flood the cap closed. A value at the High
+        # threshold must fail at load.
+        cfg = _minimal_config()
+        # At the High threshold (inclusive upper bound is exclusive), so it must
+        # fail: a consensus-1.0 anomaly would land exactly on the High band edge.
+        cfg["contract_anomaly"]["anomaly_consensus_scale"] = _sc().BAND_HIGH_THRESHOLD
+        with pytest.raises(
+            RuntimeError,
+            match=r"anomaly_consensus_scale.*violates its band contract",
+        ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_missing_anomaly_consensus_scale_raises_with_path(self, tmp_path, monkeypatch):
+        # The scale is a required leaf; a silently absent value would KeyError at
+        # first projection. Must fail fast with its full dotted path at load.
+        cfg = _minimal_config()
+        del cfg["contract_anomaly"]["anomaly_consensus_scale"]
+        with pytest.raises(RuntimeError, match=r"contract_anomaly.*anomaly_consensus_scale"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
     def test_missing_saturation_floor_key_raises_with_path(self, tmp_path, monkeypatch):
         # The saturation floor is a recall backstop; a silently absent leaf
         # would disable it without a trace. Must fail with the dotted path.

@@ -43,11 +43,11 @@ _SCORE_MAX = 100.0
 # manufacture a finding from a curated-safe verdict.
 #
 # Suppression keys on the verdict IDENTITY, not on the numeric floor: the
-# `anomaly` floor is 0 (pure consensus-driven, so it reaches High only when
-# consensus scales to BAND_HIGH_THRESHOLD), so a "floor <= 0 means suppress" test
-# would wrongly zero out every anomaly. The distinction between a safe verdict
-# and a positive verdict that happens to have a 0 floor must therefore be the
-# label, not the value.
+# `anomaly` floor is 0 (pure consensus-driven, capped in Moderate by
+# anomaly_consensus_scale), so a "floor <= 0 means suppress" test would wrongly
+# zero out every anomaly. The distinction between a safe verdict and a positive
+# verdict that happens to have a 0 floor must therefore be the label, not the
+# value.
 #
 # This set is the AUTHORITY for which verdicts score. To add a positive verdict
 # you MUST update BOTH this set AND verdict_floors in detection.yaml: a
@@ -76,14 +76,18 @@ if _missing_positive_floors:
 def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBand]:
     """Map a clustering verdict + consensus onto ``(score, RiskBand)``.
 
-    Only the POSITIVE verdicts carry a score (see :data:`_POSITIVE_VERDICTS`): a
-    human-labeled malicious cluster floors into Critical, while an auto-anomaly
-    carries NO floor and is driven purely by the ensemble consensus, so it bands
-    Informational / Moderate / High by strength and reaches High only once
-    consensus scales to ``BAND_HIGH_THRESHOLD`` (consensus >= 0.60 at the default
-    scale of 100). ``benign`` (human-labeled safe), ``normal`` (no finding), and
-    any unknown verdict SUPPRESS the signal outright: they project to 0 regardless
-    of consensus, so a curated "safe" label is authoritative and the ensemble can
+    Only the POSITIVE verdicts carry a score (see :data:`_POSITIVE_VERDICTS`). A
+    human-labeled ``malicious`` cluster is a confirmed attack: it floors into
+    Critical and consensus refines it upward within Critical across the full scale
+    (``consensus_scale``). An auto-``anomaly`` carries NO floor and is driven purely
+    by the ensemble consensus, but on the reduced ``anomaly_consensus_scale`` (kept
+    below the High threshold) so it bands Informational / Moderate by strength and
+    is CAPPED at Moderate: an unsupervised shape-outlier has no exploit semantics
+    and must never page on its own (a real attack with an unusual shape is still
+    banded by the nine stored detectors, or promoted to Critical by a malicious
+    LABEL). ``benign`` (human-labeled safe), ``normal`` (no finding), and any
+    unknown verdict SUPPRESS the signal outright: they project to 0 regardless of
+    consensus, so a curated "safe" label is authoritative and the ensemble can
     never manufacture a finding from it. For a positive verdict the consensus may
     only REFINE the score upward from its floor (``max(floor, consensus * scale)``);
     a missing consensus contributes nothing, so a malicious verdict still floors to
@@ -100,9 +104,16 @@ def project_score(verdict: str, consensus: float | None) -> tuple[float, RiskBan
     if verdict not in _POSITIVE_VERDICTS:
         return _SCORE_MIN, RiskBand(score_to_band(_SCORE_MIN))
     floor = float(cfg["verdict_floors"][verdict])
-    consensus_term = (
-        float(consensus) * float(cfg["consensus_scale"]) if consensus is not None else 0.0
+    # `malicious` refines from its Critical floor across the full 0-100 scale; a
+    # bare `anomaly` uses the reduced anomaly_consensus_scale so even a
+    # full-consensus (1.0) shape-outlier lands below the High threshold and bands
+    # Moderate at most. The Moderate ceiling is enforced at config load by
+    # scorer_config._BAND_INVARIANTS, so this cannot silently drift into an alert
+    # band. See the detection.yaml contract_anomaly block for the recall rationale.
+    scale = float(
+        cfg["anomaly_consensus_scale"] if verdict == "anomaly" else cfg["consensus_scale"]
     )
+    consensus_term = float(consensus) * scale if consensus is not None else 0.0
     score = min(_SCORE_MAX, max(floor, consensus_term))
     return score, RiskBand(score_to_band(score))
 

@@ -334,6 +334,7 @@ _REQUIRED_CONTRACT_ANOMALY: tuple[str, ...] = (
     "verdict_floors.benign",
     "verdict_floors.normal",
     "consensus_scale",
+    "anomaly_consensus_scale",
     "corroboration_threshold",
     "freshness_seconds",
     "heartbeat_stale_seconds",
@@ -593,6 +594,14 @@ _BAND_INVARIANTS: tuple[tuple[str, float, float | None, str], ...] = (
         BAND_CRITICAL_THRESHOLD,
         None,
         "a curated-malicious verdict must band Critical",
+    ),
+    (
+        "contract_anomaly.anomaly_consensus_scale",
+        BAND_MODERATE_THRESHOLD,
+        BAND_HIGH_THRESHOLD,
+        "a bare auto-anomaly (consensus <= 1) must band Moderate at most: "
+        "an unsupervised shape-outlier has no exploit semantics and must not "
+        "page on its own (only a malicious LABEL or a stored detector alerts)",
     ),
 )
 
