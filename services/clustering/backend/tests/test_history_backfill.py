@@ -25,6 +25,7 @@ from app.service.history import (
     KupoHistory,
     _SlotCappedRepo,
     get_history_backfill,
+    history_cap,
     history_incomplete,
     host_history_boundary,
 )
@@ -153,12 +154,21 @@ def test_boundary_defers_when_younger_than_safety_window(
 
 
 class _RecordingRepo(FakeRepoBase):
-    def __init__(self, cursor: dict[str, Any] | None = None) -> None:
+    def __init__(self, cursor: dict[str, Any] | None = None, target_txs: int = 0) -> None:
         self.txs: list[Any] = []
         self.utxos: list[Any] = []
         self.assets: list[Any] = []
         self.cursors: list[dict[str, Any]] = []
         self._cursor = cursor
+        # The per-contract "latest N to cluster on" the window-full skip gate
+        # reads back via get_contract (the target_txs column). 0 (default)
+        # resolves to the window ceiling in effective_window_txs, i.e. the
+        # pre-per-contract skip threshold, so tests that do not exercise a
+        # specific N keep their original behavior unchanged.
+        self._target_txs = target_txs
+
+    def get_contract(self, target: str) -> dict[str, Any] | None:
+        return {"target_txs": self._target_txs}
 
     def insert_transactions(self, rows: list[Any]) -> None:
         self.txs.extend(rows)
@@ -348,6 +358,106 @@ async def test_window_full_preflight_skips_and_marks(monkeypatch: pytest.MonkeyP
     assert repo.cursors[-1]["done"] is True
     assert repo.cursors[-1]["source"] == "blockfrost_history"
     assert repo.cursors[-1]["txs_seen"] == 500
+
+
+async def test_window_full_gate_fires_at_the_per_contract_n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The window-full skip now keys on the contract's OWN "latest N to cluster
+    # on", not the global ceiling: a contract with N=1000 whose host rows already
+    # reach 1000 skips the top-up (older history would sit past its LIMIT), even
+    # though the host count is far below the 50k ceiling the old gate used.
+    repo = _RecordingRepo(target_txs=1_000)
+    _patch_repo(monkeypatch, repo)
+    at_n = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=1_000)
+    _patch_boundary(monkeypatch, at_n)
+
+    async def _boom(**kw: Any) -> IngestResult:
+        raise AssertionError("no quota may be spent once the host fills the contract's window")
+
+    monkeypatch.setattr("app.service.history.ingest", _boom)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=1_000, progress=lambda _m: None
+    )
+    assert out.status == "skipped" and "window full" in out.note
+    assert repo.cursors[-1]["done"] is True
+
+
+async def test_thin_contract_below_its_n_still_backfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Recall-preservation counterpart: a contract with N=1000 whose host rows are
+    # BELOW 1000 must STILL backfill its pre-deployment history: the window-full
+    # gate must not starve a contract that has not yet reached its own N. (The old
+    # gate, keyed on the 50k ceiling, would also have backfilled here; this pins
+    # that the per-contract gate keeps doing so.)
+    repo = _RecordingRepo(target_txs=1_000)
+    _patch_repo(monkeypatch, repo)
+    thin = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=500)
+    _patch_boundary(monkeypatch, thin)
+    seen: dict[str, Any] = {}
+
+    async def _ingest(**kw: Any) -> IngestResult:
+        seen.update(kw)
+        return IngestResult("addr1demo", "address", "completed", 500, "page:5")
+
+    monkeypatch.setattr("app.service.history.ingest", _ingest)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=1_000, progress=lambda _m: None
+    )
+    assert out.status == "completed" and seen["max_txs"] == 1_000
+
+
+# --- history_cap: the backfill DOWNLOAD depth, floored and ceilinged ---------------
+
+
+def _cap_settings() -> Settings:
+    # Explicit floor/default/ceiling so the clamp boundaries are visible and the
+    # test does not depend on a stray .env overriding the defaults.
+    return Settings(
+        CHAIN_SOURCE="host_ch",
+        CLUSTERING_MIN_TARGET_TXS=200,
+        HISTORY_MAX_TXS=500,
+        HISTORY_MAX_TXS_CEILING=5_000,
+    )
+
+
+def test_history_cap_uses_row_value_within_range() -> None:
+    # A per-contract cap between the floor and the ceiling is the download depth.
+    assert history_cap({"requested_max_txs": 1_000}, _cap_settings()) == 1_000
+
+
+def test_history_cap_clamps_below_floor_up_to_floor() -> None:
+    # Recall floor on the DOWNLOAD (not just the read window): a sub-floor cap
+    # would fetch too few rows to fill the floor-clamped fit window, half-
+    # delivering the recall floor, so it is lifted to min(min_target, ceiling).
+    assert history_cap({"requested_max_txs": 50}, _cap_settings()) == 200
+
+
+def test_history_cap_clamps_above_ceiling_down_to_ceiling() -> None:
+    # The completeness check compares against the cap, so it must equal what the
+    # walk can actually reach: the backfill ceiling.
+    assert history_cap({"requested_max_txs": 999_999}, _cap_settings()) == 5_000
+
+
+def test_history_cap_unset_row_uses_default_download() -> None:
+    # 0/absent (feed-onboarded rows) falls back to the configured default
+    # download depth, itself clamped into [floor, ceiling].
+    s = _cap_settings()
+    assert history_cap({"requested_max_txs": 0}, s) == 500
+    assert history_cap(None, s) == 500
+
+
+def test_history_cap_floor_never_exceeds_ceiling() -> None:
+    # A ceiling below the floor (misconfig / tiny window) clamps the floor itself
+    # to the ceiling, so the cap can never exceed what the walk can reach.
+    tiny = Settings(
+        CHAIN_SOURCE="host_ch",
+        CLUSTERING_MIN_TARGET_TXS=200,
+        HISTORY_MAX_TXS=500,
+        HISTORY_MAX_TXS_CEILING=100,
+    )
+    assert history_cap({"requested_max_txs": 50}, tiny) == 100
 
 
 def _min_host_settings(min_host: int) -> Settings:

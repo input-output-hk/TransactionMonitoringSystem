@@ -22,8 +22,9 @@ consume exactly their expected column contract without any engine change:
   (non-script) side coalesced to 0.
 
 A watched contract is an address ``target``; its transactions are resolved from
-``address_transactions`` and bounded to the most recent ``CLUSTERING_WINDOW_TXS``
-(applied as an in-SQL subquery, never a multi-thousand-element array parameter)
+``address_transactions`` and bounded to its per-contract "latest N to cluster
+on" (``target_txs``, clamped to ``CLUSTERING_WINDOW_TXS``; see ``_window_for``),
+applied as an in-SQL subquery, never a multi-thousand-element array parameter,
 so DBSCAN/IsolationForest and the O(n^2) silhouette stay bounded for a
 high-volume mainnet contract. Writes to the engine's raw-tx tables and the
 ingest cursor are no-ops (the host already ingested the chain; the sidecar never
@@ -52,7 +53,11 @@ class HostBackedRepo(ClickHouseRepo):
         super().__init__(settings, **kw)
         self._host_db = self._settings.host_clickhouse_db
         self._network = self._settings.cardano_network
-        # 0 = unbounded (test/small contracts only); see CLUSTERING_WINDOW_TXS.
+        # The window CEILING (and the "is windowing on at all" switch): 0 =
+        # unbounded (test/small contracts only). A contract's ACTUAL window is
+        # per-contract (_window_for), clamped to this; an unset contract uses the
+        # ceiling itself, so this stays the effective window for them. See
+        # CLUSTERING_WINDOW_TXS / Settings.effective_window_txs.
         self._window = int(self._settings.clustering_window_txs)
 
     # --- target -> windowed tx_hash subquery ----------------------------------
@@ -69,10 +74,12 @@ class HostBackedRepo(ClickHouseRepo):
         )
 
     def _hashes_expr(self) -> str:
-        """An in-SQL subquery yielding the most recent ``CLUSTERING_WINDOW_TXS``
-        distinct tx_hashes that touched the watched address ``{tgt}``, newest
-        first by slot. Embedded directly so no large array crosses the HTTP
-        boundary; the rolling window is applied HERE so the fit/classify
+        """An in-SQL subquery yielding the most recent ``{lim}`` distinct
+        tx_hashes that touched the watched address ``{tgt}``, newest first by
+        slot. ``{lim}`` is the contract's per-contract window (``_window_for``,
+        bound by ``_scope_params``); the clause is present whenever windowing is
+        enabled (ceiling > 0). Embedded directly so no large array crosses the
+        HTTP boundary; the rolling window is applied HERE so the fit/classify
         populations and every read agree and stay bounded."""
         limit = "" if self._window <= 0 else "LIMIT {lim:UInt64}"
         return f"""(
@@ -83,10 +90,43 @@ class HostBackedRepo(ClickHouseRepo):
             )
         )"""
 
+    def _target_txs(self, target: str) -> int:
+        """This contract's onboarded "latest N to cluster on" (0 = none set), as
+        a single-column point-read on the small registry table. Reads the
+        dedicated ``target_txs`` column, NOT ``requested_max_txs``: the latter is
+        the backfill download depth and its stored values predate this feature,
+        so using it as the read window would silently shrink existing contracts.
+        Split out from the full ``get_contract`` so the per-read window
+        resolution does not pay the full projection + row-map on every query."""
+        rows = self.client.query(
+            f"SELECT target_txs FROM {self._db}.contracts FINAL WHERE target = {{t:String}} LIMIT 1",
+            parameters={"t": target},
+        ).result_rows
+        return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+    def _window_for(self, target: str) -> int:
+        """The rolling-window size for THIS contract: its onboarded "latest N to
+        cluster on" (``target_txs``), clamped to the recall floor and the ceiling
+        by ``Settings.effective_window_txs``. Bound as the ``lim`` param of every
+        windowed read (fit, count, the UI/anomaly joins), so the fit population,
+        the card's tx_count and every read agree on the same N.
+
+        Resolved per read: N is operator-editable, so a cached value would score
+        a contract on a stale window after a change; the lookup is one indexed
+        FINAL point-read on the small registry table. An unknown target (no row:
+        tests, ad-hoc targets) or an unset one (target_txs=0) resolves to the
+        ceiling via effective_window_txs(0), preserving the pre-per-contract
+        behavior, so no existing contract's window changes on deploy."""
+        return self._settings.effective_window_txs(self._target_txs(target))
+
     def _scope_params(self, target: str) -> dict[str, Any]:
         params: dict[str, Any] = {"net": self._network, "tgt": target}
+        # The LIMIT clause is present in the query string iff windowing is on at
+        # all (self._window > 0; see _hashes_expr); when it is, bind the
+        # per-contract window. effective_window_txs returns > 0 whenever the
+        # ceiling is > 0, so lim is always bound when the clause needs it.
         if self._window > 0:
-            params["lim"] = self._window
+            params["lim"] = self._window_for(target)
         return params
 
     # --- engine-shaped transactions over host tables --------------------------
@@ -261,21 +301,48 @@ class HostBackedRepo(ClickHouseRepo):
     # online classify path bounds its scoring chunks (_CLASSIFY_BATCH rationale).
     _HOST_MEMBERSHIP_CHUNK = 1000
 
+    def _chunked_membership(
+        self, tx_hashes: set[str], sql: str, base_params: dict[str, Any]
+    ) -> set[str]:
+        """Run a membership query over ``tx_hashes`` in bounded chunks and return
+        the subset it matched. ``sql`` must select one hash column and reference
+        the ``{hs:Array(String)}`` parameter; ``base_params`` supplies the rest
+        (constant across chunks). The shared skeleton for host_known_tx_hashes
+        and windowed_members, so the IN-array bound (``_HOST_MEMBERSHIP_CHUNK``)
+        lives in exactly one place and neither caller materializes a large window
+        into Python."""
+        found: set[str] = set()
+        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
+            rows = self.client.query(sql, parameters={**base_params, "hs": list(chunk)}).result_rows
+            found.update(str(r[0]) for r in rows)
+        return found
+
     def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
         """The subset of ``tx_hashes`` present in the HOST's address index for
         the watched target. Exact regardless of what the engine's local tables
         contain, which is what makes it safe as the publish bound: a host-known
         tx is never suppressed (recall first), a host-unknown one never leaks
         into the host-facing projection. Chunked so the IN array stays bounded."""
-        found: set[str] = set()
-        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
-            rows = self.client.query(
-                f"SELECT DISTINCT toString(tx_hash) FROM {self._host_addr_index()} "
-                "AND toString(tx_hash) IN {hs:Array(String)}",
-                parameters={"net": self._network, "tgt": target, "hs": list(chunk)},
-            ).result_rows
-            found.update(str(r[0]) for r in rows)
-        return found
+        sql = (
+            f"SELECT DISTINCT toString(tx_hash) FROM {self._host_addr_index()} "
+            "AND toString(tx_hash) IN {hs:Array(String)}"
+        )
+        return self._chunked_membership(tx_hashes, sql, {"net": self._network, "tgt": target})
+
+    def windowed_members(self, target: str, tx_hashes: set[str]) -> set[str]:
+        """The subset of ``tx_hashes`` currently INSIDE this contract's rolling
+        window (the latest-N the fit/score/count reads see). Lets the publish
+        reconciliation tell a tx that was re-scored this pass (still in the
+        window) from one that merely aged out of it: an aged-out already-published
+        positive keeps its verdict (recall first) instead of being tombstoned
+        just because the window advanced. Bounded IN over the windowed subquery,
+        chunked like host_known_tx_hashes, so only the (small) set of currently
+        published positives is checked -- never a multi-thousand-row window
+        materialized into Python."""
+        # _scope_params resolves this contract's window (the lim param) once via a
+        # single point-read; the helper then only varies the hash list per chunk.
+        sql = f"SELECT tx_hash FROM {self._hashes_expr()} WHERE tx_hash IN {{hs:Array(String)}}"
+        return self._chunked_membership(tx_hashes, sql, self._scope_params(target))
 
     # --- writes the sidecar must not perform (no download, no duplication) ----
 

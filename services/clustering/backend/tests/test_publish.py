@@ -124,6 +124,35 @@ def test_retract_stale_noop_when_nothing_dropped() -> None:
     assert fake.inserts == []
 
 
+def test_retract_stale_preserves_aged_out_published_positives() -> None:
+    # Recall guard: txC is still published (non-normal) but has aged OUT of the
+    # rolling window (windowed_members excludes it), so it was NOT re-scored this
+    # pass and its verdict must stand; only txD (still in-window, re-scored and no
+    # longer flagged) is tombstoned. Without this, advancing/narrowing the
+    # latest-N window would silently un-alert a real, already-published attack.
+    fake = FakeClient([[("txC",), ("txD",)]])  # current published non-normal
+    repo = SimpleNamespace(
+        client=fake,
+        _db="tms",
+        host_known_tx_hashes=lambda target, hashes: set(hashes),
+        windowed_members=lambda target, hashes: {h for h in hashes if h == "txD"},
+    )
+    n = _retract_stale(repo, "addr1", "preprod", "shape", keep=set(), published_at=_PUB)
+    assert n == 1
+    _table, rows, _cols = fake.inserts[0]
+    assert [r[_TX_HASH_COL] for r in rows] == ["txD"]  # aged-out txC preserved
+
+
+def test_retract_stale_without_windowed_members_retracts_all_dropped() -> None:
+    # A repo with no rolling window (the standalone base repo) has no
+    # windowed_members, so retraction stays unconditional: both dropped hashes
+    # are tombstoned. Pins that the guard is host-backed-only, not a behavior
+    # change for standalone.
+    fake = FakeClient([[("txC",), ("txD",)]])
+    n = _retract_stale(_repo(fake), "addr1", "preprod", "shape", keep=set(), published_at=_PUB)
+    assert n == 2
+
+
 def test_publish_online_suppresses_benign_labeled_txs() -> None:
     # The SELECT/INSERT must exclude txs a human labeled benign (FINAL+deleted=0)
     # so a "cleared"/benign label retracts instead of re-publishing the anomaly.

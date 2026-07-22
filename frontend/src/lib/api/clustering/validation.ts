@@ -123,15 +123,40 @@ export const validateContracts = listPage<Contract>(
  *  boolean rather than letting a missing/garbled field fall through to falsy.
  *  `window_txs` is rendered with `.toLocaleString()`, so it must be a number. */
 export const validateConfig: Validator<ClusteringConfig> = (raw) => {
-	if (!isObject(raw)) throw new ResponseShapeError("/config", "expected an object");
+	if (!isObject(raw))
+		throw new ResponseShapeError("/config", "expected an object");
 	if (typeof raw.host_backed !== "boolean")
-		throw new ResponseShapeError("/config", 'field "host_backed" is not a boolean');
+		throw new ResponseShapeError(
+			"/config",
+			'field "host_backed" is not a boolean',
+		);
 	if (typeof raw.window_txs !== "number" || !Number.isFinite(raw.window_txs))
-		throw new ResponseShapeError("/config", 'field "window_txs" is not a finite number');
+		throw new ResponseShapeError(
+			"/config",
+			'field "window_txs" is not a finite number',
+		);
+	// default_target_txs is optional (absent on not-yet-upgraded sidecars); when
+	// present it must be a finite number (the form pre-fills the "latest N" input
+	// with it).
+	if (
+		raw.default_target_txs !== undefined &&
+		(typeof raw.default_target_txs !== "number" ||
+			!Number.isFinite(raw.default_target_txs))
+	)
+		throw new ResponseShapeError(
+			"/config",
+			'field "default_target_txs" is not a finite number',
+		);
 	// history_source is optional (absent on not-yet-upgraded sidecars); when
-	// present it must be a string, since it gates the max-txs form control.
-	if (raw.history_source !== undefined && typeof raw.history_source !== "string")
-		throw new ResponseShapeError("/config", 'field "history_source" is not a string');
+	// present it must be a string, since it gates the "latest N" form control.
+	if (
+		raw.history_source !== undefined &&
+		typeof raw.history_source !== "string"
+	)
+		throw new ResponseShapeError(
+			"/config",
+			'field "history_source" is not a string',
+		);
 	return raw as ClusteringConfig;
 };
 

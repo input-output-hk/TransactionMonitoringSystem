@@ -28,14 +28,15 @@ def config() -> ConfigOut:
     """Read-only deployment config the UI reads to shape its onboarding form.
 
     host_backed → the engine reads txs from the host tables (no per-contract
-    download), so fits run over the rolling window window_txs and a per-contract
-    "max txs" has no effect; the form hides it. Non-sensitive, so it sits on the
-    unauthenticated probe router (reachable only through the host's authed
-    reverse-proxy anyway)."""
+    download); each contract is fit/scored over its "latest N to cluster on"
+    (window_txs is the ceiling, default_target_txs the default N). Non-sensitive,
+    so it sits on the unauthenticated probe router (reachable only through the
+    host's authed reverse-proxy anyway)."""
     s = get_settings()
     return ConfigOut(
         host_backed=s.host_backed,
         window_txs=s.clustering_window_txs,
+        default_target_txs=s.clustering_default_target_txs,
         history_source=s.history_source if s.history_enabled else "",
     )
 

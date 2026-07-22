@@ -14,14 +14,19 @@ export type FeatureSet = "shape" | "graph" | "combined";
 export const FEATURE_SETS: FeatureSet[] = ["shape", "graph", "combined"];
 
 /** Read-only deployment config (`GET /config`). When `host_backed`, the engine
- *  reads txs from the host tables and fits over the rolling window `window_txs`,
- *  so the onboarding form hides the (no-op) per-contract "max txs" control —
- *  unless `history_source` is set (a secondary pre-deployment history source),
- *  which re-purposes "max txs" as the per-contract history depth. Absent on
- *  not-yet-upgraded sidecars; treated as "" (disabled). */
+ *  reads txs from the host tables and fits each contract over its "latest N to
+ *  cluster on": `window_txs` is the ceiling on N, `default_target_txs` the N a
+ *  contract gets when none is named (the form pre-fills it). The form shows the
+ *  "latest N" control when not host-backed, or when `history_source` is set (a
+ *  secondary pre-deployment history source that tops the window up); a plain
+ *  host-backed source without one hides it. `default_target_txs` is absent on
+ *  not-yet-upgraded sidecars; the form falls back to its own built-in default
+ *  constant then (it never sends an unedited value, so the exact fallback only
+ *  affects the pre-fill display). */
 export type ClusteringConfig = {
 	host_backed: boolean;
 	window_txs: number;
+	default_target_txs?: number;
 	history_source?: string;
 };
 

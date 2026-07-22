@@ -99,16 +99,42 @@ def create_contract(req: ContractRequest, request: Request, repo: Repo = RepoDep
         # empty label would otherwise clobber a previously-set name.
         prev = repo.get_contract(target)
         label = req.label.strip() or (prev or {}).get("label", "")
+        settings = get_settings()
+        # The per-contract "latest N to cluster on" (read/fit/count window AND
+        # backfill target). Precedence, and why it is NOT an `or` chain:
+        #   1. an explicit request wins;
+        #   2. else inherit the contract's stored N VERBATIM, including 0 -- a
+        #      re-add / reprocess must never rewrite an existing window, and 0
+        #      means "unbounded -> the ceiling" (the recall-safe legacy state);
+        #   3. else, only for a brand-new contract, the server default.
+        # An `or` chain would collapse a stored 0 into the default and silently
+        # shrink a legacy contract's ceiling window (50k) to the default on any
+        # bare re-add -- the exact recall regression this distinction prevents.
+        if req.max_txs is not None:
+            target_txs = req.max_txs
+        elif prev is not None:
+            target_txs = int(prev.get("target_txs") or 0)
+        else:
+            target_txs = settings.clustering_default_target_txs
+        # Store no more than the live read-window ceiling, so the persisted value
+        # equals the effective one (the read path would clamp a larger N down
+        # anyway); keeps stored N honest even if the static API cap and the
+        # configured ceiling ever diverge.
+        target_txs = min(target_txs, settings.clustering_window_txs)
+        # The backfill download cap tracks N (history_cap floors/ceilings it), so
+        # a fresh contract backfills toward its window; requested_max_txs stays
+        # the download knob, target_txs the read window (both = N here).
         repo.save_contract(
             {
                 "target": target,
                 "target_type": target_type,
                 "status": "pending",
-                "requested_max_txs": req.max_txs or 0,
+                "requested_max_txs": target_txs,
+                "target_txs": target_txs,
                 "label": label,
             }
         )
-        repo.create_job(job_id, target, target_type, req.max_txs or 0, int(req.reprocess))
+        repo.create_job(job_id, target, target_type, target_txs, int(req.reprocess))
         manager.enqueue(job_id)
     return {"job_id": job_id, "target": target, "target_type": target_type}
 

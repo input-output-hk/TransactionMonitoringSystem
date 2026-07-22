@@ -436,6 +436,31 @@ async def test_requested_max_txs_preserved_on_refit(monkeypatch: pytest.MonkeyPa
     assert repo.contracts[-1]["requested_max_txs"] == 250
 
 
+async def test_target_txs_preserved_on_refit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Companion to the requested_max_txs case for the read/fit window: a feed
+    # refit (max_txs=0) must preserve the persisted target_txs verbatim. Without
+    # the preservation line the value would reset to 0 -> the ceiling, silently
+    # WIDENING a window the operator deliberately narrowed (recall-safe direction,
+    # but not what they set), so pin that the stored N survives a refit.
+    _enable_history(monkeypatch)
+    monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeHostSource())
+    _patch_backfill(monkeypatch, _RecordingBackfill())
+    repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
+    repo.contracts.append(
+        {
+            "target": "addr1demo",
+            "target_type": "address",
+            "requested_max_txs": 250,
+            "target_txs": 1_000,
+            "label": "",
+        }
+    )
+    await process_contract(
+        repo, target="addr1demo", target_type="address", max_txs=None, reprocess=True
+    )
+    assert repo.contracts[-1]["target_txs"] == 1_000
+
+
 async def test_too_few_txs_with_history_pending_stays_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

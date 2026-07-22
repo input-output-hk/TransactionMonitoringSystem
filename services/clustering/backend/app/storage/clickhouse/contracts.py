@@ -22,6 +22,7 @@ CONTRACT_COLUMNS = [
     "tx_count",
     "status",
     "requested_max_txs",
+    "target_txs",
     "drift_score",
 ]
 _CONTRACT_DEFAULTS: dict[str, Any] = {
@@ -35,6 +36,10 @@ _CONTRACT_DEFAULTS: dict[str, Any] = {
     "tx_count": 0,
     "status": "pending",
     "requested_max_txs": 0,
+    # "Latest N to cluster on" (the read/fit/count window). 0 = unset -> the
+    # window ceiling, so a row that never set it keeps the full recall-safe
+    # window. See 010_target_txs.sql / Settings.effective_window_txs.
+    "target_txs": 0,
     # Reset to 0 whenever a writer omits it — notably the batch pipeline
     # (process_contract / re-analyze), which intentionally clears stale drift: a
     # fresh re-cluster supersedes the old frozen model. update_contract passes the
@@ -57,6 +62,7 @@ _CONTRACT_OUT_KEYS = [
     "sample_tokens",
     "status",
     "requested_max_txs",
+    "target_txs",
     "updated_at",
     "tx_count",
     "drift_score",
@@ -67,6 +73,7 @@ _CONTRACT_INT_KEYS = (
     "balance_lovelace",
     "asset_count",
     "requested_max_txs",
+    "target_txs",
     "tx_count",
 )
 _CONTRACT_FLOAT_KEYS = ("drift_score",)
@@ -127,7 +134,7 @@ class _ContractMixin(_RepoBase):
     _CONTRACT_SELECT = (
         "SELECT target, target_type, label, present, is_script, script_type, "
         "balance_lovelace, asset_count, sample_tokens, status, requested_max_txs, "
-        "toString(updated_at) AS updated_at, tx_count, drift_score "
+        "target_txs, toString(updated_at) AS updated_at, tx_count, drift_score "
         "FROM {db}.contracts FINAL {where}"
     )
 

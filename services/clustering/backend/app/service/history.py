@@ -135,15 +135,25 @@ def get_history_backfill(settings: Settings) -> HistoryBackfill | None:
 
 
 def history_cap(contract_row: dict[str, Any] | None, settings: Settings) -> int:
-    """The contract's effective history depth: its persisted per-contract cap
-    (``requested_max_txs``), falling back to the configured default when the
-    row carries none — 0 or absent, which is what host-backed feed onboarding
-    leaves. The single definition of this resolution: the pipeline stage, the
-    online resume gate and the API detail read must all agree on it, or the
-    completeness checks drift from the walk they gate. The ceiling clamp is
-    applied later by the flavor's ``run()``, so callers pass this straight
-    through as ``max_txs``."""
-    return int((contract_row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
+    """The contract's effective backfill DOWNLOAD depth: its persisted
+    per-contract cap (``requested_max_txs``), falling back to the configured
+    default when the row carries none (0 or absent, which is what host-backed
+    feed onboarding leaves), clamped to
+    [recall floor, backfill ceiling] = [min(clustering_min_target_txs,
+    history_max_txs_ceiling), history_max_txs_ceiling].
+
+    The floor is applied HERE (not just to the read window): a sub-floor N would
+    otherwise download too few rows to fill the floor-clamped fit window, so the
+    recall floor would be only half-delivered. The ceiling is applied here too so
+    the value the completeness checks compare against (txs_seen >= cap) is the
+    SAME value the walk can actually reach; without it a contract whose N exceeds
+    the backfill ceiling would settle at ceiling txs but read as forever
+    "in_progress". The single definition of this resolution: the pipeline stage,
+    the online resume gate and the API detail read must all agree on it, or the
+    completeness checks drift from the walk they gate."""
+    ceiling = settings.history_max_txs_ceiling
+    raw = int((contract_row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
+    return max(settings.recall_floor(ceiling), min(raw, ceiling))
 
 
 def host_history_boundary(settings: Settings, target: str) -> HostBoundary | None:
@@ -340,18 +350,21 @@ class BlockfrostHistory(_HistoryFlavor):
             boundary = host_history_boundary(self._settings, target)
             if boundary is None:
                 return HistoryResult("deferred", 0, _BOUNDARY_DEFERRED_NOTE)
-            # Window-full pre-flight: once the host rows ALONE fill the rolling
-            # window, downloaded history would be evicted from every read —
-            # don't spend provider quota on permanently invisible rows. Fires
-            # only at host_tx_count >= window (below that, history still
-            # occupies the window's tail and is read by every fit). Marked done
-            # at the current cap so later ticks skip-fast (the host count only
-            # grows, so the window never frees up); a raised per-contract cap
-            # falls through the guard and re-evaluates. A raised
-            # CLUSTERING_WINDOW_TXS alone does NOT re-open a settled marker —
-            # accepted: the host rows that filled the old window still fill the
-            # new one's head, and the cap is the operator's re-open lever.
-            window = int(self._settings.clustering_window_txs)
+            # Window-full pre-flight: once the host rows ALONE fill this
+            # contract's rolling window (its "latest N to cluster on"), older
+            # downloaded history would sit past the LIMIT and be evicted from
+            # every read, so don't spend provider quota on permanently invisible
+            # rows. This is the operator's "don't fetch older history when the
+            # host already has enough recent" intent, and it reads the SAME
+            # per-contract window the fit does (Settings.effective_window_txs
+            # over target_txs), so the skip point and the read bound cannot
+            # drift. Fires only at host_tx_count >= N (below that, history
+            # still occupies the window's tail and is read by every fit). Marked
+            # done at the current cap so later ticks skip-fast (the host count
+            # only grows, so the window never frees up); a raised per-contract
+            # cap falls through the guard and re-evaluates.
+            row = repo.get_contract(target)
+            window = self._settings.effective_window_txs(int((row or {}).get("target_txs") or 0))
             if window > 0 and boundary.host_tx_count >= window:
                 self._mark_done(repo, target, target_type, cap)
                 return HistoryResult(

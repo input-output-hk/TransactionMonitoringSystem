@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS tms.contracts
     sample_tokens       String DEFAULT '[]',   -- JSON: [{unit, policy_id, name}]
     tx_count            UInt32,
     status              Enum8('pending' = 1, 'processing' = 2, 'done' = 3, 'failed' = 4),
-    requested_max_txs   UInt32,                 -- 0 = unbounded
+    requested_max_txs   UInt32,                 -- backfill DOWNLOAD depth (0 = unbounded)
+    target_txs          UInt32 DEFAULT 0,       -- "latest N to cluster on" read window (0 = ceiling); see 010
     updated_at          DateTime64(6) DEFAULT now64(6)
 )
 ENGINE = ReplacingMergeTree(updated_at)
