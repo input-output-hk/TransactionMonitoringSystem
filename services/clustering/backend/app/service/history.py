@@ -152,9 +152,8 @@ def history_cap(contract_row: dict[str, Any] | None, settings: Settings) -> int:
     the online resume gate and the API detail read must all agree on it, or the
     completeness checks drift from the walk they gate."""
     ceiling = settings.history_max_txs_ceiling
-    floor = min(settings.clustering_min_target_txs, ceiling)  # floor can't exceed the ceiling
     raw = int((contract_row or {}).get("requested_max_txs") or 0) or settings.history_max_txs
-    return max(floor, min(raw, ceiling))
+    return max(settings.recall_floor(ceiling), min(raw, ceiling))
 
 
 def host_history_boundary(settings: Settings, target: str) -> HostBoundary | None:

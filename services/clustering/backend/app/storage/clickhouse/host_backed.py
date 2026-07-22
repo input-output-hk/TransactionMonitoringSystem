@@ -301,21 +301,33 @@ class HostBackedRepo(ClickHouseRepo):
     # online classify path bounds its scoring chunks (_CLASSIFY_BATCH rationale).
     _HOST_MEMBERSHIP_CHUNK = 1000
 
+    def _chunked_membership(
+        self, tx_hashes: set[str], sql: str, base_params: dict[str, Any]
+    ) -> set[str]:
+        """Run a membership query over ``tx_hashes`` in bounded chunks and return
+        the subset it matched. ``sql`` must select one hash column and reference
+        the ``{hs:Array(String)}`` parameter; ``base_params`` supplies the rest
+        (constant across chunks). The shared skeleton for host_known_tx_hashes
+        and windowed_members, so the IN-array bound (``_HOST_MEMBERSHIP_CHUNK``)
+        lives in exactly one place and neither caller materializes a large window
+        into Python."""
+        found: set[str] = set()
+        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
+            rows = self.client.query(sql, parameters={**base_params, "hs": list(chunk)}).result_rows
+            found.update(str(r[0]) for r in rows)
+        return found
+
     def host_known_tx_hashes(self, target: str, tx_hashes: set[str]) -> set[str]:
         """The subset of ``tx_hashes`` present in the HOST's address index for
         the watched target. Exact regardless of what the engine's local tables
         contain, which is what makes it safe as the publish bound: a host-known
         tx is never suppressed (recall first), a host-unknown one never leaks
         into the host-facing projection. Chunked so the IN array stays bounded."""
-        found: set[str] = set()
-        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
-            rows = self.client.query(
-                f"SELECT DISTINCT toString(tx_hash) FROM {self._host_addr_index()} "
-                "AND toString(tx_hash) IN {hs:Array(String)}",
-                parameters={"net": self._network, "tgt": target, "hs": list(chunk)},
-            ).result_rows
-            found.update(str(r[0]) for r in rows)
-        return found
+        sql = (
+            f"SELECT DISTINCT toString(tx_hash) FROM {self._host_addr_index()} "
+            "AND toString(tx_hash) IN {hs:Array(String)}"
+        )
+        return self._chunked_membership(tx_hashes, sql, {"net": self._network, "tgt": target})
 
     def windowed_members(self, target: str, tx_hashes: set[str]) -> set[str]:
         """The subset of ``tx_hashes`` currently INSIDE this contract's rolling
@@ -327,20 +339,10 @@ class HostBackedRepo(ClickHouseRepo):
         chunked like host_known_tx_hashes, so only the (small) set of currently
         published positives is checked -- never a multi-thousand-row window
         materialized into Python."""
-        found: set[str] = set()
-        # Resolve the per-contract window ONCE: _scope_params issues a point-read
-        # for target_txs, and target_txs cannot change within a single call, so
-        # re-reading it per chunk would be pure waste. Only the hash list varies
-        # per chunk, so rebind just that.
-        params = self._scope_params(target)
-        for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
-            params["hs"] = list(chunk)
-            rows = self.client.query(
-                f"SELECT tx_hash FROM {self._hashes_expr()} WHERE tx_hash IN {{hs:Array(String)}}",
-                parameters=params,
-            ).result_rows
-            found.update(str(r[0]) for r in rows)
-        return found
+        # _scope_params resolves this contract's window (the lim param) once via a
+        # single point-read; the helper then only varies the hash list per chunk.
+        sql = f"SELECT tx_hash FROM {self._hashes_expr()} WHERE tx_hash IN {{hs:Array(String)}}"
+        return self._chunked_membership(tx_hashes, sql, self._scope_params(target))
 
     # --- writes the sidecar must not perform (no download, no duplication) ----
 

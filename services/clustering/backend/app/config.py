@@ -285,6 +285,19 @@ class Settings(BaseSettings):
                 f"expected one of {sorted(_BLOCKFROST_BASE_URLS)}"
             ) from exc
 
+    def recall_floor(self, ceiling: int) -> int:
+        """The recall floor (``clustering_min_target_txs``) clamped so it never
+        exceeds ``ceiling``. The detectors need a minimum baseline to call an
+        outlier against (LOF's fixed neighborhood, DBSCAN min_samples), so a
+        per-contract N is lifted to at least this many transactions. Shared by
+        the read window (``effective_window_txs``, ceiling =
+        ``clustering_window_txs``) and the backfill depth (``history_cap``,
+        ceiling = ``history_max_txs_ceiling``) so both apply the SAME
+        minimum-baseline rule against their own ceiling. A ceiling below the
+        floor (misconfig / tiny test window) clamps the floor itself down, so the
+        result never exceeds the ceiling."""
+        return min(self.clustering_min_target_txs, ceiling)
+
     def effective_window_txs(self, requested_max_txs: int) -> int:
         """A contract's actual rolling window: the "latest N to cluster on" it
         was onboarded with (``requested_max_txs``), clamped to
@@ -306,8 +319,7 @@ class Settings(BaseSettings):
             return 0
         if requested_max_txs <= 0:
             return ceiling
-        floor = min(self.clustering_min_target_txs, ceiling)  # floor can't exceed the ceiling
-        return max(floor, min(requested_max_txs, ceiling))
+        return max(self.recall_floor(ceiling), min(requested_max_txs, ceiling))
 
     def recluster_recommended(self, drift_score: float) -> bool:
         """Whether an online-classifier ``drift_score`` is stale enough to recommend
