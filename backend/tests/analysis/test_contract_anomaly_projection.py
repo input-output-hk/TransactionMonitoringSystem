@@ -26,6 +26,16 @@ def _floors():
     return scorer_config.contract_anomaly_config()["verdict_floors"]
 
 
+def _anomaly_scale():
+    """The reduced scale a bare auto-anomaly maps consensus onto (< High)."""
+    return scorer_config.contract_anomaly_config()["anomaly_consensus_scale"]
+
+
+def _malicious_scale():
+    """The full 0-100 scale a malicious verdict refines from its floor across."""
+    return scorer_config.contract_anomaly_config()["consensus_scale"]
+
+
 class TestProjectScore:
     def test_malicious_floors_into_critical(self):
         score, band = project_score("malicious", None)
@@ -41,37 +51,51 @@ class TestProjectScore:
         assert score == 0.0
         assert band is RiskBand.INFORMATIONAL
 
-    def test_anomaly_high_consensus_reaches_high(self):
-        # RECALL PROOF: a genuinely strong anomaly still alerts High. consensus
-        # 0.65 scales (x consensus_scale=100) to 65, above BAND_HIGH_THRESHOLD.
-        scale = scorer_config.contract_anomaly_config()["consensus_scale"]
-        score, band = project_score("anomaly", 0.65)
-        assert score == pytest.approx(0.65 * scale)
-        assert score >= BAND_HIGH_THRESHOLD
-        assert band is RiskBand.HIGH
+    def test_strong_anomaly_is_capped_at_moderate_never_high(self):
+        # FP-FIX PROOF (mainnet 2026-07): a bare auto-anomaly must NEVER page.
+        # Even at maximum consensus (1.0, e.g. a DBSCAN-noise outlier on a busy
+        # contract) it caps at the top of Moderate, below the High threshold. An
+        # unsupervised shape-outlier has no exploit semantics, so it cannot alert
+        # High/Critical on its own; a real attack is banded by the nine stored
+        # detectors or promoted to Critical by a malicious LABEL.
+        score, band = project_score("anomaly", 1.0)
+        assert score == pytest.approx(_anomaly_scale())
+        assert score < BAND_HIGH_THRESHOLD
+        assert band is RiskBand.MODERATE
 
-    def test_anomaly_at_high_threshold_consensus(self):
-        # Boundary: a consensus scaling exactly to BAND_HIGH_THRESHOLD lands High.
-        scale = scorer_config.contract_anomaly_config()["consensus_scale"]
-        score, band = project_score("anomaly", BAND_HIGH_THRESHOLD / scale)
-        assert score == pytest.approx(BAND_HIGH_THRESHOLD)
-        assert band is RiskBand.HIGH
+    def test_no_consensus_lets_a_bare_anomaly_reach_an_alert_band(self):
+        # Sweep consensus across its full valid range [0, 1] (the ensemble
+        # agreement is bounded there): a bare anomaly never bands High or
+        # Critical, whatever the ensemble reports.
+        for c in (0.6, 0.8, 0.99, 1.0):
+            score, band = project_score("anomaly", c)
+            assert score < BAND_HIGH_THRESHOLD, f"consensus {c} must stay below High"
+            assert band not in (RiskBand.HIGH, RiskBand.CRITICAL)
 
     def test_anomaly_mid_consensus_is_moderate(self):
         # A mid-strength anomaly bands Moderate: between Informational and High.
-        score, band = project_score("anomaly", 0.40)
-        assert score == pytest.approx(40.0)
+        score, band = project_score("anomaly", 0.8)
+        assert score == pytest.approx(0.8 * _anomaly_scale())
         assert band is RiskBand.MODERATE
 
     def test_anomaly_zero_floor_is_consensus_driven_not_suppressed(self):
         # REGRESSION GUARD: anomaly shares a 0 floor with benign/normal but must
-        # stay consensus-driven, NOT suppressed. A 0.5 consensus must score 50,
-        # never 0; this guards against re-introducing a "floor <= 0 means
-        # suppress" check, which would zero out every anomaly.
-        score, band = project_score("anomaly", 0.5)
-        assert score == pytest.approx(50.0)
+        # stay consensus-driven, NOT suppressed. A positive consensus must produce
+        # a positive score (never 0); this guards against re-introducing a
+        # "floor <= 0 means suppress" check, which would zero out every anomaly.
+        score, band = project_score("anomaly", 0.9)
+        assert score == pytest.approx(0.9 * _anomaly_scale())
         assert score != 0.0
         assert band is RiskBand.MODERATE
+
+    def test_higher_consensus_still_orders_anomalies_within_moderate(self):
+        # Consensus still RANKS anomalies for triage, but only within Moderate: a
+        # stronger shape-outlier scores higher, yet neither one pages.
+        low, low_band = project_score("anomaly", 0.6)
+        high, high_band = project_score("anomaly", 1.0)
+        assert high > low
+        assert low_band in (RiskBand.INFORMATIONAL, RiskBand.MODERATE)
+        assert high_band is RiskBand.MODERATE
 
     def test_safe_verdict_suppresses_despite_high_consensus(self):
         # benign / normal are safe labels: consensus can NEVER raise them off 0.
@@ -79,11 +103,13 @@ class TestProjectScore:
             score, _ = project_score(verdict, 0.95)
             assert score == 0.0, f"{verdict} must suppress regardless of consensus"
 
-    def test_consensus_refines_a_positive_verdict_upward(self):
-        # A positive verdict (anomaly, floor 0) is driven up by a high consensus.
-        scale = scorer_config.contract_anomaly_config()["consensus_scale"]
-        score, band = project_score("anomaly", 0.9)  # max(0, 90) = 90
-        assert score == pytest.approx(0.9 * scale)
+    def test_malicious_consensus_refines_within_critical(self):
+        # A malicious LABEL floors to Critical and a high consensus refines it
+        # upward within Critical across the full scale, UNAFFECTED by the anomaly
+        # cap (the cap only applies to the auto-anomaly verdict).
+        score, band = project_score("malicious", 0.9)
+        assert score == pytest.approx(max(_floors()["malicious"], 0.9 * _malicious_scale()))
+        assert score >= BAND_CRITICAL_THRESHOLD
         assert band is RiskBand.CRITICAL
 
     def test_malicious_floor_wins_over_low_consensus(self):
@@ -101,6 +127,11 @@ class TestProjectScore:
         score, band = project_score("malicious", 5.0)  # 5.0*100 = 500
         assert score == 100.0
         assert band is RiskBand.CRITICAL
+
+    def test_anomaly_scale_is_capped_below_the_high_band(self):
+        # The cap must live below the High threshold or a bare anomaly could page.
+        # (Also enforced at config load by scorer_config._BAND_INVARIANTS.)
+        assert _anomaly_scale() < BAND_HIGH_THRESHOLD
 
     def test_band_matches_score_to_band(self):
         for verdict in ("malicious", "anomaly", "benign", "normal"):
@@ -154,15 +185,15 @@ class TestMergeAdditivity:
     def test_lower_ca_never_lowers_existing_detection(self):
         r = _base_result(72.0, "phishing")  # High
         before_score, before_class, before_band = r.max_score, r.max_class, r.risk_band
-        # A positive verdict that scores BELOW the stored detection (anomaly 50
-        # < phishing 72): the stored detection must win, unchanged.
-        _merge_contract_anomaly(r, [_row("anomaly", consensus=0.5)])  # -> 50 (Moderate)
+        # A positive verdict that scores BELOW the stored detection (a capped
+        # anomaly < phishing 72): the stored detection must win, unchanged.
+        _merge_contract_anomaly(r, [_row("anomaly", consensus=0.5)])
         assert r.max_score == before_score
         assert r.max_class == before_class
         assert r.risk_band is before_band
         assert r.scores["phishing"] == 72.0
         # but the contract_anomaly value is still surfaced in the payload.
-        assert r.scores["contract_anomaly"] == pytest.approx(50.0)
+        assert r.scores["contract_anomaly"] == pytest.approx(0.5 * _anomaly_scale())
 
     def test_multi_target_collapses_to_highest_severity(self):
         # One tx touched two watched contracts: a benign verdict for one must
@@ -193,13 +224,16 @@ class TestMergeAdditivity:
         assert r.contract_anomaly_corroborates is False
 
     def test_weak_anomaly_below_corroboration_threshold_does_not_corroborate(self):
-        # A weak anomaly (consensus 0.35 -> score 35, below corroboration_threshold
-        # 40) is still surfaced but does NOT count as a corroborating signal. Pins
-        # the boundary that shifted when the anomaly floor became consensus-driven:
-        # every anomaly used to floor to 60 and so always corroborated.
+        # A weak anomaly (low consensus, scoring below the corroboration threshold)
+        # is still surfaced but does NOT count as a corroborating signal. With the
+        # Moderate cap the scores are smaller, so consensus 0.35 stays well below
+        # the threshold; the flag must be False. The threshold is read from config
+        # (not duplicated) so this stays valid if it is retuned.
+        threshold = scorer_config.contract_anomaly_config()["corroboration_threshold"]
         r = _base_result(45.0, "phishing")
-        _merge_contract_anomaly(r, [_row("anomaly", consensus=0.35)])  # -> 35 (Moderate)
-        assert r.scores["contract_anomaly"] == pytest.approx(35.0)
+        _merge_contract_anomaly(r, [_row("anomaly", consensus=0.35)])
+        assert r.scores["contract_anomaly"] == pytest.approx(0.35 * _anomaly_scale())
+        assert r.scores["contract_anomaly"] < threshold
         assert r.contract_anomaly_corroborates is False
 
     def test_scored_at_and_evidence_surfaced(self):
@@ -529,8 +563,9 @@ def test_list_filter_contract_anomaly_excludes_stored_dominant(client, monkeypat
     from app.config import settings
 
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
-    # Stored phishing 95 (Critical) > anomaly verdict (65, High): max_class stays
-    # phishing, so this tx does not belong to the contract_anomaly filter.
+    # Stored phishing 95 (Critical) dominates the capped anomaly (Moderate):
+    # max_class stays phishing, so this tx does not belong to the
+    # contract_anomaly filter.
     _bind_list_stubs(
         monkeypatch,
         page_rows=[],
@@ -547,7 +582,8 @@ def test_list_filter_contract_anomaly_excludes_stored_dominant(client, monkeypat
 
 def test_list_filter_contract_anomaly_applies_band_filter(client, monkeypatch):
     """The score/band filter narrows the contract_anomaly list exactly as it does
-    the stored-class list: a risk_band=Critical filter drops a High-only verdict."""
+    the stored-class list: a risk_band=Critical filter drops a capped (Moderate)
+    auto-anomaly verdict, keeping only the malicious (Critical) one."""
     from app.config import settings
 
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
@@ -557,9 +593,9 @@ def test_list_filter_contract_anomaly_applies_band_filter(client, monkeypatch):
         total=0,
         flagged={
             "crit": [_row("malicious", target="a")],  # -> Critical
-            "high": [_row("anomaly", consensus=0.65, target="b")],  # -> High (65)
+            "modr": [_row("anomaly", consensus=0.65, target="b")],  # -> Moderate (capped)
         },
-        by_hashes=[_full_score_row("crit", 10.0), _full_score_row("high", 10.0)],
+        by_hashes=[_full_score_row("crit", 10.0), _full_score_row("modr", 10.0)],
     )
     r = client.get(
         "/api/v1/analysis/results?network=preprod&attack_class=contract_anomaly&risk_band=Critical"

@@ -43,33 +43,42 @@ contract_anomaly:
   # Score floor per verdict. The clustering engine's verdict precedence is
   # explicit-label > cluster-inherited (malicious/benign) > auto-anomaly
   # (votes >= FLAG_VOTE_THRESHOLD == 2) > normal. A human-labeled malicious
-  # cluster is the strongest signal, so it floors into Critical. An auto-anomaly
-  # carries NO floor (0): its score is driven purely by the ensemble consensus,
-  # so a weak anomaly bands Informational/Moderate and only a strong one reaches
-  # High. This avoids banding every auto-anomaly High regardless of confidence;
-  # the unsupervised ensemble fires at minimum agreement (2 votes) on benign
-  # contract drift, so a flat High floor manufactured a wall of false positives.
-  # Recall is preserved: a strong anomaly (consensus that scales to >= the High
-  # threshold) still alerts High, a malicious LABEL still floors to Critical, and
-  # no flagged tx is dropped (it is still scored and queryable, just banded by
-  # strength). benign (human-labeled safe) and normal (no finding) SUPPRESS the
-  # signal: a curated safe label is authoritative, so the verdict projects to 0
-  # and consensus can never raise it. Suppression is keyed on the verdict label,
-  # NOT the floor value (anomaly and normal both have a 0 floor but anomaly is
-  # consensus-driven while normal suppresses); see contract_anomaly.py
-  # _POSITIVE_VERDICTS. Votes are already folded into the `anomaly` verdict
-  # upstream, so they are evidence-only here (no double counting).
+  # cluster is a CONFIRMED attack, so it floors into Critical. An auto-anomaly
+  # carries NO floor (0) and is scored purely from the ensemble consensus, but on
+  # the reduced anomaly_consensus_scale (below) that caps it in the Moderate band.
+  # WHY the cap: an unsupervised shape-outlier has no exploit semantics, and on a
+  # busy contract the consensus is bimodal (DBSCAN-noise saturates ~1.0 on benign
+  # top-quantile drift), so scaling it x100 paged a wall of benign swaps as
+  # High/Critical on mainnet (Strike Finance + Djed v2, verified benign 2026-07;
+  # 64 of 68 alerts, all 15 Critical). Capping at Moderate removes those false
+  # positives WITHOUT losing recall: an anomaly is not an attack detector, so a
+  # real attack with an unusual shape is still banded by the nine stored detectors
+  # independently or promoted to Critical by a malicious LABEL, and no flagged tx
+  # is dropped (it stays scored, queryable, and corroboration-eligible, just banded
+  # by strength within Moderate). benign (human-labeled safe) and normal (no
+  # finding) SUPPRESS the signal: a curated safe label is authoritative, so the
+  # verdict projects to 0 and consensus can never raise it. Suppression is keyed on
+  # the verdict label, NOT the floor value (anomaly and normal both have a 0 floor
+  # but anomaly is consensus-driven while normal suppresses); see
+  # contract_anomaly.py _POSITIVE_VERDICTS. Votes are already folded into the
+  # `anomaly` verdict upstream, so they are evidence-only here (no double counting).
   verdict_floors:
-    malicious: 80.0   # BAND_CRITICAL_THRESHOLD: human-labeled malicious cluster
-    anomaly: 0.0      # no floor: auto-anomaly is consensus-driven (High at >= 0.60)
+    malicious: 80.0   # BAND_CRITICAL_THRESHOLD: human-labeled malicious cluster -> Critical
+    anomaly: 0.0      # no floor: consensus-driven, capped Moderate (see anomaly_consensus_scale)
     benign: 0.0       # human-labeled safe: suppresses by label (consensus cannot raise)
     normal: 0.0       # no finding: suppresses by label (consensus cannot raise)
-  # The ensemble consensus is in [0,1]; multiplying by 100 maps it onto the
-  # 0-100 score scale (so the band thresholds apply to consensus directly: a
-  # consensus of 0.60 scales to the High threshold of 60). For a POSITIVE verdict
-  # (malicious/anomaly) the score is clamp(max(floor, consensus * scale)); every
-  # other verdict (benign/normal/unknown) suppresses to 0 by label.
+  # Malicious refinement scale: a malicious verdict floors at 80 (Critical) and
+  # consensus (in [0,1]) x consensus_scale refines it upward within Critical
+  # across the full 0-100 range.
   consensus_scale: 100.0
+  # Auto-anomaly scale: a bare anomaly maps consensus onto [0, anomaly_consensus_scale]
+  # instead, so its STRONGEST possible score (consensus 1.0) still lands below the
+  # High threshold (60) and bands Moderate at most, i.e. it can never page on its
+  # own. Kept at BAND_MODERATE_MAX (High threshold minus 1) so a max-consensus
+  # anomaly sits at the top of Moderate: maximally visible for triage, never
+  # alerting. The band contract [Moderate, High) is enforced at load by
+  # scorer_config._BAND_INVARIANTS.
+  anomaly_consensus_scale: 59.0
   # A contract_anomaly score at or above this counts as a corroborating signal
   # for analyst triage (surfaced as contract_anomaly_corroborates, separate
   # from the stored, server-filterable corroboration_count over the 9 classes).
