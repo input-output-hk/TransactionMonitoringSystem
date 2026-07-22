@@ -1,10 +1,13 @@
 /**
- * Clustering run control bar: pick which cluster run the Graph / Projection /
- * Clusters views show, run a manual (custom) clustering pass, and delete a custom
- * run. The System run is canonical for scoring and is the default selection;
- * Delete is offered only for custom runs (and guarded server-side). Parameter
- * evaluation (k-distance curve + DBSCAN grid) lives in an "Advanced" disclosure so
- * it stays available without dominating. Sibling of `AnomalyRunControls`.
+ * Clustering run control bar. The run picker (view a saved run) and the glossary
+ * stay visible because viewing is read-only and safe for everyone. Creating a
+ * custom run (feature set + DBSCAN parameters + evaluation) is an expert action,
+ * so it lives in a closed "Advanced" disclosure: a non-technical Admin is not
+ * tempted to click it, and the copy there explains that the normal way to refresh
+ * after drift is to Re-analyze the contract (which regenerates the System run),
+ * not to create a custom run. The System run is canonical for scoring and is the
+ * default selection; a custom run never changes scoring. Delete is Admin-only and
+ * custom-only (guarded server-side). Sibling of `AnomalyRunControls`.
  */
 import { useState } from "react";
 
@@ -113,12 +116,9 @@ export function ClusterRunControls({
 
 	return (
 		<div className="border-border space-y-3 rounded-md border p-4">
-			<DocsCallout href={DOCS_CLUSTERING}>
-				Advanced control. A custom pass creates a separate run and never changes
-				the canonical scoring, but its results need interpretation.
-			</DocsCallout>
-
-			{/* Run selection */}
+			{/* Run selection (view a saved run): read-only and safe for everyone, so
+			    it stays at the top. Creating a run is an expert action in the
+			    "Advanced" disclosure below. */}
 			<div className="flex flex-wrap items-center gap-2">
 				<span className="text-muted-foreground text-sm">Run</span>
 				<RunSelect
@@ -145,69 +145,6 @@ export function ClusterRunControls({
 				)}
 			</div>
 
-			{/* Create a custom run */}
-			<div className="flex flex-wrap items-end gap-3">
-				<div className="w-40">
-					<Label htmlFor="cluster-feature-set" className="mb-1.5 block text-xs">
-						Feature set
-					</Label>
-					<FeatureSetSelect
-						id="cluster-feature-set"
-						value={featureSet}
-						onChange={setFeatureSet}
-					/>
-				</div>
-				<div className="w-24">
-					<Label htmlFor="cluster-eps" className="mb-1.5 block text-xs">
-						eps
-					</Label>
-					<Input
-						id="cluster-eps"
-						type="number"
-						step="0.01"
-						min="0.0001"
-						value={eps}
-						onChange={(e) => {
-							const v = Number.parseFloat(e.target.value);
-							if (Number.isFinite(v)) setEps(v);
-						}}
-					/>
-				</div>
-				<div className="w-28">
-					<Label htmlFor="cluster-min-samples" className="mb-1.5 block text-xs">
-						min_samples
-					</Label>
-					<Input
-						id="cluster-min-samples"
-						type="number"
-						step="1"
-						min="2"
-						value={minSamples}
-						onChange={(e) => {
-							const v = Number.parseInt(e.target.value, 10);
-							if (Number.isFinite(v)) setMinSamples(v);
-						}}
-					/>
-				</div>
-				<AdminOnlyGate gated={!isAdmin}>
-					<Button
-						disabled={!isAdmin || runCluster.isPending || !eps || !minSamples}
-						onClick={onRecluster}
-					>
-						{runCluster.isPending
-							? "Clustering…"
-							: "Re-cluster with custom parameters"}
-					</Button>
-				</AdminOnlyGate>
-			</div>
-
-			{runCluster.isError && (
-				<p className="text-destructive text-sm">
-					{isPermissionDenied(runCluster.error)
-						? runCluster.error.message
-						: "Clustering run failed. Check the parameters and retry."}
-				</p>
-			)}
 			{remove.isError && (
 				<p className="text-destructive text-sm">
 					{isPermissionDenied(remove.error)
@@ -224,24 +161,103 @@ export function ClusterRunControls({
 				</p>
 				<ul>
 					<li>
-						<strong>origin:</strong> the <em>Canonical</em> run is the
-						auto-tuned System run that drives scoring; a <em>Custom</em> run is
-						an experiment you ran, kept separate and safe to delete.
+						<strong>origin:</strong> the <em>System</em> run is the auto-tuned
+						run that drives scoring; a <em>Custom</em> run is an experiment you
+						ran, kept separate and safe to delete.
 					</li>
 					<li>
 						<strong>feature set:</strong> which signals are compared:{" "}
-						<em>shape</em> (per-tx value, size, in/out counts, ADA moved, assets,
-						time), <em>graph</em> (shared addresses), or <em>combined</em>.
+						<em>shape</em> (per-tx value, size, in/out counts, ADA moved,
+						assets, time), <em>graph</em> (shared addresses), or{" "}
+						<em>combined</em>.
 					</li>
 				</ul>
 			</HelpDetails>
 
-			<HelpDetails summary="Advanced: tune parameters">
-				<div className="space-y-4 px-3 pb-3">
+			<HelpDetails summary="Advanced: create an experimental run">
+				<div className="space-y-4">
+					<DocsCallout href={DOCS_CLUSTERING}>
+						This creates a <strong>separate experimental run</strong> so you can
+						try a different feature set or DBSCAN parameters. It never changes
+						the System run or scoring, and its results need interpretation. You
+						rarely need this: to refresh clusters after new activity or high
+						drift, use <strong>Re-analyze</strong> on the contract instead,
+						which updates the System run.
+					</DocsCallout>
+
+					<div className="flex flex-wrap items-end gap-3">
+						<div className="w-40">
+							<Label
+								htmlFor="cluster-feature-set"
+								className="mb-1.5 block text-xs"
+							>
+								Feature set
+							</Label>
+							<FeatureSetSelect
+								id="cluster-feature-set"
+								value={featureSet}
+								onChange={setFeatureSet}
+							/>
+						</div>
+						<div className="w-24">
+							<Label htmlFor="cluster-eps" className="mb-1.5 block text-xs">
+								eps
+							</Label>
+							<Input
+								id="cluster-eps"
+								type="number"
+								step="0.01"
+								min="0.0001"
+								value={eps}
+								onChange={(e) => {
+									const v = Number.parseFloat(e.target.value);
+									if (Number.isFinite(v)) setEps(v);
+								}}
+							/>
+						</div>
+						<div className="w-28">
+							<Label
+								htmlFor="cluster-min-samples"
+								className="mb-1.5 block text-xs"
+							>
+								min_samples
+							</Label>
+							<Input
+								id="cluster-min-samples"
+								type="number"
+								step="1"
+								min="2"
+								value={minSamples}
+								onChange={(e) => {
+									const v = Number.parseInt(e.target.value, 10);
+									if (Number.isFinite(v)) setMinSamples(v);
+								}}
+							/>
+						</div>
+						<AdminOnlyGate gated={!isAdmin}>
+							<Button
+								disabled={
+									!isAdmin || runCluster.isPending || !eps || !minSamples
+								}
+								onClick={onRecluster}
+							>
+								{runCluster.isPending ? "Clustering…" : "Re-cluster"}
+							</Button>
+						</AdminOnlyGate>
+					</div>
+
+					{runCluster.isError && (
+						<p className="text-destructive text-sm">
+							{isPermissionDenied(runCluster.error)
+								? runCluster.error.message
+								: "Clustering run failed. Check the parameters and retry."}
+						</p>
+					)}
+
 					<p className="text-muted-foreground text-xs">
-						Evaluate DBSCAN parameters for the selected feature set, then click a
-						row to load its <code>eps</code> / <code>min_samples</code> into the
-						controls above.
+						Set <code>eps</code> / <code>min_samples</code> directly, or
+						evaluate DBSCAN parameters for the selected feature set and click a
+						row to load its values into the fields above.
 					</p>
 					<Button
 						variant="outline"
@@ -274,18 +290,19 @@ export function ClusterRunControls({
 							<KDistanceChart evaluation={evalData} />
 							<HelpDetails summary="How to read the k-distance chart">
 								<p>
-									The line is the <strong>k-distance curve</strong>: for every tx
-									we measure the distance to its <em>k</em>-th nearest neighbour
-									(k = min_samples), then sort those distances low to high. Flat
-									on the left = points sitting in dense neighbourhoods (cluster
-									cores); the sharp rise on the right = increasingly isolated
-									points (likely noise). The <strong>knee</strong> (dashed line)
-									is where it turns up, a good starting <code>eps</code>, since it
-									roughly separates "dense enough to cluster" from "too far
-									apart".
+									The line is the <strong>k-distance curve</strong>: for every
+									tx we measure the distance to its <em>k</em>-th nearest
+									neighbour (k = min_samples), then sort those distances low to
+									high. Flat on the left = points sitting in dense
+									neighbourhoods (cluster cores); the sharp rise on the right =
+									increasingly isolated points (likely noise). The{" "}
+									<strong>knee</strong> (dashed line) is where it turns up, a
+									good starting <code>eps</code>, since it roughly separates
+									"dense enough to cluster" from "too far apart".
 								</p>
 								<p>
-									The table tries a few (eps, min_samples) pairs around that knee:
+									The table tries a few (eps, min_samples) pairs around that
+									knee:
 								</p>
 								<ul>
 									<li>
@@ -301,8 +318,8 @@ export function ClusterRunControls({
 										<strong>clusters:</strong> groups found (noise excluded).
 									</li>
 									<li>
-										<strong>noise:</strong> share of txs left unassigned (DBSCAN's
-										"−1" / outliers).
+										<strong>noise:</strong> share of txs left unassigned
+										(DBSCAN's "−1" / outliers).
 									</li>
 									<li>
 										<strong>silhouette:</strong> how clean the separation is, −1
@@ -377,8 +394,8 @@ export function ClusterRunControls({
 					<DialogHeader>
 						<DialogTitle>Delete this custom cluster run?</DialogTitle>
 						<DialogDescription>
-							This removes the run and its cluster labels. This cannot be undone.
-							The system run is unaffected.
+							This removes the run and its cluster labels. This cannot be
+							undone. The system run is unaffected.
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>

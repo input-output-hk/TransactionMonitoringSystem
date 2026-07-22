@@ -128,14 +128,8 @@ function AnomaliesTab({ target }: { target: string }) {
 	const effectiveRunId = selectedRunId || defaultRun?.run_id || "";
 	const selectedRun = runs?.find((r) => r.run_id === effectiveRunId);
 
-	if (isLoading)
-		return (
-			<LoadingText>Loading anomaly runs…</LoadingText>
-		);
-	if (isError)
-		return (
-			<ErrorText>Failed to load anomaly runs.</ErrorText>
-		);
+	if (isLoading) return <LoadingText>Loading anomaly runs…</LoadingText>;
+	if (isError) return <ErrorText>Failed to load anomaly runs.</ErrorText>;
 
 	return (
 		<div className="space-y-4">
@@ -158,7 +152,9 @@ function AnomaliesTab({ target }: { target: string }) {
 				<AnomalyTable runId={effectiveRunId} target={target} />
 			) : (
 				<p className="text-muted-foreground text-sm">
-					No anomaly run yet. Use “Detect anomalies” to score every transaction.
+					No anomaly run yet. The system scores one automatically once the
+					contract is analyzed. To score one now, open “Advanced: create an
+					experimental run” above.
 				</p>
 			)}
 		</div>
