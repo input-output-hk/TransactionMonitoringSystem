@@ -350,6 +350,95 @@ async def test_window_full_preflight_skips_and_marks(monkeypatch: pytest.MonkeyP
     assert repo.cursors[-1]["txs_seen"] == 500
 
 
+def _min_host_settings(min_host: int) -> Settings:
+    return Settings(
+        CHAIN_SOURCE="host_ch",
+        HISTORY_SOURCE="blockfrost",
+        BLOCKFROST_PROJECT_ID="k",
+        HISTORY_MIN_HOST_TXS=min_host,
+    )
+
+
+async def test_shortfall_gate_skips_at_or_above_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A target the host already holds >= HISTORY_MIN_HOST_TXS rows for skips the
+    # pre-deployment top-up and marks done (skip-fast), no provider quota spent.
+    # host_tx_count == the threshold exercises the inclusive >= boundary.
+    settings = _min_host_settings(1_000)
+    repo = _RecordingRepo()
+    _patch_repo(monkeypatch, repo)
+    at_threshold = HostBoundary(
+        floor_slot=50_000_000,
+        floor_height=6_000_000,
+        host_tx_count=settings.history_min_host_txs,
+    )
+    _patch_boundary(monkeypatch, at_threshold)
+
+    async def _boom(**kw: Any) -> IngestResult:
+        raise AssertionError("no quota may be spent when the host sample is sufficient")
+
+    monkeypatch.setattr("app.service.history.ingest", _boom)
+    out = await BlockfrostHistory(settings).run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "skipped" and "backfill not needed" in out.note
+    assert repo.cursors[-1]["done"] is True
+    assert repo.cursors[-1]["txs_seen"] == 500
+
+
+async def test_shortfall_gate_on_still_backfills_thin_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Recall-preservation: with the gate ON, a genuinely thin contract (host rows
+    # just BELOW the threshold) must STILL backfill its missing pre-deployment
+    # history. The gate spares well-populated contracts; it must never starve a
+    # sparse one — the case this change has to preserve.
+    settings = _min_host_settings(1_000)
+    repo = _RecordingRepo()
+    _patch_repo(monkeypatch, repo)
+    thin = HostBoundary(
+        floor_slot=50_000_000,
+        floor_height=6_000_000,
+        host_tx_count=settings.history_min_host_txs - 1,
+    )
+    _patch_boundary(monkeypatch, thin)
+    seen: dict[str, Any] = {}
+
+    async def _ingest(**kw: Any) -> IngestResult:
+        seen.update(kw)
+        return IngestResult("addr1demo", "address", "completed", 42, "page:1")
+
+    monkeypatch.setattr("app.service.history.ingest", _ingest)
+    out = await BlockfrostHistory(settings).run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "completed" and seen["max_txs"] == 500
+
+
+async def test_shortfall_gate_off_by_default_still_backfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Default HISTORY_MIN_HOST_TXS=0 preserves always-top-up: a well-populated
+    # target below the window still backfills its missing pre-deployment history.
+    assert _BF_SETTINGS.history_min_host_txs == 0  # guards the "off" premise
+    repo = _RecordingRepo()
+    _patch_repo(monkeypatch, repo)
+    populated = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=2_746)
+    _patch_boundary(monkeypatch, populated)
+    seen: dict[str, Any] = {}
+
+    async def _ingest(**kw: Any) -> IngestResult:
+        seen.update(kw)
+        return IngestResult("addr1demo", "address", "completed", 500, "page:5")
+
+    monkeypatch.setattr("app.service.history.ingest", _ingest)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=500, progress=lambda _m: None
+    )
+    assert out.status == "completed" and seen["max_txs"] == 500
+
+
 async def test_boundary_deferral_returns_deferred(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _RecordingRepo()
     _patch_repo(monkeypatch, repo)

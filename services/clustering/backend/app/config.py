@@ -182,6 +182,18 @@ class Settings(BaseSettings):
     # is enabled); mirrors the host's BACKFILL_MAX_TXS_CAP so neither flavor
     # can request more history than the host's own backfill endpoint allows.
     history_max_txs_ceiling: int = Field(default=5000, ge=1, alias="HISTORY_MAX_TXS_CEILING")
+    # Shortfall gate for the backfill (blockfrost flavor only, like the
+    # window-full pre-flight below; the kupo flavor computes no boundary and so
+    # honors neither). When > 0, skip the pre-deployment top-up for any target
+    # the host ALREADY holds at least this many rows for: a large recent host
+    # sample anchors the fit on its own, so older history buys little and is not
+    # worth the provider quota. 0 (default) disables the gate and preserves the
+    # always-top-up behavior; the window-full pre-flight (host_tx_count >=
+    # clustering_window_txs) still applies regardless. Only values below
+    # clustering_window_txs have any effect. NOTE: a skipped contract is marked
+    # done (skip-fast), so LOWERING this threshold later does NOT re-open its
+    # backfill; raise the per-contract cap to re-open (mirrors the window marker).
+    history_min_host_txs: int = Field(default=0, ge=0, alias="HISTORY_MIN_HOST_TXS")
     # Host API base URL and credential, consumed only by HISTORY_SOURCE=kupo:
     # the sidecar triggers the host's backfill over the compose network (the
     # host additionally needs its own KUPO_URL configured).

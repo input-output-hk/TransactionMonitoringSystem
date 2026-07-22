@@ -347,6 +347,9 @@ services:
       - HISTORY_SOURCE=${CLUSTERING_HISTORY_SOURCE:-}
       - HISTORY_MAX_TXS=${CLUSTERING_HISTORY_MAX_TXS:-500}
       - HISTORY_MAX_TXS_CEILING=${CLUSTERING_HISTORY_MAX_TXS_CEILING:-5000}
+      # Shortfall gate: skip the backfill when the host already has >= N rows for
+      # the target (0 = off, always top up). See app/config.py history_min_host_txs.
+      - HISTORY_MIN_HOST_TXS=${CLUSTERING_HISTORY_MIN_HOST_TXS:-0}
       - HOST_API_URL=${CLUSTERING_HOST_API_URL:-http://app:8000}
       - HOST_API_KEY=${CLUSTERING_HOST_API_KEY:-}
       - HOST_API_TIMEOUT_SECONDS=${CLUSTERING_HOST_API_TIMEOUT_SECONDS:-30}
