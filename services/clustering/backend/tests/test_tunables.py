@@ -30,6 +30,9 @@ _GOLDEN: dict[str, dict[str, Any]] = {
         "knee_fallback_percentile": 90,
         "precomputed_eps_grid": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
         "eps_multipliers": [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+        "eps_percentiles": [50, 65, 80, 90, 95],
+        "eps_tail_clip_percentile": 97.5,
+        "max_dominant_cluster_ratio": 0.9,
         "precomputed_min_samples": 4,
         "min_samples_floor": 4,
         "min_samples_ceil": 24,
@@ -143,6 +146,20 @@ def test_valid_golden_document_loads(tmp_path: Path) -> None:
         # Out of the (0, 1] Jaccard range.
         ("evaluation", "precomputed_eps_grid", [0.5, 1.2], r"evaluation\.precomputed_eps_grid"),
         ("evaluation", "eps_multipliers", [-0.5, 1.0], r"evaluation\.eps_multipliers"),
+        # eps_percentiles: not ascending / out of the (0, 100) range.
+        ("evaluation", "eps_percentiles", [80, 50], r"evaluation\.eps_percentiles"),
+        ("evaluation", "eps_percentiles", [50, 120], r"evaluation\.eps_percentiles"),
+        # eps_tail_clip_percentile out of (0, 100] / below the largest percentile (95).
+        ("evaluation", "eps_tail_clip_percentile", 150, r"evaluation\.eps_tail_clip_percentile"),
+        ("evaluation", "eps_tail_clip_percentile", 90, r"evaluation\.eps_tail_clip_percentile"),
+        # max_dominant_cluster_ratio out of (0, 1].
+        ("evaluation", "max_dominant_cluster_ratio", 0, r"evaluation\.max_dominant_cluster_ratio"),
+        (
+            "evaluation",
+            "max_dominant_cluster_ratio",
+            1.5,
+            r"evaluation\.max_dominant_cluster_ratio",
+        ),
         # Breaks floor <= ceil <= grid_cap (floor stays 4).
         ("evaluation", "min_samples_ceil", 3, r"evaluation\.min_samples_floor"),
         ("evaluation", "min_samples_grid_cap", 10, r"evaluation\.min_samples_ceil"),

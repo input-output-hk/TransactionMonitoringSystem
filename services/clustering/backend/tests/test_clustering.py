@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from app.clustering.dbscan import run_dbscan
-from app.clustering.evaluate import evaluate
+from app.clustering.evaluate import _recommend, evaluate
 from app.clustering.projection import MAX_DIMS, project_data
 from app.config import Settings
 from app.features import ClusteringInput
@@ -143,6 +143,106 @@ def test_evaluate_too_few_points() -> None:
     report = evaluate(ci)
     assert report["recommended"] is None
     assert "message" in report
+
+
+# --- dominance-aware selection: must-fire recall locks -----------------------
+
+
+def test_recommend_prefers_nondominant_split_over_degenerate_merge() -> None:
+    """Strike case: the degenerate mega-cluster maxes silhouette (0.90) but its
+    largest cluster holds 98.9% of points; the true behavioural split scores a
+    low 0.38 yet holds only 49%. The recommender must pick the split. Fails
+    against the pre-change silhouette-max _recommend (which returns eps 15.4)."""
+    grid = [
+        {
+            "eps": 1.54,
+            "min_samples": 4,
+            "n_clusters": 8,
+            "n_noise": 40,
+            "noise_ratio": 0.014,
+            "silhouette": 0.378,
+            "top_cluster_ratio": 0.49,
+        },
+        {
+            "eps": 15.4,
+            "min_samples": 4,
+            "n_clusters": 3,
+            "n_noise": 0,
+            "noise_ratio": 0.0,
+            "silhouette": 0.900,
+            "top_cluster_ratio": 0.989,
+        },
+    ]
+    rec = _recommend(grid, knee_eps=30.8, base_ms=24)
+    assert (rec["eps"], rec["min_samples"]) == (1.54, 4)
+    assert "silhouette" in rec["rationale"]
+
+
+def test_recommend_falls_back_to_silhouette_when_every_config_is_dominant() -> None:
+    """Recall-first: a genuinely single-mode contract (every viable config is a
+    dominant cluster) must NOT be forced to fragment; fall back to today's
+    silhouette-max pick."""
+    grid = [
+        {
+            "eps": 1.0,
+            "min_samples": 4,
+            "n_clusters": 2,
+            "n_noise": 5,
+            "noise_ratio": 0.05,
+            "silhouette": 0.6,
+            "top_cluster_ratio": 0.95,
+        },
+        {
+            "eps": 4.0,
+            "min_samples": 4,
+            "n_clusters": 2,
+            "n_noise": 0,
+            "noise_ratio": 0.0,
+            "silhouette": 0.9,
+            "top_cluster_ratio": 0.99,
+        },
+    ]
+    rec = _recommend(grid, knee_eps=2.0, base_ms=4)
+    assert rec["eps"] == 4.0  # unchanged from the pre-change silhouette-max
+    assert "single-mode" in rec["rationale"]
+
+
+def _mega_cluster_with_specks() -> ClusteringInput:
+    """A whale-inflated cloud: two well-separated behavioural modes plus two
+    small far specks (each smaller than the base min_samples) whose k-th NN sits
+    out in the cloud, inflating the raw k-distance knee so the legacy knee-only
+    grid floor overshoots the scale where the modes separate."""
+    rng = np.random.default_rng(0)
+    d = 13
+    a = rng.normal(loc=0.0, scale=0.3, size=(900, d))
+    b = rng.normal(loc=2.5, scale=0.3, size=(900, d))
+    s1 = rng.normal(loc=40.0, scale=0.1, size=(15, d))
+    s2 = rng.normal(loc=-40.0, scale=0.1, size=(10, d))
+    X = np.vstack([a, b, s1, s2])
+    tx = [f"tx{i}" for i in range(X.shape[0])]
+    return ClusteringInput(tx, X, "euclidean", "shape", [f"f{i}" for i in range(d)])
+
+
+def test_evaluate_recovers_behavioural_split_not_degenerate_merge() -> None:
+    """End-to-end: on a whale-inflated distribution the robust anchor puts a
+    below-merge eps into the grid and the dominance gate selects it, so the
+    recommended config is a real split, not the degenerate mega-cluster."""
+    report = evaluate(_mega_cluster_with_specks())
+    grid = report["grid"]
+    # Self-validating preconditions (guard against silent geometry drift): the
+    # degenerate trap must be present AND a non-dominant split must be reachable.
+    assert any(r["top_cluster_ratio"] >= 0.9 and (r["silhouette"] or 0) > 0.7 for r in grid)
+    assert any(r["top_cluster_ratio"] < 0.9 for r in grid)
+
+    rec = report["recommended"]
+    assert rec is not None
+    res = run_dbscan(_mega_cluster_with_specks(), eps=rec["eps"], min_samples=rec["min_samples"])
+    counts = np.bincount(res.labels[res.labels != -1])
+    n = res.n_points
+    assert res.n_clusters >= 2
+    assert counts.max() / n < 0.9  # the fix: NOT the whale-inflated mega-cluster
+    assert sorted(counts)[-2] > 0.2 * n  # both large modes survive
+    assert "silhouette" in rec["rationale"]
 
 
 # --- project_data: feature-space projection (PCA + classical MDS) ------------

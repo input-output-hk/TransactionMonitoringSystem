@@ -38,6 +38,9 @@ _REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
         "knee_fallback_percentile",
         "precomputed_eps_grid",
         "eps_multipliers",
+        "eps_percentiles",
+        "eps_tail_clip_percentile",
+        "max_dominant_cluster_ratio",
         "precomputed_min_samples",
         "min_samples_floor",
         "min_samples_ceil",
@@ -183,6 +186,33 @@ def _check_invariants(path: Path, data: dict[str, Any]) -> None:
         path,
         "evaluation.eps_multipliers must be strictly ascending",
     )
+    pcts = ev["eps_percentiles"]
+    _require(
+        isinstance(pcts, list) and len(pcts) > 0,
+        path,
+        "evaluation.eps_percentiles must be a non-empty list",
+    )
+    _require(
+        all(0 < float(v) < 100 for v in pcts),
+        path,
+        "evaluation.eps_percentiles values must each be in (0, 100) (percentiles)",
+    )
+    _require(
+        _strictly_ascending(pcts),
+        path,
+        "evaluation.eps_percentiles must be strictly ascending",
+    )
+    _require(
+        0 < float(ev["eps_tail_clip_percentile"]) <= 100,
+        path,
+        "evaluation.eps_tail_clip_percentile must be in (0, 100] (a percentile)",
+    )
+    _require(
+        float(ev["eps_tail_clip_percentile"]) >= float(pcts[-1]),
+        path,
+        "evaluation.eps_tail_clip_percentile must be >= the largest eps_percentiles "
+        "entry (else it would winsorise away the anchors it feeds)",
+    )
     _require(
         int(ev["precomputed_min_samples"]) >= 2,
         path,
@@ -202,6 +232,11 @@ def _check_invariants(path: Path, data: dict[str, Any]) -> None:
         0 < float(ev["max_noise_ratio"]) <= 1,
         path,
         "evaluation.max_noise_ratio must be in (0, 1] (a fraction of points)",
+    )
+    _require(
+        0 < float(ev["max_dominant_cluster_ratio"]) <= 1,
+        path,
+        "evaluation.max_dominant_cluster_ratio must be in (0, 1] (a fraction of points)",
     )
 
     an = data["anomaly"]
