@@ -24,7 +24,7 @@ export const ATTACK_TYPES = [
 
 export type AttackType = (typeof ATTACK_TYPES)[number];
 
-export type Severity = "INFORMATIONAL" | "MEDIUM" | "HIGH" | "CRITICAL";
+export type Severity = "INFORMATIONAL" | "MODERATE" | "HIGH" | "CRITICAL";
 
 export type SubScore = { label: string; percent: number };
 

@@ -37,10 +37,6 @@ import { toast } from "sonner";
 import { BANDS, configWarnings } from "@/lib/notification-warnings";
 
 const QK = ["notifications", "config"] as const;
-// "Moderate" is the canonical band (backend enum + stored config keys); the UI
-// shows it as "Medium" to match the dashboard. Values stay canonical on save.
-const BAND_LABEL: Record<string, string> = { Moderate: "Medium" };
-const bandLabel = (b: string) => BAND_LABEL[b] ?? b;
 const FREQUENCIES = ["daily", "weekly", "monthly"] as const;
 // Single-sourced from the canonical attack-class map (analysis.ts) so this
 // picker cannot drift from the classes the engine actually scores.
@@ -514,15 +510,13 @@ export function NotificationsSettingsPage() {
 								const chans = cfg.triggers.defaults[band] ?? [];
 								return (
 									<tr key={band} className="border-border border-t">
-										<td className="text-foreground px-3 py-1.5">
-											{bandLabel(band)}
-										</td>
+										<td className="text-foreground px-3 py-1.5">{band}</td>
 										{channelNames.map((c) => (
 											<td key={c} className="px-3 py-1.5">
 												<input
 													type="checkbox"
 													className="border-border h-4 w-4 rounded-sm border"
-													aria-label={`Send ${bandLabel(band)} alerts via ${c}`}
+													aria-label={`Send ${band} alerts via ${c}`}
 													checked={chans.includes(c)}
 													onChange={() =>
 														patch((d) => {
@@ -632,7 +626,7 @@ export function NotificationsSettingsPage() {
 					<LabeledSelect
 						label="Min band"
 						value={cfg.periodic_report.min_band}
-						options={BANDS.map((b) => ({ value: b, label: bandLabel(b) }))}
+						options={BANDS.map((b) => ({ value: b, label: b }))}
 						onChange={(v) =>
 							patch((d) => {
 								d.periodic_report.min_band = v;

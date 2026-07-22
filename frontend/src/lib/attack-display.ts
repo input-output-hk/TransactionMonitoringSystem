@@ -17,7 +17,7 @@ export const SEVERITY_VARIANT: Record<
 	"low" | "medium" | "high" | "critical"
 > = {
 	INFORMATIONAL: "low",
-	MEDIUM: "medium",
+	MODERATE: "medium",
 	HIGH: "high",
 	CRITICAL: "critical",
 };
