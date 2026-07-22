@@ -22,6 +22,20 @@ evaluation:
   precomputed_eps_grid: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
   # Multipliers applied to the k-distance knee to build the Euclidean eps grid.
   eps_multipliers: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+  # Robust Euclidean eps anchors. A heavy (whale) distance tail drags the
+  # KneeLocator knee far above the dense behavioural core, so a knee-only grid
+  # never probes the eps where the main cloud actually splits. Percentiles of
+  # the sorted k-distance curve sample that core directly (they ignore the top
+  # ~1-2% tail by construction); eps_tail_clip_percentile winsorises the tail
+  # before a second, whale-insensitive knee is located.
+  eps_percentiles: [50, 65, 80, 90, 95]
+  eps_tail_clip_percentile: 97.5
+  # A recommended config whose largest single cluster covers at least this
+  # fraction of all points is a degenerate mega-cluster (its silhouette is
+  # inflated by a few far specks). The recommender prefers a non-dominant split
+  # when one exists, and only falls back to such a config for a genuinely
+  # single-mode target (recall-first: never forced to fragment).
+  max_dominant_cluster_ratio: 0.9
   # min_samples heuristics: precomputed default, and the 2*n_features rule
   # clamped to [floor, ceil]; the grid also probes the floor and a capped
   # 2*base bounded by min_samples_grid_cap.
