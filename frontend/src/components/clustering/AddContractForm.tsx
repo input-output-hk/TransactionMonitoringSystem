@@ -162,16 +162,22 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 							<Input
 								id="add-max-txs"
 								type="number"
-								min={0}
+								// N >= 1: the backend requires a positive N (the old "0 = all"
+								// is gone), so the field never offers 0.
+								min={1}
 								// The live read-window ceiling (falls back to the API cap
 								// until config loads), so the field never offers a value
 								// the backend would only clamp back down.
 								max={Math.min(config.data.window_txs, MAX_TXS_CAP)}
 								value={effectiveMaxTxs}
 								disabled={reprocess}
-								onChange={(e) =>
-									setMaxTxs(Math.max(0, Number(e.target.value) || 0))
-								}
+								onChange={(e) => {
+									// A positive number pins this contract's N; clearing the
+									// field (or 0) resets to null = "follow the server default",
+									// so an emptied field can never silently send 0.
+									const n = Number(e.target.value);
+									setMaxTxs(Number.isFinite(n) && n > 0 ? n : null);
+								}}
 							/>
 						</div>
 					)}
@@ -180,7 +186,13 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 							type="checkbox"
 							className="accent-primary h-4 w-4"
 							checked={reprocess}
-							onChange={(e) => setReprocess(e.target.checked)}
+							onChange={(e) => {
+								setReprocess(e.target.checked);
+								// A reprocess must not carry a stale typed N into the
+								// onboard call and clobber the contract's stored window;
+								// drop back to null = "follow the existing/default N".
+								if (e.target.checked) setMaxTxs(null);
+							}}
 						/>
 						Reprocess only
 					</label>

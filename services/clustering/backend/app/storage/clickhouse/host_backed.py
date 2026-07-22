@@ -328,8 +328,12 @@ class HostBackedRepo(ClickHouseRepo):
         published positives is checked -- never a multi-thousand-row window
         materialized into Python."""
         found: set[str] = set()
+        # Resolve the per-contract window ONCE: _scope_params issues a point-read
+        # for target_txs, and target_txs cannot change within a single call, so
+        # re-reading it per chunk would be pure waste. Only the hash list varies
+        # per chunk, so rebind just that.
+        params = self._scope_params(target)
         for chunk in batched(sorted(tx_hashes), self._HOST_MEMBERSHIP_CHUNK, strict=False):
-            params = self._scope_params(target)
             params["hs"] = list(chunk)
             rows = self.client.query(
                 f"SELECT tx_hash FROM {self._hashes_expr()} WHERE tx_hash IN {{hs:Array(String)}}",
