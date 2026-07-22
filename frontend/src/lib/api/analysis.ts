@@ -46,14 +46,14 @@ export type RiskAlertsPage = {
 
 const RISK_BAND_TO_SEVERITY: Record<ApiRiskBand, Severity> = {
 	Informational: "INFORMATIONAL",
-	Moderate: "MEDIUM",
+	Moderate: "MODERATE",
 	High: "HIGH",
 	Critical: "CRITICAL",
 };
 
 const SEVERITY_TO_RISK_BAND: Record<Severity, ApiRiskBand> = {
 	INFORMATIONAL: "Informational",
-	MEDIUM: "Moderate",
+	MODERATE: "Moderate",
 	HIGH: "High",
 	CRITICAL: "Critical",
 };

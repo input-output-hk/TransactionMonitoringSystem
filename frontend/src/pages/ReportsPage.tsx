@@ -62,7 +62,7 @@ export function ReportsPage() {
 	const severityFilter = qpEnum<string>(
 		searchParams,
 		"severity",
-		["all", "INFORMATIONAL", "MEDIUM", "HIGH", "CRITICAL"],
+		["all", "INFORMATIONAL", "MODERATE", "HIGH", "CRITICAL"],
 		"all",
 	);
 	const sortBy = qpEnum(searchParams, "sort", ["date", "score"] as const, "date");
@@ -225,7 +225,7 @@ export function ReportsPage() {
 						<SelectContent>
 							<SelectItem value="all">All</SelectItem>
 							<SelectItem value="INFORMATIONAL">Informational</SelectItem>
-							<SelectItem value="MEDIUM">Medium</SelectItem>
+							<SelectItem value="MODERATE">Moderate</SelectItem>
 							<SelectItem value="HIGH">High</SelectItem>
 							<SelectItem value="CRITICAL">Critical</SelectItem>
 						</SelectContent>

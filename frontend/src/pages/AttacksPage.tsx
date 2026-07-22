@@ -53,7 +53,7 @@ export function AttacksPage() {
 	// Multi-select: empty array means "no severity filter applied".
 	// Default to High + Critical so the dashboard opens focused on the
 	// actionable alerts. Order matches the MultiSelect option order
-	// (LOW → MEDIUM → HIGH → CRITICAL) so the first user toggle doesn't
+	// (INFORMATIONAL → MODERATE → HIGH → CRITICAL) so the first user toggle doesn't
 	// cause a no-op reorder → cache miss in React Query.
 	const [severities, setSeverities] = useState<Severity[]>([
 		"HIGH",
@@ -161,7 +161,7 @@ export function AttacksPage() {
 						<MultiSelect<Severity>
 							options={[
 								{ value: "INFORMATIONAL", label: "Informational" },
-								{ value: "MEDIUM", label: "Medium" },
+								{ value: "MODERATE", label: "Moderate" },
 								{ value: "HIGH", label: "High" },
 								{ value: "CRITICAL", label: "Critical" },
 							]}
