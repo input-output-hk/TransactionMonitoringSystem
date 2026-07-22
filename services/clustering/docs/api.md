@@ -170,6 +170,8 @@ an external provider.)
 | GET | `/api/runs/{run_id}/graph?limit=&cluster=` | Node/edge payload for the network view (capped, clustered‑first); each node carries `verdict`. |
 | POST | `/api/runs/{run_id}/clusters/{cluster_id}/label` | Apply a manual verdict to a cluster's members. Body: `{verdict: "malicious"\|"benign", note?}`. **404** unknown run, **422** bad verdict or noise bucket (`-1`). |
 | POST | `/api/runs/{run_id}/clusters/{cluster_id}/clear-label` | Remove the manual verdict from a cluster's members. |
+| POST | `/api/contracts/{target}/transactions/{tx_hash}/label` | Apply a manual verdict to a single transaction. Body: `{verdict: "malicious"\|"benign", note?}`. Unlike a cluster label it does NOT propagate. **422** bad verdict. |
+| POST | `/api/contracts/{target}/transactions/{tx_hash}/clear-label` | Remove a single transaction's manual label. |
 | DELETE | `/api/runs/{run_id}` | Delete a user‑created (custom) cluster run and its per‑tx cluster labels. **404** if unknown; **403** if the run is system‑generated (canonical, drives scoring). The target‑scoped `tx_labels` verdicts are unaffected. Returns `{"deleted": true, "run_id": "..."}`. |
 
 ### Verdict fields

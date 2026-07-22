@@ -91,6 +91,37 @@ In the Anomalies table:
 Scores rank transactions **within a run**; they are not absolute thresholds, and
 statistically unusual does not mean malicious.
 
+## Escalating a finding: from review to the Attacks page
+
+Clustering and anomaly detection are for review; on their own they never raise a
+canonical alert. The way you turn a reviewed finding into an alert on the main
+Attacks page is to **label it**:
+
+- Labeling a transaction or a cluster **malicious** publishes those transactions to
+  the Attacks page as the `contract_anomaly` attack class, and can fire a
+  notification. This is the intended path for promoting a finding: a human confirms
+  it, then it becomes a canonical alert.
+- Labeling **benign** does the opposite: it clears the transaction, suppressing any
+  anomaly signal so it does not surface.
+
+A label is a per-transaction human judgement stored against the transaction itself,
+not against a run. So it works the same whether you were viewing the System run or
+one of your own Custom runs: if you spot a real attack while exploring a custom pass,
+labeling it malicious still escalates it.
+
+There are two ways to flag, differing only in scope:
+
+- A **cluster label** applies your verdict to every current member of the cluster,
+  and it **propagates**: transactions that later cluster alongside a labeled one
+  inherit the verdict. Use it when the whole group shares a judgement. The noise
+  bucket cannot be cluster-labeled (its points share no pattern).
+- A **single-transaction label** colours only that one transaction and does **not**
+  propagate. Use it for an individual judgement, for example a noise-bucket outlier
+  that belongs to no cluster.
+
+Malicious labels reach the Attacks page regardless of which run surfaced the
+transaction; only the automatic verdicts are run-scoped (see the next section).
+
 ## Custom runs vs the canonical System run
 
 Every validator has a **System** run: the automatically tuned run that drives
@@ -99,12 +130,16 @@ anomaly scoring" you create a separate **Custom** run:
 
 - A custom run is an experiment. It is kept separate, badged Custom, and can be
   deleted freely.
-- A custom run **never** replaces the System run or changes scoring. The online
-  model always fits from the System run only.
+- A custom run's **automatic** output never feeds scoring or the Attacks page. The
+  online model always fits from the System run only, and only the System run's
+  auto-verdicts are published as `contract_anomaly` alerts. To send a finding from a
+  custom run to the Attacks page, label it malicious (see [Escalating a
+  finding](#escalating-a-finding-from-review-to-the-attacks-page)): that is an
+  explicit human judgement, not the run's automatic output.
 
 Because custom runs are safe and disposable, use them freely to explore alternative
-parameters or feature sets; just remember their results are yours to interpret, not
-a change to the validator's canonical assessment.
+parameters or feature sets; just remember their automatic results are yours to
+interpret, not a change to the validator's canonical assessment.
 
 ## Choosing DBSCAN parameters
 

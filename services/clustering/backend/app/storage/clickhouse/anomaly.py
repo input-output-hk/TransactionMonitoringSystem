@@ -71,6 +71,23 @@ class _AnomalyMixin(_RepoBase):
         ).result_rows
         return str(rows[0][0]) if rows else None
 
+    def latest_canonical_anomaly_run(self, target: str, feature_set: str) -> str | None:
+        """run_id of the most recent *system-tuned* (canonical) anomaly run for a
+        (target, feature_set), or None when only user-supplied custom runs exist.
+        The host publish path pairs this with the cluster-side ``latest_canonical_run``
+        so a Custom run's auto-anomaly verdicts can never reach the host
+        ``contract_anomaly`` feed (mirror of ``latest_canonical_run``)."""
+        # created_at DESC, run_id DESC: same deterministic tiebreaker as the
+        # cluster-side latest_canonical_run, so the paired canonical lookups pick
+        # sibling runs deterministically when two share a created_at second.
+        rows = self.client.query(
+            f"SELECT run_id FROM {self._db}.anomaly_runs FINAL "
+            "WHERE target = {t:String} AND feature_set = {fs:String} "
+            "AND origin = 'system' ORDER BY created_at DESC, run_id DESC LIMIT 1",
+            parameters={"t": target, "fs": feature_set},
+        ).result_rows
+        return str(rows[0][0]) if rows else None
+
     def save_anomaly_run(self, run: dict[str, Any]) -> None:
         cols = [
             "run_id",

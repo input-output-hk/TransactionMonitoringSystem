@@ -267,6 +267,16 @@ def test_latest_anomaly_run_returns_id_or_none() -> None:
     assert empty.latest_anomaly_run("addr", "shape") is None
 
 
+def test_latest_canonical_anomaly_run_filters_to_system_origin() -> None:
+    # The host publish path uses this so a user's Custom anomaly run never feeds the
+    # contract_anomaly feed; it must restrict to origin='system'.
+    repo, fake = _repo([("anomaly-shape-sys",)])
+    assert repo.latest_canonical_anomaly_run("addr", "shape") == "anomaly-shape-sys"
+    assert "origin = 'system'" in fake.queries[-1]
+    empty, _ = _repo([])
+    assert empty.latest_canonical_anomaly_run("addr", "shape") is None
+
+
 def test_cluster_member_hashes_maps_list() -> None:
     repo, _ = _repo([("aa",), ("bb",)])
     assert repo.cluster_member_hashes("run1", 0) == ["aa", "bb"]

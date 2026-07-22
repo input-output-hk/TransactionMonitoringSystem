@@ -118,15 +118,23 @@ def _anomaly_votes(
 
 
 def _run_membership(
-    repo: Repo, target: str, feature_set: str, *, near: str | None = None
+    repo: Repo, target: str, feature_set: str, *, near: str | None = None, canonical: bool = False
 ) -> tuple[dict[str, int], dict[str, Any] | None]:
     """Base tx→cluster membership for inheritance: the latest cluster run's labels,
     plus the run row itself (callers need its ``created_at`` to pair the anomaly run).
-    ``near`` picks the run closest in time — its pipeline sibling — rather than the
+    ``near`` picks the run closest in time, its pipeline sibling, rather than the
     newest. Both are ``{}``/``None`` when the target has no cluster run for this feature
     set; inheritance then degrades to explicit labels only (still correct, since
-    labelling a cluster writes explicit per-tx labels on every member)."""
-    run = repo.latest_cluster_run(target, feature_set, near=near)
+    labelling a cluster writes explicit per-tx labels on every member).
+
+    ``canonical=True`` resolves the System (canonical) run instead of the latest of any
+    origin, and ignores ``near``: the host publish path uses it so a user's Custom run
+    can never feed the host ``contract_anomaly`` feed. UI reads keep the default."""
+    run = (
+        repo.latest_canonical_run(target, feature_set)
+        if canonical
+        else repo.latest_cluster_run(target, feature_set, near=near)
+    )
     cluster_of = dict(repo.run_tx_labels(run["run_id"])) if run else {}
     return cluster_of, run
 

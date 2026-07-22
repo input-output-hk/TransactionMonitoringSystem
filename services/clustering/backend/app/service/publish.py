@@ -47,7 +47,6 @@ from app.service.verdicts import (
     VERDICT_ANOMALY,
     VERDICT_MALICIOUS,
     VERDICT_NORMAL,
-    _anomaly_votes,
     _resolve_verdicts,
     _run_membership,
 )
@@ -151,19 +150,33 @@ def _publish_batch(
     feature_set: str,
     published_at: datetime,
 ) -> set[str]:
-    """Resolve and publish the latest batch fit's flagged verdicts. Returns the
-    set of tx_hashes published (empty if the target has no cluster run yet).
+    """Resolve and publish the canonical (System) batch fit's flagged verdicts.
+    Returns the set of tx_hashes published (empty if the target has no System run
+    yet; Custom runs never publish automatically).
 
     Resolution is label-aware (``_resolve_verdicts`` folds in the target's manual
     labels), so a tx whose cluster was labeled benign resolves to ``benign`` and
     is excluded here, which lets the reconciliation step retract any stale row.
     ``published_at`` is the reconciliation version stamped on every row (see the
     table doc); ``scored_at`` stays the source run time."""
-    cluster_of, run = _run_membership(repo, target, feature_set)
+    # Canonical (System) run only: a user's Custom cluster/anomaly run must never
+    # feed the host contract_anomaly attack feed (see docs/CLUSTERING.md). The
+    # canonical cluster run and canonical anomaly run are the sibling pair produced
+    # by the same pipeline pass, so no time-`near` pairing is needed here.
+    cluster_of, run = _run_membership(repo, target, feature_set, canonical=True)
     if not run or not cluster_of:
+        # No canonical run yet. The target may still have Custom runs (analyst
+        # experiments) or be mid-onboarding; their automatic verdicts deliberately
+        # do not publish. Manual malicious labels still publish via _publish_labels,
+        # and the drill-down UI still shows the custom run. Onboarding fits a System
+        # run first (pipeline.py), so a published target normally has one.
+        logger.debug("no canonical cluster run for %s; skipping batch publish", target[:24])
         return set()
-    near = run["created_at"]
-    votes = _anomaly_votes(repo, target, feature_set, near=near)
+    # No canonical anomaly run yet means empty votes: expected, not a bug. The batch
+    # then flags only label-derived verdicts, and process_contract always creates the
+    # sibling anomaly run alongside the cluster run, so this is transient at most.
+    anomaly_run_id = repo.latest_canonical_anomaly_run(target, feature_set)
+    votes = repo.anomaly_votes_for_run(anomaly_run_id) if anomaly_run_id else {}
     tx_verdict, _ = _resolve_verdicts(repo, target, cluster_of, votes)
     flagged = {tx: v for tx, v in tx_verdict.items() if v in _PUBLISHED}
     kept = _host_known_only(repo, target, set(flagged))
@@ -171,7 +184,6 @@ def _publish_batch(
     if not flagged:
         return set()
 
-    anomaly_run_id = repo.latest_anomaly_run(target, feature_set, near=near)
     scores: dict[str, tuple[float, float, float]] = {}
     if anomaly_run_id:
         db = repo._db  # type: ignore[attr-defined]
@@ -182,7 +194,7 @@ def _publish_batch(
         ).result_rows:
             scores[str(r[0])] = (float(r[1]), float(r[2]), float(r[3]))
 
-    stamp = _as_datetime(near)
+    stamp = _as_datetime(run["created_at"])
     model_id = anomaly_run_id or run["run_id"]
     rows = []
     for tx, verdict in flagged.items():
