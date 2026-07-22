@@ -2,8 +2,8 @@
 
 Covers the shared clamp (Settings.effective_window_txs), the repo binding that
 turns it into the read LIMIT (_scope_params), and the backfill's window-full
-skip gate reading the SAME per-contract N. Together these keep one number — the
-N the operator picked — governing the fit population, the card's tx_count and
+skip gate reading the SAME per-contract N. Together these keep one number, the
+N the operator picked, governing the fit population, the card's tx_count and
 the point past which older history is not worth fetching, so they cannot drift.
 """
 
@@ -13,6 +13,7 @@ import pytest
 
 from app.config import Settings
 from app.storage.clickhouse.host_backed import HostBackedRepo
+from app.storage.clickhouse.hybrid import HybridHistoryRepo
 from tests.test_hybrid_repo import FakeClient
 
 # A ceiling comfortably above the default floor (200) so both clamps are visible.
@@ -33,7 +34,7 @@ def _settings() -> Settings:
 
 def test_effective_window_uses_named_n_within_range() -> None:
     # The common case: an operator's N between the floor and the ceiling is used
-    # verbatim — this is the number the fit, the count and the gate all see.
+    # verbatim: this is the number the fit, the count and the gate all see.
     assert _settings().effective_window_txs(1_000) == 1_000
 
 
@@ -64,7 +65,7 @@ def test_effective_window_ceiling_zero_is_unbounded() -> None:
 
 def test_effective_window_floor_never_exceeds_ceiling() -> None:
     # A ceiling below the floor (misconfig / tiny test window) must not return a
-    # LIMIT above the ceiling — the floor is itself clamped to the ceiling.
+    # LIMIT above the ceiling; the floor is itself clamped to the ceiling.
     tiny = Settings(
         CHAIN_SOURCE="host_ch", CLUSTERING_WINDOW_TXS=100, CLUSTERING_MIN_TARGET_TXS=200
     )
@@ -77,15 +78,15 @@ def test_effective_window_floor_never_exceeds_ceiling() -> None:
 
 def test_scope_params_binds_the_per_contract_window(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = HostBackedRepo(_settings(), client=FakeClient())
-    monkeypatch.setattr(repo, "_target_requested_max_txs", lambda _t: 1_000)
+    monkeypatch.setattr(repo, "_target_txs", lambda _t: 1_000)
     assert repo._scope_params("addr1demo")["lim"] == 1_000
     # floor + ceiling clamps flow through the same binding
-    monkeypatch.setattr(repo, "_target_requested_max_txs", lambda _t: 10)
+    monkeypatch.setattr(repo, "_target_txs", lambda _t: 10)
     assert repo._scope_params("addr1demo")["lim"] == _FLOOR
-    monkeypatch.setattr(repo, "_target_requested_max_txs", lambda _t: 999_999)
+    monkeypatch.setattr(repo, "_target_txs", lambda _t: 999_999)
     assert repo._scope_params("addr1demo")["lim"] == _WINDOW_CEILING
     # unknown/unset target -> ceiling (pre-per-contract behavior preserved)
-    monkeypatch.setattr(repo, "_target_requested_max_txs", lambda _t: 0)
+    monkeypatch.setattr(repo, "_target_txs", lambda _t: 0)
     assert repo._scope_params("addr1demo")["lim"] == _WINDOW_CEILING
 
 
@@ -93,5 +94,16 @@ def test_scope_params_omits_lim_when_window_unbounded(monkeypatch: pytest.Monkey
     repo = HostBackedRepo(
         Settings(CHAIN_SOURCE="host_ch", CLUSTERING_WINDOW_TXS=0), client=FakeClient()
     )
-    monkeypatch.setattr(repo, "_target_requested_max_txs", lambda _t: 1_000)
+    monkeypatch.setattr(repo, "_target_txs", lambda _t: 1_000)
     assert "lim" not in repo._scope_params("addr1demo")
+
+
+def test_hybrid_repo_binds_a_distinct_per_contract_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The hybrid (host+local history) repo inherits the per-contract binding, so
+    # its host-UNION-local window LIMIT must reflect the contract's own N. A
+    # value strictly between the floor and the ceiling proves the read is bound
+    # to THIS contract's N, not a floor/ceiling coincidence.
+    repo = HybridHistoryRepo(_settings(), client=FakeClient())
+    monkeypatch.setattr(repo, "_target_txs", lambda _t: 1_000)
+    assert repo._scope_params("addr1demo")["lim"] == 1_000
+    assert "LIMIT {lim:UInt64}" in repo._hashes_expr()  # the union window applies it

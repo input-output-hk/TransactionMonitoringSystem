@@ -100,9 +100,9 @@ def test_count_transactions_spans_the_union() -> None:
     repo, fake = _repo(query_rows=[(7,)])
     assert repo.count_transactions("addr1demo") == 7
     # count_transactions first resolves this contract's window (a point-read on
-    # the contracts registry) and then counts over the host+local union.
-    reqmax_sql, _ = fake.queries[0]
-    assert "requested_max_txs FROM tms_clustering.contracts" in reqmax_sql
+    # the contracts registry's target_txs) and then counts over the host+local union.
+    win_sql, _ = fake.queries[0]
+    assert "target_txs FROM tms_clustering.contracts" in win_sql
     sql, params = fake.queries[-1]
     assert "tms_analytics.address_transactions" in sql
     assert "tms_clustering.transactions FINAL" in sql

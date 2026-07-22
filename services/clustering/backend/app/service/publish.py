@@ -337,6 +337,17 @@ def _retract_stale(
         ).result_rows
     }
     stale = current - keep
+    # Recall guard: a previously-published positive that has aged out of the
+    # rolling window was NOT re-scored this pass, so its verdict must stand --
+    # retract only txs still INSIDE the window (re-evaluated and no longer
+    # flagged, or cleared by a benign label, both of which keep them in-window).
+    # Without this, advancing/narrowing the latest-N window would tombstone real,
+    # already-alerted attacks purely because they scrolled past the boundary
+    # (recall first). Host-backed/hybrid repos expose windowed_members; the
+    # standalone base repo has no rolling window, so it retracts as before.
+    windowed_members = getattr(repo, "windowed_members", None)
+    if windowed_members is not None and stale:
+        stale = windowed_members(target, stale)
     if not stale:
         return 0
     rows = [

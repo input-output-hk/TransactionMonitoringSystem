@@ -153,21 +153,21 @@ def test_boundary_defers_when_younger_than_safety_window(
 
 
 class _RecordingRepo(FakeRepoBase):
-    def __init__(self, cursor: dict[str, Any] | None = None, requested_max_txs: int = 0) -> None:
+    def __init__(self, cursor: dict[str, Any] | None = None, target_txs: int = 0) -> None:
         self.txs: list[Any] = []
         self.utxos: list[Any] = []
         self.assets: list[Any] = []
         self.cursors: list[dict[str, Any]] = []
         self._cursor = cursor
         # The per-contract "latest N to cluster on" the window-full skip gate
-        # reads back via get_contract. 0 (default) resolves to the window
-        # ceiling in effective_window_txs, i.e. the pre-per-contract skip
-        # threshold — so tests that do not exercise a specific N keep their
-        # original behavior unchanged.
-        self._requested_max_txs = requested_max_txs
+        # reads back via get_contract (the target_txs column). 0 (default)
+        # resolves to the window ceiling in effective_window_txs, i.e. the
+        # pre-per-contract skip threshold, so tests that do not exercise a
+        # specific N keep their original behavior unchanged.
+        self._target_txs = target_txs
 
     def get_contract(self, target: str) -> dict[str, Any] | None:
-        return {"requested_max_txs": self._requested_max_txs}
+        return {"target_txs": self._target_txs}
 
     def insert_transactions(self, rows: list[Any]) -> None:
         self.txs.extend(rows)
@@ -366,7 +366,7 @@ async def test_window_full_gate_fires_at_the_per_contract_n(
     # on", not the global ceiling: a contract with N=1000 whose host rows already
     # reach 1000 skips the top-up (older history would sit past its LIMIT), even
     # though the host count is far below the 50k ceiling the old gate used.
-    repo = _RecordingRepo(requested_max_txs=1_000)
+    repo = _RecordingRepo(target_txs=1_000)
     _patch_repo(monkeypatch, repo)
     at_n = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=1_000)
     _patch_boundary(monkeypatch, at_n)
@@ -390,7 +390,7 @@ async def test_thin_contract_below_its_n_still_backfills(
     # gate must not starve a contract that has not yet reached its own N. (The old
     # gate, keyed on the 50k ceiling, would also have backfilled here; this pins
     # that the per-contract gate keeps doing so.)
-    repo = _RecordingRepo(requested_max_txs=1_000)
+    repo = _RecordingRepo(target_txs=1_000)
     _patch_repo(monkeypatch, repo)
     thin = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=500)
     _patch_boundary(monkeypatch, thin)

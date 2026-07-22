@@ -163,6 +163,7 @@ def _contract_row(**over: Any) -> dict[str, Any]:
         "sample_tokens": "[]",
         "status": "done",
         "requested_max_txs": 0,
+        "target_txs": 0,
         "updated_at": "2026-01-01 00:00:00.000000",
         "tx_count": 0,
         "drift_score": 0.0,
@@ -577,9 +578,10 @@ def test_create_contract_enqueues_job() -> None:
 
 
 def test_create_contract_defaults_target_txs_when_unspecified() -> None:
-    # An onboard that names no N gets the server's configured default "latest N
-    # to cluster on" (not 0/unbounded), so a bare API call and the UI agree — and
-    # it reaches both the contract row and the job.
+    # A brand-new onboard that names no N gets the server's configured default
+    # "latest N to cluster on" (not 0/unbounded), reaching BOTH columns
+    # (target_txs = the read window, requested_max_txs = the backfill target) and
+    # the job.
     from app.config import get_settings
 
     default_n = get_settings().clustering_default_target_txs
@@ -587,7 +589,8 @@ def test_create_contract_defaults_target_txs_when_unspecified() -> None:
     client = _client(repo)
     r = client.post("/api/contracts", json={"target": "addr1qxyztest0001"})
     assert r.status_code == 200
-    assert repo.saved_contracts[0]["requested_max_txs"] == default_n
+    saved = repo.saved_contracts[0]
+    assert saved["target_txs"] == default_n and saved["requested_max_txs"] == default_n
     assert repo.created_jobs[0][3] == default_n  # create_job(job_id, target, type, N, reprocess)
 
 
@@ -595,19 +598,40 @@ def test_create_contract_uses_explicit_target_txs() -> None:
     repo = FakeApiRepo()
     client = _client(repo)
     client.post("/api/contracts", json={"target": "addr1qxyztest0001", "max_txs": 1_000})
-    assert repo.saved_contracts[0]["requested_max_txs"] == 1_000
+    saved = repo.saved_contracts[0]
+    assert saved["target_txs"] == 1_000 and saved["requested_max_txs"] == 1_000
     assert repo.created_jobs[0][3] == 1_000
 
 
 def test_create_contract_inherits_existing_n_when_unspecified() -> None:
-    # Re-adding without an N keeps the contract's current N rather than resetting
-    # it to the default (mirrors the display-name preservation above).
-    repo = FakeApiRepo(
-        contracts=[_contract_row(target="addr1qxyztest0001", requested_max_txs=1_500)]
-    )
+    # Re-adding without an N keeps the contract's current N (target_txs) rather
+    # than resetting it to the default (mirrors the display-name preservation).
+    repo = FakeApiRepo(contracts=[_contract_row(target="addr1qxyztest0001", target_txs=1_500)])
     client = _client(repo)
     client.post("/api/contracts", json={"target": "addr1qxyztest0001"})
-    assert repo.saved_contracts[0]["requested_max_txs"] == 1_500
+    assert repo.saved_contracts[0]["target_txs"] == 1_500
+
+
+def test_create_contract_bare_readd_of_legacy_row_preserves_ceiling_window() -> None:
+    # Recall guard (the review's critical finding): a legacy contract carries
+    # target_txs=0, which resolves to the 50k ceiling window. A bare re-add /
+    # reprocess (no explicit N) must inherit that 0 VERBATIM and NOT fall through
+    # to the default, or the fit population would silently shrink from ~50k to the
+    # default on a routine re-analyze.
+    repo = FakeApiRepo(contracts=[_contract_row(target="addr1qxyztest0001", target_txs=0)])
+    client = _client(repo)
+    client.post("/api/contracts", json={"target": "addr1qxyztest0001", "reprocess": True})
+    saved = repo.saved_contracts[0]
+    assert saved["target_txs"] == 0  # preserved -> effective_window_txs(0) = ceiling
+
+
+def test_create_contract_explicit_lower_n_overrides_existing() -> None:
+    # An explicit smaller N wins over the contract's larger stored N (the operator
+    # deliberately narrows the window).
+    repo = FakeApiRepo(contracts=[_contract_row(target="addr1qxyztest0001", target_txs=30_000)])
+    client = _client(repo)
+    client.post("/api/contracts", json={"target": "addr1qxyztest0001", "max_txs": 1_000})
+    assert repo.saved_contracts[0]["target_txs"] == 1_000
 
 
 def test_create_contract_persists_display_name() -> None:

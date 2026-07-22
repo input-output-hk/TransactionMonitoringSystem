@@ -51,6 +51,7 @@ async def process_contract(
         "target": target,
         "target_type": target_type,
         "requested_max_txs": max_txs or 0,
+        "target_txs": max_txs or 0,
         "status": "pending",
     }
 
@@ -71,12 +72,16 @@ async def process_contract(
             existing = repo.get_contract(target)
             preset = (existing or {}).get("label") or ""
             meta["label"] = preset or lookup_label(target, target_type)
-            # The feed's refit jobs carry max_txs=0; without this line a refit
-            # would clobber the persisted per-contract cap (the history stage's
-            # depth) back to 0, the same way `label` is preserved above.
+            # The feed's refit jobs carry max_txs=0; without these lines a refit
+            # would clobber the persisted per-contract backfill depth AND the
+            # read/fit window back to 0, the same way `label` is preserved above.
+            # Preserving target_txs is what keeps a refit from silently widening a
+            # deliberately-narrowed window (or, for a legacy 0-row, from being a
+            # no-op that leaves the ceiling intact).
             contract["requested_max_txs"] = max_txs or int(
                 (existing or {}).get("requested_max_txs") or 0
             )
+            contract["target_txs"] = max_txs or int((existing or {}).get("target_txs") or 0)
             contract.update(meta)
             contract["status"] = "processing"
             repo.save_contract(contract)

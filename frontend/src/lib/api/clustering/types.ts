@@ -20,7 +20,9 @@ export const FEATURE_SETS: FeatureSet[] = ["shape", "graph", "combined"];
  *  "latest N" control when not host-backed, or when `history_source` is set (a
  *  secondary pre-deployment history source that tops the window up); a plain
  *  host-backed source without one hides it. `default_target_txs` is absent on
- *  not-yet-upgraded sidecars; the form falls back to `window_txs` then. */
+ *  not-yet-upgraded sidecars; the form falls back to its own built-in default
+ *  constant then (it never sends an unedited value, so the exact fallback only
+ *  affects the pre-fill display). */
 export type ClusteringConfig = {
 	host_backed: boolean;
 	window_txs: number;

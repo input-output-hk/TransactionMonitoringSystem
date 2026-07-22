@@ -86,13 +86,18 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 			{
 				target: t,
 				label: displayName.trim() || undefined,
-				// The per-contract "latest N to cluster on", clamped to the API
-				// cap. Send it only once config confirms the control is meaningful
-				// (a plain host-backed source without a history source ignores it;
-				// an unknown loading/errored config sends nothing). A 0 is treated
-				// as "unset" and omitted, so the backend applies its default.
-				...(config.data && showMaxTxs && effectiveMaxTxs > 0
-					? { max_txs: Math.min(effectiveMaxTxs, MAX_TXS_CAP) }
+				// Send the per-contract "latest N to cluster on" ONLY when the
+				// operator actually typed a value (maxTxs !== null). An untouched
+				// form omits it so the backend can apply the right N itself: the
+				// server default for a brand-new contract, or the contract's
+				// EXISTING N on a re-add / reprocess. Sending the prefilled default
+				// unconditionally would clobber a re-analyzed contract's stored
+				// window (a recall regression). Gated on config confirming the
+				// control is meaningful (a plain host-backed source without a
+				// history source ignores it; a loading/errored config sends
+				// nothing). Clamped to the API cap defensively.
+				...(config.data && showMaxTxs && maxTxs !== null && maxTxs > 0
+					? { max_txs: Math.min(maxTxs, MAX_TXS_CAP) }
 					: {}),
 				...(reprocess ? { reprocess: true } : {}),
 			},
@@ -152,15 +157,16 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 					{config.data && showMaxTxs && (
 						<div className="w-44 space-y-1.5">
 							<Label htmlFor="add-max-txs">
-								{hostBacked
-									? "Latest txs to cluster on"
-									: `Max txs ${effectiveMaxTxs === 0 ? "(0 = all)" : ""}`}
+								{hostBacked ? "Latest txs to cluster on" : "Max txs"}
 							</Label>
 							<Input
 								id="add-max-txs"
 								type="number"
 								min={0}
-								max={MAX_TXS_CAP}
+								// The live read-window ceiling (falls back to the API cap
+								// until config loads), so the field never offers a value
+								// the backend would only clamp back down.
+								max={Math.min(config.data.window_txs, MAX_TXS_CAP)}
 								value={effectiveMaxTxs}
 								disabled={reprocess}
 								onChange={(e) =>
@@ -192,20 +198,17 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 						{hostBacked ? (
 							<>
 								Clusters and anomaly-scores this contract over its most recent{" "}
-								{historySource ? effectiveMaxTxs.toLocaleString() : "N"}{" "}
-								transactions. These come from what the host already monitors
-								on-chain
 								{historySource
-									? `, topped up from the ${historySource} history source when the host holds fewer, so a freshly onboarded contract still fits on the latest ${effectiveMaxTxs.toLocaleString()}. Capped at ${config.data.window_txs.toLocaleString()}.`
-									: ` (the most recent ${config.data.window_txs.toLocaleString()}, the rolling fit window).`}{" "}
+									? `${effectiveMaxTxs.toLocaleString()} transactions: what the host already monitors on-chain, topped up from the ${historySource} history source when the host holds fewer, so a freshly onboarded contract still fits on the latest ${effectiveMaxTxs.toLocaleString()} (capped at ${config.data.window_txs.toLocaleString()}).`
+									: `${config.data.window_txs.toLocaleString()} transactions already monitored on-chain (the rolling fit window).`}{" "}
 								Onboarding runs in the background; the card below tracks
 								progress.
 							</>
 						) : (
 							<>
-								Downloads the most recent N transactions (0 = all history), then
-								clusters and anomaly-scores them. Onboarding runs in the
-								background; the card below tracks progress.
+								Downloads the most recent {effectiveMaxTxs.toLocaleString()}{" "}
+								transactions, then clusters and anomaly-scores them. Onboarding
+								runs in the background; the card below tracks progress.
 							</>
 						)}
 					</p>

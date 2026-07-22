@@ -574,6 +574,7 @@ def test_list_contracts_maps_rows() -> None:
                 '[{"name":"A"}]',
                 "done",
                 500,
+                1_000,
                 "2026-06-05 10:00:00.000",
                 10,
                 0.42,
@@ -582,6 +583,7 @@ def test_list_contracts_maps_rows() -> None:
     )
     rows = repo.list_contracts()
     assert rows[0]["exists"] == 1  # from present column
+    assert rows[0]["requested_max_txs"] == 500 and rows[0]["target_txs"] == 1_000
     assert rows[0]["script_type"] == "plutusV2"
     assert rows[0]["balance_lovelace"] == 5_000_000
     assert rows[0]["tx_count"] == 10  # live count from join

@@ -150,7 +150,7 @@ class Settings(BaseSettings):
     clustering_window_txs: int = Field(default=50_000, alias="CLUSTERING_WINDOW_TXS")
     # Recall floor on the per-contract "latest N": an operator's N is clamped UP
     # to at least this many transactions before it bounds the fit. The detectors
-    # need a baseline to call an outlier against — LOF reads a fixed
+    # need a baseline to call an outlier against: LOF reads a fixed
     # anomaly.lof_neighbors (20) neighborhood and DBSCAN a min_samples grid, so
     # below a few multiples of those a genuine anomaly hides in a too-thin sample
     # instead of standing out (recall first: when N is uncertain, keep MORE
@@ -160,9 +160,11 @@ class Settings(BaseSettings):
     # The "latest N to cluster on" a contract is onboarded with when the operator
     # names no explicit N (the API/UI onboard path; the feed's refit jobs carry 0
     # and preserve the persisted value instead). Applied server-side so every
-    # onboard client defaults the same way. Sits at the backfill ceiling
-    # (history_max_txs_ceiling) so a fresh contract can fully populate its window
-    # from the history source; keep the two in step if you retune either.
+    # onboard client defaults the same way. The default equals history_max_txs_ceiling
+    # so a fresh contract's whole window is backfillable in one pass, but the two
+    # are INDEPENDENT knobs, not a coupled pair: a default above the backfill
+    # ceiling is valid and simply means a fresh contract's window fills partly
+    # from live host tip-forward data rather than entirely from the history walk.
     clustering_default_target_txs: int = Field(
         default=5_000, ge=1, alias="CLUSTERING_DEFAULT_TARGET_TXS"
     )

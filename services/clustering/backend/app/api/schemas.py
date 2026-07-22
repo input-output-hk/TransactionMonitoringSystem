@@ -91,9 +91,13 @@ class AnomalyRequest(BaseModel):
     top_quantile: float = Field(default=DEFAULT_TOP_QUANTILE, gt=0, lt=1)
 
 
-# Upper bound on a contract's "latest N to cluster on", matching the read-window
-# ceiling (CLUSTERING_WINDOW_TXS): one call can't request an unbounded fit
-# population (paid-quota / DoS + memory guard). None → the server default.
+# Static upper bound on a contract's "latest N to cluster on" (a Pydantic `le=`
+# bound must be a literal, so it cannot read the live setting): one call can't
+# request an unbounded fit population (paid-quota / DoS + memory guard). The
+# ACTUAL per-deployment ceiling is CLUSTERING_WINDOW_TXS, which the onboard
+# router clamps the stored N down to; this literal must stay >= the largest
+# CLUSTERING_WINDOW_TXS any deployment sets, or the schema would 422 a value the
+# ceiling would otherwise allow. Default 50_000 matches the default ceiling.
 MAX_TXS_CAP = 50_000
 
 
@@ -203,7 +207,10 @@ class ContractOut(BaseModel):
     asset_count: int
     sample_tokens: str  # JSON-encoded [{unit, policy_id, name}]
     status: str
+    # requested_max_txs: the backfill DOWNLOAD depth. target_txs: the "latest N
+    # to cluster on" read/fit/count window (0 = unset -> the window ceiling).
     requested_max_txs: int
+    target_txs: int = 0
     updated_at: UtcIsoStr
     tx_count: int
     # Trailing online-noise rate written by the incremental classifier; 0 until a

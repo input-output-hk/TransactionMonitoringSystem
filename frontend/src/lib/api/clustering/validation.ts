@@ -136,8 +136,8 @@ export const validateConfig: Validator<ClusteringConfig> = (raw) => {
 			'field "window_txs" is not a finite number',
 		);
 	// default_target_txs is optional (absent on not-yet-upgraded sidecars); when
-	// present it must be a finite number — the form pre-fills the "latest N" input
-	// with it.
+	// present it must be a finite number (the form pre-fills the "latest N" input
+	// with it).
 	if (
 		raw.default_target_txs !== undefined &&
 		(typeof raw.default_target_txs !== "number" ||
