@@ -47,27 +47,38 @@ class _AnomalyMixin(_RepoBase):
 
         Cluster and anomaly runs are separate run_ids produced together by
         ``process_contract``. With ``near`` (a cluster run's ``created_at``) we pick
-        the anomaly run closest in time — i.e. the one produced alongside that
-        cluster run — so viewing an older cluster run doesn't pull votes from a
-        later manual anomaly run. Without it we fall back to the most recent."""
-        where = "WHERE target = {t:String} AND feature_set = {fs:String}"
-        params: dict[str, Any] = {"t": target, "fs": feature_set}
-        if near:
-            # created_at is second-precision DateTime; pick the run closest in time
-            # to the cluster run (its sibling). parseDateTimeBestEffort tolerates the
-            # stringified timestamp format regardless of fractional seconds. The
-            # secondary created_at DESC makes equidistant ties (two runs the same
-            # number of seconds away) deterministic — newest wins.
-            order = (
-                "ORDER BY abs(dateDiff('second', created_at, "
-                "parseDateTimeBestEffort({near:String}))) ASC, created_at DESC"
-            )
-            params["near"] = near
-        else:
-            order = "ORDER BY created_at DESC"
+        the anomaly run closest in time, i.e. the one produced alongside that cluster
+        run, so viewing an older cluster run doesn't pull votes from a later manual
+        anomaly run. Without it we fall back to the most recent of any origin."""
+        if near is None:
+            return self._latest_anomaly_run_id(target, feature_set, system_only=False)
+        # created_at is second-precision DateTime; pick the run closest in time to the
+        # cluster run (its sibling). parseDateTimeBestEffort tolerates the stringified
+        # timestamp regardless of fractional seconds. The created_at / run_id
+        # secondaries make equidistant ties deterministic (newest, then highest id).
         rows = self.client.query(
-            f"SELECT run_id FROM {self._db}.anomaly_runs FINAL {where} {order} LIMIT 1",
-            parameters=params,
+            f"SELECT run_id FROM {self._db}.anomaly_runs FINAL "
+            "WHERE target = {t:String} AND feature_set = {fs:String} "
+            "ORDER BY abs(dateDiff('second', created_at, "
+            "parseDateTimeBestEffort({near:String}))) ASC, created_at DESC, run_id DESC LIMIT 1",
+            parameters={"t": target, "fs": feature_set, "near": near},
+        ).result_rows
+        return str(rows[0][0]) if rows else None
+
+    def _latest_anomaly_run_id(
+        self, target: str, feature_set: str, *, system_only: bool
+    ) -> str | None:
+        """Newest anomaly run for a (target, feature_set) with the deterministic
+        ``created_at DESC, run_id DESC`` tiebreaker; ``system_only`` restricts to
+        canonical (system-tuned) runs. The near-based sibling pick lives in
+        ``latest_anomaly_run``. Mirror of the cluster-side ``_latest_run``."""
+        where = "WHERE target = {t:String} AND feature_set = {fs:String}"
+        if system_only:
+            where += " AND origin = 'system'"
+        rows = self.client.query(
+            f"SELECT run_id FROM {self._db}.anomaly_runs FINAL {where} "
+            "ORDER BY created_at DESC, run_id DESC LIMIT 1",
+            parameters={"t": target, "fs": feature_set},
         ).result_rows
         return str(rows[0][0]) if rows else None
 
@@ -77,16 +88,7 @@ class _AnomalyMixin(_RepoBase):
         The host publish path pairs this with the cluster-side ``latest_canonical_run``
         so a Custom run's auto-anomaly verdicts can never reach the host
         ``contract_anomaly`` feed (mirror of ``latest_canonical_run``)."""
-        # created_at DESC, run_id DESC: same deterministic tiebreaker as the
-        # cluster-side latest_canonical_run, so the paired canonical lookups pick
-        # sibling runs deterministically when two share a created_at second.
-        rows = self.client.query(
-            f"SELECT run_id FROM {self._db}.anomaly_runs FINAL "
-            "WHERE target = {t:String} AND feature_set = {fs:String} "
-            "AND origin = 'system' ORDER BY created_at DESC, run_id DESC LIMIT 1",
-            parameters={"t": target, "fs": feature_set},
-        ).result_rows
-        return str(rows[0][0]) if rows else None
+        return self._latest_anomaly_run_id(target, feature_set, system_only=True)
 
     def save_anomaly_run(self, run: dict[str, Any]) -> None:
         cols = [
