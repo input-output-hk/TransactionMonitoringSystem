@@ -141,3 +141,11 @@ def freshness_seconds() -> int:
     """Age beyond which a merged contract_anomaly verdict is considered stale
     (the sidecar may be down). 0 disables the staleness stamp."""
     return int(contract_anomaly_config()["freshness_seconds"])
+
+
+def heartbeat_stale_seconds() -> int:
+    """Age beyond which the clustering job heartbeat means the sidecar/feed is
+    down (see main._clustering_health). Tighter than freshness_seconds: the feed
+    completes a job ~every 30s, so a genuine outage should surface in minutes,
+    not the verdict-freshness hour. 0 disables the staleness check."""
+    return int(contract_anomaly_config()["heartbeat_stale_seconds"])
