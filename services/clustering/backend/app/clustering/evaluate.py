@@ -87,12 +87,16 @@ def k_distance(ci: ClusteringInput, k: int) -> dict[str, Any]:
     sorted_dist = _knn_kth_distances(ci, k)
     x = np.arange(len(sorted_dist))
     knee_eps: float | None = None
-    try:
-        locator = KneeLocator(x, sorted_dist, curve="convex", direction="increasing")
-        if locator.knee is not None:
-            knee_eps = float(sorted_dist[int(locator.knee)])
-    except Exception:  # pragma: no cover - kneed can be finicky on tiny inputs
-        knee_eps = None
+    # A flat curve (every k-distance equal, e.g. a tiny/degenerate window) has no
+    # knee, and KneeLocator's 0..1 rescale would divide by zero on it; skip it and
+    # let the percentile fallback below stand in (same result, without the warning).
+    if float(np.ptp(sorted_dist)) > 0:
+        try:
+            locator = KneeLocator(x, sorted_dist, curve="convex", direction="increasing")
+            if locator.knee is not None:
+                knee_eps = float(sorted_dist[int(locator.knee)])
+        except Exception:  # pragma: no cover - kneed can be finicky on tiny inputs
+            knee_eps = None
     if knee_eps is None or knee_eps <= 0:
         knee_eps = float(np.percentile(sorted_dist, _KNEE_FALLBACK_PERCENTILE))
 
