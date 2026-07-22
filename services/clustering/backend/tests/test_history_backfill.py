@@ -153,12 +153,21 @@ def test_boundary_defers_when_younger_than_safety_window(
 
 
 class _RecordingRepo(FakeRepoBase):
-    def __init__(self, cursor: dict[str, Any] | None = None) -> None:
+    def __init__(self, cursor: dict[str, Any] | None = None, requested_max_txs: int = 0) -> None:
         self.txs: list[Any] = []
         self.utxos: list[Any] = []
         self.assets: list[Any] = []
         self.cursors: list[dict[str, Any]] = []
         self._cursor = cursor
+        # The per-contract "latest N to cluster on" the window-full skip gate
+        # reads back via get_contract. 0 (default) resolves to the window
+        # ceiling in effective_window_txs, i.e. the pre-per-contract skip
+        # threshold — so tests that do not exercise a specific N keep their
+        # original behavior unchanged.
+        self._requested_max_txs = requested_max_txs
+
+    def get_contract(self, target: str) -> dict[str, Any] | None:
+        return {"requested_max_txs": self._requested_max_txs}
 
     def insert_transactions(self, rows: list[Any]) -> None:
         self.txs.extend(rows)
@@ -348,6 +357,54 @@ async def test_window_full_preflight_skips_and_marks(monkeypatch: pytest.MonkeyP
     assert repo.cursors[-1]["done"] is True
     assert repo.cursors[-1]["source"] == "blockfrost_history"
     assert repo.cursors[-1]["txs_seen"] == 500
+
+
+async def test_window_full_gate_fires_at_the_per_contract_n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The window-full skip now keys on the contract's OWN "latest N to cluster
+    # on", not the global ceiling: a contract with N=1000 whose host rows already
+    # reach 1000 skips the top-up (older history would sit past its LIMIT), even
+    # though the host count is far below the 50k ceiling the old gate used.
+    repo = _RecordingRepo(requested_max_txs=1_000)
+    _patch_repo(monkeypatch, repo)
+    at_n = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=1_000)
+    _patch_boundary(monkeypatch, at_n)
+
+    async def _boom(**kw: Any) -> IngestResult:
+        raise AssertionError("no quota may be spent once the host fills the contract's window")
+
+    monkeypatch.setattr("app.service.history.ingest", _boom)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=1_000, progress=lambda _m: None
+    )
+    assert out.status == "skipped" and "window full" in out.note
+    assert repo.cursors[-1]["done"] is True
+
+
+async def test_thin_contract_below_its_n_still_backfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Recall-preservation counterpart: a contract with N=1000 whose host rows are
+    # BELOW 1000 must STILL backfill its pre-deployment history — the window-full
+    # gate must not starve a contract that has not yet reached its own N. (The old
+    # gate, keyed on the 50k ceiling, would also have backfilled here; this pins
+    # that the per-contract gate keeps doing so.)
+    repo = _RecordingRepo(requested_max_txs=1_000)
+    _patch_repo(monkeypatch, repo)
+    thin = HostBoundary(floor_slot=50_000_000, floor_height=6_000_000, host_tx_count=500)
+    _patch_boundary(monkeypatch, thin)
+    seen: dict[str, Any] = {}
+
+    async def _ingest(**kw: Any) -> IngestResult:
+        seen.update(kw)
+        return IngestResult("addr1demo", "address", "completed", 500, "page:5")
+
+    monkeypatch.setattr("app.service.history.ingest", _ingest)
+    out = await BlockfrostHistory(_BF_SETTINGS).run(
+        target="addr1demo", target_type="address", max_txs=1_000, progress=lambda _m: None
+    )
+    assert out.status == "completed" and seen["max_txs"] == 1_000
 
 
 def _min_host_settings(min_host: int) -> Settings:

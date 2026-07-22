@@ -91,13 +91,18 @@ class AnomalyRequest(BaseModel):
     top_quantile: float = Field(default=DEFAULT_TOP_QUANTILE, gt=0, lt=1)
 
 
-# Upper bound on a single onboarding request's download, so one call can't kick
-# off an unbounded ingest (paid-quota / DoS guard).
+# Upper bound on a contract's "latest N to cluster on", matching the read-window
+# ceiling (CLUSTERING_WINDOW_TXS): one call can't request an unbounded fit
+# population (paid-quota / DoS + memory guard). None → the server default.
 MAX_TXS_CAP = 50_000
 
 
 class ContractRequest(BaseModel):
     target: str = Field(min_length=1)
+    # "Latest N transactions to cluster on" for this contract: the engine fits /
+    # scores / counts over the most recent N (host tip-forward data first, topped
+    # up from the history source when the host holds fewer). None → the server's
+    # configured default (clustering_default_target_txs).
     max_txs: int | None = Field(default=None, ge=1, le=MAX_TXS_CAP)
     reprocess: bool = False
     # Optional user-supplied display name; takes precedence over the registry
@@ -163,14 +168,19 @@ class ReadyOut(BaseModel):
 class ConfigOut(BaseModel):
     # Read-only deployment facts the UI needs to shape its onboarding form.
     # host_backed: the engine reads each contract's txs from the host tables, so
-    # there is no per-contract download to cap — fits run over the rolling
-    # window of size window_txs instead. A per-contract "max txs" is meaningless
-    # in that mode, so the form hides it.
+    # there is no per-contract download; each contract is fit/scored over its
+    # "latest N to cluster on".
+    # window_txs: the CEILING on that N (the rolling-window/memory bound); the
+    # form uses it as the input's max.
+    # default_target_txs: the N a contract gets when the operator names none;
+    # the form pre-fills it so the UI and a bare API call agree.
     # history_source: the deployment's secondary pre-deployment-history source
-    # ("" when disabled). When set, the form re-exposes "max txs" as the
-    # per-contract history depth.
+    # ("" when disabled). When set (or when not host_backed), the form shows the
+    # "latest N" control; a plain host_backed source without one hides it, since
+    # the host tip-forward data alone then defines the window.
     host_backed: bool
     window_txs: int
+    default_target_txs: int
     history_source: str = ""
 
 

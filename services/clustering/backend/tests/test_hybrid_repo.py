@@ -99,9 +99,15 @@ def test_hashes_expr_unions_local_and_host() -> None:
 def test_count_transactions_spans_the_union() -> None:
     repo, fake = _repo(query_rows=[(7,)])
     assert repo.count_transactions("addr1demo") == 7
-    sql, params = fake.queries[0]
+    # count_transactions first resolves this contract's window (a point-read on
+    # the contracts registry) and then counts over the host+local union.
+    reqmax_sql, _ = fake.queries[0]
+    assert "requested_max_txs FROM tms_clustering.contracts" in reqmax_sql
+    sql, params = fake.queries[-1]
     assert "tms_analytics.address_transactions" in sql
     assert "tms_clustering.transactions FINAL" in sql
+    # lim is the per-contract window; the registry read returns 7 here, which the
+    # recall floor lifts to the ceiling (CLUSTERING_WINDOW_TXS=100 < floor 200).
     assert params is not None and params["tgt"] == "addr1demo" and params["lim"] == 100
 
 

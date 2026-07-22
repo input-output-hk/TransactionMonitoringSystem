@@ -340,18 +340,23 @@ class BlockfrostHistory(_HistoryFlavor):
             boundary = host_history_boundary(self._settings, target)
             if boundary is None:
                 return HistoryResult("deferred", 0, _BOUNDARY_DEFERRED_NOTE)
-            # Window-full pre-flight: once the host rows ALONE fill the rolling
-            # window, downloaded history would be evicted from every read —
-            # don't spend provider quota on permanently invisible rows. Fires
-            # only at host_tx_count >= window (below that, history still
-            # occupies the window's tail and is read by every fit). Marked done
-            # at the current cap so later ticks skip-fast (the host count only
-            # grows, so the window never frees up); a raised per-contract cap
-            # falls through the guard and re-evaluates. A raised
-            # CLUSTERING_WINDOW_TXS alone does NOT re-open a settled marker —
-            # accepted: the host rows that filled the old window still fill the
-            # new one's head, and the cap is the operator's re-open lever.
-            window = int(self._settings.clustering_window_txs)
+            # Window-full pre-flight: once the host rows ALONE fill this
+            # contract's rolling window (its "latest N to cluster on"), older
+            # downloaded history would sit past the LIMIT and be evicted from
+            # every read — don't spend provider quota on permanently invisible
+            # rows. This is the operator's "don't fetch older history when the
+            # host already has enough recent" intent, and it reads the SAME
+            # per-contract window the fit does (Settings.effective_window_txs
+            # over requested_max_txs), so the skip point and the read bound
+            # cannot drift. Fires only at host_tx_count >= N (below that, history
+            # still occupies the window's tail and is read by every fit). Marked
+            # done at the current cap so later ticks skip-fast (the host count
+            # only grows, so the window never frees up); a raised per-contract
+            # cap falls through the guard and re-evaluates.
+            row = repo.get_contract(target)
+            window = self._settings.effective_window_txs(
+                int((row or {}).get("requested_max_txs") or 0)
+            )
             if window > 0 and boundary.host_tx_count >= window:
                 self._mark_done(repo, target, target_type, cap)
                 return HistoryResult(

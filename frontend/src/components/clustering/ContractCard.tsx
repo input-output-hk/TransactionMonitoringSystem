@@ -300,7 +300,15 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 					{c.target}
 				</button>
 				<div className="flex justify-between">
-					<span>Transactions</span>
+					<span
+						title={
+							"Transactions this contract is clustered and scored on: its most " +
+							"recent N (the 'latest N to cluster on' set when it was onboarded). " +
+							"Older activity ages out of this window as new transactions arrive."
+						}
+					>
+						Transactions
+					</span>
 					<span className="text-foreground tabular-nums">
 						{c.tx_count.toLocaleString()}
 					</span>

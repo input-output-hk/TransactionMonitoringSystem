@@ -139,12 +139,33 @@ class Settings(BaseSettings):
     # written to ``clickhouse_db`` (tms_clustering); raw tx/feature reads come
     # from ``host_clickhouse_db`` (tms_analytics) via the HostBackedRepo.
     host_clickhouse_db: str = Field(default="tms_analytics", alias="HOST_CLICKHOUSE_DB")
-    # Rolling-window bound on the fit/classify population: only the most recent
-    # N transactions of a watched contract are clustered/scored, so DBSCAN +
-    # IsolationForest + the O(n^2) silhouette stay bounded for a high-volume
-    # mainnet contract (the window is also the sidecar's hard memory bound).
+    # Rolling-window CEILING on the fit/classify population: no watched contract
+    # is ever clustered/scored on more than the most recent N transactions, so
+    # DBSCAN + IsolationForest + the O(n^2) silhouette stay bounded for a
+    # high-volume mainnet contract (the ceiling is also the sidecar's hard memory
+    # bound). A contract's ACTUAL window is its per-contract "latest N to cluster
+    # on" (requested_max_txs), clamped to this ceiling; a contract that carries
+    # none falls back to the ceiling itself. See effective_window_txs().
     # 0 = unbounded (small/test contracts only; never for mainnet).
     clustering_window_txs: int = Field(default=50_000, alias="CLUSTERING_WINDOW_TXS")
+    # Recall floor on the per-contract "latest N": an operator's N is clamped UP
+    # to at least this many transactions before it bounds the fit. The detectors
+    # need a baseline to call an outlier against — LOF reads a fixed
+    # anomaly.lof_neighbors (20) neighborhood and DBSCAN a min_samples grid, so
+    # below a few multiples of those a genuine anomaly hides in a too-thin sample
+    # instead of standing out (recall first: when N is uncertain, keep MORE
+    # data). Only clamps an explicit N > 0; an unset contract uses the ceiling.
+    # The default is ~10x lof_neighbors, comfortably above the min_samples grid.
+    clustering_min_target_txs: int = Field(default=200, ge=1, alias="CLUSTERING_MIN_TARGET_TXS")
+    # The "latest N to cluster on" a contract is onboarded with when the operator
+    # names no explicit N (the API/UI onboard path; the feed's refit jobs carry 0
+    # and preserve the persisted value instead). Applied server-side so every
+    # onboard client defaults the same way. Sits at the backfill ceiling
+    # (history_max_txs_ceiling) so a fresh contract can fully populate its window
+    # from the history source; keep the two in step if you retune either.
+    clustering_default_target_txs: int = Field(
+        default=5_000, ge=1, alias="CLUSTERING_DEFAULT_TARGET_TXS"
+    )
     # Default feature set for host-backed fits. "shape" scales to any volume;
     # "graph"/"combined" are O(n^2) and capped by max_graph_txs, so they are
     # opt-in per contract rather than the default at mainnet scale.
@@ -261,6 +282,30 @@ class Settings(BaseSettings):
                 f"Unknown CARDANO_NETWORK {self.cardano_network!r}; "
                 f"expected one of {sorted(_BLOCKFROST_BASE_URLS)}"
             ) from exc
+
+    def effective_window_txs(self, requested_max_txs: int) -> int:
+        """A contract's actual rolling window: the "latest N to cluster on" it
+        was onboarded with (``requested_max_txs``), clamped to
+        ``[clustering_min_target_txs, clustering_window_txs]``.
+
+        The single definition of "how many recent transactions does THIS
+        contract fit/score/count on", shared by the repo's read window
+        (``_window_for``) and the backfill's window-full skip gate so the number
+        the operator picked, the number the card shows, and the point past which
+        older history is not worth fetching can never drift apart.
+
+        ``requested_max_txs`` 0/unset falls back to the ceiling: legacy
+        feed-onboarded rows carry none, and defaulting them to the full window
+        keeps the recall-safe status quo (never silently shrinks an existing
+        fit). A ceiling of 0 means "unbounded" (small/test contracts) and is
+        returned as-is so the caller omits the LIMIT entirely."""
+        ceiling = self.clustering_window_txs
+        if ceiling <= 0:
+            return 0
+        if requested_max_txs <= 0:
+            return ceiling
+        floor = min(self.clustering_min_target_txs, ceiling)  # floor can't exceed the ceiling
+        return max(floor, min(requested_max_txs, ceiling))
 
     def recluster_recommended(self, drift_score: float) -> bool:
         """Whether an online-classifier ``drift_score`` is stale enough to recommend

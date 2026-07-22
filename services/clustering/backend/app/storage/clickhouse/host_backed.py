@@ -52,7 +52,11 @@ class HostBackedRepo(ClickHouseRepo):
         super().__init__(settings, **kw)
         self._host_db = self._settings.host_clickhouse_db
         self._network = self._settings.cardano_network
-        # 0 = unbounded (test/small contracts only); see CLUSTERING_WINDOW_TXS.
+        # The window CEILING (and the "is windowing on at all" switch): 0 =
+        # unbounded (test/small contracts only). A contract's ACTUAL window is
+        # per-contract (_window_for), clamped to this; an unset contract uses the
+        # ceiling itself, so this stays the effective window for them. See
+        # CLUSTERING_WINDOW_TXS / Settings.effective_window_txs.
         self._window = int(self._settings.clustering_window_txs)
 
     # --- target -> windowed tx_hash subquery ----------------------------------
@@ -83,10 +87,40 @@ class HostBackedRepo(ClickHouseRepo):
             )
         )"""
 
+    def _target_requested_max_txs(self, target: str) -> int:
+        """This contract's onboarded "latest N to cluster on" (0 = none set), as
+        a single-column point-read on the small registry table. Split out from
+        the full ``get_contract`` so the per-read window resolution does not pay
+        the 13-column projection + row-map on every windowed query."""
+        rows = self.client.query(
+            f"SELECT requested_max_txs FROM {self._db}.contracts FINAL "
+            "WHERE target = {t:String} LIMIT 1",
+            parameters={"t": target},
+        ).result_rows
+        return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+    def _window_for(self, target: str) -> int:
+        """The rolling-window size for THIS contract: its onboarded "latest N to
+        cluster on" (``requested_max_txs``), clamped to the recall floor and the
+        ceiling by ``Settings.effective_window_txs``. Bound as the ``lim`` param
+        of every windowed read (fit, count, the UI/anomaly joins), so the fit
+        population, the card's tx_count and every read agree on the same N.
+
+        Resolved per read: N is operator-editable, so a cached value would score
+        a contract on a stale window after a change; the lookup is one indexed
+        FINAL point-read on the small registry table. An unknown target (no row:
+        tests, ad-hoc targets) resolves to the ceiling via
+        effective_window_txs(0), preserving the pre-per-contract behavior."""
+        return self._settings.effective_window_txs(self._target_requested_max_txs(target))
+
     def _scope_params(self, target: str) -> dict[str, Any]:
         params: dict[str, Any] = {"net": self._network, "tgt": target}
+        # The LIMIT clause is present in the query string iff windowing is on at
+        # all (self._window > 0; see _hashes_expr); when it is, bind the
+        # per-contract window. effective_window_txs returns > 0 whenever the
+        # ceiling is > 0, so lim is always bound when the clause needs it.
         if self._window > 0:
-            params["lim"] = self._window
+            params["lim"] = self._window_for(target)
         return params
 
     # --- engine-shaped transactions over host tables --------------------------

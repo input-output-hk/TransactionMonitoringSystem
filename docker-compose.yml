@@ -371,8 +371,13 @@ services:
       - CLICKHOUSE_CONNECT_TIMEOUT_SECONDS=${CLUSTERING_CLICKHOUSE_CONNECT_TIMEOUT_SECONDS:-10}
       # CARDANO_NETWORK comes from .env.${TMS_ENV}; one sidecar per network keeps
       # the engine single-network (no network column on its tables).
-      # Scale / feed knobs (see engine Settings). Window bounds the fit memory.
+      # Scale / feed knobs (see engine Settings). Window is the CEILING on a
+      # contract's "latest N to cluster on" (and the fit-memory bound); default
+      # is the N a contract gets when none is named; min is the recall floor a
+      # named N is clamped up to.
       - CLUSTERING_WINDOW_TXS=${CLUSTERING_WINDOW_TXS:-50000}
+      - CLUSTERING_DEFAULT_TARGET_TXS=${CLUSTERING_DEFAULT_TARGET_TXS:-5000}
+      - CLUSTERING_MIN_TARGET_TXS=${CLUSTERING_MIN_TARGET_TXS:-200}
       - CLUSTERING_DEFAULT_FEATURE_SET=${CLUSTERING_DEFAULT_FEATURE_SET:-shape}
       - MAX_GRAPH_TXS=${MAX_GRAPH_TXS:-5000}
       - FEED_ENABLED=${FEED_ENABLED:-true}

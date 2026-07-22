@@ -99,16 +99,25 @@ def create_contract(req: ContractRequest, request: Request, repo: Repo = RepoDep
         # empty label would otherwise clobber a previously-set name.
         prev = repo.get_contract(target)
         label = req.label.strip() or (prev or {}).get("label", "")
+        # An unspecified N defaults server-side to the configured "latest N to
+        # cluster on" (not 0/unbounded), so a UI onboard and a bare API call
+        # agree; a re-add that names no N inherits the contract's existing N
+        # rather than resetting it to the default.
+        target_txs = (
+            req.max_txs
+            or int((prev or {}).get("requested_max_txs") or 0)
+            or (get_settings().clustering_default_target_txs)
+        )
         repo.save_contract(
             {
                 "target": target,
                 "target_type": target_type,
                 "status": "pending",
-                "requested_max_txs": req.max_txs or 0,
+                "requested_max_txs": target_txs,
                 "label": label,
             }
         )
-        repo.create_job(job_id, target, target_type, req.max_txs or 0, int(req.reprocess))
+        repo.create_job(job_id, target, target_type, target_txs, int(req.reprocess))
         manager.enqueue(job_id)
     return {"job_id": job_id, "target": target, "target_type": target_type}
 

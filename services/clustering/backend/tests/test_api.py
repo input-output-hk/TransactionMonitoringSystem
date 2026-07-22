@@ -223,28 +223,43 @@ def test_ready_503_when_clickhouse_down() -> None:
 
 
 def test_config_reports_host_backed_and_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    # host_ch source → host_backed True; the UI hides the per-contract max-txs cap.
+    # host_ch source → host_backed True; window_txs is the ceiling on a
+    # contract's "latest N", default_target_txs the N used when none is named.
     monkeypatch.setattr(
         "app.api.routers.system.get_settings",
-        lambda: Settings(CHAIN_SOURCE="host_ch", CLUSTERING_WINDOW_TXS=12_345),
+        lambda: Settings(
+            CHAIN_SOURCE="host_ch",
+            CLUSTERING_WINDOW_TXS=12_345,
+            CLUSTERING_DEFAULT_TARGET_TXS=3_000,
+        ),
     )
     body = _client(FakeApiRepo()).get("/api/config").json()
-    assert body == {"host_backed": True, "window_txs": 12_345, "history_source": ""}
+    assert body == {
+        "host_backed": True,
+        "window_txs": 12_345,
+        "default_target_txs": 3_000,
+        "history_source": "",
+    }
 
 
 def test_config_non_host_backed_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A download-backed source → host_backed False; the form shows the max-txs cap.
+    # A download-backed source → host_backed False; the form shows the "latest N".
     monkeypatch.setattr(
         "app.api.routers.system.get_settings",
         lambda: Settings(CHAIN_SOURCE="other", CLUSTERING_WINDOW_TXS=500),
     )
     body = _client(FakeApiRepo()).get("/api/config").json()
-    assert body == {"host_backed": False, "window_txs": 500, "history_source": ""}
+    assert body == {
+        "host_backed": False,
+        "window_txs": 500,
+        "default_target_txs": 5_000,  # config default (unset)
+        "history_source": "",
+    }
 
 
 def test_config_exposes_history_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    # With a secondary history source configured, the UI re-exposes the max-txs
-    # field as the per-contract history depth.
+    # With a secondary history source configured, the UI shows the "latest N"
+    # control (the host's recent data is topped up from the source to reach N).
     monkeypatch.setattr(
         "app.api.routers.system.get_settings",
         lambda: Settings(
@@ -252,7 +267,12 @@ def test_config_exposes_history_source(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     body = _client(FakeApiRepo()).get("/api/config").json()
-    assert body == {"host_backed": True, "window_txs": 500, "history_source": "blockfrost"}
+    assert body == {
+        "host_backed": True,
+        "window_txs": 500,
+        "default_target_txs": 5_000,
+        "history_source": "blockfrost",
+    }
 
 
 # --- Startup guards for the secondary history source --------------------------
@@ -554,6 +574,40 @@ def test_create_contract_enqueues_job() -> None:
     assert len(repo.saved_contracts) == 1
     assert len(repo.created_jobs) == 1
     assert manager.enqueued == [body["job_id"]]
+
+
+def test_create_contract_defaults_target_txs_when_unspecified() -> None:
+    # An onboard that names no N gets the server's configured default "latest N
+    # to cluster on" (not 0/unbounded), so a bare API call and the UI agree — and
+    # it reaches both the contract row and the job.
+    from app.config import get_settings
+
+    default_n = get_settings().clustering_default_target_txs
+    repo = FakeApiRepo()
+    client = _client(repo)
+    r = client.post("/api/contracts", json={"target": "addr1qxyztest0001"})
+    assert r.status_code == 200
+    assert repo.saved_contracts[0]["requested_max_txs"] == default_n
+    assert repo.created_jobs[0][3] == default_n  # create_job(job_id, target, type, N, reprocess)
+
+
+def test_create_contract_uses_explicit_target_txs() -> None:
+    repo = FakeApiRepo()
+    client = _client(repo)
+    client.post("/api/contracts", json={"target": "addr1qxyztest0001", "max_txs": 1_000})
+    assert repo.saved_contracts[0]["requested_max_txs"] == 1_000
+    assert repo.created_jobs[0][3] == 1_000
+
+
+def test_create_contract_inherits_existing_n_when_unspecified() -> None:
+    # Re-adding without an N keeps the contract's current N rather than resetting
+    # it to the default (mirrors the display-name preservation above).
+    repo = FakeApiRepo(
+        contracts=[_contract_row(target="addr1qxyztest0001", requested_max_txs=1_500)]
+    )
+    client = _client(repo)
+    client.post("/api/contracts", json={"target": "addr1qxyztest0001"})
+    assert repo.saved_contracts[0]["requested_max_txs"] == 1_500
 
 
 def test_create_contract_persists_display_name() -> None:

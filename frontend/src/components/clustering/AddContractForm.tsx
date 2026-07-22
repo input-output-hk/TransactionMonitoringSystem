@@ -20,9 +20,10 @@ import {
 import { useAuth } from "@/lib/auth";
 import { AdminOnlyGate } from "./adminOnly";
 
-// Default onboarding window: import the most recent 500 txs unless the analyst
-// asks for more (0 = all history). Keeps first onboarding fast.
-const DEFAULT_MAX_TXS = 500;
+// Fallback "latest N to cluster on" used only until /config loads (or on a
+// not-yet-upgraded sidecar that omits default_target_txs). The authoritative
+// default is the backend's clustering_default_target_txs, surfaced via config.
+const DEFAULT_TARGET_TXS_FALLBACK = 5_000;
 
 // Debounce before identifying a typed target, so we don't hit the registry on
 // every keystroke while the analyst is still pasting an address.
@@ -46,20 +47,28 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 	const { isAdmin } = useAuth();
 	const add = useAddContract();
 	const config = useClusteringConfig(enabled);
-	// On a host-backed deployment the engine reads txs from the host tables and
-	// fits over the global rolling window, so a per-contract "max txs" cap does
-	// nothing — hide the control rather than silently ignore it. Until config
-	// loads (or if it errors) we treat host-backed as unknown: the cap control
-	// stays hidden and no max_txs is sent, rather than guessing.
+	// On a plain host-backed deployment (no history source) the fit window is
+	// defined entirely by the host's tip-forward data, so there is nothing to
+	// size per contract: hide the "latest N" control rather than imply it does
+	// something. Until config loads (or if it errors) we treat host-backed as
+	// unknown: the control stays hidden and no max_txs is sent, rather than
+	// guessing.
 	const hostBacked = config.data?.host_backed ?? false;
-	// A configured secondary history source re-purposes "max txs" as the
-	// per-contract pre-deployment history depth, so the control comes back.
+	// With a secondary history source configured, the host's recent data is
+	// topped up to the contract's "latest N to cluster on", so the control (and
+	// the per-contract N it sets) is meaningful again.
 	const historySource = config.data?.history_source ?? "";
 	const showMaxTxs = !hostBacked || Boolean(historySource);
+	// The default N to pre-fill: the backend's configured default, or the
+	// fallback until config loads. `null` maxTxs means "follow this default";
+	// any edit pins a concrete number.
+	const defaultTargetTxs =
+		config.data?.default_target_txs ?? DEFAULT_TARGET_TXS_FALLBACK;
 	const [target, setTarget] = useState("");
 	const [nameDraft, setNameDraft] = useState("");
 	const [nameTouched, setNameTouched] = useState(false);
-	const [maxTxs, setMaxTxs] = useState(DEFAULT_MAX_TXS);
+	const [maxTxs, setMaxTxs] = useState<number | null>(null);
+	const effectiveMaxTxs = maxTxs ?? defaultTargetTxs;
 	const [reprocess, setReprocess] = useState(false);
 
 	const debouncedTarget = useDebounced(target, IDENTIFY_DEBOUNCE_MS);
@@ -77,14 +86,13 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 			{
 				target: t,
 				label: displayName.trim() || undefined,
-				// 0 means "all history": omit max_txs so the backend onboards
-				// unbounded; otherwise clamp to the API cap. Only send it once
-				// config confirms the field is meaningful — a plain host-backed
-				// source ignores max_txs (with a history source it bounds the
-				// backfill depth), and an unknown (loading/errored) config sends
-				// nothing.
-				...(config.data && showMaxTxs && maxTxs > 0
-					? { max_txs: Math.min(maxTxs, MAX_TXS_CAP) }
+				// The per-contract "latest N to cluster on", clamped to the API
+				// cap. Send it only once config confirms the control is meaningful
+				// (a plain host-backed source without a history source ignores it;
+				// an unknown loading/errored config sends nothing). A 0 is treated
+				// as "unset" and omitted, so the backend applies its default.
+				...(config.data && showMaxTxs && effectiveMaxTxs > 0
+					? { max_txs: Math.min(effectiveMaxTxs, MAX_TXS_CAP) }
 					: {}),
 				...(reprocess ? { reprocess: true } : {}),
 			},
@@ -93,7 +101,7 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 					setTarget("");
 					setNameDraft("");
 					setNameTouched(false);
-					setMaxTxs(DEFAULT_MAX_TXS);
+					setMaxTxs(null);
 					setReprocess(false);
 				},
 			},
@@ -142,18 +150,18 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 						/>
 					</div>
 					{config.data && showMaxTxs && (
-						<div className="w-40 space-y-1.5">
+						<div className="w-44 space-y-1.5">
 							<Label htmlFor="add-max-txs">
 								{hostBacked
-									? "History txs"
-									: `Max txs ${maxTxs === 0 ? "(0 = all)" : ""}`}
+									? "Latest txs to cluster on"
+									: `Max txs ${effectiveMaxTxs === 0 ? "(0 = all)" : ""}`}
 							</Label>
 							<Input
 								id="add-max-txs"
 								type="number"
 								min={0}
 								max={MAX_TXS_CAP}
-								value={maxTxs}
+								value={effectiveMaxTxs}
 								disabled={reprocess}
 								onChange={(e) =>
 									setMaxTxs(Math.max(0, Number(e.target.value) || 0))
@@ -184,12 +192,14 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 						{hostBacked ? (
 							<>
 								Clusters and anomaly-scores this contract over its most recent{" "}
-								{config.data.window_txs.toLocaleString()} transactions already
-								monitored on-chain (the rolling fit window). Onboarding runs in
-								the background; the card below tracks progress.
+								{historySource ? effectiveMaxTxs.toLocaleString() : "N"}{" "}
+								transactions. These come from what the host already monitors
+								on-chain
 								{historySource
-									? " Pre-deployment history is backfilled automatically; History txs bounds its depth (default 500)."
-									: ""}
+									? `, topped up from the ${historySource} history source when the host holds fewer, so a freshly onboarded contract still fits on the latest ${effectiveMaxTxs.toLocaleString()}. Capped at ${config.data.window_txs.toLocaleString()}.`
+									: ` (the most recent ${config.data.window_txs.toLocaleString()}, the rolling fit window).`}{" "}
+								Onboarding runs in the background; the card below tracks
+								progress.
 							</>
 						) : (
 							<>
