@@ -2,3 +2,8 @@ allowBuilds:
   # Transitive Plotly dependency; its postinstall only prints a funding notice,
   # so there is nothing to build.
   es5-ext: false
+
+overrides:
+  # Force the patched brace-expansion (pulled in transitively via minimatch).
+  # < 5.0.7 is vulnerable to GHSA-3jxr-9vmj-r5cp / CVE-2026-13149 (ReDoS).
+  brace-expansion@<5.0.7: ">=5.0.7"
