@@ -358,6 +358,24 @@ class BlockfrostHistory(_HistoryFlavor):
                     "skipped", 0, "window full; history would be evicted from every read"
                 )
 
+            # Shortfall gate (opt-in): a target the host already has a substantial
+            # recent sample for needs no pre-deployment padding — the recent rows
+            # anchor the fit on their own — so skip and spend no provider quota.
+            # Distinct from the window-full skip above (a hard eviction limit);
+            # this is a lower policy threshold. host_tx_count only grows, so mark
+            # done for skip-fast like the window-full path — and, like it, the
+            # marker is sticky: lowering the threshold later won't re-open a
+            # settled contract (a raised per-contract cap does). 0 disables.
+            min_host = int(self._settings.history_min_host_txs)
+            if min_host > 0 and boundary.host_tx_count >= min_host:
+                self._mark_done(repo, target, target_type, cap)
+                return HistoryResult(
+                    "skipped",
+                    0,
+                    f"host already has {boundary.host_tx_count} txs "
+                    f"(>= {min_host}); backfill not needed",
+                )
+
             progress(
                 f"history boundary: slot < {boundary.floor_slot} "
                 f"(block <= {boundary.floor_height - 1}), cap {cap}"
