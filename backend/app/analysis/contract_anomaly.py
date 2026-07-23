@@ -138,7 +138,16 @@ def resolve(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         )
         if score > best_score:
             best_score = score
-            best = {**row, "score": score, "risk_band": band}
+            # unclusterable_fit is an evidence-only marker (see clustering_queries
+            # _FIELDS): coerce the sidecar's UInt8 (or an absent column on a row
+            # built without it) to a plain bool, carried forward so the read
+            # overlay can de-prioritize without touching score / band.
+            best = {
+                **row,
+                "score": score,
+                "risk_band": band,
+                "unclusterable_fit": bool(row.get("unclusterable_fit") or 0),
+            }
     return best
 
 

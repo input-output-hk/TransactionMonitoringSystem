@@ -155,7 +155,9 @@ def _base_result(max_score: float, max_class: str) -> ClassScoreResult:
     )
 
 
-def _row(verdict: str = "anomaly", consensus=None, target="addr1xyz") -> dict:
+def _row(
+    verdict: str = "anomaly", consensus=None, target="addr1xyz", unclusterable: int = 0
+) -> dict:
     """A raw sidecar verdict row (no host-scale score; the host computes it)."""
     return {
         "tx_hash": "tx",
@@ -168,9 +170,53 @@ def _row(verdict: str = "anomaly", consensus=None, target="addr1xyz") -> dict:
         "verdict": verdict,
         "model_id": "m1",
         "feature_set": "shape",
+        "unclusterable_fit": unclusterable,
         "evidence": {"top": ["fees"]},
         "scored_at": datetime(2026, 6, 22, tzinfo=UTC),
     }
+
+
+def _ca_result(score: float, *, unclusterable: bool, at: datetime) -> ClassScoreResult:
+    """A contract_anomaly-dominant result at a fixed score/time (for sort tests)."""
+    return ClassScoreResult(
+        tx_hash=f"tx-{'u' if unclusterable else 'c'}-{score}",
+        network="preprod",
+        scores={"contract_anomaly": score},
+        max_score=score,
+        max_class="contract_anomaly",
+        risk_band=RiskBand(score_to_band(score)),
+        analyzed_at=at,
+        contract_anomaly_unclusterable=unclusterable,
+    )
+
+
+class TestUnclusterableDeprioritization:
+    _T = datetime(2026, 7, 1, tzinfo=UTC)
+
+    def test_unclusterable_loses_tie_to_clusterable_peer(self):
+        from app.api.contract_anomaly_read import _sort_results
+
+        # Same score AND same time: the only differentiator is the flag, so the
+        # un-clusterable (structural-noise) row must fall below the genuine one.
+        clusterable = _ca_result(50.0, unclusterable=False, at=self._T)
+        unclusterable = _ca_result(50.0, unclusterable=True, at=self._T)
+        for by_date in (False, True):
+            rows = [unclusterable, clusterable]
+            _sort_results(rows, by_date=by_date)
+            assert rows[0] is clusterable
+            assert rows[1] is unclusterable
+
+    def test_flag_never_beats_a_higher_score(self):
+        from app.api.contract_anomaly_read import _sort_results
+
+        # RECALL/ORDER GUARD: the flag is a FINAL tie-break only. A higher-scoring
+        # un-clusterable row must still rank above a lower-scoring clusterable one;
+        # the demotion must never reorder rows that differ on score.
+        hi_unclusterable = _ca_result(58.0, unclusterable=True, at=self._T)
+        lo_clusterable = _ca_result(40.0, unclusterable=False, at=self._T)
+        rows = [lo_clusterable, hi_unclusterable]
+        _sort_results(rows, by_date=False)
+        assert rows[0] is hi_unclusterable
 
 
 class TestMergeAdditivity:
@@ -249,6 +295,31 @@ class TestMergeAdditivity:
         _merge_contract_anomaly(r, [])
         assert "contract_anomaly" not in r.scores
         assert r.max_class == "phishing"
+
+    def test_unclusterable_flag_surfaced_when_marked(self):
+        r = _base_result(20.0, "phishing")  # low, so the CA verdict surfaces
+        _merge_contract_anomaly(r, [_row("anomaly", consensus=0.5, unclusterable=1)])
+        assert r.contract_anomaly_unclusterable is True
+
+    def test_unclusterable_defaults_false_when_absent(self):
+        # A row without the column (older sidecar / a non-CA-marked fit) must not
+        # trip the flag.
+        r = _base_result(20.0, "phishing")
+        row = _row("anomaly", consensus=0.5)
+        del row["unclusterable_fit"]
+        _merge_contract_anomaly(r, [row])
+        assert r.contract_anomaly_unclusterable is False
+
+    def test_malicious_still_fires_when_unclusterable(self):
+        # RECALL GUARD: the un-clusterable marker is EVIDENCE ONLY. A human-labeled
+        # malicious verdict must still floor into Critical and win max_class even
+        # when its fit is flagged un-clusterable; the flag never suppresses.
+        r = _base_result(45.0, "phishing")
+        _merge_contract_anomaly(r, [_row("malicious", unclusterable=1)])
+        assert r.max_score == _floors()["malicious"]
+        assert r.max_class == "contract_anomaly"
+        assert r.risk_band is RiskBand.CRITICAL
+        assert r.contract_anomaly_unclusterable is True
 
 
 # --- Endpoint-level gating ---------------------------------------------------

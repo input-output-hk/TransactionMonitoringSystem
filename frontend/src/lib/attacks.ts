@@ -50,6 +50,13 @@ export type RiskAlert = {
 	 * individual fields as optional and fall back gracefully when missing.
 	 */
 	evidence?: Record<string, unknown>;
+	/**
+	 * True when this is a contract_anomaly finding from a structurally
+	 * un-clusterable fit (the sidecar could not cluster the contract's own
+	 * data), so the "anomaly" is DBSCAN-noise rather than a distinguishing
+	 * signal. The list badges and de-prioritizes it; it never changes severity.
+	 */
+	unclusterableModel?: boolean;
 };
 
 /**

@@ -245,6 +245,16 @@ class ClassScoreResult(BaseModel):
             "down. Absent when no contract_anomaly verdict was merged."
         ),
     )
+    contract_anomaly_unclusterable: bool = Field(
+        False,
+        description=(
+            "True when the merged contract_anomaly verdict came from a "
+            "structurally un-clusterable fit (the sidecar could not cluster the "
+            "contract's own data). Such an 'anomaly' is DBSCAN-noise, not a "
+            "distinguishing signal, so the UI de-prioritizes / groups it. "
+            "Evidence only: it does NOT change score, risk_band, or alerting."
+        ),
+    )
     fee: int | None = Field(None, description="Transaction fee in lovelace")
     output_count: int | None = Field(None, description="Number of transaction outputs")
     archived: dict[str, Any] | None = Field(

@@ -218,6 +218,15 @@ export function AttacksPage() {
 										<div className="text-foreground flex items-center gap-2">
 											<Icon className="text-muted-foreground h-4 w-4" />
 											{a.attackType}
+											{a.unclusterableModel && (
+												<Badge
+													variant="outline"
+													className="text-muted-foreground border-border/60 text-[9px] font-normal normal-case tracking-normal"
+													title="This contract's model could not cluster its own data, so the anomaly is structural noise rather than a distinguishing signal. De-prioritized; it does not affect severity."
+												>
+													unclusterable model
+												</Badge>
+											)}
 										</div>
 									</TableCell>
 									<TableCell>
