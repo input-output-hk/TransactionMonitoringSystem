@@ -314,7 +314,17 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 					</span>
 				</div>
 				<div className="flex justify-between">
-					<span>Drift</span>
+					<span
+						title={
+							"How far this contract's recent transactions have drifted from " +
+							"the clusters it was last fit on. 0% means current activity still " +
+							"matches that baseline; a high percentage means it no longer does, " +
+							"so the model is stale and the contract should be re-analyzed to " +
+							"re-cluster on current data."
+						}
+					>
+						Drift
+					</span>
 					<span className="text-foreground tabular-nums">
 						{(c.drift_score * 100).toFixed(0)}%
 					</span>

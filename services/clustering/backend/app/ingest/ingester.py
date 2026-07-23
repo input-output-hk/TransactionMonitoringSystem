@@ -320,7 +320,7 @@ async def _drain_pages(
 
             batch.flush(repo)
             tracker.page_done(page_cursor, seen=drained.seen, last_tx_hash=drained.last_tx_hash)
-            progress(f"{page_cursor} done — {drained.seen} transactions ingested so far.")
+            progress(f"Ingested {drained.seen:,} transactions so far.")
     except SourceRateLimited:
         # A quota limit raised while *discovering* pages (the address/policy tx-hash
         # listing), as opposed to during a per-tx fetch (handled in-loop above).
