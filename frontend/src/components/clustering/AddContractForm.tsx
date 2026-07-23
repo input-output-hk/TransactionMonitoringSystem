@@ -67,7 +67,27 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 	const [target, setTarget] = useState("");
 	const [nameDraft, setNameDraft] = useState("");
 	const [nameTouched, setNameTouched] = useState(false);
-	const [maxTxs, setMaxTxs] = useState<number | null>(null);
+	// The "latest N to cluster on" field is held as raw text so it can be cleared
+	// and retyped: binding the input's `value` to a number snaps an emptied field
+	// straight back to the default. `maxTxsTouched` mirrors the display-name
+	// pattern below (derived, not effect-synced): the field shows the server
+	// default until the operator edits it, then reflects exactly what they type
+	// (including empty). Emptied/untouched text means "follow the server default"
+	// (send no max_txs); any positive whole number pins this contract's N.
+	const [maxTxsInput, setMaxTxsInput] = useState("");
+	const [maxTxsTouched, setMaxTxsTouched] = useState(false);
+	const displayedMaxTxs = maxTxsTouched
+		? maxTxsInput
+		: String(defaultTargetTxs);
+	const parsedMaxTxs = Number(maxTxsInput);
+	// A positive whole number pins N; anything else (empty, 0, or a fractional
+	// value like "1.5" that a number input still lets through) means "follow the
+	// default", so a meaningless sub-integer window is never sent. Falling back to
+	// the larger default rather than a tiny window is the recall-safe choice.
+	const maxTxs =
+		maxTxsInput.trim() !== "" && Number.isInteger(parsedMaxTxs) && parsedMaxTxs > 0
+			? parsedMaxTxs
+			: null;
 	const effectiveMaxTxs = maxTxs ?? defaultTargetTxs;
 	const [reprocess, setReprocess] = useState(false);
 
@@ -87,16 +107,18 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 				target: t,
 				label: displayName.trim() || undefined,
 				// Send the per-contract "latest N to cluster on" ONLY when the
-				// operator actually typed a value (maxTxs !== null). An untouched
+				// operator actually typed a value (maxTxs !== null). An emptied
 				// form omits it so the backend can apply the right N itself: the
 				// server default for a brand-new contract, or the contract's
 				// EXISTING N on a re-add / reprocess. Sending the prefilled default
 				// unconditionally would clobber a re-analyzed contract's stored
-				// window (a recall regression). Gated on config confirming the
-				// control is meaningful (a plain host-backed source without a
-				// history source ignores it; a loading/errored config sends
-				// nothing). Clamped to the API cap defensively.
-				...(config.data && showMaxTxs && maxTxs !== null && maxTxs > 0
+				// window (a recall regression). A reprocess never carries a typed N
+				// (the `!reprocess` guard), so Re-analyze always reuses the stored
+				// window. Gated on config confirming the control is meaningful (a
+				// plain host-backed source without a history source ignores it; a
+				// loading/errored config sends nothing). Clamped to the API cap
+				// defensively.
+				...(config.data && showMaxTxs && !reprocess && maxTxs !== null && maxTxs > 0
 					? { max_txs: Math.min(maxTxs, MAX_TXS_CAP) }
 					: {}),
 				...(reprocess ? { reprocess: true } : {}),
@@ -106,7 +128,9 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 					setTarget("");
 					setNameDraft("");
 					setNameTouched(false);
-					setMaxTxs(null);
+					// Back to untouched so the field shows the default again.
+					setMaxTxsTouched(false);
+					setMaxTxsInput("");
 					setReprocess(false);
 				},
 			},
@@ -162,6 +186,7 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 							<Input
 								id="add-max-txs"
 								type="number"
+								inputMode="numeric"
 								// N >= 1: the backend requires a positive N (the old "0 = all"
 								// is gone), so the field never offers 0.
 								min={1}
@@ -169,14 +194,21 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 								// until config loads), so the field never offers a value
 								// the backend would only clamp back down.
 								max={Math.min(config.data.window_txs, MAX_TXS_CAP)}
-								value={effectiveMaxTxs}
+								// The default N shows as a placeholder once the field is
+								// cleared, so an empty field reads as "follow the default"
+								// rather than looking broken.
+								placeholder={String(defaultTargetTxs)}
+								// A reprocess reuses the stored window, so blank the disabled
+								// field rather than imply the shown N will be applied.
+								value={reprocess ? "" : displayedMaxTxs}
 								disabled={reprocess}
 								onChange={(e) => {
-									// A positive number pins this contract's N; clearing the
-									// field (or 0) resets to null = "follow the server default",
-									// so an emptied field can never silently send 0.
-									const n = Number(e.target.value);
-									setMaxTxs(Number.isFinite(n) && n > 0 ? n : null);
+									// Track the raw text so the field can be cleared and
+									// retyped; `maxTxs` is derived from it (empty/0 -> null =
+									// "follow the server default", so an emptied field can never
+									// silently send 0).
+									setMaxTxsTouched(true);
+									setMaxTxsInput(e.target.value);
 								}}
 							/>
 						</div>
@@ -186,13 +218,10 @@ export function AddContractForm({ enabled = true }: { enabled?: boolean }) {
 							type="checkbox"
 							className="accent-primary h-4 w-4"
 							checked={reprocess}
-							onChange={(e) => {
-								setReprocess(e.target.checked);
-								// A reprocess must not carry a stale typed N into the
-								// onboard call and clobber the contract's stored window;
-								// drop back to null = "follow the existing/default N".
-								if (e.target.checked) setMaxTxs(null);
-							}}
+							// A reprocess must not carry a typed N into the onboard call
+							// and clobber the contract's stored window; the `!reprocess`
+							// guard on the max_txs payload above handles that.
+							onChange={(e) => setReprocess(e.target.checked)}
 						/>
 						Reprocess only
 					</label>
