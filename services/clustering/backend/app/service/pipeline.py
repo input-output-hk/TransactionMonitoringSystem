@@ -191,13 +191,6 @@ async def process_contract(
             "run_id"
         ]
 
-        # Surface this fit's flagged verdicts to the TMS as contract_anomaly
-        # rows (the host_ch sidecar path; a non-host_ch source would skip this).
-        if get_settings().host_backed:
-            from app.service.publish import publish_contract_anomaly
-
-            publish_contract_anomaly(repo, target, network=get_settings().cardano_network)
-
         # Clusterability of THIS fit: the fraction of the training window that
         # landed in some cluster (1 - n_noise/n_points). Persisted so the scheduler
         # and UI can tell "the shape does not cluster at these params" (a re-fit is
@@ -205,6 +198,9 @@ async def process_contract(
         # converges). Computed from the in-hand cluster dict, no extra query.
         # n_points here is >= _MIN_TXS_FOR_ANALYSIS (checked above), so it is never
         # 0; guarded anyway. last_fit_at marks this fit for the anti-flap cadence.
+        # Saved BEFORE the publish below so the contract_anomaly rows this fit emits
+        # are stamped with THIS fit's coverage (publish reads the row), not the
+        # previous fit's.
         n_points = int(cluster.get("n_points") or 0)
         n_noise = int(cluster.get("n_noise") or 0)
         fit_coverage = 1.0 - (n_noise / n_points) if n_points else 0.0
@@ -215,6 +211,14 @@ async def process_contract(
             last_fit_at=int(time.time()),
         )
         repo.save_contract(contract)
+
+        # Surface this fit's flagged verdicts to the TMS as contract_anomaly
+        # rows (the host_ch sidecar path; a non-host_ch source would skip this).
+        if get_settings().host_backed:
+            from app.service.publish import publish_contract_anomaly
+
+            publish_contract_anomaly(repo, target, network=get_settings().cardano_network)
+
         set_stage("done", f"{n} txs · shape cluster + shape/graph anomaly", txs_done=n)
         return result
     except Exception as exc:
