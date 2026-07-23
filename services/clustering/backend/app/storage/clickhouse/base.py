@@ -157,6 +157,7 @@ class _RepoBase:
         ("contracts", "target_txs"),  # 010 (per-contract read window)
         ("contracts", "fit_coverage"),  # 011 (frozen-fit clusterability)
         ("contracts", "last_fit_at"),  # 011 (anti-flap re-fit cadence)
+        ("tx_contract_anomaly", "unclusterable_fit"),  # 012 (host-feed grouping marker)
     )
 
     def missing_schema_objects(self) -> list[str]:

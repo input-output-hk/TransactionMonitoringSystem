@@ -43,6 +43,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from app.config import _COVERAGE_UNKNOWN, get_settings
 from app.service.verdicts import (
     VERDICT_ANOMALY,
     VERDICT_MALICIOUS,
@@ -92,6 +93,10 @@ _COLUMNS = [
     "verdict",
     "model_id",
     "feature_set",
+    # 012: host-feed grouping marker (1 = row came from an un-clusterable fit).
+    # Evidence only; never changes which rows publish. Kept adjacent to
+    # feature_set so this list mirrors the physical table column order.
+    "unclusterable_fit",
     "evidence",
     "scored_at",
     "published_at",
@@ -149,6 +154,8 @@ def _publish_batch(
     network: str,
     feature_set: str,
     published_at: datetime,
+    *,
+    unclusterable: int = 0,
 ) -> set[str]:
     """Resolve and publish the canonical (System) batch fit's flagged verdicts.
     Returns the set of tx_hashes published (empty if the target has no System run
@@ -212,6 +219,7 @@ def _publish_batch(
                 verdict,
                 model_id,
                 feature_set,
+                unclusterable,
                 "{}",
                 stamp,
                 published_at,
@@ -232,6 +240,8 @@ def _publish_online(
     network: str,
     feature_set: str,
     published_at: datetime,
+    *,
+    unclusterable: int = 0,
 ) -> set[str]:
     """Copy the target's flagged ``tx_classifications`` (incrementally-scored new
     txs) into ``tx_contract_anomaly``, in-database (both in ``tms_clustering``).
@@ -251,7 +261,13 @@ def _publish_online(
     ``published_at`` is the reconciliation version (see the table doc)."""
     db = repo._db  # type: ignore[attr-defined]
     verdicts = ", ".join(f"'{v}'" for v in _PUBLISHED)
-    params = {"net": network, "tgt": target, "fs": feature_set, "pub": published_at}
+    params = {
+        "net": network,
+        "tgt": target,
+        "fs": feature_set,
+        "pub": published_at,
+        "unclust": unclusterable,
+    }
     # Built by concatenation (not an f-string) so the {name:Type} server-binding
     # placeholders stay literal while db / verdicts interpolate. Active-label
     # subqueries: FINAL + deleted=0 means a cleared label no longer applies.
@@ -289,7 +305,8 @@ def _publish_online(
         "INSERT INTO " + db + ".tx_contract_anomaly (" + ", ".join(_COLUMNS) + ") "
         "SELECT {net:String} AS network, toString(tx_hash), target, cluster_id, "
         "iso_score, lof_score, consensus, votes, " + verdict_expr + ", model_id, "
-        "toString(feature_set), '{}' AS evidence, toDateTime(scored_at), "
+        "toString(feature_set), {unclust:UInt8} AS unclusterable_fit, "
+        "'{}' AS evidence, toDateTime(scored_at), "
         "{pub:DateTime64(6)} AS published_at "
         "FROM "
         + db
@@ -309,6 +326,7 @@ def _retract_stale(
     *,
     keep: set[str],
     published_at: datetime,
+    unclusterable: int = 0,
 ) -> int:
     """Append a ``normal`` tombstone for every currently-published (non-normal) tx
     of this ``(network, target, feature_set)`` that is NOT in ``keep`` (the
@@ -363,6 +381,7 @@ def _retract_stale(
             VERDICT_NORMAL,
             "",
             feature_set,
+            unclusterable,
             "{}",
             published_at,
             published_at,
@@ -385,6 +404,7 @@ def _publish_labels(
     published_at: datetime,
     *,
     exclude: set[str],
+    unclusterable: int = 0,
 ) -> set[str]:
     """Publish malicious MANUAL labels that neither the online nor batch path can
     reach, and return the hashes this target's ``keep`` set must cover on their
@@ -430,6 +450,7 @@ def _publish_labels(
                 VERDICT_MALICIOUS,
                 "",
                 feature_set,
+                unclusterable,
                 "{}",
                 published_at,
                 published_at,
@@ -462,8 +483,25 @@ def publish_contract_anomaly(
     # gets a newer published_at and wins on FINAL, regardless of source times
     # and even across a backward wall-clock step (see _reconciliation_version).
     published_at = _reconciliation_version(repo, target, network)
-    online_flagged = _publish_online(repo, target, network, feature_set, published_at)
-    batch_flagged = _publish_batch(repo, target, network, feature_set, published_at)
+    # One per-contract clusterability marker stamped on every row this pass writes
+    # (positives AND tombstones), derived once from the frozen fit's coverage: the
+    # SAME signal the scheduler and UI use, so there is no second threshold to
+    # diverge (011/012). Evidence only for host-feed grouping; it never changes a
+    # verdict, a vote, or which txs publish. A never-fit/legacy row (coverage -1)
+    # is not un-clusterable, so it stamps 0, exactly as before this column existed.
+    contract = repo.get_contract(target)
+    fit_coverage = (
+        float(contract.get("fit_coverage", _COVERAGE_UNKNOWN))
+        if contract is not None
+        else _COVERAGE_UNKNOWN
+    )
+    unclusterable = 1 if get_settings().model_unclusterable(fit_coverage) else 0
+    online_flagged = _publish_online(
+        repo, target, network, feature_set, published_at, unclusterable=unclusterable
+    )
+    batch_flagged = _publish_batch(
+        repo, target, network, feature_set, published_at, unclusterable=unclusterable
+    )
     # Malicious manual labels the online/batch paths can't reach (never-scored,
     # non-cluster txs). Folded into keep so they are not tombstoned.
     label_flagged = _publish_labels(
@@ -473,6 +511,7 @@ def publish_contract_anomaly(
         feature_set,
         published_at,
         exclude=online_flagged | batch_flagged,
+        unclusterable=unclusterable,
     )
     retracted = _retract_stale(
         repo,
@@ -481,6 +520,7 @@ def publish_contract_anomaly(
         feature_set,
         keep=online_flagged | batch_flagged | label_flagged,
         published_at=published_at,
+        unclusterable=unclusterable,
     )
     db = repo._db  # type: ignore[attr-defined]
     rows = repo.client.query(  # type: ignore[attr-defined]

@@ -33,6 +33,7 @@ from tests.fakes import FakeRepoBase
 _VERDICT_COL = _COLUMNS.index("verdict")
 _TX_HASH_COL = _COLUMNS.index("tx_hash")
 _PUBLISHED_AT_COL = _COLUMNS.index("published_at")
+_UNCLUST_COL = _COLUMNS.index("unclusterable_fit")
 _PUB = datetime(2026, 6, 23, 12, 0, 0)  # a fixed reconciliation version for tests
 
 
@@ -63,11 +64,17 @@ class FakeClient:
         self.command_params.append(parameters or {})
 
 
-def _repo(client: FakeClient) -> Any:
+def _repo(client: FakeClient, *, fit_coverage: float = -1.0) -> Any:
     # Identity host-membership: every hash is host-known, so these tests pin
     # the reconciliation logic itself (the bound is exercised separately below).
+    # get_contract carries fit_coverage so publish_contract_anomaly can derive the
+    # unclusterable marker; the -1 default is "not yet fit" (marker 0, pre-012
+    # behaviour), so every existing test is unaffected.
     return SimpleNamespace(
-        client=client, _db="tms", host_known_tx_hashes=lambda target, hashes: set(hashes)
+        client=client,
+        _db="tms",
+        host_known_tx_hashes=lambda target, hashes: set(hashes),
+        get_contract=lambda target: {"target": target, "fit_coverage": fit_coverage},
     )
 
 
@@ -219,6 +226,68 @@ def test_publish_reconciles_then_counts(monkeypatch: pytest.MonkeyPatch) -> None
     assert rows[0][_PUBLISHED_AT_COL] == stale_max + _VERSION_EPSILON
     # The final count query filters out tombstones.
     assert "verdict != {normal:String}" in fake.queries[-1]
+
+
+# --- 012: un-clusterable marker (evidence only; never changes the published set) ---
+
+
+def test_publish_online_stamps_unclusterable_flag() -> None:
+    # The INSERT...SELECT projects the per-pass flag as a bound param, and the
+    # returned published set is unchanged by it (recall: marker suppresses nothing).
+    fake = FakeClient([[("txB",)]])
+    published = _publish_online(_repo(fake), "addr1", "preprod", "shape", _PUB, unclusterable=1)
+    assert published == {"txB"}
+    assert "unclusterable_fit" in fake.commands[0]
+    assert fake.command_params[0]["unclust"] == 1
+
+
+def test_retract_stale_stamps_unclusterable_flag() -> None:
+    fake = FakeClient([[("txC",)]])  # current published non-normal, none kept
+    _retract_stale(
+        _repo(fake), "addr1", "preprod", "shape", keep=set(), published_at=_PUB, unclusterable=1
+    )
+    _table, rows, cols = fake.inserts[0]
+    assert cols == _COLUMNS
+    assert rows[0][_UNCLUST_COL] == 1
+    assert rows[0][_VERDICT_COL] == "normal"  # still a plain tombstone
+
+
+def test_publish_labels_stamps_unclusterable_flag() -> None:
+    fake = FakeClient([[("txMANUAL",)]])
+    _publish_labels(_repo(fake), "addr1", "preprod", "shape", _PUB, exclude=set(), unclusterable=1)
+    _table, rows, _cols = fake.inserts[0]
+    assert rows[0][_UNCLUST_COL] == 1
+    assert rows[0][_VERDICT_COL] == VERDICT_MALICIOUS
+
+
+def test_publish_derives_and_forwards_unclusterable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # publish_contract_anomaly derives ONE 0/1 flag from the contract's fit_coverage
+    # (below MIN_CLUSTER_COVERAGE -> 1) and forwards it to every write path, without
+    # changing which txs each path returns (the flagged set is passed through).
+    seen: dict[str, int | None] = {}
+
+    def _cap(name: str, ret: Any) -> Any:
+        def _f(*_a: Any, **k: Any) -> Any:
+            seen[name] = k.get("unclusterable")
+            return ret
+
+        return _f
+
+    monkeypatch.setattr("app.service.publish._publish_online", _cap("online", {"txA"}))
+    monkeypatch.setattr("app.service.publish._publish_batch", _cap("batch", set()))
+    monkeypatch.setattr("app.service.publish._publish_labels", _cap("labels", set()))
+    monkeypatch.setattr("app.service.publish._retract_stale", _cap("retract", 0))
+
+    # Below the 0.5 floor -> un-clusterable -> flag 1 everywhere.
+    fake = FakeClient([[(datetime(2000, 1, 1),)], [(1,)]])  # version max, final count
+    publish_contract_anomaly(_repo(fake, fit_coverage=0.1), "addr1", network="preprod")
+    assert seen == {"online": 1, "batch": 1, "labels": 1, "retract": 1}
+
+    # Clusterable fit -> flag 0 everywhere (byte-identical to pre-012).
+    seen.clear()
+    fake = FakeClient([[(datetime(2000, 1, 1),)], [(1,)]])
+    publish_contract_anomaly(_repo(fake, fit_coverage=0.9), "addr1", network="preprod")
+    assert seen == {"online": 0, "batch": 0, "labels": 0, "retract": 0}
 
 
 def test_label_change_triggers_host_projection_sync(monkeypatch: pytest.MonkeyPatch) -> None:
