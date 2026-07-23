@@ -43,6 +43,18 @@ logger = logging.getLogger(__name__)
 _CONTRACT_ANOMALY = "contract_anomaly"
 
 
+def _clusterable_priority(d: ClassScoreResult) -> bool:
+    """False only for a row whose SURFACING detection is an un-clusterable
+    contract_anomaly (DBSCAN-noise from a model that could not cluster its own
+    data). Used as the LAST sort key so such rows fall to the bottom of an
+    otherwise-tied group. Recall-safe: it is a final tie-break only, so it never
+    reorders rows that differ on score / recency (nothing is filtered, hidden, or
+    re-banded); it just keeps structural noise from sitting atop genuine findings
+    of equal score. A row whose stored 9-class score dominates (max_class is not
+    contract_anomaly) keeps normal priority even if the CA verdict is flagged."""
+    return not (d.max_class == _CONTRACT_ANOMALY and d.contract_anomaly_unclusterable)
+
+
 def _sort_results(results: list[ClassScoreResult], *, by_date: bool) -> None:
     """Re-rank a hydrated result list in place to mirror the SQL ORDER BY.
 
@@ -50,11 +62,19 @@ def _sort_results(results: list[ClassScoreResult], *, by_date: bool) -> None:
     (max_score, analyzed_at) descending. Shared by the contract_anomaly list
     filter and the recall rescue so the two read paths order identically.
     ``analyzed_at`` is a required datetime on :class:`ClassScoreResult`, so the
-    key never mixes None with datetime."""
+    key never mixes None with datetime. ``_clusterable_priority`` is appended as
+    the final tie-break so an un-clusterable contract_anomaly row loses only to
+    an equally-scored (or equally-dated) peer, never on score/recency itself."""
     if by_date:
-        results.sort(key=lambda d: (d.analyzed_at, d.max_score), reverse=True)
+        results.sort(
+            key=lambda d: (d.analyzed_at, d.max_score, _clusterable_priority(d)),
+            reverse=True,
+        )
     else:
-        results.sort(key=lambda d: (d.max_score, d.analyzed_at), reverse=True)
+        results.sort(
+            key=lambda d: (d.max_score, d.analyzed_at, _clusterable_priority(d)),
+            reverse=True,
+        )
 
 
 def _merge_contract_anomaly(
@@ -97,6 +117,7 @@ def _merge_contract_anomaly(
         result.risk_band = RiskBand(score_to_band(score))
     result.contract_anomaly_corroborates = score >= corroboration_threshold()
     result.contract_anomaly_scored_at = resolved.get("scored_at")
+    result.contract_anomaly_unclusterable = bool(resolved.get("unclusterable_fit"))
 
 
 def _passes_score_band(

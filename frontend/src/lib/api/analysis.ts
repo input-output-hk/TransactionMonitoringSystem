@@ -29,6 +29,10 @@ type ApiAnalysisResult = {
 	analyzed_at: string; // ISO datetime
 	fee: number | null; // lovelace
 	output_count: number | null;
+	// True when a merged contract_anomaly verdict came from a structurally
+	// un-clusterable fit: the "anomaly" is DBSCAN-noise, not a distinguishing
+	// signal, so the UI de-prioritizes it. Evidence only; never changes severity.
+	contract_anomaly_unclusterable?: boolean;
 };
 
 type ApiAnalysisResults = {
@@ -103,7 +107,7 @@ export const SUPERVISED_ATTACK_CLASS_OPTIONS: { value: string; label: string }[]
 		label: t,
 	}));
 
-function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
+export function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	// A genuine no-finding row carries an empty max_class; drop it. A non-empty
 	// but unrecognized class still renders (via the fallback) so a new backend
 	// class is never silently dropped from the operator's view.
@@ -129,6 +133,7 @@ function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 		outputs: r.output_count ?? 0,
 		subScores,
 		evidence,
+		unclusterableModel: r.contract_anomaly_unclusterable ?? false,
 	};
 }
 

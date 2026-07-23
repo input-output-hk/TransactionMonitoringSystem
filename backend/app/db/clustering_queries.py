@@ -51,6 +51,12 @@ _FIELDS = (
     "verdict",
     "model_id",
     "feature_set",
+    # 1 when the row's fit was structurally un-clusterable (coverage below the
+    # sidecar's MIN_CLUSTER_COVERAGE): its "anomaly" verdicts are DBSCAN-noise
+    # from a model that could not cluster its own data, so they are evidence to
+    # de-prioritize, not to suppress (the score/band projection is unchanged).
+    # See services/clustering migration 012 and the sidecar publish path.
+    "unclusterable_fit",
     "evidence",
     "scored_at",
     "published_at",

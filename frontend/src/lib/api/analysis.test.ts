@@ -4,7 +4,26 @@ import {
 	attackTypeFromSnake,
 	SNAKE_BY_ATTACK_TYPE,
 	SUPERVISED_ATTACK_CLASS_OPTIONS,
+	toRiskAlert,
 } from "./analysis";
+
+// A minimal backend result row (structurally matches ApiAnalysisResult).
+function apiRow(over: Record<string, unknown> = {}) {
+	return {
+		tx_hash: "abc123",
+		network: "preprod",
+		scores: { contract_anomaly: 50 },
+		max_score: 50,
+		max_class: "contract_anomaly",
+		risk_band: "Moderate" as const,
+		sub_scores: {},
+		analysis_version: "v1",
+		analyzed_at: "2026-07-23T00:00:00Z",
+		fee: null,
+		output_count: null,
+		...over,
+	};
+}
 
 describe("attackTypeFromSnake", () => {
 	it("maps every backend class round-trip through its snake form", () => {
@@ -31,6 +50,18 @@ describe("attackTypeFromSnake", () => {
 		// render, never be dropped from the operator's view.
 		expect(attackTypeFromSnake("brand_new_class")).toBe("Brand New Class");
 		expect(attackTypeFromSnake("oracle")).toBe("Oracle");
+	});
+});
+
+describe("toRiskAlert contract_anomaly_unclusterable mapping", () => {
+	it("passes the flag through when the backend marks the fit un-clusterable", () => {
+		const alert = toRiskAlert(apiRow({ contract_anomaly_unclusterable: true }));
+		expect(alert?.unclusterableModel).toBe(true);
+	});
+
+	it("defaults to false when the backend omits the flag", () => {
+		const alert = toRiskAlert(apiRow());
+		expect(alert?.unclusterableModel).toBe(false);
 	});
 });
 
