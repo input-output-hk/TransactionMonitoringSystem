@@ -4,6 +4,7 @@ goes through (UI job worker, CLI, existing-contract backfill)."""
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from app.clustering.evaluate import evaluate
@@ -197,7 +198,22 @@ async def process_contract(
 
             publish_contract_anomaly(repo, target, network=get_settings().cardano_network)
 
-        contract.update(status="done", tx_count=n)
+        # Clusterability of THIS fit: the fraction of the training window that
+        # landed in some cluster (1 - n_noise/n_points). Persisted so the scheduler
+        # and UI can tell "the shape does not cluster at these params" (a re-fit is
+        # futile, drift is structural) from "genuinely drifted" (a re-fit
+        # converges). Computed from the in-hand cluster dict, no extra query.
+        # n_points here is >= _MIN_TXS_FOR_ANALYSIS (checked above), so it is never
+        # 0; guarded anyway. last_fit_at marks this fit for the anti-flap cadence.
+        n_points = int(cluster.get("n_points") or 0)
+        n_noise = int(cluster.get("n_noise") or 0)
+        fit_coverage = 1.0 - (n_noise / n_points) if n_points else 0.0
+        contract.update(
+            status="done",
+            tx_count=n,
+            fit_coverage=fit_coverage,
+            last_fit_at=int(time.time()),
+        )
         repo.save_contract(contract)
         set_stage("done", f"{n} txs · shape cluster + shape/graph anomaly", txs_done=n)
         return result

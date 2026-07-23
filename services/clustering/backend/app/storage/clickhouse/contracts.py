@@ -24,6 +24,8 @@ CONTRACT_COLUMNS = [
     "requested_max_txs",
     "target_txs",
     "drift_score",
+    "fit_coverage",
+    "last_fit_at",
 ]
 _CONTRACT_DEFAULTS: dict[str, Any] = {
     "label": "",
@@ -45,6 +47,14 @@ _CONTRACT_DEFAULTS: dict[str, Any] = {
     # fresh re-cluster supersedes the old frozen model. update_contract passes the
     # measured rate through explicitly.
     "drift_score": 0.0,
+    # Clusterability of the frozen fit (1 - n_noise/n_points), and the last system
+    # fit time (unix seconds). -1/0 = "not yet fit": legacy rows and the too-few-txs
+    # branch keep the pre-011 behaviour (treated clusterable, never throttled) until
+    # a real fit records them. Every writer of the contracts row MUST carry both
+    # through, or this default silently re-arms the auto-refit loop (see 011 / the
+    # update_contract round-trip test).
+    "fit_coverage": -1.0,
+    "last_fit_at": 0,
 }
 
 # Output column order for the public contract select (single source of truth shared
@@ -66,6 +76,8 @@ _CONTRACT_OUT_KEYS = [
     "updated_at",
     "tx_count",
     "drift_score",
+    "fit_coverage",
+    "last_fit_at",
 ]
 _CONTRACT_INT_KEYS = (
     "exists",
@@ -75,8 +87,9 @@ _CONTRACT_INT_KEYS = (
     "requested_max_txs",
     "target_txs",
     "tx_count",
+    "last_fit_at",
 )
-_CONTRACT_FLOAT_KEYS = ("drift_score",)
+_CONTRACT_FLOAT_KEYS = ("drift_score", "fit_coverage")
 
 # Tables that carry a ``target`` column, purged directly when a contract is
 # deleted. ``cluster_labels``/``anomaly_scores`` key on ``run_id`` instead and are
@@ -134,7 +147,8 @@ class _ContractMixin(_RepoBase):
     _CONTRACT_SELECT = (
         "SELECT target, target_type, label, present, is_script, script_type, "
         "balance_lovelace, asset_count, sample_tokens, status, requested_max_txs, "
-        "target_txs, toString(updated_at) AS updated_at, tx_count, drift_score "
+        "target_txs, toString(updated_at) AS updated_at, tx_count, drift_score, "
+        "fit_coverage, last_fit_at "
         "FROM {db}.contracts FINAL {where}"
     )
 

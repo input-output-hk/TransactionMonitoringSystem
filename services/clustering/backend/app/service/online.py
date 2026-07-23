@@ -19,7 +19,7 @@ from app.clustering.model import (
     score_shape,
     serialize_model,
 )
-from app.config import get_settings
+from app.config import _COVERAGE_UNKNOWN, get_settings
 from app.ids import new_id
 from app.ingest.ingester import ProgressFn, TargetKwargs, ingest
 from app.service._common import (
@@ -260,6 +260,15 @@ async def update_contract(
         drift_score: float | None = out.get("drift_score")
 
         contract = repo.get_contract(target)
+        # Clusterability of the frozen fit, carried by the row (a classify does NOT
+        # re-fit, so fit_coverage/last_fit_at must round-trip untouched through this
+        # save; save_contract writes them from the fetched row). Gates the drift
+        # message below the same way the scheduler and API gate the re-fit / nag.
+        fit_coverage = (
+            float(contract.get("fit_coverage", _COVERAGE_UNKNOWN))
+            if contract is not None
+            else _COVERAGE_UNKNOWN
+        )
         if contract is not None:
             contract["tx_count"] = repo.count_transactions(target)
             contract["status"] = "done"
@@ -273,10 +282,22 @@ async def update_contract(
             )
         else:
             detail = out.get("note") or "no new transactions"
-        if drift_score is not None and get_settings().recluster_recommended(drift_score):
+        settings = get_settings()
+        if drift_score is not None and settings.recluster_recommended(drift_score, fit_coverage):
             detail += (
-                f" · model drift high ({round(drift_score * 100)}% unassigned)"
-                " — re-cluster recommended"
+                f" · model drift high ({round(drift_score * 100)}% unassigned):"
+                " re-cluster recommended"
+            )
+        elif (
+            drift_score is not None
+            and drift_score >= settings.recluster_noise_threshold
+            and settings.model_unclusterable(fit_coverage)
+        ):
+            # Drift is high but the shape does not cluster: re-clustering is futile,
+            # so say so honestly instead of recommending it (mirrors the UI card).
+            detail += (
+                f" · no stable clusters (fit coverage {round(fit_coverage * 100)}%);"
+                " scored by outlier detectors"
             )
         set_stage("done", detail, txs_done=out["n_new"])
         return out

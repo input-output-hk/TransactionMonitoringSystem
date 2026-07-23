@@ -188,6 +188,28 @@ async def test_process_contract_reprocess_runs_full_pipeline(
     assert repo.contracts[-1]["label"] == ""
 
 
+async def test_process_contract_persists_fit_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed fit records its clusterability (1 - n_noise/n_points) and the
+    fit time on the contract row, so the scheduler/UI can tell an un-clusterable
+    contract from a genuinely-drifted one."""
+    monkeypatch.setattr("app.service.pipeline.get_source", lambda settings: FakeSource())
+    repo = FakePipelineRepo(_shape_df(8), _addr_df(8))
+    await process_contract(
+        repo,
+        target="addr1demo",
+        target_type="address",
+        max_txs=None,
+        reprocess=True,
+        job_id="job-cov",
+    )
+    done = repo.contracts[-1]
+    assert done["status"] == "done"
+    assert 0.0 <= done["fit_coverage"] <= 1.0
+    assert done["last_fit_at"] > 0
+
+
 class FakeHostSource(FakeSource):
     """A host-backed stub (mirrors HostChainSource): its data already lives in
     storage, so onboarding must skip the download path even with reprocess=False."""
@@ -279,6 +301,10 @@ async def test_process_contract_skips_analysis_under_three_txs(
     assert "note" in result
     assert repo.cluster_runs == [] and repo.anomaly_runs == []
     assert repo.contracts[-1]["status"] == "done"
+    # No fit happened, so clusterability stays unrecorded (-1 = unknown, so the row
+    # is treated as clusterable, exactly as before migration 011).
+    assert repo.contracts[-1].get("fit_coverage", -1.0) == -1.0
+    assert repo.contracts[-1].get("last_fit_at", 0) == 0
 
 
 async def test_process_contract_rate_limited_download_fails_no_cluster(

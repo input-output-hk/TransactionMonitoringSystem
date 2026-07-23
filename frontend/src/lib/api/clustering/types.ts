@@ -38,7 +38,12 @@ export type Contract = {
 	status: string;
 	tx_count: number;
 	drift_score: number;
+	/** Cluster coverage of the frozen fit (1 - noise/points); -1 = not yet fit. */
+	fit_coverage: number;
 	reclustering_suggested: boolean;
+	/** True when the frozen fit has no usable cluster structure, so re-clustering
+	 *  cannot help: the card shows an honest status instead of the drift nag. */
+	model_unclusterable: boolean;
 	updated_at: string;
 	/** Locally-backfilled pre-deployment rows (detail endpoint only; 0 in lists). */
 	history_tx_count?: number;
