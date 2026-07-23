@@ -93,12 +93,15 @@ class Settings(BaseSettings):
     # construction and a re-cluster reproduces the same DBSCAN-noise. Below the
     # floor, drift is treated as STRUCTURAL (not staleness): recluster_recommended
     # returns False and the scheduler stops the ~60s auto-refit loop (see
-    # model_unclusterable). Observed coverage: ~0.16 uniform/tight, ~0.43
-    # heavy-tail, ~0.88 a healthy dominant-mode fit, so 0.5 separates the
-    # pathological fits from the healthy one. Raising it only treats MORE fits as
-    # un-clusterable (fewer re-fits, more honest UI): recall-safe, since classify +
-    # anomaly scoring run every tick regardless.
-    min_cluster_coverage: float = Field(default=0.5, ge=0.0, le=1.0, alias="MIN_CLUSTER_COVERAGE")
+    # model_unclusterable). Calibrated on mainnet 2026-07-23: the degenerate
+    # stablecoin-validator fits cluster at 0.52 (Strike) and 0.58 (Djed at a 2000
+    # window), both with drift pinned at ~1.0 and a re-fit reproducing the same
+    # noise; a genuinely healthy fit (Djed at a ~1100 window) sits at 0.97. 0.6
+    # falls in the wide empty gap between those two regimes, so it gates the
+    # pathological fits while leaving healthy ones clusterable. Raising it only
+    # treats MORE fits as un-clusterable (fewer re-fits, more honest UI): recall-
+    # safe, since classify + anomaly scoring run every tick regardless.
+    min_cluster_coverage: float = Field(default=0.6, ge=0.0, le=1.0, alias="MIN_CLUSTER_COVERAGE")
 
     # Number of transactions whose (tx, utxos) pairs are fetched concurrently
     # within a page during ingest. Admission is still serialized by the token
