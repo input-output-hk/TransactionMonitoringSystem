@@ -334,7 +334,23 @@ export function ContractCard({ c, job }: { c: Contract; job: Job | null }) {
 						className="text-severity-medium-foreground text-xs"
 						title="Recent transactions no longer fit the frozen clusters. Re-analyze to re-cluster on current data."
 					>
-						⚠ Model drift high — re-analyze to re-cluster.
+						⚠ Model drift high: re-analyze to re-cluster.
+					</p>
+				)}
+				{/* Shown whenever the fit is un-clusterable: a persistent property of
+				    the model, not tied to the (often transient) drift number, so it
+				    stays visible right after a re-fit resets drift to 0. This is
+				    intentionally broader than the job-detail note, which annotates a
+				    single high-drift classify run. `reclustering_suggested` and
+				    `model_unclusterable` are mutually exclusive (see
+				    Settings.recluster_recommended), so at most one line renders. */}
+				{c.model_unclusterable && !jobRunning && (
+					<p
+						className="text-muted-foreground text-xs"
+						title="This contract's transactions don't form stable clusters at the current parameters, so re-clustering won't reduce the drift. New transactions are still scored for anomalies by the outlier detectors (Isolation Forest / LOF) on every tick."
+					>
+						No stable clusters at this traffic shape; scored by outlier
+						detectors instead.
 					</p>
 				)}
 				<JobProgress job={job} />

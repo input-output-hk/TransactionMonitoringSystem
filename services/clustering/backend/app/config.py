@@ -16,6 +16,14 @@ _BLOCKFROST_BASE_URLS = {
     "preview": "https://cardano-preview.blockfrost.io/api/v0",
 }
 
+# Sentinel for a contract whose frozen-fit clusterability was never recorded: rows
+# written before migration 011, and contracts with too few transactions to fit.
+# Matches the fit_coverage column DEFAULT (-1). Treated as clusterable so such rows
+# keep their pre-011 behaviour (re-cluster recommended purely on drift) until their
+# first real fit records a coverage. Consumed as the default of the clusterability
+# helpers below.
+_COVERAGE_UNKNOWN = -1.0
+
 
 class Settings(BaseSettings):
     """Runtime configuration sourced from the environment / `.env`."""
@@ -77,6 +85,20 @@ class Settings(BaseSettings):
     # but is noisier. A tunable, so it lives here beside its threshold rather
     # than as a literal in the storage query.
     online_noise_window: int = Field(default=500, alias="ONLINE_NOISE_WINDOW")
+
+    # A frozen fit's cluster coverage is the fraction of its OWN training window
+    # that landed in some cluster (1 - n_noise/n_points). Below this floor the fit
+    # failed to describe its own data: the shape does not cluster at the
+    # auto-selected DBSCAN params, so its online-noise rate ("drift") is high by
+    # construction and a re-cluster reproduces the same DBSCAN-noise. Below the
+    # floor, drift is treated as STRUCTURAL (not staleness): recluster_recommended
+    # returns False and the scheduler stops the ~60s auto-refit loop (see
+    # model_unclusterable). Observed coverage: ~0.16 uniform/tight, ~0.43
+    # heavy-tail, ~0.88 a healthy dominant-mode fit, so 0.5 separates the
+    # pathological fits from the healthy one. Raising it only treats MORE fits as
+    # un-clusterable (fewer re-fits, more honest UI): recall-safe, since classify +
+    # anomaly scoring run every tick regardless.
+    min_cluster_coverage: float = Field(default=0.5, ge=0.0, le=1.0, alias="MIN_CLUSTER_COVERAGE")
 
     # Number of transactions whose (tx, utxos) pairs are fetched concurrently
     # within a page during ingest. Admission is still serialized by the token
@@ -186,6 +208,19 @@ class Settings(BaseSettings):
     # Contracts enqueued per tick: bounds per-tick work so a large watchlist
     # cannot flood the single job worker (mirrors the host's per-tick drain cap).
     feed_max_contracts_per_tick: int = Field(default=4, alias="FEED_MAX_CONTRACTS_PER_TICK")
+    # Anti-flap / re-baseline cadence: the minimum seconds between two AUTOMATIC
+    # re-fits of the same contract. A clusterable-but-genuinely-drifting contract
+    # re-fits on the next tick when its previous fit is already older than the
+    # interval; if the drift appears sooner, the re-fit is deferred up to one
+    # interval (classify + iso/LOF still run every tick, so this defers baseline
+    # refresh, never detection). An un-clusterable contract uses this as its slow
+    # re-baseline cadence (keeping RobustScaler + iso/LOF thresholds fresh) instead
+    # of the ~60s non-convergent churn. 3600 is far below distribution-shift
+    # timescales, so periodic refresh is preserved (recall-first): only the tight
+    # loop is dropped. 0 disables throttling.
+    feed_refit_min_interval_seconds: int = Field(
+        default=3600, ge=0, alias="FEED_REFIT_MIN_INTERVAL_SECONDS"
+    )
 
     # Optional secondary HISTORY source (host_ch deployments only). The host
     # syncs tip-forward, so a watched contract's pre-deployment history never
@@ -321,12 +356,34 @@ class Settings(BaseSettings):
             return ceiling
         return max(self.recall_floor(ceiling), min(requested_max_txs, ceiling))
 
-    def recluster_recommended(self, drift_score: float) -> bool:
+    def model_unclusterable(self, fit_coverage: float) -> bool:
+        """Whether a frozen fit failed to cluster its OWN training data: its cluster
+        coverage (fraction of the training window inside some cluster) is below
+        ``min_cluster_coverage``. The ``_COVERAGE_UNKNOWN`` sentinel (legacy rows,
+        or contracts never fit) is treated as clusterable, so those rows keep their
+        pre-011 behaviour. Single source of truth for the "not clusterable" fact,
+        shared by ``recluster_recommended``, the scheduler and the API card, so they
+        cannot disagree."""
+        return _COVERAGE_UNKNOWN < fit_coverage < self.min_cluster_coverage
+
+    def recluster_recommended(
+        self, drift_score: float, fit_coverage: float = _COVERAGE_UNKNOWN
+    ) -> bool:
         """Whether an online-classifier ``drift_score`` is stale enough to recommend
         a full re-cluster. Single source of truth for the threshold rule, shared by
-        the API (``ContractOut.reclustering_suggested``) and the classify job's
-        detail message — keep both reading this so they can't disagree."""
-        return drift_score >= self.recluster_noise_threshold
+        the API (``ContractOut.reclustering_suggested``), the scheduler's auto-refit
+        and the classify job's detail message: keep them all reading this so they
+        cannot disagree.
+
+        A re-cluster is only worth recommending when it can plausibly help. For an
+        un-clusterable fit (``model_unclusterable``) the high drift is STRUCTURAL: a
+        re-fit reproduces the same majority-noise model, so re-clustering is futile
+        and is NOT recommended. This is what breaks the non-convergent auto-refit
+        loop. ``fit_coverage`` defaults to the unknown sentinel, so every existing
+        caller/test keeps its current behaviour (pure drift threshold)."""
+        if drift_score < self.recluster_noise_threshold:
+            return False
+        return not self.model_unclusterable(fit_coverage)
 
 
 @lru_cache

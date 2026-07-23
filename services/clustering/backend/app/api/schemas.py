@@ -216,6 +216,11 @@ class ContractOut(BaseModel):
     # Trailing online-noise rate written by the incremental classifier; 0 until a
     # classify run has scored against this contract's model.
     drift_score: float = 0.0
+    # Cluster coverage of the frozen fit (1 - n_noise/n_points); -1 = not yet fit
+    # (legacy rows, or too few txs to cluster). Below MIN_CLUSTER_COVERAGE the shape
+    # does not cluster at the auto params, so a high drift_score is structural
+    # rather than staleness (drives reclustering_suggested / model_unclusterable).
+    fit_coverage: float = -1.0
     # Pre-deployment history backfill visibility (HISTORY_SOURCE deployments).
     # Both are derived at read time on the DETAIL endpoint only (0/"none" in
     # list views): the count is the locally-stored history subset, the status
@@ -230,9 +235,20 @@ class ContractOut(BaseModel):
     @property
     def reclustering_suggested(self) -> bool:
         """True when recent traffic drifted enough from the frozen model that a
-        full re-cluster is warranted (drift_score over RECLUSTER_NOISE_THRESHOLD).
-        Derived at read time so the threshold can be retuned without re-running."""
-        return get_settings().recluster_recommended(self.drift_score)
+        full re-cluster is warranted AND the fit is clusterable enough that a
+        re-cluster can help. Derived at read time (drift_score + fit_coverage) so
+        the thresholds can be retuned without re-running. False for an
+        un-clusterable fit even at high drift: re-clustering it is futile (see
+        Settings.recluster_recommended)."""
+        return get_settings().recluster_recommended(self.drift_score, self.fit_coverage)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def model_unclusterable(self) -> bool:
+        """True when the frozen fit failed to cluster its own training data. The
+        card uses this to show an honest 'no stable clusters' status instead of the
+        (futile) 're-analyze to re-cluster' nag when drift is high."""
+        return get_settings().model_unclusterable(self.fit_coverage)
 
 
 class JobOut(BaseModel):

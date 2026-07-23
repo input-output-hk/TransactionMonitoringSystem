@@ -210,15 +210,27 @@ class _JobRepo(FakeRepoBase):
 
 
 class _DriftRepo(FakeClassifyRepo):
-    """Full classify machinery plus the contract/job writes update_contract needs."""
+    """Full classify machinery plus the contract/job writes update_contract needs.
 
-    def __init__(self) -> None:
+    ``fit_coverage``/``last_fit_at`` mirror the frozen-fit clusterability the real
+    contracts row now carries; the defaults (-1/0 = "not yet fit") keep the pre-011
+    behaviour (a classify treats the model as clusterable)."""
+
+    def __init__(self, fit_coverage: float = -1.0, last_fit_at: int = 0) -> None:
         super().__init__()
         self.job_updates: list[dict[str, Any]] = []
         self.saved_contract: dict[str, Any] | None = None
+        self._fit_coverage = fit_coverage
+        self._last_fit_at = last_fit_at
 
     def get_contract(self, target: str) -> dict[str, Any]:
-        return {"target": target, "target_type": "address", "exists": 1}
+        return {
+            "target": target,
+            "target_type": "address",
+            "exists": 1,
+            "fit_coverage": self._fit_coverage,
+            "last_fit_at": self._last_fit_at,
+        }
 
     def count_transactions(self, target: str) -> int:
         return 18
@@ -254,6 +266,57 @@ async def test_update_contract_persists_drift_and_suggests_recluster(
     assert repo.saved_contract is not None and repo.saved_contract["drift_score"] == 0.5
     done = [c for c in repo.job_updates if c.get("status") == "done"][-1]
     assert "re-cluster recommended" in done["stage_detail"]
+
+
+async def test_update_contract_round_trips_fit_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A classify is not a fit: fit_coverage/last_fit_at on the contract row must
+    round-trip untouched through the classify save. Locks the column-omission reset
+    trap that would otherwise silently re-arm the auto-refit loop."""
+    _force_download_path(monkeypatch)
+    monkeypatch.setattr("app.service.online.get_source", lambda settings: _FakeSource())
+
+    async def _completed(**kwargs: Any) -> IngestResult:
+        return IngestResult("addr1demo", "address", "completed", 2, "page:1")
+
+    monkeypatch.setattr("app.service.online.ingest", _completed)
+    repo = _DriftRepo(fit_coverage=0.82, last_fit_at=1234567)
+    await update_contract(
+        repo,  # type: ignore[arg-type]
+        target="addr1demo",
+        target_type="address",
+        job_id="job-rt",
+    )
+    assert repo.saved_contract is not None
+    assert repo.saved_contract["fit_coverage"] == 0.82
+    assert repo.saved_contract["last_fit_at"] == 1234567
+
+
+async def test_update_contract_unclusterable_does_not_suggest_recluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An un-clusterable fit at high drift must NOT surface a re-cluster
+    recommendation (re-clustering is futile); the detail says so honestly instead.
+    Drift is still measured and stored, so nothing about scoring/recall changes."""
+    _force_download_path(monkeypatch)
+    monkeypatch.setattr("app.service.online.get_source", lambda settings: _FakeSource())
+
+    async def _completed(**kwargs: Any) -> IngestResult:
+        return IngestResult("addr1demo", "address", "completed", 2, "page:1")
+
+    monkeypatch.setattr("app.service.online.ingest", _completed)
+    repo = _DriftRepo(fit_coverage=0.1, last_fit_at=1234567)  # below the 0.5 floor
+    out = await update_contract(
+        repo,  # type: ignore[arg-type]
+        target="addr1demo",
+        target_type="address",
+        job_id="job-uc",
+    )
+    assert out["drift_score"] == 0.5  # still measured + surfaced (recall untouched)
+    done = [c for c in repo.job_updates if c.get("status") == "done"][-1]
+    assert "re-cluster recommended" not in done["stage_detail"]
+    assert "no stable clusters" in done["stage_detail"]
 
 
 async def test_update_contract_rate_limited_fails_without_classifying(

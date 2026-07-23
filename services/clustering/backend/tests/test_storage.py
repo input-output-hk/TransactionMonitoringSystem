@@ -578,6 +578,8 @@ def test_list_contracts_maps_rows() -> None:
                 "2026-06-05 10:00:00.000",
                 10,
                 0.42,
+                0.75,
+                1_700_000_000,
             )
         ]
     )
@@ -589,6 +591,7 @@ def test_list_contracts_maps_rows() -> None:
     assert rows[0]["tx_count"] == 10  # live count from join
     assert rows[0]["status"] == "done"
     assert rows[0]["drift_score"] == 0.42
+    assert rows[0]["fit_coverage"] == 0.75 and rows[0]["last_fit_at"] == 1_700_000_000
 
 
 # --- Jobs ------------------------------------------------------------------

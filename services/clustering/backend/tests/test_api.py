@@ -167,6 +167,7 @@ def _contract_row(**over: Any) -> dict[str, Any]:
         "updated_at": "2026-01-01 00:00:00.000000",
         "tx_count": 0,
         "drift_score": 0.0,
+        "fit_coverage": -1.0,
     }
     row.update(over)
     return row
@@ -401,6 +402,22 @@ def test_contract_reclustering_suggested_derived_from_drift_score() -> None:
     low = FakeApiRepo(contracts=[_contract_row(drift_score=0.1)])
     body = _client(low).get("/api/contracts/addr1a").json()
     assert body["reclustering_suggested"] is False
+
+
+def test_contract_reclustering_suggested_gated_by_clusterability() -> None:
+    """High drift alone no longer suggests a re-cluster. An un-clusterable fit
+    (coverage below MIN_CLUSTER_COVERAGE) reports reclustering_suggested False and
+    model_unclusterable True, so the card shows an honest status instead of the
+    futile 're-analyze' nag; a clusterable fit at the same drift still suggests it."""
+    unclusterable = FakeApiRepo(contracts=[_contract_row(drift_score=0.4, fit_coverage=0.1)])
+    body = _client(unclusterable).get("/api/contracts/addr1a").json()
+    assert body["reclustering_suggested"] is False
+    assert body["model_unclusterable"] is True
+
+    clusterable = FakeApiRepo(contracts=[_contract_row(drift_score=0.4, fit_coverage=0.9)])
+    body = _client(clusterable).get("/api/contracts/addr1a").json()
+    assert body["reclustering_suggested"] is True
+    assert body["model_unclusterable"] is False
 
 
 def test_delete_contract_purges() -> None:
