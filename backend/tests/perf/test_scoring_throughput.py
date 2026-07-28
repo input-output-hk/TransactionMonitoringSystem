@@ -445,11 +445,24 @@ def pure_compute_scoring(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the zero-I/O seam for the benchmark.
 
     The perf tier deliberately drops the suite-wide baseline mock (storage
-    benchmarks need the real ClickHouse), so this benchmark stubs
-    ``clickhouse.get_baseline`` itself: a plain in-memory function returning
-    None, which sends every scorer to its bootstrap anchors. That matches a
-    fresh deployment and is the same seam the hermetic suite mocks, keeping
-    the timed region pure compute with no client, socket, or cache involved.
+    benchmarks need the real ClickHouse), so this benchmark stubs every
+    ClickHouse-backed resolution seam itself with plain in-memory functions.
+    That matches a fresh deployment and is the same set of seams the hermetic
+    suite mocks, keeping the timed region pure compute with no client, socket,
+    or cache involved.
+
+    Two seams exist, and BOTH must be stubbed or the benchmark silently stops
+    measuring compute:
+
+    - ``get_baseline`` returning None sends every scorer to its bootstrap
+      anchors.
+    - ``get_policies_first_seen`` returning an empty map leaves every policy
+      age unknown, which token_dust's established-collection cap treats as
+      "no cap" (it fails open toward detection). This seam is reached once per
+      engaged token_dust transaction, so leaving it live puts a database round
+      trip inside the timed region: the CI job runs a real ClickHouse service
+      container, which cost roughly 3 ms per engaged transaction and cut the
+      reported throughput by more than half before this stub was added.
 
     All scorer flags are pinned on so the measurement covers the documented
     9-scorer workload regardless of local .env toggles, and testnet mode
@@ -460,6 +473,7 @@ def pure_compute_scoring(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, f"SCORER_{name.upper()}_ENABLED", True)
     monkeypatch.setattr(settings, "FAKE_TOKEN_TESTNET_MODE", True)
     monkeypatch.setattr("app.db.clickhouse.get_baseline", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.db.clickhouse.get_policies_first_seen", lambda *args, **kwargs: {})
 
 
 def test_scoring_throughput_meets_budget(pure_compute_scoring):

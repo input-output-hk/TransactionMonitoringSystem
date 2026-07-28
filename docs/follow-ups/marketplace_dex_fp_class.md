@@ -73,7 +73,7 @@ A shared marketplace / DEX discriminator, mirroring the existing
 | Aspect | Cost | Notes |
 |---|---|---|
 | Recall | None by construction | Cap, never suppress; findings stay visible and corroboration-eligible. |
-| Precision | Removes the dominant residual High-band FP class | 6 of 7 non-multiple_sat mainnet High FPs on 2026-07-21 were marketplace / DEX. |
+| Precision | Removes the dominant residual High-band FP class | 7 marketplace / DEX High FPs confirmed on 2026-07-21, individually listed above: 6 phishing (`19ae239a`, `3b56f1b8`, `a413fcb0`, `5a7332ab`, `6aa6e386`, `4acfd980`) and 1 token_dust (`fb2a443f`). An earlier revision of this table said "6 of 7 non-multiple_sat High FPs", which is inconsistent with the seven cases enumerated above; the per-transaction list is the authoritative count, and the day's full non-multiple_sat denominator should be re-derived from the warehouse when this work is picked up. |
 | Evasion | Forged operator `msg` | Mitigated by keying on operator scripts, not text, and by capping rather than suppressing. |
 | Maintenance | Operator script list drifts | Network-scoped config with REVIEW-BY dates, same discipline as the allowlists. |
 
