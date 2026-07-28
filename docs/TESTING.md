@@ -2,7 +2,7 @@
 
 This document is the test-suite inventory for the Cardano Transaction
 Monitoring System: what each tier covers, how to run it, and how the tiers
-map to CI. Counts are current as of commit `fa6adca` on `main` and move as
+map to CI. Counts are current as of commit `3a03c22` on `main` and move as
 the suite grows; the exact numbers are always whatever CI reports on the
 latest commit.
 
@@ -10,16 +10,19 @@ latest commit.
 
 | Tier | Location | Count | Services needed | CI job |
 |---|---|---|---|---|
-| Backend hermetic | `backend/tests/` | 1053 | none (all I/O mocked) | Backend (pytest + recall gate) |
-| Recall gate | `backend/tests/analysis/` | subset of the above | none | Backend (run first, on its own) |
+| Backend hermetic | `backend/tests/` | 1111 | none (all I/O mocked) | Backend (pytest + recall gate) |
+| Recall gate | `backend/tests/analysis/` | 492 (subset of the above) | none | Backend (run first, on its own) |
 | Live-DB tier | `backend/tests/live_db/` | 21 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
-| Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 4 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 5 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
-| Clustering sidecar | `services/clustering/backend/tests/` | 349 | none | Clustering sidecar (pytest) |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 40 | none | Frontend (lint + build) |
+| Clustering sidecar | `services/clustering/backend/tests/` | 495 | none | Clustering sidecar (pytest) |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 49 | none | Frontend (lint + build) |
+
+That is 1,684 tests across the six independent tiers (the recall gate is a
+subset of the backend suite, not an additional tier).
 
 The default developer command, `pytest tests/` from `backend/`, runs the
-1053 hermetic backend tests and nothing that needs a database: the live-DB
+1111 hermetic backend tests and nothing that needs a database: the live-DB
 and performance tiers are opt-in behind environment flags so a contributor
 without Docker still gets a green run.
 
@@ -42,8 +45,10 @@ uv run pytest tests/ -q --cov=app --cov-report=term-missing   # with coverage
 
 ### The recall gate
 
-`backend/tests/analysis/` is the attack-must-fire tier: the tests that prove
-each detection scorer still fires on its real-attack case. CI runs it first
+`backend/tests/analysis/` is the full scorer and analysis suite. It contains
+the attack-must-fire tests that prove each detection scorer still fires on its
+real-attack case, alongside the must-not-fire precision cases and the engine,
+feature and baseline tests they depend on. CI runs it first
 and on its own so a recall regression is unambiguous, and the project's change
 rules require every detection-parameter change to keep it green. It is
 intended as a required status check on `main`; enabling that branch
@@ -53,7 +58,9 @@ protection is a pending repository-admin step.
 
 CI measures line coverage on the full backend suite (`--cov=app`) and reports
 it in the job summary; there is no enforced threshold yet (report-only). At
-commit `fa6adca` backend coverage is 76% and the clustering sidecar is 82%.
+commit `3a03c22` backend coverage is 75% in CI (76% run locally, over the same
+8,797 statements: the difference is environment-gated branches) and the
+clustering sidecar is 85%.
 
 ## Live-DB integration tier
 
@@ -111,7 +118,7 @@ artifact.
 ## Clustering sidecar
 
 The optional clustering sidecar keeps its own suite under
-`services/clustering/backend/tests/` (349 tests), covering its chain sources,
+`services/clustering/backend/tests/` (495 tests), covering its chain sources,
 storage layer, scoring pipeline, and API. It runs in its own CI job. Its
 opt-in live tier (`tests/live_db/`, gated like the host's) is described in
 the Live-DB section above.
@@ -124,7 +131,7 @@ uv run pytest -q
 
 ## Frontend
 
-The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 40 tests)
+The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 49 tests)
 over the API client and helper libraries, run under jsdom.
 
 ```bash

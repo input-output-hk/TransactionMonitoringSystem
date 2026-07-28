@@ -372,6 +372,22 @@ false positives.
 | `CLUSTERING_HISTORY_MAX_TXS_CEILING` | `5000` | Clamp on per-contract history overrides |
 | `CLUSTERING_HOST_API_URL` / `CLUSTERING_HOST_API_KEY` | `http://app:8000` / _(empty)_ | kupo flavor only: how the sidecar reaches this app's `/api/v1/backfill` |
 | `CLUSTERING_HOST_API_TIMEOUT_SECONDS` | `30` | kupo flavor only: per-request ceiling on the sidecar's trigger/status calls to this app |
+| `CLUSTERING_HISTORY_MIN_HOST_TXS` | `0` | Skip the backfill when the host already holds at least N rows for the target (its recent sample is a sufficient fit baseline). `0` = always top up |
+| `CLUSTERING_CHAIN_SOURCE` | _(empty)_ | Sidecar chain source for the backfill (`blockfrost`); the network comes from `CARDANO_NETWORK` |
+
+**Clustering sidecar (module side).** Set these when the sidecar container is
+reachable beyond the compose network. It binds to loopback in the bundled
+compose file and its API is unauthenticated by default, so a deployment that
+publishes its port **must** set the first two.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLUSTERING_API_KEY` | _(empty)_ | Shared key; the host proxy forwards it as `X-API-Key` and the sidecar requires it |
+| `CLUSTERING_REQUIRE_AUTH` | _(unset)_ | `1` makes the sidecar refuse to start unless `CLUSTERING_API_KEY` and `MODEL_SIGNING_KEYS` are both set. Turns a missing key into a boot failure rather than a silently open API |
+| `CLUSTERING_CORS_ORIGINS` | _(empty)_ | Allowed browser origins for direct sidecar access; leave empty when it sits behind the host proxy |
+| `CLUSTERING_DEFAULT_TARGET_TXS` | `5000` | Per-contract "latest N to cluster on" when the operator names none at onboarding |
+| `CLUSTERING_MIN_TARGET_TXS` | `200` | Recall floor a named N is clamped up to; below it the outlier baseline is too thin |
+| `CLUSTERING_WINDOW_TXS` | `50000` | Window and fit-memory ceiling that caps both of the above |
 
 **Ingestion resilience: raw-store fallback and analysis deferral.** When a
 ClickHouse write fails, the transaction is parked and retried from the raw

@@ -133,19 +133,24 @@ rerunning re-covers whatever a partial run wrote.
 
 Every budget and workload knob lives in `config/performance.yaml`, loaded through the validated
 loader in `backend/perf/config.py`; a typo in the file is a load-time error, not a silently
-ignored knob, and benchmarks reference the config rather than duplicating values. The current
-budgets are provisional, derived from the first measured baseline on a development machine using
-two fixed rules:
+ignored knob, and benchmarks reference the config rather than duplicating values.
+
+The current budgets are deliberately wide provisional guardrails, set roughly an order of
+magnitude below the first development baseline so the tier runs green on a laptop on battery
+and on a busy shared CI runner alike. They are not derived from the two ratification rules
+below; they are placeholders chosen to catch a catastrophic regression without flaking.
+
+Ratification is the separate step that replaces them with real targets, using two fixed rules:
 
 - Throughput floors are set at 50% of the measured baseline.
 - Latency ceilings are set at twice the measured p95.
 
-The rules are chosen so normal machine variance (a laptop on battery, a busy CI runner) does not
-flake the tier, while a real regression, halved throughput or doubled latency, still fails it.
-These are engineering guardrails, not contractual SLOs: production targets are ratified with the
-customer against the performance report, then updated in that one file. Numbers used for
-ratification should come from the reference environment recorded in each artifact, not from a
-shared CI runner.
+Those rules are chosen so normal machine variance does not flake the tier, while a real
+regression, halved throughput or doubled latency, still fails it. These remain engineering
+guardrails, not contractual SLOs: production targets are ratified with the customer against the
+performance report, then updated in that one file. Numbers used for ratification must come from
+the reference environment recorded in each artifact, not from a shared CI runner. Applying the
+rules to shared-runner medians would set floors the same runner intermittently fails.
 
 ## Artifacts and the Report: perf-results
 
