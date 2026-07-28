@@ -49,10 +49,15 @@ if [ "$CONFIRMED" != "1" ]; then
     fi
 fi
 
-# Activate virtual environment
-if [ -f venv/bin/activate ]; then
-    source venv/bin/activate
+# Activate the uv-managed virtual environment. Hard failure rather than a
+# best-effort activation: the reset below needs asyncpg and the ClickHouse
+# client, so falling through to whatever python is on PATH only produces a
+# confusing ImportError.
+if [ ! -f .venv/bin/activate ]; then
+    echo "❌ .venv not found. Run ./setup.sh (or 'uv sync') first."
+    exit 1
 fi
+source .venv/bin/activate
 
 cd backend
 ALL="$ALL" NETWORK_ARG="$NETWORK_ARG" python -c "
