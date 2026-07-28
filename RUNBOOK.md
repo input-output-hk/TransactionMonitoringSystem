@@ -402,6 +402,7 @@ analysis is deferred and retried.
 | `ANALYSIS_DEFER_ENABLED` | `true` | Defer + retry scoring when enrichment inputs are missing |
 | `ANALYSIS_DEFER_MAX_ATTEMPTS` | `3` | Deferred-scoring attempts before the class is persisted as not-applicable |
 | `ANALYSIS_DEFER_RETRY_SECONDS` | `30` | Spacing between deferred-scoring attempts |
+| `ROLLBACK_CLEANUP_ENABLED` | `true` | On a chain rollback, delete ClickHouse rows for transactions past the rollback point, so orphaned-fork data cannot feed scorers or API reads. `archived_alerts` is exempt: it is admin curation, not chain state |
 
 **Analysis engine internals.** Tuning knobs for the scoring loop; the
 defaults suit preprod. On mainnet, set `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS`
@@ -427,6 +428,7 @@ which grows unbounded).
 | `BASELINE_CACHE_TTL_SECONDS` | `3600` | In-process baseline cache TTL |
 | `BASELINE_CACHE_MAX_ENTRIES` | `50000` | Baseline cache size cap |
 | `TOKEN_REGISTRY_REFRESH_INTERVAL_HOURS` | `24` | Fake-token registry refresh cadence |
+| `POLICY_FIRST_SEEN_CACHE_MAX_ENTRIES` | `100000` | Policy first-seen lookup cache size; `0` disables. Only known first-slots are cached and a known slot can only move earlier, so a stale entry can only under-state a policy's age, which fails toward detection. No TTL; overflow clears the cache |
 
 **Database tuning.** Pool sizing, timeouts, and insert-retry backoff. The
 defaults match Docker Compose and rarely need changing; raise pool sizes and
@@ -457,6 +459,7 @@ above): older than DEGRADED is `DEGRADED`, older than DOWN is `DOWN`.
 | `OGMIOS_CIRCUIT_OPEN_POLL_SECONDS` | `10` | Poll cadence while the breaker is open |
 | `OGMIOS_SESSION_STABLE_RESET_SECONDS` | `60` | Uptime after which a session counts as stable and the failure count resets |
 | `SUPERVISOR_BACKOFF_BASE_SECONDS` / `SUPERVISOR_BACKOFF_MAX_SECONDS` | `5` / `300` | Supervisor restart backoff bounds for the ingestion tasks |
+| `SUPERVISOR_STABLE_RESET_SECONDS` | `600` | Run duration after which a supervised task counts as stable and its backoff resets to base. One-off crashes recover fast; a persistently failing task keeps backing off instead of hammering logs and downstream services |
 | `OGMIOS_PARSE_EXECUTOR_THRESHOLD_BYTES` | `1048576` | Payload size above which parsing moves to a thread executor |
 | `OGMIOS_WS_MAX_FRAME_BYTES` | `67108864` | Max Ogmios WebSocket frame accepted (64 MiB) |
 
@@ -516,6 +519,17 @@ table; these are the rest.
 | `SMTP_TIMEOUT_SECONDS` | `10` | SMTP send timeout |
 | `MAGIC_LINK_MAX_REDEMPTIONS` | `3` | Times one magic link can be redeemed before it is consumed |
 | `MAGIC_LINK_PER_EMAIL_WINDOW_SECONDS` | `900` | Window for the per-address magic-link request throttle |
+| `ADMIN_INVARIANT_LOCK_KEY` | `8737367428` | Postgres advisory lock serialising Admin role changes, so the "cannot remove the last active Admin" guard cannot be raced by two concurrent operations. Must stay constant across deploys and must not collide with `LEADER_LOCK_KEY` |
+
+**Application identity and process.** Cosmetic and developer-only settings.
+`UVICORN_RELOAD` must stay `false` outside local development.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_TITLE` | `Cardano Transaction Monitoring System` | Title shown in the OpenAPI schema and the `/docs` page |
+| `API_VERSION` | `0.1.0` | Version string reported in the OpenAPI schema |
+| `TMS_CONFIG_DIR` | _(empty)_ | Override the directory searched for `detection.yaml` and the other config files; empty resolves the project root's `config/` directory |
+| `UVICORN_RELOAD` | `false` | Uvicorn's file-watch reloader. Local development only: it adds request latency and spawns a watchdog subprocess, so leave it off in Docker and in production |
 
 **Logging.**
 
