@@ -345,3 +345,50 @@ For very high-throughput Mainnet ingestion, a lower-level language (Go, Rust) wo
 | Go |
 | Rust |
 | Node.js |
+
+## ADR-010: Observability Without OpenTelemetry
+
+### Context
+
+OpenTelemetry was identified early as a candidate for the observability layer, alongside structured logs and trace IDs. The underlying requirement it serves is full traceability for audit.
+
+OpenTelemetry's distinctive contribution is **distributed tracing**: propagating a trace context across process and service boundaries so that one logical operation can be reconstructed from spans emitted by many independent services. Its value scales with the number of boundaries a request crosses.
+
+This system's deployed topology is two services: the application (a single process running the API, chain sync, mempool monitor, and analysis engine on one event loop, per ADR-006) and the clustering sidecar, reached over one synchronous reverse-proxy hop. There is no service mesh, no request fan-out across independent services, and no cross-service call graph that cannot be read directly from the two services' logs.
+
+Adopting OpenTelemetry also has a real cost: the SDK and instrumentation packages, an exporter, and a collector or hosted tracing backend to receive spans. For a two-service deployment that is new operational surface, a new dependency set to keep patched, and a new external egress path, for a correlation problem the current topology does not have.
+
+### Decision
+
+**Do not adopt OpenTelemetry at the current scale.** Deliver the observability and traceability requirement through structured logging, operational health endpoints, and durable audit trails.
+
+| Requirement | Delivered by |
+|---|---|
+| Machine-parseable logs | JSON structured logging (`LOG_FORMAT=json`): level, logger, message, exception, and arbitrary structured extras per record, ready for any log collector |
+| Credential safety in logs | Access-log filter redacting `token=` and `api_key=` query-string values (`backend/app/logging_utils.py`) |
+| Pipeline observability | `GET /health/detail`: `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_slots`, `last_processed_slot`, `last_ogmios_msg_at` |
+| Operator action traceability | PostgreSQL audit log, retained per `AUDIT_LOG_RETENTION_DAYS` (default: keep forever), the accountability record for alert suppression and administrative actions |
+| Alert delivery traceability | Notification ledger recording every send attempt and its outcome |
+| Detection traceability | Per-transaction `sub_scores` and evidence columns persisted alongside every score, so any band assignment can be reconstructed from stored data |
+
+Revisit this decision when any of the following becomes true:
+
+- The architecture moves to multi-process or multi-instance deployment (ADR-006 anticipates this), at which point cross-process correlation stops being free.
+- A formal audit-readiness exercise defines a traceability evidence format that span data would satisfy better than the audit log and the persisted evidence columns.
+- Operational experience at mainnet volume shows a latency-attribution problem that logs and health metrics cannot localise.
+
+### Consequences
+
+- No vendor-neutral trace export. Integrating this system into an existing tracing backend would require instrumentation work at that point, though FastAPI and the async database clients all have mature OpenTelemetry instrumentation available, so the work is additive rather than structural.
+- No automatic end-to-end latency attribution across the application and sidecar boundary. Latency is instead characterised by the performance benchmark tier (`docs/PERFORMANCE.md`), which measures each seam directly.
+- No per-request correlation ID threading through application logs. Within a single process the logger name plus timestamp ordering is generally sufficient to follow one operation; this becomes a genuine gap under high concurrency, and is the first thing to add if tracing is deferred further.
+- Logs, audit rows, and evidence columns are all queryable with tools already in the stack, with no additional collector to run, secure, or keep patched.
+
+### Alternatives Considered
+
+| Alternative | Reason rejected |
+|---|---|
+| Full OpenTelemetry SDK plus collector | Distributed tracing solves cross-service correlation; a two-service topology with one synchronous hop does not have that problem. Adds dependencies, a collector to operate, and an egress path, for correlation that logs already provide |
+| OpenTelemetry logs and metrics only, no tracing | The vendor-neutral wire format is the benefit, but nothing currently consumes it. JSON logs are already collector-agnostic, so this adds a dependency without adding a capability |
+| Per-request correlation IDs, no OpenTelemetry | A reasonable middle step and the most likely next increment. Deferred because the single-process topology makes logger name and timestamp ordering adequate today |
+| Prometheus metrics endpoint | Complementary rather than alternative; `GET /health/detail` covers the operational signals that matter now. Worth revisiting alongside multi-instance deployment |
