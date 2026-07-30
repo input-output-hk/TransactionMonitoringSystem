@@ -117,6 +117,17 @@ async def _tick() -> None:
                     logger.info(f"Retention: pruned {n} notified-alert dedup rows")
             except Exception as e:
                 logger.error(f"Notified-alerts retention sweep failed: {e}")
+            try:
+                # Same retention knob: both ledgers exist only to suppress
+                # re-notification, and a group row past the grouping window
+                # already has no effect on behaviour.
+                n = await postgres.prune_notified_alert_groups(
+                    settings.NOTIFY_DEDUP_RETENTION_DAYS,
+                )
+                if n:
+                    logger.info(f"Retention: pruned {n} group-alert dedup rows")
+            except Exception as e:
+                logger.error(f"Group-alert retention sweep failed: {e}")
 
 
 async def _loop():

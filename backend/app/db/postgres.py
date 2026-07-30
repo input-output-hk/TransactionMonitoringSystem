@@ -340,6 +340,36 @@ async def execute_schema():
             END $$;
         """)
 
+        # Second dedup stream, keyed on a GROUP rather than a transaction.
+        # Some findings are a property of the script, not of the transaction
+        # that happened to carry them: a contract holding a near-backstop datum
+        # re-spends it every state transition, and each spend is a fresh tx_hash,
+        # so per-tx dedup cannot collapse them (observed on mainnet 2026-07-26:
+        # 106 alerts in 67 minutes for one script, 77% of the window's alerting
+        # volume). This ledger lets the delivery path emit one alert per
+        # (group, band) per window instead of one per transaction.
+        #
+        # It bounds NOTIFICATIONS only. Every finding still lands in
+        # tx_class_scores and the dashboard; nothing is suppressed from the
+        # record. Two guards keep it recall-safe: band_rank means an escalation
+        # to a higher band always breaks through, and notified_at means the
+        # suppression expires, so a sustained attack re-alerts every window.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS notified_alert_groups (
+                network     TEXT NOT NULL,
+                group_key   TEXT NOT NULL,
+                source      TEXT NOT NULL DEFAULT 'scorer',
+                band_rank   SMALLINT NOT NULL,
+                notified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, group_key, source)
+            )
+        """)
+        # Prune scans by age, like notified_alerts.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notified_alert_groups_notified_at
+                ON notified_alert_groups (notified_at)
+        """)
+
         # Periodic-report scheduling state. One row per
         # (network, report_kind); last_sent_at is the boundary the scheduler
         # checks so a restart neither double-sends nor skips a period.
@@ -453,6 +483,109 @@ async def already_notified(
             rank,
         )
     return row is not None
+
+
+async def already_notified_group(
+    network: str,
+    group_key: str,
+    band: str,
+    window_minutes: int,
+    source: str = "scorer",
+) -> bool:
+    """True if ``group_key`` was notified at >= ``band`` inside the window.
+
+    The group-level counterpart of :func:`already_notified`, and it answers a
+    different question: not "have we told anyone about this transaction" but
+    "have we recently told anyone about this script". Used to collapse a burst
+    of findings that are really one situation (see the
+    ``notified_alert_groups`` DDL) into one alert per window.
+
+    Two conditions must BOTH hold to suppress, and each is a recall guard:
+
+    - ``band_rank >= rank``: an escalation to a higher band is never suppressed,
+      so a group that has only produced High alerts still pages on its first
+      Critical, immediately and inside the same window.
+    - ``notified_at > now() - window``: suppression expires. A sustained attack
+      re-alerts once per window rather than going quiet forever, which is what
+      makes this bounded rather than a mute button.
+
+    ``window_minutes <= 0`` disables grouping entirely and returns False, so the
+    delivery path falls back to pure per-transaction dedup.
+    """
+    if window_minutes <= 0:
+        return False
+    rank = _BAND_RANK.get(band, -1)
+    if rank < 0:
+        return False  # unknown band: let the per-tx dedup decide, do not suppress
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 1 FROM notified_alert_groups
+            WHERE network = $1 AND group_key = $2 AND source = $3
+              AND band_rank >= $4
+              AND notified_at > NOW() - ($5 * INTERVAL '1 minute')
+        """,
+            network,
+            group_key,
+            source,
+            rank,
+            window_minutes,
+        )
+    return row is not None
+
+
+async def claim_notification_group(
+    network: str,
+    group_key: str,
+    band: str,
+    source: str = "scorer",
+) -> None:
+    """Record that ``group_key`` was notified at ``band``, refreshing the window.
+
+    Unconditional upsert, unlike :func:`claim_notification`: the suppression
+    decision was already made by :func:`already_notified_group`, and this only
+    records what was delivered. ``band_rank`` takes the max so a later Moderate
+    cannot lower the bar a Critical already set inside the window, while
+    ``notified_at`` always advances so the window is measured from the most
+    recent delivery.
+    """
+    rank = _BAND_RANK.get(band, -1)
+    if rank < 0:
+        return
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO notified_alert_groups (network, group_key, source, band_rank)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (network, group_key, source) DO UPDATE
+                SET band_rank = GREATEST(notified_alert_groups.band_rank, EXCLUDED.band_rank),
+                    notified_at = CURRENT_TIMESTAMP
+        """,
+            network,
+            group_key,
+            source,
+            rank,
+        )
+
+
+async def prune_notified_alert_groups(older_than_days: int) -> int:
+    """Delete aged group dedup-ledger rows.
+
+    Unlike :func:`prune_notified_alerts` this is safe for EVERY source: a group
+    claim is already window-scoped, so a row older than the window has no
+    suppressing effect and deleting it changes no behaviour. It exists purely to
+    bound table growth (one row per alerting script, not per transaction, so the
+    table is small by construction).
+    """
+    async with get_connection() as conn:
+        result = await conn.execute(
+            """
+            DELETE FROM notified_alert_groups
+            WHERE notified_at < NOW() - ($1 * INTERVAL '1 day')
+        """,
+            older_than_days,
+        )
+        return int(result.split()[1])
 
 
 async def prune_notified_alerts(older_than_days: int) -> int:
