@@ -477,8 +477,56 @@ def _object_datum_byte_leaves(datum: Any) -> list[bytes]:
 _MAX_BYTE_ENTROPY_BITS = 8.0
 
 
-def datum_shannon_entropy_bits(output: dict[str, Any]) -> float:
-    """Shannon entropy (bits/byte) of an inline datum's raw bytes.
+def _assessable_datum(
+    output: dict[str, Any],
+    datums: dict[str, Any] | None = None,
+) -> Any:
+    """The datum payload whose CONTENT can be inspected, or None.
+
+    Resolves in the same order as :func:`_extract_datum_info`, which is the
+    point: the byte gates size a datum-hash output from the witness preimage,
+    so the content discriminators have to read the same bytes. Reading only
+    ``output["datum"]`` made every hash-delivered datum report "no content to
+    assess" while still sizing at its full byte count, which let an attacker
+    choose hash delivery to guarantee a not-assessable verdict on content.
+    """
+    datum = output.get("datum")
+    if datum is not None:
+        return datum
+    datum_hash = output.get("datumHash")
+    if datum_hash and datums:
+        return datums.get(datum_hash)
+    return None
+
+
+def _datum_raw_bytes(
+    output: dict[str, Any],
+    datums: dict[str, Any] | None = None,
+) -> bytes | None:
+    """Raw datum bytes for content assessment, or None when unavailable.
+
+    None means "not measurable" (absent datum, malformed hex, or an object
+    datum with no ByteArray leaves), never "measured and empty": callers use
+    that distinction to avoid reading an unmeasured datum as a benign one.
+    """
+    datum = _assessable_datum(output, datums)
+    if isinstance(datum, dict):
+        # Object-shaped datum: assess its decoded ByteArray leaves so
+        # object-form padding is measurable too.
+        return b"".join(_object_datum_byte_leaves(datum)) or None
+    if isinstance(datum, str) and len(datum) >= 2:
+        try:
+            return bytes.fromhex(datum) or None
+        except ValueError:
+            return None
+    return None
+
+
+def datum_shannon_entropy_bits(
+    output: dict[str, Any],
+    datums: dict[str, Any] | None = None,
+) -> float:
+    """Shannon entropy (bits/byte) of a datum's raw bytes.
 
     A datum-bloat DoS pads the datum with repetitive, low-information bytes to
     inflate its size cheaply, which yields near-zero entropy (observed CTF
@@ -487,32 +535,24 @@ def datum_shannon_entropy_bits(output: dict[str, Any]) -> float:
     Absolute datum size cannot separate the two (a real ~7KB attack overlaps a
     benign ~7KB contract), so entropy is the discriminator.
 
-    Returns ``_MAX_BYTE_ENTROPY_BITS`` (treated as "not padding") when there is
-    no hex inline datum to assess (object datum, datum-hash-only, or absent),
-    so the bloat check only fires on a measured low-entropy hex datum.
+    Returns ``_MAX_BYTE_ENTROPY_BITS`` (treated as "not padding") when the
+    datum's bytes cannot be reached at all, so the bloat check only fires on a
+    measured low-entropy datum. That default is "unmeasured", NOT "benign":
+    :func:`datum_content_assessable` is how a caller tells the two apart.
+
+    ``datums`` is the transaction's witness datum map, forwarded to
+    :func:`_assessable_datum` so a hash-delivered datum is assessed from its
+    preimage rather than reported as unmeasurable.
 
     Limitation: an adaptive attacker could pad with random (high-entropy) bytes
-    to evade this; per-script size baselines / recurrence are the complementary
-    defence (deferred, see large_datum recurrence stub).
+    to evade this; leaf concentration covers the single-leaf form of that, and
+    per-script size baselines / recurrence are the complementary defence
+    (deferred, see large_datum recurrence stub).
     """
-    datum = output.get("datum")
-    if isinstance(datum, dict):
-        # Object-shaped inline datum: measure entropy over its decoded
-        # ByteArray leaves so object-form padding is assessable too. No byte
-        # leaves -> not assessable (return the not-padding default).
-        raw = b"".join(_object_datum_byte_leaves(datum))
-        if not raw:
-            return _MAX_BYTE_ENTROPY_BITS
-    elif isinstance(datum, str) and len(datum) >= 2:
-        try:
-            raw = bytes.fromhex(datum)
-        except ValueError:
-            return _MAX_BYTE_ENTROPY_BITS
-    else:
+    raw = _datum_raw_bytes(output, datums)
+    if not raw:
         return _MAX_BYTE_ENTROPY_BITS
     n = len(raw)
-    if n == 0:
-        return _MAX_BYTE_ENTROPY_BITS
     counts = Counter(raw)
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
@@ -547,7 +587,10 @@ def _max_primitive_leaf_bytes(obj: Any) -> int:
     return best
 
 
-def datum_leaf_concentration(output: dict[str, Any]) -> float:
+def datum_leaf_concentration(
+    output: dict[str, Any],
+    datums: dict[str, Any] | None = None,
+) -> float:
     """Fraction of total datum bytes held by the single largest CBOR leaf.
 
     A datum-bloat attack concentrates its bytes in one oversized primitive leaf
@@ -558,14 +601,16 @@ def datum_leaf_concentration(output: dict[str, Any]) -> float:
     lower it, so it catches the high-entropy single-leaf bloat that the entropy
     gate misses.
 
-    Returns 0.0 ("not concentrated / not assessable") when there is no hex inline
-    datum, the hex is malformed, or the CBOR cannot be decoded, so the bloat
-    check only fires on a measured high concentration and degrades safely (the
-    entropy gate and size backstop still apply) when cbor2 is unavailable.
+    Returns 0.0 when the datum's bytes cannot be reached or its CBOR cannot be
+    walked, so the bloat check only fires on a measured high concentration. As
+    with entropy, that default means "unmeasured", NOT "spread across many
+    leaves": an attacker controls these bytes and can make them unwalkable, so
+    a caller that reads a low value as evidence of legitimate structure must
+    first consult :func:`datum_content_assessable`.
     """
-    datum = output.get("datum")
+    datum = _assessable_datum(output, datums)
     if isinstance(datum, dict):
-        # Object-shaped inline datum: concentration over its decoded ByteArray
+        # Object-shaped datum: concentration over its decoded ByteArray
         # leaves (largest leaf / total leaf bytes), mirroring the hex path so
         # single-leaf padding in object form is caught too.
         leaves = _object_datum_byte_leaves(datum)
@@ -573,20 +618,44 @@ def datum_leaf_concentration(output: dict[str, Any]) -> float:
         if total == 0:
             return 0.0
         return max(len(b) for b in leaves) / total
-    if not isinstance(datum, str) or len(datum) < 2:
-        return 0.0
-    try:
-        raw = bytes.fromhex(datum)
-    except ValueError:
-        return 0.0
-    n = len(raw)
-    if n == 0:
+    raw = _datum_raw_bytes(output, datums)
+    if not raw:
         return 0.0
     try:
         obj = get_cbor2().loads(raw)
     except Exception:
         return 0.0
-    return _max_primitive_leaf_bytes(obj) / n
+    return _max_primitive_leaf_bytes(obj) / len(raw)
+
+
+def datum_content_assessable(
+    output: dict[str, Any],
+    datums: dict[str, Any] | None = None,
+) -> bool:
+    """True when BOTH content discriminators actually measured this datum.
+
+    Entropy needs the raw bytes; leaf concentration additionally needs the CBOR
+    to decode. When either is unavailable both functions return their
+    "not padding" / "not concentrated" defaults, which look identical to a
+    measurement that cleared the gate. They are not the same thing, and the
+    difference is security-relevant: the attacker writes the datum, so any
+    encoding that defeats the decoder (nesting past cbor2's 400-container
+    limit, a truncated or non-canonical payload) would otherwise buy a benign
+    verdict for free. Callers that act on the ABSENCE of a content signal must
+    require this to be True first.
+    """
+    raw = _datum_raw_bytes(output, datums)
+    if raw is None:
+        return False
+    if isinstance(_assessable_datum(output, datums), dict):
+        # Object form is pre-decoded by the ingester: reaching its ByteArray
+        # leaves is the whole measurement, there is no CBOR left to walk.
+        return True
+    try:
+        get_cbor2().loads(raw)
+    except Exception:
+        return False
+    return True
 
 
 def extract_utxo_features(
