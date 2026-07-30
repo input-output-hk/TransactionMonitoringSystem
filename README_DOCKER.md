@@ -2,6 +2,13 @@
 
 Databases run in Docker. The app can run on the host (development) or as a container (production).
 
+**Scope: local development.** The credentials and defaults below are the ones the
+stack ships with, and the application refuses to start on them unless
+`TMS_ALLOW_DEV_MODE=1` is set. That switch is what gates the credential guards,
+not whether API keys are configured (an empty `API_KEYS` is itself a third
+refusal under the same switch). For a production or mainnet deployment follow
+[docs/MAINNET-DEPLOYMENT.md](docs/MAINNET-DEPLOYMENT.md) instead.
+
 ## Quick Commands
 
 ```bash
@@ -32,24 +39,36 @@ docker-compose --profile app up -d
 
 ## Connection Details
 
+Both sets of credentials below are the local development defaults, and both are
+values the startup guards reject: the app refuses to boot on the well-known
+`POSTGRES_PASSWORD` default or an empty `CLICKHOUSE_PASSWORD` unless
+`TMS_ALLOW_DEV_MODE=1`. Set real values in `.env` before deploying anywhere.
+
 ### PostgreSQL
 - Host: `localhost:5433` (host port, mapped from container :5432)
-- Database: `tms_db`, User: `tms_user`, Password: `tms_password`
+- Database: `tms_db`, User: `tms_user`, Password: the dev default in `.env.example`
 
 ```bash
-docker exec -it tms-postgres psql -U tms_user -d tms_db
+docker exec -it tms-postgres sh -c \
+  'exec psql -U "${POSTGRES_USER:-tms_user}" -d "${POSTGRES_DB:-tms_db}"'
 # or via scripts
 ./scripts/db.sh psql
 ```
 
 ### ClickHouse
 - Native: `localhost:9000`, HTTP: `localhost:8123`
-- Database: `tms_analytics`, User: `default`, no password
+- Database: `tms_analytics`, User: `default`, no password in dev
 
 ```bash
-docker exec -it tms-clickhouse clickhouse-client
+# clickhouse-client picks up CLICKHOUSE_PASSWORD from the container's own
+# environment, so this works with or without a password set and no secret
+# crosses from the host. Do not add `-e CLICKHOUSE_PASSWORD`: with the variable
+# unset in your shell that flag strips the container's value and you get
+# `Code: 516 Authentication failed`.
+docker exec -it tms-clickhouse sh -c \
+  'exec clickhouse-client --user "${CLICKHOUSE_USER:-default}"'
 curl http://localhost:8123/ping
-# or via scripts
+# or via scripts (same idiom, plus the psql equivalent)
 ./scripts/db.sh clickhouse
 ```
 

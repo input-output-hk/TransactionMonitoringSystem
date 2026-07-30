@@ -8,9 +8,19 @@ Index of the project's documentation. For setup and day-to-day operations start 
 
 ## Architecture
 
+- [REPOSITORY-MAP.md](REPOSITORY-MAP.md): where each delivered component lives. Maps the backend, frontend and alerting deliverables onto trees in this repository, with file counts, CI gating, and the test inventory.
 - [ARCHITECTURE.md](ARCHITECTURE.md): system architecture overview, the three async background tasks, and how the clustering module integrates.
 - [C4-ARCHITECTURE.md](C4-ARCHITECTURE.md): C4 model at the system-context and container levels, rendered from [c4-context.mmd](c4-context.mmd) and [c4-container.mmd](c4-container.mmd).
 - [TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md): Architecture Decision Records (ADRs) covering the main technology choices.
+
+## Deployment and operations
+
+- [MAINNET-DEPLOYMENT.md](MAINNET-DEPLOYMENT.md): standing up a mainnet instance from an empty server. The service inventory and what each profile is for, measured sizing over 15 days of mainnet, the node and Ogmios version contract with the Mithril bootstrap, an `.env` checklist and the six startup guards, first-start verification, alerting and retention decisions, and the backup, upgrade and hard-fork procedures.
+- [ALERTING.md](ALERTING.md): the alerting operator guide. The two paths that produce an alert, the Postgres-backed notification config document (channels, groups, the band by attack-class trigger matrix, periodic report), routing precedence, the two levels of deduplication (per transaction and per script per window), exactly what the delivery path guarantees, where to confirm a send, and the common misconfigurations.
+
+## Clustering
+
+- [CLUSTERING.md](CLUSTERING.md): the clustering sidecar. What it groups, how a contract is onboarded, and how a clustering-derived finding reaches the dashboard.
 
 ## Data flow
 

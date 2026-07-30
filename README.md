@@ -23,7 +23,7 @@ The `cardano-node`, `ogmios`, and `kupo` services in `docker-compose.yml` are ga
 | **Local full stack** | Place node config at `./cardano-config/preprod/` (or set `CARDANO_CONFIG_DIR`), keep default `OGMIOS_WS_URL=ws://localhost:1337`, then `docker compose --profile app --profile ingestion up` | Self-contained local development; requires ~30 GB disk and initial chain sync |
 | **No ingestion** | `docker compose --profile app up` with no reachable Ogmios | API/dashboard work against whatever has already been ingested (an empty database on first run) |
 
-`CARDANO_CONFIG_DIR` must contain `config.json` and `topology.json` for the target network, plus the genesis files they reference (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. Download the official set for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html (preprod, preview, and mainnet each have their own directory). Defaults to `./cardano-config/preprod`.
+`CARDANO_CONFIG_DIR` must contain `config.json`, `topology.json`, `checkpoints.json` and `peer-snapshot.json` for the target network, plus the four genesis files (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. Download the whole directory for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html (preprod, preview, and mainnet each have their own) rather than picking files individually: `config.json` references the genesis files and `checkpoints.json` by filename and hash, so a missing or edited file fails the hash check at node startup. Defaults to `./cardano-config/preprod`.
 
 ## Setup
 
@@ -48,17 +48,26 @@ docker compose --profile app up -d
 docker compose exec app python -m app.cli create-admin you@example.com "Your Name" --no-email
 ```
 
-With no per-network override file present, the app monitors **mainnet** using its built-in defaults. To monitor a testnet, create the per-network file from the tracked template and select it with `TMS_ENV`:
+With no per-network override file present, the app monitors **mainnet** using its built-in defaults. To pick a network explicitly, create the per-network file from the tracked template and select it with `TMS_ENV`:
 
 ```bash
+cp .env.mainnet.example .env.mainnet                  # then edit OGMIOS_WS_URL
+TMS_ENV=mainnet docker compose --profile app up -d    # mainnet
+
 cp .env.preprod.example .env.preprod                  # then edit OGMIOS_WS_URL
-TMS_ENV=preprod docker compose --profile app up -d    # preprod, API on 8000
+TMS_ENV=preprod docker compose --profile app up -d    # preprod
 
 cp .env.preview.example .env.preview                  # then edit OGMIOS_WS_URL
-TMS_ENV=preview docker compose --profile app up -d    # preview, API on 8001
+TMS_ENV=preview docker compose --profile app up -d    # preview
 ```
 
-`.env.preprod` and `.env.preview` are gitignored; only the `.example` templates are tracked. Each sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT` for its network. To run the bundled Cardano node and Ogmios as well, add the `ingestion` profile (see [Ingestion modes](#ingestion-modes)).
+Pick one network per host. Every service has a fixed `container_name`, and the published ports come from the top-level `.env`, so running two networks side by side needs a separate `COMPOSE_PROJECT_NAME` and a distinct port per published service.
+
+Under Compose the published host port is `${API_PORT}` resolved from the shell or the top-level `.env`; the container itself always listens on 8000. The `API_PORT` in a per-network template applies to a host run (`python run.py`), so set `API_PORT` in `.env` to move the published port.
+
+`TMS_ENV` defaults to `preprod`, so on a host that has a `.env.preprod` an unset `TMS_ENV` will point a mainnet deployment at preprod. Use `.env.mainnet` with `TMS_ENV=mainnet` whenever more than one per-network file exists.
+
+`.env.mainnet`, `.env.preprod` and `.env.preview` are gitignored; only the `.example` templates are tracked. Each sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and the host-run `API_PORT` for its network; the mainnet template also documents the volume-sensitive knobs whose defaults are sized for preprod, and pins `FAKE_TOKEN_TESTNET_MODE=false`. To run the bundled Cardano node and Ogmios as well, add the `ingestion` profile (see [Ingestion modes](#ingestion-modes)).
 
 ### Local development (host Python)
 
@@ -98,9 +107,11 @@ for the module itself.
 Configuration is layered across files:
 
 - `.env`: values shared across every network (DB ports, API keys, rate limits, logging, Ogmios tuning).
-- `.env.preprod`, `.env.preview`, `.env.<name>`: per-network overrides, each setting `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT`. These files are gitignored; copy the tracked `.env.preprod.example` / `.env.preview.example` templates to create them.
+- `.env.mainnet`, `.env.preprod`, `.env.preview`, `.env.<name>`: per-network overrides, each setting `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and the host-run `API_PORT`. These files are gitignored; copy the tracked `.env.mainnet.example` / `.env.preprod.example` / `.env.preview.example` templates to create them.
 
 Selection is via `TMS_ENV=<name>` at launch. The selected per-network file is layered on top of `.env` if it exists; with none present, the app uses its built-in defaults (mainnet). Shell env vars override both files.
+
+Under Docker Compose that layering reaches fewer settings than it looks: anything pinned under the app service's `environment:` block resolves from the shell or the top-level `.env` only, and silently overrides whatever a per-network file said. `KUPO_URL` and `APP_BASE_URL` are deliberately left unpinned so they can be per-network; everything else belongs in `.env`. See [First-time setup](RUNBOOK.md#first-time-setup) in the RUNBOOK for the full rule and the settings it covers.
 
 **Per-network variables** (defined in `.env.<name>`):
 
@@ -108,7 +119,9 @@ Selection is via `TMS_ENV=<name>` at launch. The selected per-network file is la
 |---|---|---|
 | `CARDANO_NETWORK` | `preprod` | `mainnet`, `preprod`, or `preview` |
 | `OGMIOS_WS_URL` | `ws://<host>:1337` | Ogmios WebSocket endpoint |
-| `API_PORT` | `8000` | Port uvicorn binds to |
+| `API_PORT` | `8000` | Port uvicorn binds to. Host runs only: under Compose the container's bind is pinned to 8000 and the published port comes from `${API_PORT}` in `.env` |
+| `KUPO_URL` | `http://kupo:1442` | Address index for `POST /api/v1/backfill`; empty disables it (503) |
+| `APP_BASE_URL` | `https://tms.example.com` | Public dashboard URL baked into magic-link emails |
 
 **Shared variables** (in `.env`):
 
