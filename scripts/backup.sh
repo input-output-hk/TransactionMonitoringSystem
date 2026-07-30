@@ -36,11 +36,20 @@ CLICKHOUSE_DB="${CLICKHOUSE_DB:-tms_analytics}"
 CLICKHOUSE_USER="${CLICKHOUSE_USER:-default}"
 CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-}"
 
-# Name-only -e forwards the password from THIS shell's environment into the
-# exec'd process without putting the secret in argv (visible in host `ps`);
-# clickhouse-client natively reads the CLICKHOUSE_PASSWORD env var.
-export CLICKHOUSE_PASSWORD
-CH_CLIENT=(docker exec -e CLICKHOUSE_PASSWORD tms-clickhouse
+# clickhouse-client natively reads CLICKHOUSE_PASSWORD from its environment, and
+# the container already has the value Compose populated from .env. So the default
+# is to forward nothing: `docker exec -e VAR` for a VAR that is unset or empty in
+# THIS shell does not pass a value through, it REMOVES the variable from the
+# exec'd process, masking the container's own password and failing every export
+# with `Code: 516 Authentication failed`. Forward by name only when this shell
+# genuinely holds a password (e.g. an admin credential that is not in .env),
+# which still keeps the secret out of argv and out of host `ps`.
+CH_ENV=()
+if [ -n "${CLICKHOUSE_PASSWORD:-}" ]; then
+    export CLICKHOUSE_PASSWORD
+    CH_ENV=(-e CLICKHOUSE_PASSWORD)
+fi
+CH_CLIENT=(docker exec ${CH_ENV[@]+"${CH_ENV[@]}"} tms-clickhouse
            clickhouse-client --user "$CLICKHOUSE_USER")
 
 # Every persistent table. tx_class_scores and archived_alerts are the
