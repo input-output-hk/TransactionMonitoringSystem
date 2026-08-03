@@ -24,8 +24,16 @@
          NOTE for EXISTING deployments: these settings apply when ClickHouse
          CREATES a log table, so mounting this file reclaims nothing by itself.
          A table that already exists with a different TTL is not migrated in
-         place; on restart ClickHouse renames it to <name>_0 and creates a fresh
-         empty one with the TTL below. All nine are renamed here, because every
+         place; ClickHouse renames it to <name>_0 and creates a fresh empty one
+         with the TTL below.
+
+         That rename is LAZY, on the table's first write after restart, not at
+         startup. A busy table is renamed within seconds, but a rarely-written
+         one is not: on mainnet 2026-08-03 error_log still reported NO TTL
+         several minutes after the restart and was only renamed once an error
+         was provoked to force a flush. So a post-restart audit can show a table
+         as unbounded when the config is in fact correct. Re-check after the
+         table has been written to before concluding the setting failed. All nine are renamed here, because every
          stock TTL differs from 7 days, and the renamed tables hold all the old
          data with no TTL of their own. Reclaiming space therefore means
          DROP TABLE system.<name>_0, not TRUNCATE of the new tables. RUNBOOK.md
@@ -52,6 +60,27 @@
         <size>100M</size>
         <count>3</count>
     </logger>
+
+    <!-- Sampling profiler for BACKGROUND (non-query) threads: merges, flushes,
+         the scheduled pool. Server settings, so they belong here and not in
+         users.d/query-profiler.xml, which can only reach query threads.
+
+         This distinction cost a deploy to discover. trace_log's 'Real' rows
+         look like query profiling and are not: measured on mainnet 2026-08-03
+         immediately after disabling the query profiler, 11,046 of 11,088 Real
+         samples in three minutes carried no query_id, i.e. 99.6% were
+         background threads. Turning off only the user-profile knob therefore
+         removed 0.4% of them and left ~5.3 M rows/day in place.
+
+         The stock default is 10000000000 (one sample per thread per 10s), set
+         nowhere in the image's config: it is a built-in. Zero disables.
+
+         Memory sampling is NOT touched here. total_memory_profiler_step stays
+         at its 4 MiB value, because this container runs under a 4 GiB
+         mem_limit it has already exceeded once mid-mutation and memory traces
+         are what explain that. Those rows are what remains in trace_log. -->
+    <global_profiler_real_time_period_ns>0</global_profiler_real_time_period_ns>
+    <global_profiler_cpu_time_period_ns>0</global_profiler_cpu_time_period_ns>
 
     <!-- 7 days is the incident-triage window for this stack: long enough to
          investigate a weekend outage on the following Monday, short enough to
@@ -90,14 +119,24 @@
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </query_log>
     <trace_log>
-        <!-- Sampling profiler output, not diagnostics. Measured composition
-             before the profiler was disabled (see clickhouse/users.d/
-             query-profiler.xml): Real 59.2%, Memory 20.8%, MemoryPeak 19.7%,
-             CPU 0.2%. The Real/CPU half is query profiling and had never been
-             read in this deployment, so it is off. The Memory half is retained
-             on purpose: this container runs under a 4 GiB mem_limit it has
-             already hit mid-mutation, and memory traces are what explain that.
-             Hence ~750 MiB rather than the ~1.85 GiB it was heading for. -->
+        <!-- Sampling profiler output, not diagnostics. Composition measured
+             before either profiler was disabled: Real 59.2%, Memory 20.8%,
+             MemoryPeak 19.7%, CPU 0.2%.
+
+             The Real/CPU rows are almost entirely BACKGROUND threads, not
+             queries: 99.6% of them carry no query_id. Switching them off
+             therefore needs the server-level global_profiler_* settings above,
+             NOT only the user profile in users.d/query-profiler.xml. Both are
+             set, because the two cover different thread populations and either
+             one alone leaves most of the volume in place.
+
+             Neither had ever been read here: across the whole query_log history
+             the only statements touching system.trace_log were a TTL inspection
+             and the TRUNCATE from the 2026-07-30 cleanup.
+
+             What remains is the Memory/MemoryPeak half, kept on purpose (see
+             the note above the global_profiler settings), for ~750 MiB at a
+             7-day TTL rather than the ~1.85 GiB it was heading for. -->
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </trace_log>
     <!-- This one reached 7.19 GiB / 271.3 M rows in 15 days on mainnet despite

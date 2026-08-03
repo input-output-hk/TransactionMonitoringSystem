@@ -319,10 +319,20 @@ at 100 MB x 3. Both halves have to move at once, because a 33x smaller cap at
 unchanged `trace` verbosity would hold only hours, which would defeat the 7-day
 window the tables are set to.
 
-A second file, `clickhouse/users.d/query-profiler.xml`, disables the query
-profiler. It is mounted separately because these are user-profile settings:
-ClickHouse reads them only from `users.xml` / `users.d`, so the same content
-placed in `config.d/` would parse without error and silently do nothing.
+Disabling the sampling profiler takes **two** settings in **two** files, because
+query threads and background threads are governed separately and each knob is a
+silent no-op in the other's file:
+
+| Thread population | Setting | File |
+|---|---|---|
+| Query threads | `query_profiler_real_time_period_ns` | `clickhouse/users.d/query-profiler.xml` (user profile) |
+| Background threads | `global_profiler_real_time_period_ns` | `clickhouse/config.d/log-retention.xml` (server) |
+
+The split matters more than it looks: `trace_log`'s `Real` rows look like query
+profiling and are not. Measured on mainnet with only the user-profile knob live,
+**11,046 of 11,088 Real samples in three minutes carried no `query_id`**, so
+99.6% were background threads and the user-profile setting alone removed 0.4%
+of them. Setting one without the other leaves nearly all the volume in place.
 
 **Measured sizes at 7-day steady state**, taken on mainnet on 2026-08-03 with
 both files live. They span three orders of magnitude, so there is no single
@@ -342,15 +352,23 @@ would be ~7.3 GiB at a 7-day TTL and the largest object in the volume. At
 roughly 2,500x less. Anyone re-deriving the sizing from the pre-fix tables will
 overestimate `text_log` by that factor.
 
-`trace_log` is sampling-profiler output rather than diagnostics. Before the
+`trace_log` is sampling-profiler output rather than diagnostics. Before either
 profiler was disabled it broke down as Real 59.2%, Memory 20.8%,
-MemoryPeak 19.7%, CPU 0.2%. The Real and CPU halves are query profiling and had
-never been read here, so they are off. The Memory half is kept deliberately:
-this container runs under a 4 GiB `mem_limit` it has already exceeded once
-mid-mutation, and memory traces are what explain that. To profile a slow query,
-re-enable per session with
-`SET query_profiler_real_time_period_ns = 1000000000` rather than editing the
-file.
+MemoryPeak 19.7%, CPU 0.2%. The Real and CPU rows are the sampling described
+above, overwhelmingly from background threads, and had never been read here:
+across the whole `query_log` history the only statements touching
+`system.trace_log` were a TTL inspection and the `TRUNCATE` from the 2026-07-30
+cleanup. Both are off.
+
+The Memory half is kept deliberately: this container runs under a 4 GiB
+`mem_limit` it has already exceeded once mid-mutation, and memory traces are
+what explain that. It is what remains in the table.
+
+To profile a slow query, re-enable per session with
+`SET query_profiler_real_time_period_ns = 1000000000` rather than editing either
+file. That works because the session setting overrides the user profile;
+background-thread sampling stays off, which is what you want when profiling a
+specific query anyway.
 
 `query_log` is the largest remaining table and is worth its size, being the one
 that answers what ran, when and for how long. 77.5% of its rows are queries
@@ -396,13 +414,22 @@ docker exec tms-clickhouse clickhouse-client -q "SELECT table, formatReadableSiz
 
 On an EXISTING server the config alone reclaims nothing, because these settings
 apply when ClickHouse CREATES a log table. A table that already exists with a
-different TTL is not migrated in place: on restart ClickHouse renames the
-mismatched table to `<name>_0` and creates a fresh, empty one with the new TTL.
-All nine are renamed on the pinned image (their stock TTLs all differ from 7
-days), the fresh tables are empty and correct, and every byte you are trying to
-reclaim is now sitting in the `_0` tables, which carry no TTL and will never
-expire on their own. So after restarting with the config mounted, the job is to
-drop the renamed tables:
+different TTL is not migrated in place: ClickHouse renames the mismatched table
+to `<name>_0` and creates a fresh, empty one with the new TTL. Every table whose
+stock TTL differs from 7 days is renamed, the fresh tables are empty and
+correct, and every byte you are trying to reclaim is now sitting in the `_0`
+tables, which carry no TTL and will never expire on their own. So after
+restarting with the config mounted, the job is to drop the renamed tables:
+
+**The rename is lazy**, triggered by the table's first write after restart
+rather than by startup itself. A busy table is renamed within seconds, but a
+rarely-written one is not: on mainnet on 2026-08-03, `error_log` still reported
+`NO TTL` several minutes after the restart and was renamed only once an error
+was provoked to force a flush. Two consequences. A post-restart audit can show a
+table as unbounded when the config is actually correct, so re-check after the
+table has been written to before concluding the setting failed. And `_0` tables
+can appear later than the restart, so the drop below is worth re-running once
+the server has been up for a while rather than only immediately after.
 
 ```bash
 # What the renamed tables are still holding:
