@@ -356,15 +356,25 @@ scorers:
       leaf_concentration_max: 0.5
       # Absolute-size backstop. A datum at this fraction of
       # protocol_limits.max_tx_size_bytes (0.75 * 16384 = 12288 bytes) is
-      # flagged unconditionally, IGNORING entropy: once the datum plus a minimal
-      # consuming tx's inputs/outputs/redeemers/witnesses approaches the 16384
-      # tx-size ceiling, the UTxO cannot be spent regardless of what the padding
-      # bytes are. This catches a high-entropy (random-padded) bloat attack that
+      # flagged IGNORING entropy, because it nears the point where a consuming
+      # tx's inputs/outputs/redeemers/witnesses no longer fit under the 16384
+      # ceiling. This catches a high-entropy (random-padded) bloat attack that
       # would otherwise evade the entropy gate. Sits above the observed
-      # legitimate maximum (benign per-script p99 ~7.4 KB) with margin. Lower it
-      # to catch more high-entropy bloat, at the cost of false positives on
-      # large legitimate datums. Mid-range (6-12 KB) high-entropy datums that
-      # overlap legitimate state remain a known gap (needs recurrence/semantics).
+      # legitimate maximum (benign per-script p99 ~7.4 KB) with margin.
+      #
+      # A finding this backstop admits ALONE keeps its full score and alerts.
+      # It is NOT downgraded for having cleared the two content branches,
+      # because clearing them is not evidence of legitimacy: an attacker writes
+      # the datum, so any "benign" shape is reproducible at a victim script.
+      # 13 KB of random 32-byte CBOR leaves reads as legitimate registry state
+      # on both axes (entropy 7.86, concentration 0.002) and is pure padding.
+      # The only suppression is `large_state_allowlist_prefixes` below, which is
+      # keyed on the contract's address.
+      #
+      # Lowering this engages the scorer on more high-entropy bloat and DOES
+      # add alert volume, since these findings are no longer capped. Mid-range
+      # (6-12 KB) high-entropy datums that overlap legitimate state remain a
+      # known gap (needs recurrence/semantics).
       size_backstop_fraction: 0.75
       # Observability flag for datumHash-only outputs at script addresses.
       # The referenced datum cannot be sized without an indexer, so a
@@ -384,6 +394,63 @@ scorers:
     # queries. Set well above `min_datum_bytes` so the engagement is
     # meaningful (sum of 2x 3KB doesn't engage; 4x 3KB does).
     aggregate_engagement_min: 12000
+    # Known legitimate large-state contracts, by address prefix, network-scoped
+    # exactly like multiple_sat.allowlist_prefixes (a preprod entry can never
+    # suppress a mainnet alert). A script listed here holds a near-backstop
+    # datum as its normal operation, so a finding admitted by the size backstop
+    # alone (i.e. content did not corroborate) is capped at the top of Moderate
+    # for that script and does not alert. A content-triggered finding is never
+    # capped, even here: an allowlisted contract that starts emitting
+    # low-entropy or single-leaf padding still pages.
+    #
+    # Why identity and not shape. This is the ONLY safe form of the
+    # suppression. Any depositor can create an output at a victim script
+    # carrying a datum of any shape, so no property of the datum can vouch for
+    # it; only the operator controls the address. The reason codes
+    # `size_backstop_only` and `size_backstop_content_unreadable` are what an
+    # analyst uses to find candidates for this list.
+    #
+    # To add an entry, confirm from the evidence that the script RE-SPENDS its
+    # own large-datum UTxO (a state machine) rather than accumulating deposits
+    # from third parties, then record the observation window and a review date,
+    # as the multiple_sat entries do. Leaving a network empty means nothing is
+    # suppressed on it, which is the recall-safe default.
+    large_state_allowlist_prefixes:
+      # NO KNOWN INSTANCE on any network. The contract observed on mainnet
+      # 2026-07-26 (one script, 106 spends in 67 minutes, ~12.5 KB inline datum,
+      # every spend 89.79 Critical) does NOT belong here, contrary to the first
+      # reading of that incident: measured from the persisted evidence on
+      # 2026-07-30, its datum is entropy 0.2749 bits/byte and leaf concentration
+      # 0.9662, so it trips the CONTENT branch, and a content-triggered finding
+      # is never capped. Adding it here would change nothing.
+      #
+      # What it actually is: Constr 1 [5, <36-byte IPFS CIDv1>, 12096 bytes of
+      # 0xff], i.e. a fully-set ~96.8 Kbit bitmap behind a pinned manifest, whose
+      # UTxO the contract re-spends every state transition (105 of the 106
+      # transactions spend an output of another). A saturated bitmap is
+      # indistinguishable from zero-information padding on both content axes,
+      # which is the real residual FP class here and is NOT what this allowlist
+      # addresses. Its alert volume is bounded by NOTIFY_GROUP_WINDOW_MINUTES
+      # (see app.notifications.grouping) instead.
+      #
+      # Candidates for this list are backstop-only findings, so recover them by
+      # trigger rather than by volume:
+      #   SELECT JSONExtractString(evidence, 'large_datum',
+      #                            'target_script_address') AS script,
+      #          count() AS n,
+      #          max(JSONExtractInt(evidence, 'large_datum',
+      #                             'datum_bytes_raw')) AS max_bytes
+      #   FROM tx_class_scores
+      #   WHERE network = 'mainnet' AND max_class = 'large_datum'
+      #     AND JSONExtractString(evidence, 'large_datum', 'bloat_trigger')
+      #         LIKE 'size_backstop%'
+      #   GROUP BY script ORDER BY n DESC
+      # ('large_datum' is a required path segment: tx_class_scores.evidence is
+      #  the whole per-scorer document, keyed by scorer name.)
+      # then confirm the re-spend pattern on the top script before adding it.
+      mainnet: []
+      preprod: []
+      preview: []
     weights:
       # The entropy gate (above) is what removes the false positives, so the
       # score axes can keep their original shape: a confirmed bloat datum is

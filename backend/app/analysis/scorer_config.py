@@ -57,6 +57,7 @@ _REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
         "fixed_anchors",
         "bootstrap_anchors",
         "aggregate_engagement_min",
+        "large_state_allowlist_prefixes",
         "reason_threshold",
     ),
     "token_dust": (
@@ -285,6 +286,7 @@ _FREEFORM_SUBTREES: frozenset = frozenset(
         "scorers.multiple_sat.allowlist_prefixes",
         "scorers.token_dust.allowlist_prefixes",
         "scorers.token_dust.allowlist_policies",
+        "scorers.large_datum.large_state_allowlist_prefixes",
         "scorers.front_running.outcome_scores",
     }
 )

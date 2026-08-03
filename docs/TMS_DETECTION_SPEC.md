@@ -171,11 +171,15 @@ The attacker attaches an oversized inline datum to a UTxO output. The Value fiel
 ### Gate Conditions
 - `address_type == SCRIPT`
 - `datum_present == INLINE` (or resolvable hash) and `datum_bytes != null`
-- **Bloat discriminator** (`_is_bloat_datum`): a script output's datum is a candidate only when it is either
-  - at or above the absolute size backstop (`size_backstop_fraction` * `max_tx_size_bytes` = 0.75 * 16384 = 12288 bytes), flagged regardless of content because it nears the point a consuming tx cannot fit under `maxTxSize`; or
-  - large (`>= min_datum_bytes`, default 6000) AND low-information, where low-information means byte-entropy `<= bloat_entropy_max` (default 4.0 bits/byte: padding attacks observe ~0.3-1.5, legitimate structured state ~7) OR a single CBOR leaf holds `>= leaf_concentration_max` (default 0.5) of the datum bytes (catches high-entropy single-leaf padding the entropy gate misses).
+- **Bloat discriminator** (`_bloat_trigger`): a script output's datum is a candidate when it is either
+  - large (`>= min_datum_bytes`, default 6000) AND low-information, where low-information means byte-entropy `<= bloat_entropy_max` (default 4.0 bits/byte: padding attacks observe ~0.3-1.5, legitimate structured state ~7) OR a single CBOR leaf holds `>= leaf_concentration_max` (default 0.5) of the datum bytes (catches high-entropy single-leaf padding the entropy gate misses). Reported as trigger `content`; or
+  - at or above the absolute size backstop (`size_backstop_fraction` * `max_tx_size_bytes` = 0.75 * 16384 = 12288 bytes), flagged regardless of content because it nears the point a consuming tx cannot fit under `maxTxSize`. Reported as trigger `size_backstop`, or `size_backstop_unassessed` when the datum's content could not be measured at all.
 
   Absolute size alone cannot separate the two populations: an observed CTF bloat attack carries a 7.3 KB datum, overlapping a benign contract's ~6.9 KB datum. Content entropy and leaf concentration are the discriminators that removed the false positives, which is why the scoring axes below keep their original size-based shape.
+
+  The content branch is evaluated first so a datum that trips both is reported as `content`. The trigger is recorded in `evidence.bloat_trigger`, and it does **not** affect the band: a backstop-only finding scores and alerts exactly like a content-triggered one. Clearing the content branches is not evidence of legitimacy, since an attacker writes the datum and can reproduce any benign-looking shape at a victim script (13 KB of random 32-byte CBOR leaves measures entropy ~7.86 and concentration ~0.002 while being pure padding). Content assessment follows the same hash-to-preimage resolution as the byte gates, so choosing datumHash delivery does not make a datum unmeasurable while it is still sized.
+
+- **Large-state exemption** (`large_state_allowlist_prefixes`, network-scoped, **empty in the shipped config**): for a script listed here, a finding admitted by the size backstop alone, and whose content was successfully measured, is capped at the top of the Moderate band and does not alert. It exists for contracts whose normal state is a near-backstop datum that they re-spend on every transition, which falsifies the backstop's "this UTxO can no longer be spent" premise. It is keyed on the script address because that is the only property an attacker cannot reproduce. A content-triggered finding at an allowlisted script is never capped, and neither is one whose content could not be read.
 - **Aggregate engagement** (observability only): when no single output passes the per-output predicate but the SUM of datum bytes across outputs at the same payment credential reaches `aggregate_engagement_min` (12000), the scorer engages and records `max_script_datum_bytes` in `sub_scores` but returns `score=-1` (no alert, not selected as `max_class`). This surfaces the multi-output split-payload shape for analyst queries without firing.
 - **DatumHash-only observability** (`gate.flag_datum_hash_only`, default true): a script output that carries only a `datumHash` (the datum body is off-chain, so its size cannot be measured without an indexer) engages the gate and records `datum_hash_only_count` plus `datum_hash_only_addresses` in evidence, returning `score=-1` (no alert). Without this, hash-only bloat carriers were invisible to the scorer; the gate condition `datum_present == INLINE (or resolvable hash)` previously did not surface the unresolvable-hash case at all.
 
@@ -190,13 +194,15 @@ The attacker attaches an oversized inline datum to a UTxO output. The Value fiel
 
 ### Scoring
 
-The gate (the bloat discriminator above) is what removes false positives, so the score axes keep their original size-based shape: a confirmed bloat datum is both large (`datum_bytes`) and occupies most of the UTxO (`datum_ratio`), both saturating toward Critical.
+The gate (the bloat discriminator above) is what removes false positives, so the score axes keep their original size-based shape: a confirmed bloat datum is both large (`datum_bytes`) and occupies most of the UTxO (`datum_ratio`), both saturating toward Critical. Which gate branch admitted the datum does not change the score; only the per-script large-state exemption does, and it is empty by default.
 
 ```
 score_large_datum(utxo):
     if utxo.address_type != SCRIPT: return 0
     if utxo.datum_present == NONE or utxo.datum_bytes == null: return 0
-    if not is_bloat_datum(utxo): return -1  # gate (entropy / leaf-conc / size backstop)
+    trigger = bloat_trigger(utxo)          # content / size_backstop /
+                                           # size_backstop_unassessed / None
+    if trigger is None: return -1          # gate
 
     datum_ratio = utxo.datum_bytes / (utxo.utxo_total_bytes + EPSILON)
 
@@ -206,7 +212,16 @@ score_large_datum(utxo):
     s_recurrence = 0.0  # stubbed: entity clustering deferred
 
     score = 0.50 * s_datum + 0.35 * s_ratio + 0.05 * s_value_inv + 0.10 * s_recurrence
-    return clip(score, 0, 1) * 100
+    score = clip(score, 0, 1) * 100
+
+    # Large-state exemption. Empty allowlist in the shipped config, so this
+    # branch is inert by default and no shape is ever downgraded. The
+    # size_backstop trigger already implies the content was measured
+    # (an unmeasurable datum yields size_backstop_unassessed instead).
+    if trigger == size_backstop and is_large_state_allowlisted(utxo.address):
+        score = min(score, BAND_MODERATE_MAX)   # 59.0: recorded, does not alert
+
+    return score
 ```
 
 ### What TMS Forge Produces

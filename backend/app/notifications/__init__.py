@@ -21,7 +21,7 @@ from typing import Any
 
 from app.config import settings
 from app.db import postgres
-from app.notifications import config, dispatcher, registry, triggers
+from app.notifications import config, dispatcher, grouping, registry, triggers
 from app.notifications.payloads import build_immediate_alert
 
 logger = logging.getLogger(__name__)
@@ -102,8 +102,11 @@ def on_new_scores(results: list[dict[str, Any]], network: str) -> None:
             if not dispatches:
                 continue
             payload = build_immediate_alert(r, network)
+            # None for every class that is not grouped, which is all but
+            # large_datum today.
+            group = grouping.group_key(r["max_class"], r.get("evidence"))
             asyncio.run_coroutine_threadsafe(
-                _deliver_with_dedup(network, r["tx_hash"], band, payload, dispatches),
+                _deliver_with_dedup(network, r["tx_hash"], band, payload, dispatches, group=group),
                 loop,
             )  # future intentionally discarded — fire-and-forget
         except Exception:
@@ -121,8 +124,13 @@ async def _deliver_with_dedup(
     payload,
     dispatches,
     source: str = "scorer",
+    group: str | None = None,
 ) -> str:
     """On the main loop: skip duplicates, deliver, then record the claim.
+
+    ``group`` opts this alert into the coarser group-level window as well as the
+    per-transaction dedup (see :mod:`app.notifications.grouping`). None means
+    per-transaction only, which is the behaviour for every ungrouped class.
 
     Deliver-then-claim ordering: the dedup is a READ pre-check and the claim is
     written only AFTER at least one channel actually delivered. So a transient
@@ -140,6 +148,11 @@ async def _deliver_with_dedup(
     no-op from a real send attempt. The scorer path ignores the return
     (fire-and-forget).
     """
+    # NOTIFY_GROUP_WINDOW_MINUTES=0 turns grouping off. Normalised to "ungrouped"
+    # once, here, so the check and the claim below cannot disagree: gating only
+    # the check would leave the claim writing ledger rows that nothing reads.
+    if settings.NOTIFY_GROUP_WINDOW_MINUTES <= 0:
+        group = None
     try:
         if await postgres.already_notified(network, tx_hash, band, source=source):
             return DELIVER_DUPLICATE  # already notified at >= this band
@@ -150,6 +163,35 @@ async def _deliver_with_dedup(
             network,
             tx_hash,
         )
+    # Group dedup, for classes where repeat findings at one identity are a single
+    # situation rather than N (see notifications.grouping). Checked AFTER the
+    # per-tx dedup because it is the coarser bound, and it only ever collapses
+    # notifications: the finding is already durably written and visible.
+    if group is not None:
+        try:
+            if await postgres.already_notified_group(
+                network,
+                group,
+                band,
+                settings.NOTIFY_GROUP_WINDOW_MINUTES,
+                source=source,
+            ):
+                logger.info(
+                    "notification: collapsing %s into the open %s alert window for group "
+                    "'%s'; the finding is recorded, only the notification is suppressed",
+                    tx_hash,
+                    band,
+                    group,
+                )
+                return DELIVER_DUPLICATE
+        except Exception:
+            # Same failure posture as the per-tx check: a duplicate alert beats
+            # a missed one, so an unavailable ledger must not suppress.
+            logger.exception(
+                "notification group dedup check failed for %s/%s; delivering anyway",
+                network,
+                group,
+            )
     # Bound concurrent sends so a burst (backlog drain / spam wave) cannot open
     # hundreds of simultaneous SMTP/webhook connections and trip the endpoint's
     # rate limits. Recall-safe: every alert still delivers, just paced.
@@ -167,4 +209,15 @@ async def _deliver_with_dedup(
             network,
             tx_hash,
         )
+    if group is not None:
+        try:
+            await postgres.claim_notification_group(network, group, band, source=source)
+        except Exception:
+            # Same trade as the per-tx claim: an unrecorded group claim means the
+            # next finding in this group alerts too, which is a duplicate.
+            logger.exception(
+                "notification group claim record failed for %s/%s",
+                network,
+                group,
+            )
     return DELIVER_SENT

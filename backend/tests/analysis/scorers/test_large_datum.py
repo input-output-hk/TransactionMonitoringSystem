@@ -1,11 +1,22 @@
 """Unit tests for the Large Datum scorer (Class 3)."""
 
+import hashlib
 import os
 
 import pytest
 
-from app.analysis.normalise import BAND_CRITICAL_THRESHOLD, BAND_HIGH_THRESHOLD
-from app.analysis.scorers.large_datum import _MIN_DATUM_BYTES, LargeDatumScorer
+from app.analysis.normalise import (
+    BAND_CRITICAL_THRESHOLD,
+    BAND_HIGH_THRESHOLD,
+    BAND_MODERATE_MAX,
+)
+from app.analysis.scorers import large_datum as ldm
+from app.analysis.scorers.large_datum import (
+    _MIN_DATUM_BYTES,
+    _SIZE_BACKSTOP,
+    _W,
+    LargeDatumScorer,
+)
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
 
@@ -82,7 +93,12 @@ class TestGate:
         # is flagged by the absolute size backstop REGARDLESS of entropy, since
         # a consuming tx could no longer fit. This is the defence against the
         # high-entropy evasion of the entropy gate.
-        assert scorer.gate(_features([_out(SCRIPT, datum=_high_entropy_datum(13000))])) is True
+        feats = _features([_out(SCRIPT, datum=_high_entropy_datum(13000))])
+        assert scorer.gate(feats) is True
+        # Asserted at the SCORE level too: gate() alone cannot see a band
+        # change, so a gate-only test would stay green through a downgrade of
+        # exactly the evasion this case exists to cover.
+        assert scorer.score(feats).score >= BAND_CRITICAL_THRESHOLD
 
     def test_high_entropy_single_leaf_padding_gates(self, scorer):
         # The exact entropy-gate evasion: a single CBOR ByteArray of ~9KB random
@@ -91,7 +107,8 @@ class TestGate:
         cbor2 = pytest.importorskip("cbor2")
         datum = cbor2.dumps(os.urandom(9000)).hex()  # one giant leaf
         feats = _features([_out(SCRIPT, datum=datum)])
-        assert len(datum) // 2 < 12288  # below the backstop, so concentration is the trigger
+        # Below the backstop, so concentration is the trigger.
+        assert len(datum) // 2 < _SIZE_BACKSTOP
         assert scorer.gate(feats) is True
 
     def test_high_entropy_structured_datum_not_gated(self, scorer):
@@ -101,7 +118,7 @@ class TestGate:
         cbor2 = pytest.importorskip("cbor2")
         datum = cbor2.dumps([os.urandom(32) for _ in range(250)]).hex()
         feats = _features([_out(SCRIPT, datum=datum)])
-        assert 6000 <= len(datum) // 2 < 12288  # above floor, below backstop
+        assert _MIN_DATUM_BYTES <= len(datum) // 2 < _SIZE_BACKSTOP  # above floor, below backstop
         assert scorer.gate(feats) is False
 
     def test_ctf04_sized_low_entropy_datum_gates(self, scorer):
@@ -164,6 +181,195 @@ class TestScore:
         result = scorer.score(_features([out]))
         for key in ("datum_bytes", "datum_ratio", "value_cbor_bytes_inverted"):
             assert key in result.sub_scores
+
+
+def _uncapped_score(result):
+    """The score the weights alone would have produced, from the sub-scores.
+
+    Lets a cap assertion prove the cap is load-bearing rather than incidental,
+    and a no-cap assertion prove the fixture really was in alerting territory.
+    Mirrors the weighting in ``LargeDatumScorer._score_utxo``.
+    """
+    return 100.0 * (
+        float(_W["datum_bytes"]) * result.sub_scores["datum_bytes"]
+        + float(_W["datum_ratio"]) * result.sub_scores["datum_ratio"]
+        + float(_W["value_cbor_inv"]) * result.sub_scores["value_cbor_bytes_inverted"]
+        + float(_W["recurrence"]) * result.sub_scores["sender_recurrence"]
+    )
+
+
+class TestBackstopOnlyRecall:
+    """A finding the size backstop admits ALONE keeps its full alerting band.
+
+    Clearing the two content branches is not evidence of legitimacy: the
+    attacker writes the datum, so every "benign" shape is reproducible at a
+    victim script, and some deliveries are not measurable at all. Each test
+    here is a shape that a content-keyed downgrade would silence, pinned at the
+    SCORE level (a ``gate()``-only assertion cannot see a band change).
+    """
+
+    def test_high_entropy_multi_leaf_padding_stays_critical(self, scorer):
+        # 400 random 32-byte CBOR leaves: 13 KB of pure padding that reads as
+        # legitimate registry state on BOTH content axes (entropy ~7.86 > 4.0,
+        # concentration ~0.002 < 0.5). Chunked leaves are also the natural
+        # on-chain encoding, since Plutus Data bounds each ByteString at 64
+        # bytes, so this is the cheap shape, not an exotic one.
+        cbor2 = pytest.importorskip("cbor2")
+        datum = cbor2.dumps([os.urandom(32) for _ in range(400)]).hex()
+        assert len(datum) // 2 >= _SIZE_BACKSTOP
+        out = _out(SCRIPT, lovelace=55_000_000, datum=datum)
+        result = scorer.score(_features([out]))
+        assert result.evidence["bloat_trigger"] == "size_backstop"
+        assert "size_backstop_only" in result.reasons
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_hash_delivered_padding_stays_critical(self, scorer):
+        # The same padding attack delivered as datumHash + witness preimage.
+        # The byte gates size it from the preimage, so the content
+        # discriminators must read the same bytes: assessing only
+        # output["datum"] made entropy report its 8.0 "unmeasurable" default and
+        # concentration 0.0, which is indistinguishable from a benign verdict.
+        # Choosing hash delivery must not change the band.
+        datum = _low_entropy_datum(13000)
+        digest = hashlib.blake2b(bytes.fromhex(datum), digest_size=32).hexdigest()
+        feats = _features([_out(SCRIPT, lovelace=2_000_000, datum_hash=digest)])
+        feats["raw_data"]["datums"] = {digest: datum}
+        result = scorer.score(feats)
+        assert result.evidence["datum_type"] == "hash"
+        assert result.evidence["bloat_trigger"] == "content"
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_hash_delivered_padding_below_the_backstop_is_found(self, scorer):
+        # Coverage this scorer did not previously have, rather than a
+        # restoration: a hash-delivered datum between min_datum_bytes and the
+        # size backstop used to fall in a hole. It is too small for the
+        # backstop, and the content gate read output["datum"], which a hash
+        # output does not have, so nothing engaged at all. Reading the preimage
+        # closes the hole, and the score must match the same bytes delivered
+        # inline: how a datum is delivered is not a property of the attack.
+        nbytes = (_MIN_DATUM_BYTES + _SIZE_BACKSTOP) // 2
+        datum = _low_entropy_datum(nbytes)
+        assert _MIN_DATUM_BYTES <= nbytes < _SIZE_BACKSTOP
+        digest = hashlib.blake2b(bytes.fromhex(datum), digest_size=32).hexdigest()
+        feats = _features([_out(SCRIPT, lovelace=2_000_000, datum_hash=digest)])
+        feats["raw_data"]["datums"] = {digest: datum}
+        assert scorer.gate(feats) is True
+        by_hash = scorer.score(feats)
+        assert by_hash.evidence["bloat_trigger"] == "content"
+        assert by_hash.score >= BAND_HIGH_THRESHOLD
+
+        inline = scorer.score(_features([_out(SCRIPT, lovelace=2_000_000, datum=datum)]))
+        assert by_hash.score == inline.score
+
+    def test_unwalkable_cbor_stays_critical_and_is_marked(self, scorer):
+        # Nesting past cbor2's 400-container limit makes leaf concentration
+        # unmeasurable (it returns 0.0, its "not concentrated" default). An
+        # attacker controls the encoding, so an unreadable datum is recorded as
+        # unread, never treated as read-and-benign.
+        cbor2 = pytest.importorskip("cbor2")
+        datum = (b"\x81" * 500 + cbor2.dumps(os.urandom(13000))).hex()
+        out = _out(SCRIPT, lovelace=2_000_000, datum=datum)
+        result = scorer.score(_features([out]))
+        assert result.evidence["bloat_trigger"] == "size_backstop_unassessed"
+        assert "size_backstop_content_unreadable" in result.reasons
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_low_entropy_oversized_datum_stays_critical(self, scorer):
+        # Oversized AND low-entropy is bloat twice over: content-triggered.
+        out = _out(SCRIPT, lovelace=2_000_000, datum=_low_entropy_datum(13000))
+        result = scorer.score(_features([out]))
+        assert result.evidence["bloat_trigger"] == "content"
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_single_leaf_oversized_padding_stays_critical(self, scorer):
+        # The entropy-gate evasion: one giant random ByteArray past the
+        # backstop, caught structurally by leaf concentration.
+        cbor2 = pytest.importorskip("cbor2")
+        datum = cbor2.dumps(os.urandom(13000)).hex()
+        out = _out(SCRIPT, lovelace=2_000_000, datum=datum)
+        result = scorer.score(_features([out]))
+        assert result.evidence["bloat_trigger"] == "content"
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+
+class TestLargeStateAllowlistCap:
+    """Only an allowlisted script's backstop-only finding is capped.
+
+    The suppression exists for one observed shape: a state-machine contract
+    whose normal state IS a near-backstop datum, re-spending that UTxO on every
+    transition (mainnet 2026-07-26: one script, 106 spends in 67 minutes at a
+    fixed ~12.5 KB inline datum, every spend Critical). Re-spending falsifies
+    the backstop's "this UTxO can no longer be spent" premise, and with no
+    per-script baseline yet and recurrence stubbed to 0 the score cannot tell
+    the difference. Identity is what carries the exemption: only the contract's
+    operator controls its address.
+    """
+
+    @pytest.fixture
+    def allowlisted(self, monkeypatch):
+        monkeypatch.setattr(ldm, "_LARGE_STATE_ALLOWLIST", {"preprod": (SCRIPT,)})
+
+    def _structured_oversized(self):
+        cbor2 = pytest.importorskip("cbor2")
+        return cbor2.dumps([os.urandom(32) for _ in range(400)]).hex()
+
+    def test_allowlisted_backstop_only_finding_is_capped(self, scorer, allowlisted):
+        out = _out(SCRIPT, lovelace=55_000_000, datum=self._structured_oversized())
+        result = scorer.score(_features([out]))
+        assert "large_state_allowlisted" in result.reasons
+        assert result.score <= BAND_MODERATE_MAX
+        # The cap must be load-bearing: without it this was an alerting
+        # Critical. Guards against a weight change making the test vacuous.
+        assert _uncapped_score(result) >= BAND_CRITICAL_THRESHOLD
+
+    def test_capped_finding_still_records_full_evidence(self, scorer, allowlisted):
+        # Capping the band must not suppress the finding: sub-scores and
+        # evidence stay intact so an analyst can review and promote it.
+        out = _out(SCRIPT, lovelace=55_000_000, datum=self._structured_oversized())
+        result = scorer.score(_features([out]))
+        assert result.score > 0
+        assert result.sub_scores["datum_bytes"] > 0
+        assert result.evidence["datum_bytes_raw"] >= _SIZE_BACKSTOP
+        assert result.evidence["datum_type"] == "inline"
+
+    def test_allowlist_does_not_cap_a_content_triggered_finding(self, scorer, allowlisted):
+        # An allowlisted contract that starts emitting padding still pages.
+        out = _out(SCRIPT, lovelace=2_000_000, datum=_low_entropy_datum(13000))
+        result = scorer.score(_features([out]))
+        assert "large_state_allowlisted" not in result.reasons
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_allowlist_does_not_cap_unreadable_content(self, scorer, allowlisted):
+        # Nor does it cap a datum whose content could not be read: the
+        # exemption is for a contract observed serving MEASURED benign state.
+        cbor2 = pytest.importorskip("cbor2")
+        datum = (b"\x81" * 500 + cbor2.dumps(os.urandom(13000))).hex()
+        out = _out(SCRIPT, lovelace=2_000_000, datum=datum)
+        result = scorer.score(_features([out]))
+        assert "large_state_allowlisted" not in result.reasons
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_non_allowlisted_script_is_not_capped(self, scorer, monkeypatch):
+        monkeypatch.setattr(ldm, "_LARGE_STATE_ALLOWLIST", {"preprod": ("addr_test1wOTHER",)})
+        out = _out(SCRIPT, lovelace=55_000_000, datum=self._structured_oversized())
+        result = scorer.score(_features([out]))
+        assert "large_state_allowlisted" not in result.reasons
+        assert result.score >= BAND_CRITICAL_THRESHOLD
+
+    def test_shipped_allowlist_is_empty_on_every_network(self):
+        # The recall-safe default: nothing is suppressed until an operator adds
+        # a script they have verified re-spends its own large-datum UTxO.
+        for network in ("mainnet", "preprod", "preview"):
+            assert ldm._LARGE_STATE_ALLOWLIST.get(network, ()) == ()
+
+    def test_allowlist_is_network_scoped(self, scorer, monkeypatch):
+        # A preprod entry must never suppress a mainnet finding.
+        monkeypatch.setattr(ldm, "_LARGE_STATE_ALLOWLIST", {"preprod": (SCRIPT,)})
+        feats = _features([_out(SCRIPT, lovelace=55_000_000, datum=self._structured_oversized())])
+        feats["network"] = "mainnet"
+        result = scorer.score(feats)
+        assert "large_state_allowlisted" not in result.reasons
+        assert result.score >= BAND_CRITICAL_THRESHOLD
 
 
 # Two bech32-decodable preprod script addresses with distinct payment

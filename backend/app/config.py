@@ -625,6 +625,15 @@ class Settings(BaseSettings):
     # Dedup ledger (notified_alerts) retention; bounds its growth. The sweep
     # runs on RETENTION_SWEEP_INTERVAL_HOURS. 0 disables (keeps everything).
     NOTIFY_DEDUP_RETENTION_DAYS: int = 30
+    # Group-alert window: how long one alert for a grouped finding suppresses
+    # further notifications for the SAME group at the same-or-lower band (see
+    # app.notifications.grouping). Sized against the incident that motivated it:
+    # one script produced 106 Critical alerts in 67 minutes on mainnet
+    # 2026-07-26, so an hour-long window turns that burst into one or two pages
+    # while still re-alerting hourly for as long as the condition persists.
+    # It bounds notifications only; every finding is still recorded and visible.
+    # 0 disables grouping and restores pure per-transaction dedup.
+    NOTIFY_GROUP_WINDOW_MINUTES: int = 60
 
     # Logging
     LOG_LEVEL: str = "INFO"

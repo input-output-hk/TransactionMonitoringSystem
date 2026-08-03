@@ -10,6 +10,13 @@ import type { NotificationConfig } from "@/lib/api/notifications";
 export const BANDS = ["Critical", "High", "Moderate", "Informational"] as const;
 
 /**
+ * Marks a recipient entry as a reference to a named group rather than a literal
+ * address. Must match `_GROUP_PREFIX` in `backend/app/notifications/config.py`,
+ * which is what actually expands it at dispatch.
+ */
+const GROUP_PREFIX = "group:";
+
+/**
  * Human-readable config problems that silently prevent delivery, surfaced
  * before save so an operator doesn't repeat the classic mistakes: routing a
  * channel that is switched off, or routing webhook with nowhere to POST. A
@@ -53,6 +60,50 @@ export function configWarnings(cfg: NotificationConfig): string[] {
 		out.push(
 			"A per-class rule routes to webhook but sets no URL, and Channels has no Default URL to fall back on, so it can't be delivered.",
 		);
+
+	// Recipient-bearing channel routed with nothing to deliver to: the email
+	// equivalent of the webhook-with-no-URL case above, and the one that bit
+	// production. The backend drops such a channel at resolve_dispatch with a
+	// WARNING, so alerts stop arriving while the config still reads as
+	// "Critical -> email". Observed on mainnet: 121 dropped alerts over 11 days.
+	//
+	// "Nothing to deliver to" is counted AFTER group expansion, matching
+	// config.resolve_recipients: a `group:<alias>` entry contributes its
+	// members, so a list of one alias whose group is empty (or which names no
+	// existing group) resolves to zero addresses. Counting the raw list instead
+	// would read `["group:soc-team"]` as covered while the backend delivers
+	// nothing, reintroducing the same silent failure through the pattern the
+	// Groups editor encourages.
+	const expand = (recipients: string[] | undefined) =>
+		(recipients ?? []).flatMap((r) =>
+			r.startsWith(GROUP_PREFIX)
+				? (cfg.groups?.[r.slice(GROUP_PREFIX.length)] ?? [])
+				: [r],
+		).length;
+
+	for (const c of Object.keys(cfg.channels)) {
+		if (c === "webhook" || !isOn(c)) continue;
+		const defaultCount = expand(cfg.channels[c]?.recipients);
+		if (defaultCount === 0 && routedInDefaults(c))
+			out.push(
+				`"${c}" is routed in the band defaults but has no recipients, so those alerts can't be delivered. Add recipients under Channels.`,
+			);
+		// A per-rule override REPLACES the channel default rather than merging
+		// with it (triggers._resolve_recipients returns the override whenever the
+		// channel key is present, including for an empty list), so a rule that
+		// names the channel with an empty list delivers nothing EVEN WHEN the
+		// channel default is populated. The two shapes are distinguished by key
+		// presence, not by emptiness: an absent key falls back to the default.
+		const deadRule = cfg.triggers.rules.some((r) => {
+			if (!(r.channels ?? []).includes(c)) return false;
+			const override = r.recipients?.[c];
+			return override === undefined ? defaultCount === 0 : expand(override) === 0;
+		});
+		if (deadRule)
+			out.push(
+				`A per-class rule routes to "${c}" but resolves to no recipients, so it can't be delivered. A rule's recipient list replaces the Channels default rather than adding to it.`,
+			);
+	}
 
 	// Enabled but never routed anywhere: the inverse mistake.
 	for (const c of Object.keys(cfg.channels))

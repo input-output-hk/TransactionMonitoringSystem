@@ -23,7 +23,7 @@ import logging
 from typing import Any
 
 from app.analysis import features as feat_mod
-from app.analysis.normalise import normalise, normalise_inverted
+from app.analysis.normalise import BAND_MODERATE_MAX, normalise, normalise_inverted
 from app.analysis.scorer_config import (
     anchor as _anchor,
 )
@@ -32,6 +32,9 @@ from app.analysis.scorer_config import (
 )
 from app.analysis.scorer_config import (
     get as _get_cfg,
+)
+from app.analysis.scorer_config import (
+    load_network_map as _load_network_map,
 )
 from app.analysis.scorer_config import (
     resolved_or_bootstrap as _resolve,
@@ -65,7 +68,9 @@ _LEAF_CONCENTRATION_MAX = float(_CFG["gate"]["leaf_concentration_max"])
 # Absolute-size backstop: a datum at or above this many bytes is flagged
 # regardless of entropy, because it approaches the point where a consuming tx
 # can no longer fit under maxTxSize. Robust against a high-entropy (random)
-# padding attack that evades the entropy gate. Derived from the tx-size limit.
+# padding attack that evades the entropy gate, and NOT downgraded for having
+# cleared the content branches: an attacker writes those bytes, so a benign
+# reading of them vouches for nothing. Derived from the tx-size limit.
 _SIZE_BACKSTOP = _fraction_of_limit(_CFG["gate"]["size_backstop_fraction"], "max_tx_size_bytes")
 _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
 # Observability flag for datumHash-only outputs at script addresses. The
@@ -73,6 +78,17 @@ _AGGREGATE_ENGAGEMENT_MIN = int(_CFG["aggregate_engagement_min"])
 # attack is invisible to the byte gates; when enabled, the scorer engages
 # and records datum_hash_only_count (score stays -1: never alerts).
 _FLAG_DATUM_HASH_ONLY = bool(_CFG["gate"]["flag_datum_hash_only"])
+# Known legitimate large-state contracts, network-scoped prefixes. A script here
+# holds a datum near the size backstop as its normal operation, so a
+# backstop-only finding on it is capped out of the alerting bands (see the cap in
+# _score_utxo). Identity, not shape, is what earns that: any depositor can build
+# a datum of any shape at a victim script, so shape cannot distinguish the two,
+# but only the contract's own operator controls its address.
+_LARGE_STATE_ALLOWLIST: dict[str, tuple[str, ...]] = _load_network_map(
+    _CFG.get("large_state_allowlist_prefixes"),
+    scorer="large_datum",
+    field="large_state_allowlist_prefixes",
+)
 
 
 def _datum_hash_only_addresses(outputs, datums=None) -> list:
@@ -90,26 +106,61 @@ def _datum_hash_only_addresses(outputs, datums=None) -> list:
     ]
 
 
-def _is_bloat_datum(output: dict[str, Any], datum_bytes: int) -> bool:
-    """True when an output's datum is a bloat-DoS candidate.
+# Which gate condition admitted a datum. The distinction is recorded as a reason
+# so an analyst can see whether the datum's CONTENT corroborated the size, but it
+# does NOT decide the band: see the allowlist cap in _score_utxo for the only
+# thing that does.
+_TRIGGER_CONTENT = "content"
+_TRIGGER_SIZE_BACKSTOP = "size_backstop"
+# Backstop admission where the content could not be measured at all. Kept
+# distinct from _TRIGGER_SIZE_BACKSTOP because "content says benign" and
+# "content unreadable" must never be treated alike: the attacker writes those
+# bytes (see features.datum_content_assessable).
+_TRIGGER_SIZE_BACKSTOP_UNASSESSED = "size_backstop_unassessed"
 
-    Triggers (any one):
-      - absolute backstop: ``datum_bytes >= _SIZE_BACKSTOP`` flags regardless of
-        content, catching extreme bloat that nears the tx-size limit;
-      - content gate: a smaller-but-large datum (``>= _MIN_DATUM_BYTES``) is a
-        candidate when it is either low-entropy padding
-        (``<= _BLOAT_ENTROPY_MAX``) OR structurally concentrated in one CBOR
-        leaf (``>= _LEAF_CONCENTRATION_MAX``). The concentration branch catches
-        single-leaf padding even when the padding bytes are high-entropy.
+
+def _bloat_trigger(
+    output: dict[str, Any],
+    datum_bytes: int,
+    datums: dict[str, Any] | None = None,
+) -> str | None:
+    """Which gate admits this datum as a bloat-DoS candidate, or None.
+
+    Triggers:
+      - content gate: a large datum (``>= _MIN_DATUM_BYTES``) that is either
+        low-entropy padding (``<= _BLOAT_ENTROPY_MAX``) OR structurally
+        concentrated in one CBOR leaf (``>= _LEAF_CONCENTRATION_MAX``). The
+        concentration branch catches single-leaf padding even when the padding
+        bytes are high-entropy. Returns ``_TRIGGER_CONTENT``.
+      - absolute backstop: ``datum_bytes >= _SIZE_BACKSTOP`` admits a datum
+        whose content did NOT trip either branch above, because it nears the
+        point where a consuming tx can no longer fit under maxTxSize. Returns
+        ``_TRIGGER_SIZE_BACKSTOP`` when the content was actually measured and
+        ``_TRIGGER_SIZE_BACKSTOP_UNASSESSED`` when it could not be.
+
+    The content gate is evaluated first so that a datum large enough to trip
+    both is reported as content-triggered: an oversized LOW-entropy datum is a
+    bloat attack twice over.
     """
+    if datum_bytes >= _MIN_DATUM_BYTES and (
+        feat_mod.datum_shannon_entropy_bits(output, datums) <= _BLOAT_ENTROPY_MAX
+        or feat_mod.datum_leaf_concentration(output, datums) >= _LEAF_CONCENTRATION_MAX
+    ):
+        return _TRIGGER_CONTENT
     if datum_bytes >= _SIZE_BACKSTOP:
-        return True
-    if datum_bytes < _MIN_DATUM_BYTES:
-        return False
-    return (
-        feat_mod.datum_shannon_entropy_bits(output) <= _BLOAT_ENTROPY_MAX
-        or feat_mod.datum_leaf_concentration(output) >= _LEAF_CONCENTRATION_MAX
-    )
+        if feat_mod.datum_content_assessable(output, datums):
+            return _TRIGGER_SIZE_BACKSTOP
+        return _TRIGGER_SIZE_BACKSTOP_UNASSESSED
+    return None
+
+
+def _is_large_state_allowlisted(script_addr: str, network: str) -> bool:
+    """True when this script is a known legitimate large-state contract.
+
+    Prefix + network semantics are identical to ``multiple_sat`` and
+    ``token_dust``: see :func:`app.analysis.scorer_config.load_network_map`.
+    """
+    return any(script_addr.startswith(p) for p in _LARGE_STATE_ALLOWLIST.get(network, ()))
 
 
 def _per_script_datum_bytes(outputs, datums=None):
@@ -149,7 +200,10 @@ class LargeDatumScorer(BaseScorer):
 
         The per-output predicate is what produces an alert: only when
         one UTxO's datum saturates do downstream users have to copy
-        bloated state. The aggregate predicate engages the scorer but
+        bloated state. The one exception is a script listed in
+        ``large_state_allowlist_prefixes``, whose backstop-only findings are
+        capped below the alerting bands (see ``_score_utxo``); the shipped
+        config lists none. The aggregate predicate engages the scorer but
         does NOT contribute to ``max_score`` or band; it exists so the
         ``max_script_datum_bytes`` sub-score reaches storage when an
         attacker splits a bloat payload across N outputs of the same
@@ -167,7 +221,7 @@ class LargeDatumScorer(BaseScorer):
             if not feat_mod.is_script_address(addr):
                 continue
             _, datum_bytes = feat_mod._extract_datum_info(out, datums)
-            if _is_bloat_datum(out, datum_bytes):
+            if _bloat_trigger(out, datum_bytes, datums) is not None:
                 return True
         per_script = _per_script_datum_bytes(outputs, datums)
         if any(v >= _AGGREGATE_ENGAGEMENT_MIN for v in per_script.values()):
@@ -202,7 +256,10 @@ class LargeDatumScorer(BaseScorer):
             if not feat_mod.is_script_address(addr):
                 continue
             datum_flag, datum_bytes = feat_mod._extract_datum_info(out, datums)
-            if datum_flag == 0 or not _is_bloat_datum(out, datum_bytes):
+            if datum_flag == 0:
+                continue
+            trigger = _bloat_trigger(out, datum_bytes, datums)
+            if trigger is None:
                 continue
 
             candidates.append(
@@ -213,6 +270,7 @@ class LargeDatumScorer(BaseScorer):
                     datum_flag,
                     network,
                     max_script_datum_bytes,
+                    trigger=trigger,
                 )
             )
 
@@ -248,6 +306,7 @@ class LargeDatumScorer(BaseScorer):
         datum_flag: int,
         network: str,
         max_script_datum_bytes: int,
+        trigger: str,
     ) -> ScorerResult:
         value = output.get("value", {})
         if not isinstance(value, dict):
@@ -306,6 +365,49 @@ class LargeDatumScorer(BaseScorer):
         if s_value_inv > _REASON_T:
             reasons.append("lean_value_field")
 
+        # Record whether the datum's CONTENT corroborated its size. This is
+        # evidence for the analyst, not an input to the band: a backstop-only
+        # finding keeps its full score.
+        if trigger == _TRIGGER_SIZE_BACKSTOP:
+            reasons.append("size_backstop_only")
+        elif trigger == _TRIGGER_SIZE_BACKSTOP_UNASSESSED:
+            reasons.append("size_backstop_content_unreadable")
+
+        # Known-legitimate large-state contract: cap out of the alerting bands.
+        # A contract whose normal state IS a near-backstop datum re-spends that
+        # UTxO on every transition, which falsifies the backstop's "this UTxO can
+        # no longer be spent" premise. Both driving axes then saturate for
+        # definitional rather than adversarial reasons: a datum-heavy UTxO is
+        # nearly all datum, and the ADA it holds is the min-ADA that datum size
+        # forces. With no per-script baseline yet (BASELINE_MIN_SAMPLES) and
+        # recurrence stubbed to 0, nothing in the score separates that from an
+        # attack, so the suppression has to come from outside the score.
+        #
+        # No such contract is known yet, on any network, so the shipped
+        # allowlist is empty and this branch is inert. Note in particular that
+        # the mainnet 2026-07-26 burst is NOT an instance: its datum measures
+        # entropy 0.2749 and leaf concentration 0.9662, so it is
+        # content-triggered and never reaches this cap. Its volume is bounded in
+        # the delivery path instead (app.notifications.grouping).
+        #
+        # It is keyed on the SCRIPT, never on the datum's shape. Shape cannot
+        # carry it: an attacker chooses the bytes freely, so every "benign
+        # shape" is reproducible at a victim script (13 KB of random 32-byte
+        # leaves reads as legitimate registry state on both content axes), and
+        # a datum delivered by hash or encoded past cbor2's nesting limit is
+        # not measurable at all. The contract's address is the one thing only
+        # its operator controls.
+        #
+        # Gated on _TRIGGER_SIZE_BACKSTOP alone, which already carries the
+        # content requirement: _bloat_trigger returns the _UNASSESSED variant
+        # when the datum could not be read, so an allowlisted script that starts
+        # serving unreadable datums re-alerts. Re-testing assessability here
+        # would be a second source of truth for the same question, and a second
+        # CBOR parse of a 12 KB payload.
+        if trigger == _TRIGGER_SIZE_BACKSTOP and _is_large_state_allowlisted(address, network):
+            final = min(final, BAND_MODERATE_MAX)
+            reasons.append("large_state_allowlisted")
+
         datum_type = "inline" if datum_flag == 2 else "hash"
         lovelace = feat_mod.extract_lovelace(value)
 
@@ -328,5 +430,12 @@ class LargeDatumScorer(BaseScorer):
                 "target_script_address": address,
                 "value_cbor_bytes_raw": int(value_cbor),
                 "lovelace_amount": lovelace,
+                # Which gate admitted this datum, in EVIDENCE rather than only
+                # in `reasons`, because evidence is the part that reaches
+                # ClickHouse (tx_class_scores has sub_scores + evidence columns
+                # and no reasons column). Triaging backstop-only findings, which
+                # is how `large_state_allowlist_prefixes` entries get sourced,
+                # needs this to be queryable.
+                "bloat_trigger": trigger,
             },
         )
