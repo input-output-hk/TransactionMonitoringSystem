@@ -302,23 +302,72 @@ a long-running deployment, by an order of magnitude. Measured on mainnet 15 days
 after go-live: 32 GB of volume, of which about 30 GB was `system.*` log tables
 and about 1 GB was actual transaction data. `system.text_log` alone held 14.2 GB
 across 380 million rows, because the stock image runs it at `trace` level. Eight
-of the nine tables the retention config targets ship with no TTL at all
-(`text_log`, `trace_log`, `query_log`, `asynchronous_metric_log`, `metric_log`,
-`part_log`, `query_views_log`, `query_metric_log`; only `processors_profile_log`
-carries one, at 30 days). That is roughly 2.0 GiB/day of growth, against
-~62 MiB/day for the detection data itself: about thirty to one.
+of the nine tables targeted at that time shipped with no TTL at all (`text_log`,
+`trace_log`, `query_log`, `asynchronous_metric_log`, `metric_log`, `part_log`,
+`query_views_log`, `query_metric_log`; only `processors_profile_log` carried
+one, at 30 days). That is roughly 2.0 GiB/day of growth, against ~62 MiB/day for
+the detection data itself: about thirty to one. Two more tables were added to
+the list on 2026-08-03, bringing it to eleven, for the reason given at the end
+of this section.
 
 `clickhouse/config.d/log-retention.xml` fixes this for new deployments: it drops
-`text_log` to `information` and puts a 7-day TTL on the nine log tables this
-stack actually populates. It is not every table the server can create: a handful
-that stay empty here (`error_log`, `crash_log`, `backup_log`, `query_thread_log`,
-`opentelemetry_span_log` and the object-store logs) are left alone, so re-check
-them if a future change starts writing to them. It also caps the server's own log
-FILES, which are a separate concern from the tables: stock is `trace` level
-rotating at 1000 MB x 10 (up to ~10 GB), and the file lowers both together, to
-`information` at 100 MB x 3. Both halves have to move at once, because a 33x
-smaller cap at unchanged `trace` verbosity would hold only hours, which would
-defeat the 7-day window the tables are set to.
+`text_log` to `information` and puts a 7-day TTL on the eleven log tables this
+stack actually populates. It also caps the server's own log FILES, which are a
+separate concern from the tables: stock is `trace` level rotating at
+1000 MB x 10 (up to ~10 GB), and the file lowers both together, to `information`
+at 100 MB x 3. Both halves have to move at once, because a 33x smaller cap at
+unchanged `trace` verbosity would hold only hours, which would defeat the 7-day
+window the tables are set to.
+
+A second file, `clickhouse/users.d/query-profiler.xml`, disables the query
+profiler. It is mounted separately because these are user-profile settings:
+ClickHouse reads them only from `users.xml` / `users.d`, so the same content
+placed in `config.d/` would parse without error and silently do nothing.
+
+**Measured sizes at 7-day steady state**, taken on mainnet on 2026-08-03 with
+both files live. They span three orders of magnitude, so there is no single
+per-table figure:
+
+| Table | Steady state | Rate |
+|---|---|---|
+| `query_log` | ~1.56 GiB | 838 K rows/day at 286.1 B/row |
+| `trace_log` | ~750 MiB | memory traces only; query profiler off |
+| `text_log` | ~2.8 MiB | 8.6 K rows/day at 46.6 B/row |
+| everything else | ~120 MiB | `asynchronous_metric_log` dominates |
+
+Total lands near 2.4 GiB. The `text_log` figure is the one worth understanding:
+at the stock `trace` level it took 22.3 M rows/day, about 1.04 GiB/day, which
+would be ~7.3 GiB at a 7-day TTL and the largest object in the volume. At
+`information` it measures 6 rows/minute with zero Trace and zero Debug rows,
+roughly 2,500x less. Anyone re-deriving the sizing from the pre-fix tables will
+overestimate `text_log` by that factor.
+
+`trace_log` is sampling-profiler output rather than diagnostics. Before the
+profiler was disabled it broke down as Real 59.2%, Memory 20.8%,
+MemoryPeak 19.7%, CPU 0.2%. The Real and CPU halves are query profiling and had
+never been read here, so they are off. The Memory half is kept deliberately:
+this container runs under a 4 GiB `mem_limit` it has already exceeded once
+mid-mutation, and memory traces are what explain that. To profile a slow query,
+re-enable per session with
+`SET query_profiler_real_time_period_ns = 1000000000` rather than editing the
+file.
+
+`query_log` is the largest remaining table and is worth its size, being the one
+that answers what ran, when and for how long. 77.5% of its rows are queries
+under 10 ms, so `log_queries_min_query_duration_ms` would cut it to ~350 MiB;
+that is left unset on purpose, because it also erases the query-volume signal
+and a flood of fast queries is a real failure mode.
+
+The config covers the tables this workload creates, not all 23 the server can
+define. That set drifts: `error_log` and `background_schedule_pool_log` were
+assumed empty in the first pass and had started being written by 2026-08-03.
+After an image bump or a feature change, re-run the audit and add anything that
+reports `NO TTL`:
+
+```sql
+SELECT name, if(position(engine_full,'TTL')>0,'has TTL','NO TTL')
+FROM system.tables WHERE database='system' AND name LIKE '%log%'
+```
 
 Confirm the file is present before `docker compose up -d`. It is a bind mount, so
 on a host where the path is missing Docker creates an empty **directory** at

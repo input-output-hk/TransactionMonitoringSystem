@@ -1,0 +1,43 @@
+<clickhouse>
+    <!-- Turns off the QUERY profiler, which is the single largest remaining
+         contributor to system.trace_log.
+
+         Why this file exists separately from config.d/log-retention.xml: these
+         are user-PROFILE settings, not server settings. ClickHouse only reads
+         them from users.xml / users.d, so putting them next to the <trace_log>
+         TTL in config.d would parse without error and do nothing. That silent
+         no-op is the trap; hence the separate mount in docker-compose.yml.
+
+         Measured composition of trace_log on mainnet 2026-08-03, over ~4 days:
+
+           Real         22,062,374   59.2%   query profiler, 1s per thread
+           Memory        7,745,639   20.8%   memory profiler (KEPT, see below)
+           MemoryPeak    7,349,165   19.7%   memory profiler (KEPT)
+           CPU              91,755    0.2%   query profiler, CPU clock
+
+         The Real/CPU half is disabled below. It had never been read: across the
+         entire query_log history the only statements touching system.trace_log
+         were a TTL inspection and the TRUNCATE from the 2026-07-30 cleanup,
+         plus the queries from this investigation. Nothing in the application
+         or the runbooks consumes it. Sampling every thread every second also
+         costs CPU in signal handling and stack unwinding, so this is a small
+         throughput win as well as ~1.1 GiB.
+
+         The MEMORY half is deliberately left ON. This container runs under a
+         4 GiB mem_limit that it has already exceeded once mid-mutation (see
+         config.d/log-retention.xml), and memory traces are precisely what
+         explains an OOM after the fact. Trading ~750 MiB for that answer is
+         the wrong trade, so memory_profiler_step is untouched at its 4 MiB
+         default.
+
+         To profile a slow query later, re-enable per session rather than
+         reverting this file:
+           SET query_profiler_real_time_period_ns = 1000000000;
+         Setting either knob to 0 disables that sampler. -->
+    <profiles>
+        <default>
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+        </default>
+    </profiles>
+</clickhouse>
