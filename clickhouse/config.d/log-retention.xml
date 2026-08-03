@@ -10,9 +10,16 @@
          ~62 MiB/day for the detection data itself: about thirty to one.
 
          Verified against clickhouse/clickhouse-server:26.1.3, the tag
-         docker-compose.yml pins. Re-check on an image bump with:
-           SELECT name, extract(engine_full, 'TTL [^S]*')
-           FROM system.tables WHERE database = 'system' AND name LIKE '%log%'
+         docker-compose.yml pins. The stock config defines 23 log tables but
+         only the ones this workload actually creates matter, so the audit that
+         matters is "which EXISTING table has no TTL", not "which table exists":
+           SELECT name, if(position(engine_full,'TTL')>0,'has TTL','NO TTL')
+           FROM system.tables WHERE database='system' AND name LIKE '%log%'
+         Run it after an image bump or a feature change. Anything reported
+         NO TTL grows forever and belongs in the list below. error_log and
+         background_schedule_pool_log were added on 2026-08-03 by exactly this
+         check, having started being written after the first pass assumed they
+         would stay empty.
 
          NOTE for EXISTING deployments: these settings apply when ClickHouse
          CREATES a log table, so mounting this file reclaims nothing by itself.
@@ -47,18 +54,50 @@
     </logger>
 
     <!-- 7 days is the incident-triage window for this stack: long enough to
-         investigate a weekend outage on the following Monday, short enough that
-         each table stays around a GB at mainnet write rates. -->
+         investigate a weekend outage on the following Monday, short enough to
+         bound the volume.
+
+         Sizes at 7-day steady state, measured on mainnet 2026-08-03 with this
+         file live, rather than estimated. They differ per table by three orders
+         of magnitude, so a single "about a GB each" figure (which this comment
+         used to give) is wrong in both directions:
+
+           query_log   ~1.56 GiB   838 K rows/day  @ 286.1 B/row
+           trace_log   ~750 MiB    see the profiler note below
+           text_log    ~2.8 MiB    8.6 K rows/day  @  46.6 B/row
+           others      ~120 MiB    asynchronous_metric_log dominates the rest
+
+         Total lands near 2.4 GiB against the ~30 GiB per 15 days the stock
+         image reached unbounded. -->
     <text_log>
-        <!-- 'trace' is what makes this the largest table by an order of
-             magnitude. 'information' keeps startup, DDL and error context. -->
+        <!-- The single highest-value line in this file. At stock 'trace' this
+             table took 22.3 M rows/day (1.04 GiB/day, ~7.3 GiB at a 7-day TTL)
+             and was the largest object in the volume. Measured after the switch
+             to 'information': 6 rows/minute, zero Trace and zero Debug, i.e.
+             ~2,500x less, for ~2.8 MiB at steady state. 'information' still
+             keeps startup, DDL, warning and error context, which is what
+             triage actually reads. -->
         <level>information</level>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </text_log>
     <query_log>
+        <!-- Largest remaining table once the two above are bounded, and worth
+             it: this is the table that answers "what ran, when, how long".
+             77.5% of its rows are queries under 10 ms, so
+             log_queries_min_query_duration_ms would cut it to ~350 MiB. Left
+             unset deliberately: that also erases the volume signal, and a flood
+             of fast queries is a real failure mode worth being able to see. -->
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </query_log>
     <trace_log>
+        <!-- Sampling profiler output, not diagnostics. Measured composition
+             before the profiler was disabled (see clickhouse/users.d/
+             query-profiler.xml): Real 59.2%, Memory 20.8%, MemoryPeak 19.7%,
+             CPU 0.2%. The Real/CPU half is query profiling and had never been
+             read in this deployment, so it is off. The Memory half is retained
+             on purpose: this container runs under a 4 GiB mem_limit it has
+             already hit mid-mutation, and memory traces are what explain that.
+             Hence ~750 MiB rather than the ~1.85 GiB it was heading for. -->
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </trace_log>
     <!-- This one reached 7.19 GiB / 271.3 M rows in 15 days on mainnet despite
@@ -83,4 +122,16 @@
     <query_metric_log>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </query_metric_log>
+    <!-- Added 2026-08-03. The first pass assumed these two stayed empty on this
+         workload and left them alone; the audit query above found them being
+         written, at 55 and 77 rows. Harmless at that size, and that is the
+         point: without a TTL they only ever grow, which is the whole reason
+         this file exists. Covering them now costs nothing and removes the need
+         to notice later. -->
+    <error_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </error_log>
+    <background_schedule_pool_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </background_schedule_pool_log>
 </clickhouse>

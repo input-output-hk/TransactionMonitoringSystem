@@ -56,6 +56,13 @@ services:
       # DIRECTORY here and ClickHouse silently ignores it (config.d/ is scanned
       # for *.xml files), so the stack comes up with no limits applied.
       - ./clickhouse/config.d/log-retention.xml:/etc/clickhouse-server/config.d/log-retention.xml:ro
+      # Disables the query profiler, the largest remaining contributor to
+      # system.trace_log. Separate from the file above because these are user
+      # PROFILE settings: ClickHouse reads them only from users.xml / users.d,
+      # so the same content under config.d/ would parse cleanly and do nothing.
+      # Same single-file rule and same missing-source-becomes-a-directory
+      # failure mode as above.
+      - ./clickhouse/users.d/query-profiler.xml:/etc/clickhouse-server/users.d/query-profiler.xml:ro
     ulimits:
       nofile:
         soft: 262144
