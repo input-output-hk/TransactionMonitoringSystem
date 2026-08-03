@@ -48,6 +48,14 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
+      # Caps ClickHouse's own system log tables + server log files, which the
+      # stock image leaves unbounded (they reached ~30 GiB against ~1 GiB of real
+      # data in 15 days on mainnet). Mounted as a SINGLE FILE, not a directory:
+      # bind-mounting over config.d/ would hide the image's own
+      # docker_related_config.xml. If the source path is missing, Docker creates a
+      # DIRECTORY here and ClickHouse silently ignores it (config.d/ is scanned
+      # for *.xml files), so the stack comes up with no limits applied.
+      - ./clickhouse/config.d/log-retention.xml:/etc/clickhouse-server/config.d/log-retention.xml:ro
     ulimits:
       nofile:
         soft: 262144
@@ -149,7 +157,9 @@ services:
       - "1442"
       - --workdir
       - /kupo-db
-      # What to index and from where; both set in .env.${TMS_ENV}.
+      # What to index and from where. Both are Compose ${...} interpolations, so
+      # they resolve from the shell or the top-level .env ONLY: a per-network
+      # .env.${TMS_ENV} is injected into containers and is never seen here.
       # KUPO_MATCH defaults to '*' (every address, so any onboarded contract is
       # answerable). A single narrower pattern (one address or credential) also
       # works; multiple distinct patterns cannot be expressed through one env var
@@ -212,10 +222,10 @@ services:
     container_name: tms-app
     env_file:
       - .env
-      # Per-network override (preprod/preview/...). Optional: with no such file
-      # present (e.g. a fresh clone) the app falls back to its built-in defaults
-      # (mainnet). Create one from .env.preprod.example / .env.preview.example
-      # and select it with TMS_ENV to monitor a testnet.
+      # Per-network override (mainnet/preprod/preview/...). Optional: with no
+      # such file present (e.g. a fresh clone) the app falls back to its
+      # built-in defaults (mainnet). Create one from .env.mainnet.example /
+      # .env.preprod.example / .env.preview.example and select it with TMS_ENV.
       - path: .env.${TMS_ENV:-preprod}
         required: false
     environment:
@@ -230,10 +240,25 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-tms_analytics}
-      # Address backfill is opt-in: empty by default (POST /api/v1/backfill then
-      # returns 503). Set to http://kupo:1442 when the ingestion-profile kupo
-      # service runs, or to a co-located kupo on a remote node box.
-      - KUPO_URL=${KUPO_URL:-}
+      # Pin the IN-CONTAINER uvicorn bind to 8000. run.py binds settings.API_PORT,
+      # and the container side of the port mapping, EXPOSE, and the healthcheck
+      # probe are all fixed at 8000. Without this pin a per-network file carrying
+      # API_PORT=8001 (see .env.preview.example) is injected via env_file, uvicorn
+      # listens on 8001, and nothing answers on 8000: the published port is dead
+      # and the container never turns healthy. The HOST-side published port is
+      # still configurable via ${API_PORT} under `ports:` below.
+      - API_PORT=8000
+      # KUPO_URL is deliberately NOT pinned here. It is an app setting, so it
+      # comes from the env_file layering above (.env, then .env.${TMS_ENV}) and
+      # falls back to the built-in default of "" when neither sets it, which is
+      # what makes backfill opt-in (POST /api/v1/backfill then returns 503).
+      # Trade-off of unpinning: a shell export no longer reaches the container
+      # for this setting or APP_BASE_URL below, because nothing interpolates them
+      # here any more. Set both in .env or .env.${TMS_ENV}, not in the shell.
+      # Set it to http://kupo:1442 when the ingestion-profile kupo service runs,
+      # or to a co-located kupo on a remote node box. An `environment:` entry
+      # here would override env_file AND resolve only from the shell / top-level
+      # .env, so a per-network KUPO_URL would be silently blanked.
       - RAW_STORE_PATH=/data/raw
       - RAW_STORE_ENABLED=${RAW_STORE_ENABLED:-true}
       # Magic-link SMTP defaults — point to the docker-compose mailpit
@@ -245,7 +270,12 @@ services:
       - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@example.com}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-TMS}
       - SMTP_ENABLED=${SMTP_ENABLED:-true}
-      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:8000}
+      # APP_BASE_URL is deliberately NOT pinned here, like KUPO_URL above: the
+      # public dashboard URL differs per network, so it has to be settable from
+      # .env.${TMS_ENV}. Its built-in default (http://localhost:8000) is the same
+      # value this line used to interpolate, so an absent setting behaves as
+      # before. Pinning it was a silent footgun: a per-network APP_BASE_URL was
+      # blanked back to localhost and emailed magic links resolved from nowhere.
       # Client-IP trust for rate limiting + audit logs. The default path is
       # the append-safe right-most X-Forwarded-For hop, honoured only when
       # the direct peer is inside TRUSTED_PROXY_CIDRS (set via .env).
@@ -262,6 +292,14 @@ services:
       - TRUSTED_PROXY_CLIENT_IP_HEADER=${TRUSTED_PROXY_CLIENT_IP_HEADER:-}
       # No default: production must set the dashboard origin explicitly
       # (the app refuses to start with '*' when API keys are configured).
+      #
+      # Stays PINNED, unlike APP_BASE_URL, because the interpolation default
+      # here ('') deliberately differs from the code default ('*'): unpinning
+      # would hand an unset deployment wildcard CORS under TMS_ALLOW_DEV_MODE
+      # instead of the fail-closed empty value. Consequence: set it in .env or
+      # the shell. A per-network CORS_ALLOW_ORIGINS is blanked, and the app then
+      # refuses to start whenever API_KEYS is set. TRUSTED_PROXY_ENABLED is
+      # pinned for the same reason (compose 'true' vs code default False).
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}
       # Clustering sidecar wiring. Opt-in: defaults OFF so the app behaves
       # identically without the module. Set CLUSTERING_ENABLED=true (in .env)
@@ -280,6 +318,11 @@ services:
     ports:
       # Bind to loopback only — public exposure happens via Cloudflare Tunnel
       # (or similar) which terminates TLS in front of the app.
+      #
+      # ${API_PORT} is a Compose interpolation, so it resolves from the shell or
+      # the top-level .env ONLY: to move the published port, set API_PORT there,
+      # not in a per-network .env.<name>. The container side stays 8000 (pinned
+      # under `environment:` above).
       - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
       - raw_store_data:/data/raw

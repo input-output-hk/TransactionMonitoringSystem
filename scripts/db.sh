@@ -8,6 +8,17 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
+# The interactive shells below resolve their credentials INSIDE the container,
+# from the environment Compose already populated from .env. Nothing here parses
+# .env: a host-side parser has to reimplement dotenv (quoting, inline comments,
+# `export ` prefixes, duplicate-key precedence) and any disagreement with
+# Compose's parser produces a confusing auth failure against a database that is
+# configured correctly. The container's own environment is the same value the
+# server was started with, by construction.
+#
+# It also keeps secrets out of the host process list: the password is never an
+# argument, on either side of `docker exec`.
+
 case "$1" in
     start)
         echo "Starting database containers..."
@@ -52,10 +63,21 @@ case "$1" in
         fi
         ;;
     psql)
-        docker exec -it tms-postgres psql -U tms_user -d tms_db
+        # POSTGRES_USER / POSTGRES_DB are expanded by the container's shell, not
+        # this one, hence the single quotes. The defaults match docker-compose.
+        docker exec -it tms-postgres sh -c \
+            'exec psql -U "${POSTGRES_USER:-tms_user}" -d "${POSTGRES_DB:-tms_db}"'
         ;;
     clickhouse)
-        docker exec -it tms-clickhouse clickhouse-client
+        # clickhouse-client reads CLICKHOUSE_PASSWORD from its own environment,
+        # which the official image already carries, so no credential has to
+        # cross from the host. Do NOT reintroduce `docker exec -e
+        # CLICKHOUSE_PASSWORD`: for a variable unset in the invoking shell that
+        # flag STRIPS the container's own value rather than passing it through,
+        # turning a working shell into `Code: 516 Authentication failed` on
+        # exactly the password-protected deployments it looks like it is for.
+        docker exec -it tms-clickhouse sh -c \
+            'exec clickhouse-client --user "${CLICKHOUSE_USER:-default}"'
         ;;
     *)
         echo "Usage: $0 {start|stop|restart|status|logs|down|reset|psql|clickhouse}"

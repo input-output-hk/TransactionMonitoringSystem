@@ -9,7 +9,7 @@ The TMS connects to a Cardano node through Ogmios, a WebSocket bridge. You must 
 Two options:
 
 - **External infrastructure (recommended for production/staging):** run node + Ogmios separately and point `OGMIOS_WS_URL` at the remote endpoint. The details below describe this path.
-- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json`, `topology.json`, and the genesis files they reference (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. Download the official set for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html. Also needs ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
+- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json`, `topology.json`, `checkpoints.json`, `peer-snapshot.json`, and the four genesis files (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. That is eight files, not six. Download the whole directory for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html rather than picking files individually: `config.json` references the genesis files and `checkpoints.json` by filename **and hash**, and `topology.json` references `peer-snapshot.json`, so a missing or edited file fails the hash check at node startup. Also needs ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
 
 | Component | Version | Notes |
 |---|---|---|
@@ -45,11 +45,16 @@ cp .env.example .env
 Config is layered:
 
 - `.env`: shared across every network (DB ports, log level, API keys).
-- `.env.preprod`, `.env.preview`, `.env.<name>`: per-network overrides. Each one sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT` for that network.
+- `.env.mainnet`, `.env.preprod`, `.env.preview`, `.env.<name>`: per-network overrides. Each one sets `CARDANO_NETWORK`, `OGMIOS_WS_URL`, and `API_PORT` for that network, and may also set `KUPO_URL` and `APP_BASE_URL`.
 
 Edit `.env` for anything shared, and create a per-network file for each Cardano network you want to point at:
 
 ```bash
+# .env.mainnet
+CARDANO_NETWORK=mainnet
+OGMIOS_WS_URL=ws://<host>:1337
+API_PORT=8000
+
 # .env.preprod
 CARDANO_NETWORK=preprod
 OGMIOS_WS_URL=ws://<host>:1337
@@ -61,7 +66,25 @@ OGMIOS_WS_URL=ws://<host>:1338
 API_PORT=8001
 ```
 
-Which file is applied is chosen at launch via `TMS_ENV`; unset defaults to `preprod`.
+Which file is applied is chosen at launch via `TMS_ENV`; unset defaults to `preprod`. That default is the reason a mainnet deployment should carry an explicit `.env.mainnet` and `TMS_ENV=mainnet`: on a host that also has a `.env.preprod`, forgetting `TMS_ENV` silently layers preprod, which flips `CARDANO_NETWORK` and re-targets `scripts/reset.sh` (see [Reset all data](#reset-all-data)). Copy `.env.mainnet.example`, which documents the knobs whose defaults are sized for preprod rather than mainnet volume.
+
+Every Compose service has a fixed `container_name` and takes its published ports from the top-level `.env`, so one host runs one network unless you give the second stack its own `COMPOSE_PROJECT_NAME` and distinct published ports throughout.
+
+One caveat on Compose variables: `${...}` placeholders in `docker-compose.yml` are resolved by Compose from the shell and the **top-level `.env`** only. A per-network `.env.<name>` is passed into containers via `env_file`, so it never reaches interpolation.
+
+Read the rule in that direction, because most app settings are affected: **anything listed under the app service's `environment:` block must be set in `.env` or the shell.** An `environment:` entry both overrides `env_file` and resolves only from `.env`, so a value put in a per-network file is silently replaced by the interpolation default. That covers `POSTGRES_*`, `CLICKHOUSE_*`, `SMTP_*`, `TRUSTED_PROXY_*`, `CORS_ALLOW_ORIGINS`, `CLUSTERING_*` and `RAW_STORE_ENABLED`, plus the container-level `API_PORT`, `KUPO_SINCE` and `KUPO_MATCH`.
+
+Everything the `environment:` block does **not** name still comes from the layered `env_file`, and that is most of the configuration surface: `CARDANO_NETWORK`, `OGMIOS_WS_URL`, `LOG_LEVEL`, the `CH_RETENTION_DAYS_*` knobs and the `NOTIFY_*` / `WEBHOOK_*` settings all live there. Two settings in particular were deliberately left out of the block so they can vary per network:
+
+- `KUPO_URL`: the backfill index differs per network.
+- `APP_BASE_URL`: the public dashboard URL differs per network, and getting it wrong is silent (emailed magic links stop resolving).
+
+`CORS_ALLOW_ORIGINS` is the one to watch, because it looks like it belongs in the same group. It stays pinned on purpose: its interpolation default (empty) is fail-closed, while the code default is `*`. Set it in `.env`; in a per-network file it is blanked, and the app then refuses to start whenever `API_KEYS` is set. `TRUSTED_PROXY_ENABLED` is pinned for the same kind of reason (Compose sends `true`, the code default is `false`).
+
+`API_PORT` sits on both sides of that line, so it is worth stating plainly:
+
+- Under Compose it selects the **published host port** via interpolation, so it must be set in `.env` (or the shell) to take effect. The container's own bind is pinned to 8000 in the compose file, because the container side of the port mapping, `EXPOSE`, and the healthcheck probe are all fixed at 8000.
+- For a **host run**, `run.py` binds uvicorn to `settings.API_PORT`, which does come from the layered per-network file. That is what the `API_PORT` line in each per-network template is for.
 
 If you want API key authentication, set `API_KEYS` in `.env`:
 
@@ -104,7 +127,10 @@ docker compose --profile app up -d
 ```
 
 The app container connects to the databases internally. `OGMIOS_WS_URL` must still point to your external Ogmios host.
-`TMS_ENV` must be set in .env to select the correct network-specific environment file (.env.<TMS_ENV>).
+
+`TMS_ENV` must be set in `.env` for this path: Compose reads that file to resolve the `env_file: .env.${TMS_ENV}` entry, and the resulting values are injected into the container as real environment variables.
+
+Set it in the shell **as well** if you also run anything on the host. `TMS_ENV` is read from the process environment before any dotenv file is loaded ([config.py](backend/app/config.py) `_env_files`), so a value that lives only in `.env` is invisible to `run.py`, `app.cli`, and `scripts/reset.sh`: those fall back to `preprod`, ignore the per-network file, and take each setting from `.env` or its built-in default. On a mainnet host that means `reset.sh` scopes correctly only because `CARDANO_NETWORK` happens to default to `mainnet`, and it silently re-scopes to preprod the moment a `.env.preprod` exists. Add `export TMS_ENV=mainnet` to the deploy shell profile. Commands run via `docker compose exec` are unaffected, since they inherit the container's environment.
 
 
 ## Verifying the system is working
@@ -217,10 +243,19 @@ supervisor that handles rotation. Set `LOG_FORMAT=json` for a log collector.
 
 ```bash
 # PostgreSQL shell (lifecycle state, sync checkpoint)
-docker exec -it tms-postgres psql -U tms_user -d tms_db
+docker exec -it tms-postgres sh -c \
+  'exec psql -U "${POSTGRES_USER:-tms_user}" -d "${POSTGRES_DB:-tms_db}"'
 
-# ClickHouse shell (transactions, analysis results)
-docker exec -it tms-clickhouse clickhouse-client
+# ClickHouse shell (transactions, analysis results).
+# The credentials are resolved inside the container, from the environment
+# Compose populated: clickhouse-client reads CLICKHOUSE_PASSWORD from its own
+# environment, so no secret crosses from the host and none appears in `ps`.
+# Do NOT add `-e CLICKHOUSE_PASSWORD`: when the variable is unset in your shell
+# that flag strips the container's own value instead of forwarding it, and the
+# shell fails with `Code: 516 Authentication failed` on a correctly configured
+# server. Single quotes are deliberate: the container's shell does the expansion.
+docker exec -it tms-clickhouse sh -c \
+  'exec clickhouse-client --user "${CLICKHOUSE_USER:-default}"'
 ```
 
 Useful queries:
@@ -260,6 +295,100 @@ ORDER BY n DESC;
 docker compose ps
 ```
 
+### ClickHouse disk use: its own logs, not your data
+
+ClickHouse's system log tables are the largest thing in the ClickHouse volume on
+a long-running deployment, by an order of magnitude. Measured on mainnet 15 days
+after go-live: 32 GB of volume, of which about 30 GB was `system.*` log tables
+and about 1 GB was actual transaction data. `system.text_log` alone held 14.2 GB
+across 380 million rows, because the stock image runs it at `trace` level. Eight
+of the nine tables the retention config targets ship with no TTL at all
+(`text_log`, `trace_log`, `query_log`, `asynchronous_metric_log`, `metric_log`,
+`part_log`, `query_views_log`, `query_metric_log`; only `processors_profile_log`
+carries one, at 30 days). That is roughly 2.0 GiB/day of growth, against
+~62 MiB/day for the detection data itself: about thirty to one.
+
+`clickhouse/config.d/log-retention.xml` fixes this for new deployments: it drops
+`text_log` to `information` and puts a 7-day TTL on the nine log tables this
+stack actually populates. It is not every table the server can create: a handful
+that stay empty here (`error_log`, `crash_log`, `backup_log`, `query_thread_log`,
+`opentelemetry_span_log` and the object-store logs) are left alone, so re-check
+them if a future change starts writing to them. It also caps the server's own log
+FILES, which are a separate concern from the tables: stock is `trace` level
+rotating at 1000 MB x 10 (up to ~10 GB), and the file lowers both together, to
+`information` at 100 MB x 3. Both halves have to move at once, because a 33x
+smaller cap at unchanged `trace` verbosity would hold only hours, which would
+defeat the 7-day window the tables are set to.
+
+Confirm the file is present before `docker compose up -d`. It is a bind mount, so
+on a host where the path is missing Docker creates an empty **directory** at
+`/etc/clickhouse-server/config.d/log-retention.xml`. ClickHouse only reads `*.xml`
+FILES from `config.d/`, so it does not fail on the directory: it starts normally
+with none of these limits applied, and the first symptom is the disk filling
+weeks later. That silence is why the check is worth doing. A `git pull` deploy
+gets the file for free; a hand-copied deploy needs it verified:
+
+```bash
+docker exec tms-clickhouse test -f \
+  /etc/clickhouse-server/config.d/log-retention.xml && echo present
+# And that it took effect (expect: information / 100M / 3):
+docker exec tms-clickhouse clickhouse-client -q \
+  "SELECT name, value FROM system.server_settings WHERE name IN ('logger.level','logger.size','logger.count') FORMAT TSV"
+```
+
+It is mounted as a single file rather than over `config.d/`, because bind-mounting
+the directory would hide the image's own `docker_related_config.xml`.
+
+To check what a running server is holding:
+
+```bash
+docker exec tms-clickhouse clickhouse-client -q "SELECT table, formatReadableSize(sum(bytes_on_disk)) AS size, sum(rows) AS rows FROM system.parts WHERE active AND database='system' GROUP BY table ORDER BY sum(bytes_on_disk) DESC LIMIT 10 FORMAT PrettyCompactMonoBlock"
+```
+
+On an EXISTING server the config alone reclaims nothing, because these settings
+apply when ClickHouse CREATES a log table. A table that already exists with a
+different TTL is not migrated in place: on restart ClickHouse renames the
+mismatched table to `<name>_0` and creates a fresh, empty one with the new TTL.
+All nine are renamed on the pinned image (their stock TTLs all differ from 7
+days), the fresh tables are empty and correct, and every byte you are trying to
+reclaim is now sitting in the `_0` tables, which carry no TTL and will never
+expire on their own. So after restarting with the config mounted, the job is to
+drop the renamed tables:
+
+```bash
+# What the renamed tables are still holding:
+docker exec tms-clickhouse clickhouse-client -q "SELECT table, formatReadableSize(sum(bytes_on_disk)) AS size FROM system.parts WHERE active AND database='system' AND table LIKE '%\_0' GROUP BY table ORDER BY sum(bytes_on_disk) DESC FORMAT PrettyCompactMonoBlock"
+
+# Drop them. DROP, not TRUNCATE: a truncated `_0` table would linger empty and
+# be renamed again to `_1` on the next config change.
+for t in text_log trace_log query_log asynchronous_metric_log metric_log \
+         part_log query_views_log query_metric_log processors_profile_log; do
+  docker exec tms-clickhouse clickhouse-client -q "DROP TABLE IF EXISTS system.${t}_0 SYNC"
+done
+```
+
+Dropping these is safe: they are ClickHouse's own telemetry, not transaction
+data, and nothing in TMS reads them.
+
+If instead you are fixing retention IN PLACE, without mounting the config or
+restarting, the order matters:
+
+```bash
+# TRUNCATE FIRST, then set the TTL.
+for t in text_log trace_log query_log asynchronous_metric_log metric_log \
+         part_log query_views_log query_metric_log processors_profile_log; do
+  docker exec tms-clickhouse clickhouse-client -q "TRUNCATE TABLE system.$t"
+  docker exec tms-clickhouse clickhouse-client -q \
+    "ALTER TABLE system.$t MODIFY TTL event_date + INTERVAL 7 DAY"
+done
+```
+
+`MODIFY TTL` on a populated table makes ClickHouse materialize the TTL across
+every existing part; on a 14 GB table that mutation exceeded the container's
+4 GB `mem_limit` and failed partway (`Code: 241`). Truncating first makes the
+same operation instant. Note that an in-place `MODIFY TTL` also stops the
+rename from happening later, since the table then matches the config.
+
 ### Restart after a crash
 
 The application reconnects to Ogmios automatically on restart using an exponential backoff circuit breaker. After a restart it reads the last saved `sync_checkpoint` from PostgreSQL and resumes from that slot. The checkpoint only advances after the block's ClickHouse insert succeeds (failed inserts retry with backoff, then force a reconnect and replay), so confirmed blocks are not lost across restarts or transient ClickHouse outages. Replayed blocks deduplicate via the ReplacingMergeTree schema.
@@ -278,13 +407,19 @@ python run.py                     # preprod (default)
 Variables are layered across files:
 
 - `.env`: shared across all networks.
-- `.env.<TMS_ENV>` (e.g. `.env.preprod`, `.env.preview`): per-network overrides; applied on top of `.env`. Defaults to `.env.preprod` when `TMS_ENV` is unset.
+- `.env.<TMS_ENV>` (e.g. `.env.mainnet`, `.env.preprod`, `.env.preview`): per-network overrides; applied on top of `.env`. Defaults to `.env.preprod` when `TMS_ENV` is unset.
 - Shell environment variables override both files.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CARDANO_NETWORK` | `mainnet` | `mainnet`, `preprod`, or `preview`. The bundled per-network templates (`.env.preprod.example`, `.env.preview.example`, copied to `.env.preprod` / `.env.preview`) set this to their network; with no per-network file the built-in default is mainnet |
+| `CARDANO_NETWORK` | `mainnet` | `mainnet`, `preprod`, or `preview`. The bundled per-network templates (`.env.mainnet.example`, `.env.preprod.example`, `.env.preview.example`, copied to `.env.mainnet` / `.env.preprod` / `.env.preview`) set this to their network; with no per-network file the built-in default is mainnet |
 | `OGMIOS_WS_URL` | `ws://localhost:1337` | Ogmios WebSocket endpoint |
+| `POSTGRES_PASSWORD` | dev default | The app refuses to start on the well-known dev default unless `TMS_ALLOW_DEV_MODE=1`. Set it for any real deployment, in `.env` (it is named under the compose `environment:` block, so a per-network file cannot override it) |
+| `CLICKHOUSE_PASSWORD` | _(empty)_ | The app refuses to start with an empty value unless `TMS_ALLOW_DEV_MODE=1`. Set it in `.env`. The official image re-applies it on EVERY container start (it writes `users.d/default-user.xml` from the variable), so setting it after the stack is already running just needs `docker compose up -d clickhouse` to recreate the container. Do not recreate the volume for this: that destroys `tms_analytics` and `tms_clustering`, and it is not necessary, the existing data is preserved across the password change |
+| `POSTGRES_MEM_LIMIT` | `1g` | Compose `mem_limit` for the `postgres` container |
+| `CLICKHOUSE_MEM_LIMIT` | `4g` | Compose `mem_limit` for the `clickhouse` container. The default is tight at mainnet volume: this deployment reached 3.0 GiB after 15 days, and a `MODIFY TTL` has already failed here with Code 241. Raise it before a projection-changing upgrade or a large retention change |
+| `APP_MEM_LIMIT` | `2g` | Compose `mem_limit` for the `app` container |
+| `CLUSTERING_MEM_LIMIT` | `3g` | Compose `mem_limit` for the `clustering` sidecar container |
 | `API_KEYS` | _(empty)_ | Comma-separated API keys. Empty = open access; requires `TMS_ALLOW_DEV_MODE=1` or the app refuses to start |
 | `RATE_LIMIT_ENABLED` | `true` | Enable per-key sliding-window rate limiting |
 | `RATE_LIMIT_REQUESTS` | `240` | Max requests per window per key |
@@ -316,7 +451,7 @@ Variables are layered across files:
 | `SMTP_ENABLED` | `true` | Send magic-link emails over SMTP; `false` logs the link instead |
 | `SMTP_HOST` / `SMTP_PORT` | `mailpit` / `1025` (compose; code default `localhost` / `1025`) | SMTP relay. The compose default is the bundled Mailpit catch-all, see "Magic-link email in production" below |
 | `SMTP_FROM_EMAIL` | `noreply@tms.local` | Sender address (code default; `.env.example` ships `noreply@example.com`). Not validated, but set a real domain in production: special-use domains like `.local`/`.test` are rejected by many receivers |
-| `APP_BASE_URL` | `http://localhost:8000` | Base URL baked into emailed magic links. Must be the public dashboard URL in production or links will not resolve |
+| `APP_BASE_URL` | `http://localhost:8000` | Base URL baked into emailed magic links. Must be the public dashboard URL in production or links will not resolve. Settable per-network (`.env.<name>`) as well as in `.env` |
 | `MAGIC_LINK_TTL_MINUTES` | `15` | Magic-link token lifetime |
 | `MAGIC_LINK_PER_EMAIL_LIMIT` | `5` | Link requests per address per window (silent throttle, always on) |
 | `RAW_STORE_ENABLED` | `true` | Write raw Ogmios payloads to filesystem |
@@ -343,7 +478,7 @@ retention sweep runs on the housekeeping tick.
 | `CH_RETENTION_DAYS_FEATURES` | `0` | Prune the analysis feature tables older than N days |
 | `LIFECYCLE_RETENTION_DAYS` | `0` | Prune `DROPPED` / `ROLLED_BACK` Postgres lifecycle rows older than N days. `CONFIRMED` rows are never pruned: they are the canonical lifecycle record |
 | `MEMPOOL_COLLISION_RETENTION_DAYS` | `0` | Prune mempool-collision bookkeeping older than N days |
-| `RAW_STORE_RETENTION_DAYS` | `0` | Prune raw Data-Lake blobs older than N days. Refused when `RAW_DATA_MAX_BYTES > 0` (pick size-based OR age-based pruning, not both). At mainnet volume the raw store grows roughly 0.5-2 GB/day, so set one of the two before long runs |
+| `RAW_STORE_RETENTION_DAYS` | `0` | Prune raw Data-Lake blobs older than N days. Skipped with a logged warning while `RAW_DATA_MAX_BYTES > 0`: capping the ClickHouse payload makes the raw store the only full copy, so it must not also be pruned. Measured on mainnet over 15 days: 196 MiB/day of disk blocks (about 5.7 GiB per 30 days) across roughly 46,000 files/day, so plan for inodes as well as bytes |
 | `RETENTION_SWEEP_INTERVAL_HOURS` | `24` | How often the retention sweep runs |
 | `NOTIFY_DEDUP_RETENTION_DAYS` | `30` | Prune the notification dedup ledger older than N days |
 
@@ -398,16 +533,23 @@ analysis is deferred and retried.
 |---|---|---|
 | `RAW_FALLBACK_ENABLED` | `true` | Retry failed warehouse writes from the raw store |
 | `RAW_FALLBACK_MAX_ATTEMPTS` | `3` | Counted fallback attempts per row; after the budget the tx is scored anyway, degraded, with a `raw_data_unavailable` evidence marker, so a lost blob cannot park it in the pending queue forever |
-| `RAW_DATA_MAX_BYTES` | `0` | Size cap for the raw store; `0` = unbounded (see `RAW_STORE_RETENTION_DAYS`) |
+| `RAW_DATA_MAX_BYTES` | `0` | Per-transaction cap on the serialized payload stored in the ClickHouse `raw_data` column; `0` = store the full payload. Above the cap an **empty** string is written with `raw_data_truncated = 1`, never a partial prefix, and the engine reads the full payload back from the raw store instead. This is not a raw-store size cap: setting it makes the raw store load-bearing, which is why it blocks `RAW_STORE_RETENTION_DAYS` |
 | `ANALYSIS_DEFER_ENABLED` | `true` | Defer + retry scoring when enrichment inputs are missing |
 | `ANALYSIS_DEFER_MAX_ATTEMPTS` | `3` | Deferred-scoring attempts before the class is persisted as not-applicable |
 | `ANALYSIS_DEFER_RETRY_SECONDS` | `30` | Spacing between deferred-scoring attempts |
 | `ROLLBACK_CLEANUP_ENABLED` | `true` | On a chain rollback, delete ClickHouse rows for transactions past the rollback point, so orphaned-fork data cannot feed scorers or API reads. `archived_alerts` is exempt: it is admin curation, not chain state |
 
 **Analysis engine internals.** Tuning knobs for the scoring loop; the
-defaults suit preprod. On mainnet, set `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS`
-to bound the periodic full rescan to a recent window (0 = rescan all history,
-which grows unbounded).
+defaults suit preprod. `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` bounds the
+periodic full rescan to a recent window, which caps its anti-join cost as
+history accumulates (`0` = rescan all history). Treat it as a recall
+trade-off, not a routine mainnet setting: the full rescan is the never-skip
+guarantee, and the incremental query only looks back
+`UNANALYZED_OVERLAP_SECONDS`, so anything still unscored past the window is
+never picked up. If ingestion outlives scoring (engine disabled, crash-loop,
+multi-day resync) that gap is a permanent detection miss. Bound it only once
+the rescan's cost is measured on the deployment, and then pick a window that
+comfortably exceeds the longest plausible scoring outage.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -416,7 +558,7 @@ which grows unbounded).
 | `ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS` | `0.5` | Pause between drained batches |
 | `UNANALYZED_OVERLAP_SECONDS` | `120` | Look-back overlap on the incremental unscored-tx query |
 | `UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS` | `600` | How often the safety-net full rescan runs |
-| `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` | `0` | Bound the full rescan to the last N seconds; `0` = all history (set a window on mainnet) |
+| `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` | `0` | Bound the full rescan to the last N seconds; `0` = all history. Narrowing it trades recall for query cost (see the warning above) |
 
 **Baselines.** Per-entity percentile baselines and the token registry.
 
@@ -480,8 +622,10 @@ above): older than DEGRADED is `DEGRADED`, older than DOWN is `DOWN`.
 
 **Historical backfill (Kupo).** Backs the on-demand `POST /api/v1/backfill`
 address history import. `KUPO_SINCE` and `KUPO_MATCH` are Compose-container
-settings for the bundled Kupo service, not app config. Requires a reachable
-Kupo instance (the `ingestion` profile starts one).
+settings for the bundled Kupo service, not app config, and they only take
+effect from the shell or the top-level `.env`: Compose does not interpolate
+from a per-network `.env.<name>`. Requires a reachable Kupo instance (the
+`ingestion` profile starts one).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -502,6 +646,7 @@ below.
 | `NOTIFY_TOP_FEATURES` | `5` | Top contributing features included in an alert payload |
 | `NOTIFY_SEND_TIMEOUT_SECONDS` | `10` | Per-send timeout |
 | `NOTIFY_MAX_CONCURRENT_DELIVERIES` | `8` | Concurrent alert deliveries |
+| `NOTIFY_GROUP_WINDOW_MINUTES` | `60` | Alert-grouping window. For attack classes where repeat findings at one script are a single situation (`large_datum` only today), one alert per script per window instead of one per transaction. Escalation to a higher band always breaks through, and suppression expires with the window, so a persistent condition re-alerts hourly. Bounds notifications only: every finding is still recorded and visible in the dashboard. `0` disables grouping. See [docs/ALERTING.md](docs/ALERTING.md#per-group-one-alert-per-script-per-window) |
 | `WEBHOOK_TIMEOUT_SECONDS` | `8` | Per-webhook HTTP timeout |
 | `WEBHOOK_MAX_RETRIES` | `2` | Extra webhook attempts on 5xx / network error |
 | `WEBHOOK_RETRY_BACKOFF_SECONDS` | `1` | Webhook retry backoff base |
@@ -737,10 +882,30 @@ dedup migration below, which the startup guard will demand explicitly.
    ingestion catches up from the sync checkpoint (a brief `DEGRADED` while it
    replays the gap is normal).
 
-To roll back, redeploy the previous image tag and restart. Additive schema
-changes are backward compatible with the prior release; a release that
-required the dedup migration is not (keep the `<table>__legacy_<date>` tables
-until the new version is confirmed healthy).
+To roll back, rebuild from the previous commit. There is no image tag to
+redeploy: as step 2 says, the `app` service is built from this repository and no
+registry image is published, so record `git rev-parse HEAD` as step 0 of every
+upgrade and roll back with it:
+
+```bash
+git checkout <previous-commit>
+docker compose build app
+docker compose --profile app up -d app
+```
+
+The databases and their volumes are untouched by an app rollback, so an additive
+release needs no restore. Additive schema changes are backward compatible with
+the prior release; a release that required the dedup migration is not (keep the
+`<table>__legacy_<date>` tables until the new version is confirmed healthy).
+
+Two things to know before a rollback that crosses a schema change. Changing
+`VITE_NETWORK` needs `docker compose build app` rather than a restart, because
+the value is baked into the dashboard bundle at build time. And startup runs
+`ALTER TABLE transactions MATERIALIZE PROJECTION`, a part-rewriting mutation over
+the whole table, inside the same `CLICKHOUSE_MEM_LIMIT` that has already failed a
+`MODIFY TTL` with Code 241 on this deployment; raise the limit before a
+projection-changing upgrade and expect list queries to fall back to the base
+table while it runs.
 
 ## Schema migration (dedup-safe v2)
 

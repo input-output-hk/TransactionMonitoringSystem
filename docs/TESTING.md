@@ -2,7 +2,7 @@
 
 This document is the test-suite inventory for the Cardano Transaction
 Monitoring System: what each tier covers, how to run it, and how the tiers
-map to CI. Counts are current as of commit `3a03c22` on `main` and move as
+map to CI. Counts were measured on the commit this document ships in and move as
 the suite grows; the exact numbers are always whatever CI reports on the
 latest commit.
 
@@ -10,19 +10,19 @@ latest commit.
 
 | Tier | Location | Count | Services needed | CI job |
 |---|---|---|---|---|
-| Backend hermetic | `backend/tests/` | 1111 | none (all I/O mocked) | Backend (pytest + recall gate) |
-| Recall gate | `backend/tests/analysis/` | 492 (subset of the above) | none | Backend (run first, on its own) |
-| Live-DB tier | `backend/tests/live_db/` | 21 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Backend hermetic | `backend/tests/` | 1147 | none (all I/O mocked) | Backend (pytest + recall gate) |
+| Recall gate | `backend/tests/analysis/` | 505 (subset of the above) | none | Backend (run first, on its own) |
+| Live-DB tier | `backend/tests/live_db/` | 28 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 5 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
 | Clustering sidecar | `services/clustering/backend/tests/` | 495 | none | Clustering sidecar (pytest) |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 49 | none | Frontend (lint + build) |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 58 | none | Frontend (lint + build) |
 
-That is 1,684 tests across the six independent tiers (the recall gate is a
+That is 1,736 tests across the six independent tiers (the recall gate is a
 subset of the backend suite, not an additional tier).
 
 The default developer command, `pytest tests/` from `backend/`, runs the
-1111 hermetic backend tests and nothing that needs a database: the live-DB
+1147 hermetic backend tests and nothing that needs a database: the live-DB
 and performance tiers are opt-in behind environment flags so a contributor
 without Docker still gets a green run.
 
@@ -57,16 +57,17 @@ protection is a pending repository-admin step.
 ### Coverage
 
 CI measures line coverage on the full backend suite (`--cov=app`) and reports
-it in the job summary; there is no enforced threshold yet (report-only). At
-commit `3a03c22` backend coverage is 75% in CI (76% run locally, over the same
-8,797 statements: the difference is environment-gated branches) and the
-clustering sidecar is 85%.
+it in the job summary; there is no enforced threshold yet (report-only). At the
+commit this document ships in, backend coverage is 76% over 8,888 statements
+(`cd backend && ../.venv/bin/python -m pytest tests/ --cov=app`), and the
+clustering sidecar is 85%. CI has reported a point lower than a local run on the
+same commit; the difference is environment-gated branches.
 
 ## Live-DB integration tier
 
 `backend/tests/live_db/` applies the real schema to a live ClickHouse 26.x
-and Postgres 18 and runs representative queries, migrations, and the
-projection DDL against them. It exists because the hermetic suite's mocks let
+and Postgres 18 and runs representative queries, migrations, the projection
+DDL, and the alert-grouping ledger's suppression semantics against them. It exists because the hermetic suite's mocks let
 two real ClickHouse 26.x regressions ship green in the past; this tier catches
 version- and dialect-level breakage. It is gated so it never runs by accident:
 
@@ -131,7 +132,7 @@ uv run pytest -q
 
 ## Frontend
 
-The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 49 tests)
+The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 58 tests)
 over the API client and helper libraries, run under jsdom.
 
 ```bash

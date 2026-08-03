@@ -1,0 +1,86 @@
+<clickhouse>
+    <!-- Bounds ClickHouse's OWN observability, which the stock image leaves
+         unbounded. Measured on the mainnet deployment 2026-07-30, 15 days after
+         go-live: the ClickHouse volume was 32 GB, of which ~30 GB was these
+         system log tables and ~1 GB was actual TMS data. system.text_log alone
+         held 14.2 GB / 380 M rows because the stock image runs it at
+         <level>trace</level>. Eight of the nine tables configured below ship
+         with NO ttl and grow forever; only processors_profile_log carries one
+         (30 days). Combined that is ~2.0 GiB/day at mainnet write rates, versus
+         ~62 MiB/day for the detection data itself: about thirty to one.
+
+         Verified against clickhouse/clickhouse-server:26.1.3, the tag
+         docker-compose.yml pins. Re-check on an image bump with:
+           SELECT name, extract(engine_full, 'TTL [^S]*')
+           FROM system.tables WHERE database = 'system' AND name LIKE '%log%'
+
+         NOTE for EXISTING deployments: these settings apply when ClickHouse
+         CREATES a log table, so mounting this file reclaims nothing by itself.
+         A table that already exists with a different TTL is not migrated in
+         place; on restart ClickHouse renames it to <name>_0 and creates a fresh
+         empty one with the TTL below. All nine are renamed here, because every
+         stock TTL differs from 7 days, and the renamed tables hold all the old
+         data with no TTL of their own. Reclaiming space therefore means
+         DROP TABLE system.<name>_0, not TRUNCATE of the new tables. RUNBOOK.md
+         ("ClickHouse disk use") has the full procedure, including the in-place
+         alternative and why TRUNCATE must precede MODIFY TTL there (the ALTER
+         materializes the TTL across every existing part, which on a 14 GB table
+         exceeded the container's 4 GB mem_limit mid-mutation). -->
+
+    <!-- Server log FILES (the clickhouse_logs volume), separate from the log
+         tables above. Stock default is level=trace at 1000M x 10, i.e. up to
+         ~10 GB.
+
+         The level and the cap have to move TOGETHER. Cutting the cap 33x while
+         leaving the level at 'trace' would hold only hours of history at
+         mainnet write rates, which contradicts the 7-day table TTL below: an
+         operator triaging Monday morning would find the tables intact and the
+         server logs already rotated away. At 'information' the same 300 MB
+         spans days, so both halves agree on the triage window.
+
+         Note this is the FILE logger. The <level> inside <text_log> below is a
+         separate setting governing that table only. -->
+    <logger>
+        <level>information</level>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <!-- 7 days is the incident-triage window for this stack: long enough to
+         investigate a weekend outage on the following Monday, short enough that
+         each table stays around a GB at mainnet write rates. -->
+    <text_log>
+        <!-- 'trace' is what makes this the largest table by an order of
+             magnitude. 'information' keeps startup, DDL and error context. -->
+        <level>information</level>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </text_log>
+    <query_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+    <trace_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </trace_log>
+    <!-- This one reached 7.19 GiB / 271.3 M rows in 15 days on mainnet despite
+         already carrying a TTL: it is the ONLY one of the nine with a stock TTL,
+         verified as 30 days on 26.1.3. At its measured 486 MiB/day, pinning it
+         to the same 7 days as the rest should hold it near 3.3 GiB. -->
+    <processors_profile_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </processors_profile_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </part_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <query_views_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_views_log>
+    <query_metric_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_metric_log>
+</clickhouse>
