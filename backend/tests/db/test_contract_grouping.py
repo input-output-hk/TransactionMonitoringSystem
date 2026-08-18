@@ -145,21 +145,3 @@ class TestGroupedAggregateSql:
         assert "max_score >= %(min_score)s" in sql
         assert "corroboration_count >= %(min_corroboration)s" in sql
         assert params["min_score"] == 1.0
-
-
-class TestGroupCount:
-    def test_counts_groups_not_alerts(self, monkeypatch):
-        # The grouped pager's total is a group count; feeding it an alert count
-        # would overstate the number of pages.
-        fake = _patch_client(monkeypatch, [(7,)])
-        assert clickhouse_scores.count_contract_groups(network="preprod") == 7
-        assert "uniqExact(contract_address)" in fake.queries[0]
-
-    def test_excludes_the_no_contract_rows(self, monkeypatch):
-        fake = _patch_client(monkeypatch, [(0,)])
-        clickhouse_scores.count_contract_groups(network="preprod")
-        assert "contract_address != %(no_contract)s" in fake.queries[0]
-
-    def test_empty_result_is_zero(self, monkeypatch):
-        _patch_client(monkeypatch, [])
-        assert clickhouse_scores.count_contract_groups(network="preprod") == 0

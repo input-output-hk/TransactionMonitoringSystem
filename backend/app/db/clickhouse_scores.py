@@ -674,66 +674,6 @@ async def group_class_scores_by_contract_async(
     )
 
 
-def count_contract_groups(
-    network: str,
-    risk_band: list[str] | None = None,
-    attack_class: str | None = None,
-    min_score: float = 0.0,
-    analyzed_from: Any | None = None,
-    analyzed_to: Any | None = None,
-    include_archived: bool = False,
-    min_corroboration: int = 0,
-) -> int:
-    """Number of distinct contracts matching the filters.
-
-    This is the pagination total for the grouped view: it counts GROUPS, not
-    alerts, so the pager must not be fed ``count_class_scores``.
-    """
-    conditions, params = _score_filter_conditions(
-        network,
-        risk_band,
-        attack_class,
-        min_score,
-        analyzed_from,
-        analyzed_to,
-        include_archived,
-        min_corroboration,
-    )
-    conditions.append("contract_address != %(no_contract)s")
-    params["no_contract"] = NO_CONTRACT
-    where = " AND ".join(conditions)
-    rows = _client().execute(
-        f"SELECT uniqExact(contract_address) FROM tx_class_scores FINAL WHERE {where}",
-        params,
-    )
-    return int(rows[0][0]) if rows else 0
-
-
-async def count_contract_groups_async(
-    network: str,
-    risk_band: list[str] | None = None,
-    attack_class: str | None = None,
-    min_score: float = 0.0,
-    analyzed_from: Any | None = None,
-    analyzed_to: Any | None = None,
-    include_archived: bool = False,
-    min_corroboration: int = 0,
-) -> int:
-    return await _run(
-        partial(
-            count_contract_groups,
-            network=network,
-            risk_band=risk_band,
-            attack_class=attack_class,
-            min_score=min_score,
-            analyzed_from=analyzed_from,
-            analyzed_to=analyzed_to,
-            include_archived=include_archived,
-            min_corroboration=min_corroboration,
-        )
-    )
-
-
 def aggregate_window_counts(
     network: str,
     analyzed_from: Any,

@@ -1,7 +1,7 @@
 """The Avg Risk KPI averages findings, not every scored transaction.
 
-The alert list filters to max_score >= FINDING_MIN_SCORE, so the average shown
-beside it has to apply the same floor. Averaging the whole table mixed in the
+The alerts client filters the list to max_score >= FINDING_MIN_SCORE, so the
+average shown beside that table has to apply the same floor server-side. Averaging the whole table mixed in the
 mass of scored-but-clean rows (max_score = 0) that are never listed, which
 dragged the KPI far below the alerts it sat next to.
 """
@@ -66,7 +66,7 @@ class TestFindingFloorInSql:
 
 
 class TestFloorValue:
-    def test_floor_matches_the_list_endpoint_default(self):
+    def test_floor_matches_the_alerts_client_filter(self):
         # The frontend list sends min_score=1; if these diverge the KPI and the
         # table describe different populations again.
         assert FINDING_MIN_SCORE == 1.0

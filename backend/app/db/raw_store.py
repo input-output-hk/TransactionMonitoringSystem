@@ -263,3 +263,16 @@ def read_confirmed(network: str, tx_hash: str, ts: datetime) -> dict[str, Any] |
         except (OSError, json.JSONDecodeError, EOFError) as e:
             logger.warning(f"Raw store read failed for {path}: {e}")
     return None
+
+
+async def read_confirmed_async(network: str, tx_hash: str, ts: datetime) -> dict[str, Any] | None:
+    """Non-blocking :func:`read_confirmed`, for request handlers.
+
+    Runs on the ClickHouse request executor rather than this module's own write
+    pool: that pool has two workers sized for the ingester's write stream, and a
+    UI request must not queue behind a block's worth of blob writes. Imported
+    lazily so the store keeps its single dependency (app.config) at module level.
+    """
+    from app.db import clickhouse
+
+    return await clickhouse._in_executor(read_confirmed, network, tx_hash, ts)

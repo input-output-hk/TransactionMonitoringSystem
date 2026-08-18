@@ -78,10 +78,11 @@ ALERT_BANDS: tuple[str, ...] = (RiskBand.HIGH.value, RiskBand.CRITICAL.value)
 # The lowest max_score that represents an actual finding. A scored transaction
 # sits at exactly 0 when every scorer either gated out or looked and found
 # nothing, which is the overwhelming majority of ingested traffic; such a row is
-# queryable but is not an alert and is never listed. Readers that describe "the
-# alerts" (the list endpoint's default floor, and the Avg Risk aggregate that is
-# displayed beside it) must apply this same floor, or they report on two
-# different populations and the KPI silently contradicts the table.
+# queryable but is not an alert. The list endpoint leaves the floor to its caller
+# (min_score defaults to 0, so a raw /results call can see clean rows), and the
+# alerts client sends exactly this value; the Avg Risk aggregate displayed beside
+# that table therefore has to apply the same floor server-side, or the KPI and
+# the table report on two different populations.
 FINDING_MIN_SCORE: float = 1.0
 
 

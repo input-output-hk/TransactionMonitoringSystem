@@ -401,10 +401,9 @@ async def get_transaction_by_hash(
             timestamp = tx_row[5]
             if isinstance(timestamp, datetime):
                 try:
-                    # Blocking file read, so it runs on the ClickHouse executor
-                    # rather than the event loop (same rule the engine follows).
-                    raw_data = await clickhouse._in_executor(
-                        raw_store.read_confirmed,
+                    # Blocking gzip read, so it goes through the store's async
+                    # entry point rather than the event loop.
+                    raw_data = await raw_store.read_confirmed_async(
                         query_network,
                         tx_hash,
                         timestamp,

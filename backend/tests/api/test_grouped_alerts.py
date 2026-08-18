@@ -68,12 +68,15 @@ def _alert_row(tx_hash, score=65.0, band="High", cls="phishing", at=None):
     }
 
 
-def _stub_groups(monkeypatch, groups, unattributed=None):
-    """Stub both halves of the grouped view: the aggregate and the no-contract rows."""
+def _stub_groups(monkeypatch, groups, unattributed=None, unattributed_total=None):
+    """Stub all three halves of the grouped view: the aggregate, the no-contract
+    page, and the no-contract COUNT that feeds the pager total."""
     from app.db import clickhouse
 
     captured: dict = {}
     captured_flat: dict = {}
+    captured_count: dict = {}
+    rows = list(unattributed or [])
 
     async def _grouped(**kwargs):
         captured.update(kwargs)
@@ -81,11 +84,19 @@ def _stub_groups(monkeypatch, groups, unattributed=None):
 
     async def _flat(**kwargs):
         captured_flat.update(kwargs)
-        return [dict(r) for r in (unattributed or [])]
+        # Honour the endpoint's page-depth bound so the stub cannot hide a
+        # regression that fetches (or slices) the wrong number of rows.
+        return [dict(r) for r in rows[: kwargs.get("limit")]]
+
+    async def _count(**kwargs):
+        captured_count.update(kwargs)
+        return len(rows) if unattributed_total is None else unattributed_total
 
     monkeypatch.setattr(clickhouse, "group_class_scores_by_contract_async", _grouped)
     monkeypatch.setattr(clickhouse, "get_class_scores_list_async", _flat)
+    monkeypatch.setattr(clickhouse, "count_class_scores_async", _count)
     captured["_flat"] = captured_flat
+    captured["_count"] = captured_count
     return captured
 
 
@@ -126,6 +137,17 @@ class TestGroupedResponse:
         assert body["total"] == 4  # total counts rows, not the alerts inside them
         assert body["count"] == 2
         assert [g["contract_address"] for g in body["data"]] == ["addr1", "addr2"]
+
+    def test_unclusterable_marker_reaches_the_row(self, client, monkeypatch):
+        # Set by the reconciliation, not by SQL, so a group the aggregate produced
+        # alone reports False rather than omitting the field.
+        marked = _group(DJED)
+        marked["unclusterable_model"] = True
+        _stub_groups(monkeypatch, [marked, _group(STRIKE)])
+        body = client.get(f"{GROUPED_URL}?network=preprod").json()
+        by_address = {r["contract_address"]: r for r in body["data"]}
+        assert by_address[DJED]["unclusterable_model"] is True
+        assert by_address[STRIKE]["unclusterable_model"] is False
 
     def test_score_sort_orders_by_worst_first(self, client, monkeypatch):
         _stub_groups(monkeypatch, [_group(DJED, worst=40.0), _group(STRIKE, worst=95.0)])
@@ -201,6 +223,89 @@ class TestUnattributedAlerts:
         body = client.get(f"{GROUPED_URL}?network=preprod&attack_class=contract_anomaly").json()
         assert body["data"] == []
         assert captured["_flat"] == {}
+        assert captured["_count"] == {}
+
+
+class TestUnattributedPaging:
+    """The un-attributed side is bounded by page depth, not by its own size."""
+
+    def test_total_comes_from_a_count_not_the_fetched_slice(self, client, monkeypatch):
+        # Only the requested page's depth is fetched, so len(rows) would understate
+        # the pager. A wrong total here hides alerts behind a page that never
+        # renders.
+        _stub_groups(
+            monkeypatch,
+            [_group(DJED)],
+            unattributed=[_alert_row(f"tx{i}") for i in range(3)],
+            unattributed_total=4_211,
+        )
+        body = client.get(f"{GROUPED_URL}?network=preprod&limit=2").json()
+        assert body["total"] == 1 + 4_211
+        assert body["count"] == 2
+
+    def test_fetch_is_bounded_to_the_requested_page_depth(self, client, monkeypatch):
+        # Nothing ranked below offset+limit can enter the merge window, so the
+        # fetch must not pull the whole un-attributed set to sort it in Python.
+        captured = _stub_groups(monkeypatch, [], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&limit=25&offset=50")
+        assert captured["_flat"]["limit"] == 75
+        assert captured["_flat"]["offset"] == 0
+
+    def test_fetch_uses_the_requested_sort(self, client, monkeypatch):
+        # Fetching the newest N and then merging by score would leave a
+        # high-scoring older alert unreachable on a score-sorted page 1.
+        captured = _stub_groups(monkeypatch, [], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&sort=score")
+        assert captured["_flat"]["sort"] == "score"
+
+    def test_count_applies_the_same_filters_as_the_page(self, client, monkeypatch):
+        captured = _stub_groups(monkeypatch, [], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&risk_band=High&min_score=1")
+        count = captured["_count"]
+        assert count["risk_band"] == ["High"]
+        assert count["min_score"] == 1.0
+        assert count["contract"] == ""
+
+
+class TestReconciliationGate:
+    """The synthetic class is reconciled only where it can satisfy the filter."""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        from app.api import analysis as analysis_mod
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        calls: list[dict] = []
+
+        async def _augment(_net, _groups, **kwargs):
+            calls.append(kwargs)
+
+        monkeypatch.setattr(analysis_mod, "_augment_groups_with_contract_anomaly", _augment)
+        return calls
+
+    def test_skipped_under_a_nine_class_attack_filter(self, client, monkeypatch):
+        # attack_class is a stored-column predicate the synthetic class cannot
+        # satisfy: reconciling under it would add groups the filter excludes and
+        # decrement groups SQL never counted. Mirrors the flat list's rescue gate.
+        calls = self._spy(monkeypatch)
+        _stub_groups(monkeypatch, [_group(DJED)], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&attack_class=phishing")
+        assert calls == []
+
+    def test_runs_with_no_attack_filter(self, client, monkeypatch):
+        calls = self._spy(monkeypatch)
+        _stub_groups(monkeypatch, [_group(DJED)], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod")
+        assert len(calls) == 1
+        assert calls[0]["anomaly_only"] is False
+
+    def test_runs_when_the_filter_is_the_synthetic_class_itself(self, client, monkeypatch):
+        calls = self._spy(monkeypatch)
+        _stub_groups(monkeypatch, [], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&attack_class=contract_anomaly")
+        assert len(calls) == 1
+        assert calls[0]["anomaly_only"] is True
 
 
 class TestValidation:
@@ -370,3 +475,53 @@ class TestAnomalyReconciliation:
             anomaly_only=True,
         )
         assert groups == []
+
+    @pytest.mark.anyio
+    async def test_unclusterable_verdict_marks_the_group(self, monkeypatch):
+        # The un-clusterable marker is how an operator de-prioritises an
+        # auto-anomaly whose model could not fit the contract. It rides on the
+        # group's WORST row, so it has to be set where worst_score is.
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        stored = _full_score_row("tx1", 20.0)
+        stored["contract_address"] = STRIKE
+        flagged = self._flagged_row(STRIKE, "anomaly")
+        flagged["unclusterable_fit"] = 1
+        self._stored(monkeypatch, [stored], {"tx1": [flagged]})
+
+        groups = [_group(STRIKE, count=1, worst=20.0, band="Informational")]
+        await _augment_groups_with_contract_anomaly(
+            "preprod",
+            groups,
+            bands=None,
+            min_score=1.0,
+            analyzed_from=None,
+            analyzed_to=None,
+            min_corroboration=0,
+        )
+        assert groups[0]["unclusterable_model"] is True
+
+    @pytest.mark.anyio
+    async def test_marker_is_cleared_when_a_stored_class_tops_the_group(self, monkeypatch):
+        # A group marked un-clusterable on a row that no longer tops it would
+        # tell the operator to de-prioritise a contract on stale grounds.
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        stored = _full_score_row("tx1", 95.0)  # stored Critical beats the verdict
+        stored["contract_address"] = STRIKE
+        flagged = self._flagged_row(STRIKE, "anomaly")
+        flagged["unclusterable_fit"] = 1
+        self._stored(monkeypatch, [stored], {"tx1": [flagged]})
+
+        groups = [_group(STRIKE, count=1, worst=20.0, band="Informational")]
+        await _augment_groups_with_contract_anomaly(
+            "preprod",
+            groups,
+            bands=None,
+            min_score=1.0,
+            analyzed_from=None,
+            analyzed_to=None,
+            min_corroboration=0,
+        )
+        assert groups[0]["worst_score"] == 95.0
+        assert groups[0]["unclusterable_model"] is False

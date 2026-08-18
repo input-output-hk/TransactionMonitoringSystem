@@ -132,6 +132,46 @@ def _merge_contract_anomaly(
     result.contract_anomaly_unclusterable = bool(resolved.get("unclusterable_fit"))
 
 
+def _warn_if_flagged_capped(
+    flagged: dict[str, list[dict[str, Any]]],
+    network: str,
+    consequence: str,
+) -> None:
+    """Log when the flagged-set fetch was truncated by its safety cap.
+
+    No silent caps (see CLAUDE.md): every reader of the flagged set states what a
+    truncation costs *it*, so an operator can decide whether to raise the cap.
+    ``consequence`` is that reader-specific half of the message.
+    """
+    if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
+        logger.warning(
+            "contract_anomaly flagged fetch hit the cap (%d) for %s; %s",
+            clustering_queries._RESCUE_FETCH_CAP,
+            network,
+            consequence,
+        )
+
+
+async def _flagged_with_stored_rows(
+    network: str,
+    consequence: str,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """The network's flagged set plus the stored 9-class row for each flagged tx.
+
+    Both readers that reconcile the synthetic class against stored rows (the
+    ``attack_class=contract_anomaly`` list and the grouped-alerts augmentation)
+    need exactly this pair, hydrated the same way: archived false positives are
+    excluded by ``get_class_scores_by_hashes_async``'s default anti-join, so a
+    curated FP cannot re-enter through either path.
+    """
+    flagged = await clustering_queries.flagged_for_network_async(network)
+    if not flagged:
+        return {}, []
+    _warn_if_flagged_capped(flagged, network, consequence)
+    stored_rows = await clickhouse.get_class_scores_by_hashes_async(network, list(flagged))
+    return flagged, stored_rows
+
+
 def _passes_score_band(
     score: float,
     band: RiskBand,
@@ -259,22 +299,12 @@ async def _list_contract_anomaly_results(
     truncation is logged, never silent. Archived false positives are excluded by
     ``get_class_scores_by_hashes_async``'s default anti-join, matching the list
     query. Returns ``(page, total)`` where total is the full match count."""
-    flagged = await clustering_queries.flagged_for_network_async(network)
+    flagged, stored_rows = await _flagged_with_stored_rows(
+        network,
+        "older flagged txs may be absent from the filtered list",
+    )
     if not flagged:
         return [], 0
-    if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
-        # No silent caps: a truncated flagged set could omit a contract_anomaly
-        # detection from this filtered view; surface it so the cap can be raised.
-        logger.warning(
-            "contract_anomaly list filter hit the fetch cap (%d) for %s; "
-            "older flagged txs may be absent from the filtered list",
-            clustering_queries._RESCUE_FETCH_CAP,
-            network,
-        )
-    stored_rows = await clickhouse.get_class_scores_by_hashes_async(
-        network,
-        list(flagged),
-    )
     matched: list[ClassScoreResult] = []
     for row in stored_rows:
         res = _row_to_class_score(row)
@@ -484,15 +514,11 @@ async def _rescue_flagged_onto_page(
     page_full = len(data) >= limit
     try:
         flagged = await clustering_queries.flagged_for_network_async(network)
-        if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
-            # No silent caps: a truncated rescue set could omit a flagged tx
-            # from page 1; surface it so the cap can be raised.
-            logger.warning(
-                "contract_anomaly rescue hit the fetch cap (%d) for %s; "
-                "older flagged txs may be absent from the first page",
-                clustering_queries._RESCUE_FETCH_CAP,
-                network,
-            )
+        _warn_if_flagged_capped(
+            flagged,
+            network,
+            "older flagged txs may be absent from the first page",
+        )
         present = {d.tx_hash for d in data}
         rescue_hashes = [h for h in flagged if h not in present]
         # Date sort: a rescued row older than the page's oldest shown row
@@ -591,6 +617,14 @@ async def _augment_groups_with_contract_anomaly(
     3. the group's ``worst_score`` / ``worst_band`` / ``latest_analyzed_at``
        rise to the effective values.
 
+    The corrections are one-directional: a group's ``worst_score`` is never
+    LOWERED when correction 1 moves its highest-scoring alert out, because the
+    second-worst alert's score is not in hand and re-querying per group would
+    cost a query per row of the page. The residual error therefore overstates a
+    group's severity, never understates it, which is the side of the trade-off
+    CLAUDE.md's recall-first order asks for: the analyst opens the group and sees
+    the true rows.
+
     Mutates ``groups`` in place. Groups emptied by correction 1 are dropped.
     Best-effort by contract: the caller treats a sidecar failure as "no
     augmentation" rather than failing the page.
@@ -599,22 +633,15 @@ async def _augment_groups_with_contract_anomaly(
     a class it never stores, so the caller passes an empty ``groups`` and this
     builds the whole result from transactions the verdict pushes to the top,
     which is the in-memory analogue of the DB's ``max_class = attack_class``.
+    Under any OTHER attack_class filter the caller must not call this at all: the
+    filter is a 9-class predicate the synthetic class cannot satisfy.
     """
-    flagged = await clustering_queries.flagged_for_network_async(network)
+    flagged, stored_rows = await _flagged_with_stored_rows(
+        network,
+        "some flagged txs may be missing from their contract's group",
+    )
     if not flagged:
         return
-    if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
-        # No silent caps: a truncated flagged set understates a contract's group.
-        logger.warning(
-            "contract_anomaly group augmentation hit the fetch cap (%d) for %s; "
-            "some flagged txs may be missing from their contract's group",
-            clustering_queries._RESCUE_FETCH_CAP,
-            network,
-        )
-    stored_rows = await clickhouse.get_class_scores_by_hashes_async(
-        network,
-        list(flagged),
-    )
     by_address = {g["contract_address"]: g for g in groups}
 
     def _passes(res: ClassScoreResult) -> bool:
@@ -656,6 +683,7 @@ async def _augment_groups_with_contract_anomaly(
                 "worst_score": 0.0,
                 "worst_band": res.risk_band.value,
                 "latest_analyzed_at": res.analyzed_at,
+                "unclusterable_model": False,
             }
             by_address[effective_contract] = group
             groups.append(group)
@@ -665,6 +693,13 @@ async def _augment_groups_with_contract_anomaly(
         if res.max_score > float(group["worst_score"]):
             group["worst_score"] = res.max_score
             group["worst_band"] = res.risk_band.value
+            # Tracks the WORST row, so it flips back off when a stored-class
+            # alert outranks the un-clusterable verdict. A group marked
+            # un-clusterable on a row that no longer tops it would tell the
+            # operator to de-prioritise a contract on stale grounds.
+            group["unclusterable_model"] = (
+                res.max_class == _CONTRACT_ANOMALY and res.contract_anomaly_unclusterable
+            )
         # Normalise both sides: the SQL group's latest_analyzed_at comes from
         # ClickHouse tz-NAIVE while res.analyzed_at is tz-AWARE, and comparing
         # them raw raises the naive-vs-aware TypeError this endpoint would

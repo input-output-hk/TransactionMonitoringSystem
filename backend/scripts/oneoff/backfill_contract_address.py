@@ -13,8 +13,12 @@ that has since been recalibrated, for a column that is a pure projection of data
 already on the row.
 
 Work is chunked by ``analyzed_at`` window and every chunk is guarded on
-``contract_address = ''``, so the script is idempotent, resumable, and safe to
-re-run after an interruption. It never overwrites a value already present.
+``contract_address = ''`` AND on the winning class being one the mapping covers,
+so the script is idempotent, resumable, and safe to re-run after an interruption.
+It never overwrites a value already present. The class guard is what makes the
+run CONVERGE: without it, every row whose class names no contract still derives
+'' and so stays "pending" forever, and each re-run would resubmit a mutation over
+the whole of history to rewrite '' onto '' .
 
 Run with ``--apply`` to write; default is dry-run.
 
@@ -28,7 +32,7 @@ each mutation over a bounded slice of history rather than the whole table.
 import argparse
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.analysis.contract_identity import CONTRACT_EVIDENCE_KEYS, NO_CONTRACT
 from app.config import settings
@@ -46,6 +50,13 @@ DEFAULT_CHUNK_DAYS = 30
 # starts far later than this, and the loop stops as soon as it runs out of rows,
 # so this is only a floor for the initial scan.
 DEFAULT_LOOKBACK_DAYS = 3650
+
+# Rows sampled per chunk in the dry-run preview, and the width the derived
+# address is truncated to for one log line. Display only; neither bounds the
+# mutation.
+PREVIEW_ROWS = 5
+PREVIEW_ADDR_WIDTH = 20
+PREVIEW_ELLIPSIS = "..."
 
 
 def _case_expression() -> str:
@@ -69,15 +80,41 @@ def _case_expression() -> str:
     return "CASE " + " ".join(branches) + " ELSE '' END"
 
 
+def _pending_conditions() -> str:
+    """The WHERE fragment identifying rows this backfill can still improve.
+
+    Both halves matter. ``contract_address = ''`` never overwrites a value
+    already present. ``max_class IN (mapped)`` excludes the classes that name no
+    contract: their derived value is also '', so without this guard they would
+    stay "pending" on every future run and each re-run would resubmit a mutation
+    over the whole of history to write '' onto ''.
+    """
+    return (
+        "network = %(network)s "
+        "AND contract_address = %(empty)s "
+        "AND max_class IN %(mapped_classes)s "
+        "AND analyzed_at >= %(start)s AND analyzed_at < %(end)s"
+    )
+
+
+def _pending_params(network: str, start: datetime, end: datetime) -> dict:
+    return {
+        "network": network,
+        "empty": NO_CONTRACT,
+        # Tuple, not list: clickhouse-driver renders a tuple as a SQL IN list.
+        "mapped_classes": tuple(sorted(CONTRACT_EVIDENCE_KEYS)),
+        "start": start,
+        "end": end,
+    }
+
+
 def _count_pending(client, network: str, start: datetime, end: datetime) -> int:
     rows = client.execute(
-        """
+        f"""
         SELECT count() FROM tx_class_scores FINAL
-        WHERE network = %(network)s
-          AND contract_address = %(empty)s
-          AND analyzed_at >= %(start)s AND analyzed_at < %(end)s
+        WHERE {_pending_conditions()}
         """,
-        {"network": network, "empty": NO_CONTRACT, "start": start, "end": end},
+        _pending_params(network, start, end),
     )
     return int(rows[0][0]) if rows else 0
 
@@ -88,21 +125,22 @@ def _preview(client, network: str, start: datetime, end: datetime, limit: int) -
         f"""
         SELECT max_class, {_case_expression()} AS derived, count() AS n
         FROM tx_class_scores FINAL
-        WHERE network = %(network)s
-          AND contract_address = %(empty)s
-          AND analyzed_at >= %(start)s AND analyzed_at < %(end)s
+        WHERE {_pending_conditions()}
         GROUP BY max_class, derived
         ORDER BY n DESC
         LIMIT %(limit)s
         """,
-        {
-            "network": network,
-            "empty": NO_CONTRACT,
-            "start": start,
-            "end": end,
-            "limit": limit,
-        },
+        {**_pending_params(network, start, end), "limit": limit},
     )
+
+
+def _short_address(derived: str) -> str:
+    """One log-line rendering of a derived address."""
+    if not derived:
+        return "<no identity>"
+    if len(derived) > PREVIEW_ADDR_WIDTH + len(PREVIEW_ELLIPSIS):
+        return derived[:PREVIEW_ADDR_WIDTH] + PREVIEW_ELLIPSIS
+    return derived
 
 
 def main() -> None:
@@ -141,7 +179,10 @@ def main() -> None:
         sys.exit(2)
 
     client = clickhouse._get_client()
-    now = datetime.now()
+    # analyzed_at is written as UTC, so the window has to be built in UTC. A naive
+    # local now() would shift every chunk boundary by the host's offset and could
+    # exclude the most recent rows outright.
+    now = datetime.now(UTC).replace(tzinfo=None)
     start = now - timedelta(days=args.lookback_days)
     total_pending = _count_pending(client, args.network, start, now)
     logger.info(
@@ -168,11 +209,13 @@ def main() -> None:
             window_end.date(),
             pending,
         )
-        for max_class, derived, n in _preview(client, args.network, window_start, window_end, 5):
+        for max_class, derived, n in _preview(
+            client, args.network, window_start, window_end, PREVIEW_ROWS
+        ):
             logger.info(
                 "    %-18s -> %-24s (%d rows)",
                 max_class or "<none>",
-                (derived[:20] + "...") if len(derived) > 23 else (derived or "<no identity>"),
+                _short_address(derived),
                 n,
             )
         if args.apply:
@@ -181,17 +224,10 @@ def main() -> None:
                 f"""
                 ALTER TABLE tx_class_scores
                 UPDATE contract_address = {case_sql}
-                WHERE network = %(network)s
-                  AND contract_address = %(empty)s
-                  AND analyzed_at >= %(start)s AND analyzed_at < %(end)s
+                WHERE {_pending_conditions()}
                 {settings_clause}
                 """,
-                {
-                    "network": args.network,
-                    "empty": NO_CONTRACT,
-                    "start": window_start,
-                    "end": window_end,
-                },
+                _pending_params(args.network, window_start, window_end),
             )
             updated_chunks += 1
         window_start = window_end
