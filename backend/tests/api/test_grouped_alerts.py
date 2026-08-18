@@ -525,3 +525,101 @@ class TestAnomalyReconciliation:
         )
         assert groups[0]["worst_score"] == 95.0
         assert groups[0]["unclusterable_model"] is False
+
+
+class TestGroupExpansionAgreesWithTheCount:
+    """A group's count and the rows its expansion lists must describe one set.
+
+    The grouped row is reconciled to the EFFECTIVE contract (a winning sidecar
+    verdict re-homes a tx to its watched target), while expanding the group is a
+    plain ``?contract=`` list request. The rescue is what keeps the two in step:
+    the DB filters on the STORED contract, so a re-homed tx is missing from the
+    SQL page even when its score passes, and only the rescue can put it back.
+    """
+
+    @pytest.mark.anyio
+    async def test_rehomed_alert_is_listed_when_its_group_is_expanded(self, monkeypatch):
+        from app.api.contract_anomaly_read import _rescue_flagged_onto_page
+        from app.config import settings
+        from app.db import clickhouse, clustering_queries
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        # Stored High under DJED (so the score/band filter alone would have kept
+        # it), but the verdict re-homes it to STRIKE and outranks it.
+        stored = _full_score_row("tx1", 70.0)
+        stored["contract_address"] = DJED
+        stored["risk_band"] = "High"
+
+        async def _by_hashes(_net, _hashes, *a, **k):
+            return [stored]
+
+        async def _flagged(_net, *a, **k):
+            return {"tx1": [TestAnomalyReconciliation._flagged_row(STRIKE)]}
+
+        monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+        monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+
+        # The SQL page for ?contract=STRIKE is empty: the stored row names DJED.
+        data: list = []
+        rescued = await _rescue_flagged_onto_page(
+            "preprod",
+            data,
+            min_score=1.0,
+            bands=["High", "Critical"],
+            attack_class=None,
+            min_corroboration=0,
+            analyzed_from=None,
+            analyzed_to=None,
+            sort="date",
+            limit=50,
+            offset=0,
+            contract=STRIKE,
+        )
+        assert [d.tx_hash for d in data] == ["tx1"]
+        # Additive: the contract predicate, not the score, is what excluded it.
+        assert rescued == 1
+
+    @pytest.mark.anyio
+    async def test_row_the_db_already_returned_is_not_counted_twice(self, monkeypatch):
+        from app.api.contract_anomaly_read import _rescue_flagged_onto_page
+        from app.config import settings
+        from app.db import clickhouse, clustering_queries
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        # Stored under the SAME contract the request filters on, and already
+        # passing the band filter, so the SQL page returned it.
+        stored = _full_score_row("tx2", 70.0)
+        stored["contract_address"] = STRIKE
+        stored["risk_band"] = "High"
+
+        async def _by_hashes(_net, _hashes, *a, **k):
+            return [stored]
+
+        async def _flagged(_net, *a, **k):
+            flagged = TestAnomalyReconciliation._flagged_row(STRIKE)
+            flagged["tx_hash"] = "tx2"
+            return {"tx2": [flagged]}
+
+        monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+        monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+
+        # `data` is empty only because this unit test does not run the SQL half;
+        # the rescue must still decline it, since the DB filter selected it.
+        data: list = []
+        rescued = await _rescue_flagged_onto_page(
+            "preprod",
+            data,
+            min_score=1.0,
+            bands=["High", "Critical"],
+            attack_class=None,
+            min_corroboration=0,
+            analyzed_from=None,
+            analyzed_to=None,
+            sort="date",
+            limit=50,
+            offset=0,
+            contract=STRIKE,
+        )
+        assert rescued == 0

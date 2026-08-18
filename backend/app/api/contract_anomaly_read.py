@@ -541,12 +541,15 @@ async def _rescue_flagged_onto_page(
                     continue
                 if date_floor is not None and res.analyzed_at < date_floor:
                     continue
+                # What the DB filter actually selected on: the STORED score/band
+                # AND the STORED contract. Both halves matter, and both are read
+                # before the merge rewrites them.
                 stored_meets = _passes_score_band(
                     res.max_score,
                     res.risk_band,
                     min_score,
                     bands,
-                )
+                ) and (contract is None or res.contract_address == contract)
                 _merge_contract_anomaly(res, flagged[res.tx_hash])
                 # Contract filter is checked AFTER the merge, because a winning
                 # sidecar verdict rewrites contract_address to its watched
@@ -555,10 +558,15 @@ async def _rescue_flagged_onto_page(
                 # trade-off, the analyst asked for one contract.
                 if contract is not None and res.contract_address != contract:
                     continue
-                # Genuinely rescued only: stored score missed the filter but
-                # the merged score now meets it. A row whose stored score
-                # already met the filter is in the normal paginated set, so
-                # it must not be added to total here.
+                # Genuinely rescued only: the DB filter dropped it and the merged
+                # verdict now meets the filter. A row the DB already returned is
+                # in the normal paginated set, so it must not be added to total
+                # here. Re-homing counts as dropped: a tx whose stored score
+                # passes but whose stored contract differs was excluded by the
+                # contract predicate, so it is additive under this filter even
+                # though its score alone would not have rescued it. Without that,
+                # a group's count (reconciled to the effective target) would
+                # exceed the rows its expansion can show.
                 if not stored_meets and _passes_score_band(
                     res.max_score,
                     res.risk_band,

@@ -12,13 +12,12 @@ are untouched, so re-running the engine would risk moving scores under a config
 that has since been recalibrated, for a column that is a pure projection of data
 already on the row.
 
-Work is chunked by ``analyzed_at`` window and every chunk is guarded on
-``contract_address = ''`` AND on the winning class being one the mapping covers,
-so the script is idempotent, resumable, and safe to re-run after an interruption.
-It never overwrites a value already present. The class guard is what makes the
-run CONVERGE: without it, every row whose class names no contract still derives
-'' and so stays "pending" forever, and each re-run would resubmit a mutation over
-the whole of history to rewrite '' onto '' .
+Work is chunked by ``analyzed_at`` window and every chunk is guarded so that it
+only touches rows the backfill can actually improve (see ``_pending_conditions``),
+which makes the script idempotent, resumable, and safe to re-run after an
+interruption. It never overwrites a value already present, and it never rewrites
+'' onto '': a chunk that has been applied once reports nothing pending on the
+next run, so re-running does not resubmit a mutation over the whole of history.
 
 Run with ``--apply`` to write; default is dry-run.
 
@@ -83,16 +82,23 @@ def _case_expression() -> str:
 def _pending_conditions() -> str:
     """The WHERE fragment identifying rows this backfill can still improve.
 
-    Both halves matter. ``contract_address = ''`` never overwrites a value
-    already present. ``max_class IN (mapped)`` excludes the classes that name no
-    contract: their derived value is also '', so without this guard they would
-    stay "pending" on every future run and each re-run would resubmit a mutation
-    over the whole of history to write '' onto ''.
+    All three halves matter, and together they are what makes the run CONVERGE:
+    a chunk that has been applied once reports zero pending on the next run.
+
+    - ``contract_address = ''`` never overwrites a value already present.
+    - ``max_class IN (mapped)`` excludes the classes that name no contract.
+    - the derived value being non-empty excludes the rest: a MAPPED class can
+      still carry no address (a gated-out or partial finding never emitted its
+      evidence key, which :func:`contract_identity.contract_address_of` returns
+      NO_CONTRACT for). Those rows derive '' too, so without this guard they
+      would stay "pending" for ever and every re-run would resubmit a mutation
+      over the whole of history to write '' onto ''.
     """
     return (
         "network = %(network)s "
         "AND contract_address = %(empty)s "
         "AND max_class IN %(mapped_classes)s "
+        f"AND {_case_expression()} != %(empty)s "
         "AND analyzed_at >= %(start)s AND analyzed_at < %(end)s"
     )
 
