@@ -8,6 +8,12 @@ export type AnalysisStats = {
 	moderate_count: number;
 	informational_count: number;
 	avg_max_score: number | null;
+	/**
+	 * Transactions behind `avg_max_score`: those at or above the finding floor.
+	 * `total` counts every scored transaction including the clean ones, so it is
+	 * NOT this average's denominator.
+	 */
+	finding_count: number;
 	last_analyzed_at: string;
 	// Ingested-but-unscored backlog, computed server-side as a single
 	// like-for-like query (distinct tx_hashes with no score row). Prefer

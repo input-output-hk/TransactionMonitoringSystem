@@ -57,7 +57,78 @@ export type RiskAlert = {
 	 * signal. The list badges and de-prioritizes it; it never changes severity.
 	 */
 	unclusterableModel?: boolean;
+	/**
+	 * The contract this alert implicates, normalized server-side from whichever
+	 * evidence key the winning class used. Empty string means the class names no
+	 * contract (phishing, circular and front_running describe a relationship
+	 * between addresses), and those alerts render as ungrouped rows rather than
+	 * being collapsed into a bucket with nothing to name it.
+	 */
+	contractAddress?: string;
 };
+
+/**
+ * Lowest 0-100 score that lands in each risk band.
+ *
+ * Mirrors the backend's single source of truth, `BAND_*_THRESHOLD` in
+ * `backend/app/analysis/normalise.py`. Duplicated here only because no endpoint
+ * exposes the thresholds and the Avg Risk helper has to answer "is this high or
+ * low" in terms the operator sees elsewhere in the UI. Keep in step with that
+ * module if the bands are ever recalibrated.
+ */
+export const SEVERITY_MIN_SCORE: Record<Severity, number> = {
+	INFORMATIONAL: 0,
+	MODERATE: 31,
+	HIGH: 60,
+	CRITICAL: 80,
+};
+
+/** The band a 0-100 score falls in, matching the backend's score_to_band. */
+export function severityForScore(score: number): Severity {
+	if (score >= SEVERITY_MIN_SCORE.CRITICAL) return "CRITICAL";
+	if (score >= SEVERITY_MIN_SCORE.HIGH) return "HIGH";
+	// Strictly above the top of Informational, not >= MODERATE: scores are
+	// rounded to 2dp, so 30.5 must not fall into a dead zone and under-band.
+	if (score > SEVERITY_MIN_SCORE.MODERATE - 1) return "MODERATE";
+	return "INFORMATIONAL";
+}
+
+const SEVERITY_WORD: Record<Severity, string> = {
+	INFORMATIONAL: "Informational",
+	MODERATE: "Moderate",
+	HIGH: "High",
+	CRITICAL: "Critical",
+};
+
+/**
+ * Operator-facing explanation of the Avg Risk KPI.
+ *
+ * The client reported this number as unclear, and it had two problems: nothing
+ * said what it measured, and it averaged every scored transaction including the
+ * clean ones, so it described a different population than the table beside it.
+ * The aggregate now applies the alert list's finding floor; this text supplies
+ * the rest, including where the value sits among the bands so "high or low" is
+ * answerable without a second lookup. Same house style as SUB_SCORE_LABELS:
+ * short, and for an operator rather than a researcher.
+ */
+export function avgRiskHelp(score: number | null | undefined): string {
+	const scale =
+		`Mean risk score (0-100) across alerting transactions on this network. ` +
+		`Bands: Informational under ${SEVERITY_MIN_SCORE.MODERATE}, ` +
+		`Moderate ${SEVERITY_MIN_SCORE.MODERATE}-${SEVERITY_MIN_SCORE.HIGH - 1}, ` +
+		`High ${SEVERITY_MIN_SCORE.HIGH}-${SEVERITY_MIN_SCORE.CRITICAL - 1}, ` +
+		`Critical ${SEVERITY_MIN_SCORE.CRITICAL}+.`;
+	const where =
+		score === null || score === undefined
+			? ""
+			: ` The current average sits in the ${SEVERITY_WORD[severityForScore(score)]} band.`;
+	// Say this explicitly: it is network-wide by design, so it will not move when
+	// the table's attack-type or severity filters change.
+	const scope =
+		" Counts only transactions a detector flagged, not clean ones, and is not" +
+		" affected by the filters on this table.";
+	return scale + where + scope;
+}
 
 /**
  * Per-attack-class ordered list of sub-score dimensions to display as donuts.
