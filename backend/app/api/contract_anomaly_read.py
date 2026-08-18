@@ -28,11 +28,17 @@ from typing import Any
 
 from app.analysis import contract_anomaly as ca_projection
 from app.analysis.contract_anomaly import corroboration_threshold
+from app.analysis.contract_identity import contract_address_of
 from app.analysis.engine import _CLASS_NAMES
 from app.analysis.normalise import score_to_band
 from app.config import settings
 from app.db import clickhouse, clustering_queries
-from app.models.transaction import ALERT_BANDS, ClassScoreResult, RiskBand
+from app.models.transaction import (
+    ALERT_BANDS,
+    FINDING_MIN_SCORE,
+    ClassScoreResult,
+    RiskBand,
+)
 from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
@@ -115,6 +121,12 @@ def _merge_contract_anomaly(
         result.max_score = score
         result.max_class = _CONTRACT_ANOMALY
         result.risk_band = RiskBand(score_to_band(score))
+        # The stored contract_address was derived from the STORED winning class.
+        # The sidecar verdict has just taken over as the winner, so the grouping
+        # identity has to follow it to the watched target, or a contract_anomaly
+        # alert would be grouped under whichever contract the displaced class
+        # happened to name (or under nothing at all).
+        result.contract_address = contract_address_of(_CONTRACT_ANOMALY, result.evidence)
     result.contract_anomaly_corroborates = score >= corroboration_threshold()
     result.contract_anomaly_scored_at = resolved.get("scored_at")
     result.contract_anomaly_unclusterable = bool(resolved.get("unclusterable_fit"))
@@ -230,6 +242,7 @@ async def _list_contract_anomaly_results(
     sort: str,
     limit: int,
     offset: int,
+    contract: str | None = None,
 ) -> tuple[list[ClassScoreResult], int]:
     """List page for ``attack_class=contract_anomaly``.
 
@@ -270,6 +283,10 @@ async def _list_contract_anomaly_results(
         # stored 9-class score still dominates is a stored-class detection.
         if res.max_class != _CONTRACT_ANOMALY:
             continue
+        # Post-merge, so the comparison is against the watched target the
+        # verdict just installed rather than the displaced stored class's value.
+        if contract is not None and res.contract_address != contract:
+            continue
         if not _within_analyzed_window(res.analyzed_at, analyzed_from, analyzed_to):
             continue
         if not _passes_score_band(res.max_score, res.risk_band, min_score, bands):
@@ -295,20 +312,35 @@ async def _augment_stats_with_contract_anomaly(
     per-call copy from the cached aggregate)."""
     flagged = await _flagged_effective(network)
     delta_sum = 0.0
+    # A tx whose stored score is below the finding floor is not in the mean's
+    # population at all. If its effective score clears the floor, the anomaly
+    # verdict does not merely raise an existing member, it ADDS one, so that tx
+    # contributes its whole score to the numerator and one to the denominator.
+    # Conflating the two cases (the previous single delta_sum) skewed the mean.
+    entering_sum = 0.0
+    entering_count = 0
     for sb, ss, cb, cs in flagged.values():
         if _BAND_RANK.get(cb, 0) > _BAND_RANK.get(sb, 0):
             sk, ck = _BAND_COUNT_KEY.get(sb), _BAND_COUNT_KEY.get(cb)
             if sk and ck:
                 stats[sk] = max(0, int(stats.get(sk, 0)) - 1)
                 stats[ck] = int(stats.get(ck, 0)) + 1
-        if cs > ss:
+        if cs <= ss:
+            continue
+        if ss >= FINDING_MIN_SCORE:
             delta_sum += cs - ss
-    # Avg Risk: the effective score raises each flagged tx's max, so lift the mean
-    # by the summed delta over the (unchanged) population size.
-    total = int(stats.get("total") or 0)
+        elif cs >= FINDING_MIN_SCORE:
+            entering_sum += cs
+            entering_count += 1
+    # Avg Risk: reconcile the mean over the FINDING population (the same floor
+    # the alert list applies), not over every scored row.
+    findings = int(stats.get("finding_count") or 0)
     avg = stats.get("avg_max_score")
-    if delta_sum and total > 0 and avg is not None:
-        stats["avg_max_score"] = (float(avg) * total + delta_sum) / total
+    denominator = findings + entering_count
+    if (delta_sum or entering_count) and denominator > 0:
+        base = float(avg) * findings if avg is not None else 0.0
+        stats["avg_max_score"] = (base + delta_sum + entering_sum) / denominator
+        stats["finding_count"] = denominator
 
 
 async def _augment_timeseries_with_contract_anomaly(
@@ -366,6 +398,7 @@ def _row_to_class_score(row: dict[str, Any]) -> ClassScoreResult:
         analyzed_at=row["analyzed_at"],
         corroboration_count=int(row.get("corroboration_count", 0) or 0),
         corroborating_classes=row.get("corroborating_classes", "") or "",
+        contract_address=row.get("contract_address", "") or "",
         fee=row.get("fee"),
         output_count=row.get("output_count"),
     )
@@ -411,6 +444,7 @@ async def _rescue_flagged_onto_page(
     sort: str,
     limit: int,
     offset: int,
+    contract: str | None = None,
 ) -> int:
     """Recall rescue (recall-first, see CLAUDE.md): re-admit flagged txs the DB
     filter dropped, returning the count added so the caller folds it into ``total``.
@@ -488,6 +522,13 @@ async def _rescue_flagged_onto_page(
                     bands,
                 )
                 _merge_contract_anomaly(res, flagged[res.tx_hash])
+                # Contract filter is checked AFTER the merge, because a winning
+                # sidecar verdict rewrites contract_address to its watched
+                # target: checking the stored value first would drop exactly the
+                # anomaly rows this rescue exists to re-admit. Not a recall
+                # trade-off, the analyst asked for one contract.
+                if contract is not None and res.contract_address != contract:
+                    continue
                 # Genuinely rescued only: stored score missed the filter but
                 # the merged score now meets it. A row whose stored score
                 # already met the filter is in the normal paginated set, so
@@ -519,3 +560,118 @@ async def _rescue_flagged_onto_page(
         _sort_results(data, by_date=date_sort)
         del data[limit:]
     return rescued_total
+
+
+async def _augment_groups_with_contract_anomaly(
+    network: str,
+    groups: list[dict[str, Any]],
+    *,
+    bands: list[str] | None,
+    min_score: float,
+    analyzed_from: datetime | None,
+    analyzed_to: datetime | None,
+    min_corroboration: int,
+    anomaly_only: bool = False,
+) -> None:
+    """Reconcile contract-grouped alert counts to the EFFECTIVE per-tx verdict.
+
+    The SQL grouping keys on the STORED ``contract_address``, which was derived
+    from the stored winning class. When a sidecar verdict wins it installs its
+    own watched target, so a transaction can belong to a different group than
+    SQL placed it in, or to a group SQL never produced at all. Without this the
+    single noisiest class (contract_anomaly) would be invisible in the grouped
+    view, which is precisely the view meant to tame it.
+
+    Three corrections are applied per flagged transaction:
+
+    1. it moves out of its stored group when the verdict re-homes it, or when
+       the verdict leaves it failing the filter;
+    2. it is added to its effective group, creating that group if SQL produced
+       none for the target;
+    3. the group's ``worst_score`` / ``worst_band`` / ``latest_analyzed_at``
+       rise to the effective values.
+
+    Mutates ``groups`` in place. Groups emptied by correction 1 are dropped.
+    Best-effort by contract: the caller treats a sidecar failure as "no
+    augmentation" rather than failing the page.
+
+    ``anomaly_only`` serves ``attack_class=contract_anomaly``: SQL cannot filter
+    a class it never stores, so the caller passes an empty ``groups`` and this
+    builds the whole result from transactions the verdict pushes to the top,
+    which is the in-memory analogue of the DB's ``max_class = attack_class``.
+    """
+    flagged = await clustering_queries.flagged_for_network_async(network)
+    if not flagged:
+        return
+    if len(flagged) >= clustering_queries._RESCUE_FETCH_CAP:
+        # No silent caps: a truncated flagged set understates a contract's group.
+        logger.warning(
+            "contract_anomaly group augmentation hit the fetch cap (%d) for %s; "
+            "some flagged txs may be missing from their contract's group",
+            clustering_queries._RESCUE_FETCH_CAP,
+            network,
+        )
+    stored_rows = await clickhouse.get_class_scores_by_hashes_async(
+        network,
+        list(flagged),
+    )
+    by_address = {g["contract_address"]: g for g in groups}
+
+    def _passes(res: ClassScoreResult) -> bool:
+        """The grouped view's full predicate, mirroring _score_filter_conditions."""
+        if not _within_analyzed_window(res.analyzed_at, analyzed_from, analyzed_to):
+            return False
+        if not _passes_score_band(res.max_score, res.risk_band, min_score, bands):
+            return False
+        # corroboration_count is the stored 9-class signal; the synthetic class
+        # never mutates it, so this reads the same value the SQL path filtered on.
+        return not (min_corroboration > 0 and res.corroboration_count < min_corroboration)
+
+    for row in stored_rows:
+        res = _row_to_class_score(row)
+        stored_contract = res.contract_address
+        # Under anomaly_only there are no SQL groups to correct, so nothing was
+        # ever counted for this tx and its stored placement is irrelevant.
+        stored_counted = not anomaly_only and bool(stored_contract) and _passes(res)
+        _merge_contract_anomaly(res, flagged[res.tx_hash])
+        effective_contract = res.contract_address
+        effective_counted = bool(effective_contract) and _passes(res)
+        if anomaly_only and res.max_class != _CONTRACT_ANOMALY:
+            # Its stored 9-class score still dominates, so it is a stored-class
+            # detection and does not belong under this filter.
+            effective_counted = False
+
+        if stored_counted and (effective_contract != stored_contract or not effective_counted):
+            stale = by_address.get(stored_contract)
+            if stale is not None:
+                stale["alert_count"] = max(0, int(stale["alert_count"]) - 1)
+        if not effective_counted:
+            continue
+
+        group = by_address.get(effective_contract)
+        if group is None:
+            group = {
+                "contract_address": effective_contract,
+                "alert_count": 0,
+                "worst_score": 0.0,
+                "worst_band": res.risk_band.value,
+                "latest_analyzed_at": res.analyzed_at,
+            }
+            by_address[effective_contract] = group
+            groups.append(group)
+        # Already counted by SQL only when it was counted under THIS contract.
+        if not (stored_counted and stored_contract == effective_contract):
+            group["alert_count"] = int(group["alert_count"]) + 1
+        if res.max_score > float(group["worst_score"]):
+            group["worst_score"] = res.max_score
+            group["worst_band"] = res.risk_band.value
+        # Normalise both sides: the SQL group's latest_analyzed_at comes from
+        # ClickHouse tz-NAIVE while res.analyzed_at is tz-AWARE, and comparing
+        # them raw raises the naive-vs-aware TypeError this endpoint would
+        # swallow into an unaugmented page.
+        latest = to_aware_utc(group.get("latest_analyzed_at"))
+        current = to_aware_utc(res.analyzed_at)
+        if current is not None and (latest is None or current > latest):
+            group["latest_analyzed_at"] = res.analyzed_at
+
+    groups[:] = [g for g in groups if int(g["alert_count"]) > 0]

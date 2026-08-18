@@ -778,6 +778,8 @@ def test_stats_reclassifies_flagged_tx_to_effective_band(client, monkeypatch):
         "moderate_count": 1,
         "informational_count": 0,
         "avg_max_score": 45.0,
+        # The mean's real population: one stored finding at 45.
+        "finding_count": 1,
         "last_analyzed_at": None,
         "per_class": {},
         "pending_count": 0,

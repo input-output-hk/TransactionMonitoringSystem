@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app import notifications
+from app.analysis.contract_identity import contract_address_of
 from app.analysis.enrichment import (
     enrich_collision_features as _enrich_collision_features,
 )
@@ -197,6 +198,10 @@ def _score_transaction(
         "baseline_source": baseline_sources.get(max_class, "missing"),
         "corroboration_count": len(corroborating),
         "corroborating_classes": ",".join(corroborating),
+        # Normalized from the winning class's own evidence key so alerts can be
+        # grouped by contract without a reader knowing which scorer won. '' when
+        # the class names no contract (see contract_identity.NO_CONTRACT).
+        "contract_address": contract_address_of(max_class, evidence),
         "sub_scores": sub_scores,
         "evidence": evidence,
         "analysis_version": _VERSION,

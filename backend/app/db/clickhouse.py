@@ -847,6 +847,8 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     _score_filter_conditions,
     count_class_scores,
     count_class_scores_async,
+    count_contract_groups,
+    count_contract_groups_async,
     get_alert_timeseries,
     get_alert_timeseries_async,
     get_class_scores,
@@ -861,6 +863,8 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     get_tx_block_dates,
     get_tx_block_dates_async,
     get_unanalyzed_transactions,
+    group_class_scores_by_contract,
+    group_class_scores_by_contract_async,
     insert_class_scores,
     query_multiple_sat_extraction_percentiles,
 )

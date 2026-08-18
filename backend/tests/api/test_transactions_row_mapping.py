@@ -27,6 +27,8 @@ def _row():
         1010,  # 10 total_input_value
         1111,  # 11 total_output_value
         ["addr1", "addr2"],  # 12 addresses
+        # 13 metadata, 14 raw_data, 15 raw_data_truncated are fetched by the
+        # detail SELECT only and are not part of _row_to_transaction's contract.
     ]
 
 

@@ -75,6 +75,15 @@ class RiskBand(str, Enum):
 # every consumer together instead of leaving stale string pairs behind.
 ALERT_BANDS: tuple[str, ...] = (RiskBand.HIGH.value, RiskBand.CRITICAL.value)
 
+# The lowest max_score that represents an actual finding. A scored transaction
+# sits at exactly 0 when every scorer either gated out or looked and found
+# nothing, which is the overwhelming majority of ingested traffic; such a row is
+# queryable but is not an alert and is never listed. Readers that describe "the
+# alerts" (the list endpoint's default floor, and the Avg Risk aggregate that is
+# displayed beside it) must apply this same floor, or they report on two
+# different populations and the KPI silently contradicts the table.
+FINDING_MIN_SCORE: float = 1.0
+
 
 class AttackClass(str, Enum):
     """The nine attack classes defined by the Polimi detection spec, plus the
@@ -253,6 +262,16 @@ class ClassScoreResult(BaseModel):
             "contract's own data). Such an 'anomaly' is DBSCAN-noise, not a "
             "distinguishing signal, so the UI de-prioritizes / groups it. "
             "Evidence only: it does NOT change score, risk_band, or alerting."
+        ),
+    )
+    contract_address: str = Field(
+        "",
+        description=(
+            "The contract this alert implicates, normalized from the winning "
+            "class's own evidence key so alerts can be grouped by contract. "
+            "Empty when the class names no contract: phishing, circular and "
+            "front_running describe a relationship between addresses rather "
+            "than an interaction with one contract."
         ),
     )
     fee: int | None = Field(None, description="Transaction fee in lovelace")
