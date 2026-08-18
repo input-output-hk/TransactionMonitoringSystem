@@ -45,6 +45,20 @@ import { ArrowDownLeft, ArrowUpRight } from "lucide-react";
 const ADDR_HEAD = 12;
 const ADDR_TAIL = 8;
 
+/**
+ * Asset-unit truncation. The policy id keeps a tail so two policies with the
+ * same prefix stay distinguishable; the asset name is the human-readable half
+ * and reads head-first, so it keeps none.
+ */
+const POLICY_HEAD = 8;
+const POLICY_TAIL = 4;
+const ASSET_NAME_HEAD = 10;
+const ASSET_NAME_TAIL = 0;
+
+/** A datum hash gets more room: it is what an analyst cross-checks elsewhere. */
+const DATUM_HASH_HEAD = 16;
+const DATUM_HASH_TAIL = 8;
+
 /** ADA is shown to 2dp here: these are per-UTxO amounts, not aggregates. */
 const ADA_DECIMALS = 2;
 
@@ -87,8 +101,8 @@ function AssetLines({ assets }: { assets: Record<string, number> | null }) {
 						title={unit}
 					>
 						<span className="break-all">
-							{shortHash(policy, 8, 4)}
-							{name && `.${shortHash(name, 10, 0)}`}
+							{shortHash(policy, POLICY_HEAD, POLICY_TAIL)}
+							{name && `.${shortHash(name, ASSET_NAME_HEAD, ASSET_NAME_TAIL)}`}
 						</span>
 						<span className="tabular-nums">×{quantity.toLocaleString()}</span>
 					</div>
@@ -295,7 +309,7 @@ function DatumEntry({ datum }: { datum: OutputDatum }) {
 								})
 							}
 						>
-							{shortHash(datum.datum_hash, 16, 8)}
+							{shortHash(datum.datum_hash, DATUM_HASH_HEAD, DATUM_HASH_TAIL)}
 						</button>
 					}
 				/>

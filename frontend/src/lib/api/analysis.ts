@@ -354,7 +354,7 @@ export function useRiskAlert(txHash: string | undefined) {
 
 export function useRiskAlerts(
 	params: RiskAlertsParams,
-	options?: { pollMs?: number },
+	options?: { pollMs?: number; enabled?: boolean },
 ) {
 	// 15s default matches the stats polling cadence. The dashboard mounts
 	// multiple `useRiskAlerts` instances (table + critical-alert banner)
@@ -368,6 +368,9 @@ export function useRiskAlerts(
 	return useQuery({
 		queryKey: ["analysis", "results", params],
 		queryFn: () => fetchRiskAlertsPage(params),
+		// Lets a caller hold the request off entirely rather than fetching a page
+		// it has already decided not to show (same contract as useGroupedAlerts).
+		enabled: options?.enabled ?? true,
 		refetchInterval,
 		refetchIntervalInBackground: false,
 		staleTime: pollMs > 0 ? pollMs / 2 : 30_000,

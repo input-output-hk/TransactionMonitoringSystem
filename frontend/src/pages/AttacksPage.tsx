@@ -82,6 +82,14 @@ function parseSeverities(raw: string | null): Severity[] {
 	return SEVERITY_VALUES.filter((s) => picked.has(s));
 }
 
+/**
+ * Poll cadence for the contract registry, which supplies the group rows' display
+ * names. Slower than the alert polling on purpose: the registry only changes when
+ * an operator adds or renames a watched contract, so the hook's 10s default would
+ * put a steady request on the sidecar for data that is effectively static.
+ */
+const CONTRACT_LABEL_POLL_MS = 60_000;
+
 /** Validate `?size=` against the sizes the picker actually offers. */
 function parsePageSize(raw: string | null): number {
 	const n = Number(raw);
@@ -153,24 +161,34 @@ export function AttacksPage() {
 		pageSize,
 	});
 
-	// The pinned latest-critical row. Filter-aware: pinned to the top of whatever
-	// the current filter selects, so it can never contradict an active filter,
-	// but never displaced by the sort below it.
-	const { data: criticalData } = useRiskAlerts({
-		...filters,
-		severities: ["CRITICAL"],
-		page: 0,
-		pageSize: 1,
-		sort: "date",
-	});
-	const pinnedCritical = criticalData?.rows[0];
+	// The pinned latest-critical row, never displaced by the sort below it.
+	// Filter-aware in both directions: it inherits the attack-type filter, and it
+	// exists at all only while the severity selection admits Critical. Pinning a
+	// Critical row above a Moderate-only table would contradict the filter the
+	// operator set, so the query is held off rather than merely hidden.
+	const criticalSelected =
+		severities.length === 0 || severities.includes("CRITICAL");
+	const { data: criticalData } = useRiskAlerts(
+		{
+			...filters,
+			severities: ["CRITICAL"],
+			page: 0,
+			pageSize: 1,
+			sort: "date",
+		},
+		{ enabled: criticalSelected },
+	);
+	const pinnedCritical = criticalSelected ? criticalData?.rows[0] : undefined;
 
 	// Human contract names come from the clustering registry. Gated on the health
 	// flag so a clustering-disabled deployment never polls the sidecar; without it
 	// a group falls back to its truncated address.
 	const health = useHealth();
 	const clusteringEnabled = health.data?.clustering_enabled === true;
-	const { data: contracts } = useContracts(undefined, clusteringEnabled);
+	const { data: contracts } = useContracts(
+		CONTRACT_LABEL_POLL_MS,
+		clusteringEnabled,
+	);
 	const contractLabels = useMemo(() => {
 		const byAddress = new Map<string, string>();
 		for (const c of contracts ?? []) {
@@ -179,6 +197,17 @@ export function AttacksPage() {
 		return byAddress;
 	}, [contracts]);
 
+	// Alerts matching the filters, network-wide. The grouped list's own `total`
+	// counts ROWS (groups + un-attributed alerts) because that is what the pager
+	// steps through, so it cannot answer "how many alerts"; the flat list's total
+	// under the same filters can, and a one-row page is the cheapest way to ask.
+	const { data: alertTotalData } = useRiskAlerts({
+		...filters,
+		page: 0,
+		pageSize: 1,
+	});
+	const totalAlerts = alertTotalData?.total ?? 0;
+
 	const total = data?.total ?? 0;
 	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`,
 	// so the rows we get are guaranteed not archived. No client filter needed.
@@ -186,10 +215,6 @@ export function AttacksPage() {
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
-	// Alerts on this page, summed across groups. The previous label counted table
-	// rows, which under grouping would understate the alerts by an order of
-	// magnitude: one row can stand for dozens.
-	const totalAlerts = visibleRows.reduce((sum, r) => sum + r.alertCount, 0);
 	// Rows that will actually render. An un-attributed row missing its tx identity
 	// is skipped, so keying the empty state off visibleRows.length could leave the
 	// table with no rows AND no message.
@@ -212,7 +237,13 @@ export function AttacksPage() {
 		setExpandedContract(null);
 		setParam("page", next === 0 ? null : String(next + 1));
 	};
-	const openDetail = (slug: string) => void navigate(`/attacks/${slug}`);
+	// Carry the query string across the detail route. The filters live in the URL
+	// now, and `/attacks/:id` renders this same page under the dialog, so
+	// navigating without them would reset the table behind the popup and leave the
+	// operator back at the defaults when they close it.
+	const search = searchParams.toString();
+	const openDetail = (slug: string) =>
+		void navigate({ pathname: `/attacks/${slug}`, search });
 
 	// Live KPI cards
 	const { data: analysisStats } = useAnalysisStats();
@@ -440,7 +471,7 @@ export function AttacksPage() {
 			<Dialog
 				open={!!detailId}
 				onOpenChange={(open) => {
-					if (!open) void navigate("/dashboard");
+					if (!open) void navigate({ pathname: "/dashboard", search });
 				}}
 			>
 				<DialogContent

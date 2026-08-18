@@ -83,13 +83,31 @@ export const SEVERITY_MIN_SCORE: Record<Severity, number> = {
 	CRITICAL: 80,
 };
 
+/** Top of the risk scale. Scores are normalised to 0-100 backend-side. */
+export const SCORE_MAX = 100;
+
+/**
+ * Highest score still inside each band.
+ *
+ * The bands are contiguous over the scale, so each one ends a point below the
+ * next one's floor. Named rather than written as `SEVERITY_MIN_SCORE.HIGH - 1`
+ * at each use: the offset is a property of the scale, and it appears in both
+ * the banding function and the operator-facing copy, which must not drift.
+ */
+export const SEVERITY_MAX_SCORE: Record<Severity, number> = {
+	INFORMATIONAL: SEVERITY_MIN_SCORE.MODERATE - 1,
+	MODERATE: SEVERITY_MIN_SCORE.HIGH - 1,
+	HIGH: SEVERITY_MIN_SCORE.CRITICAL - 1,
+	CRITICAL: SCORE_MAX,
+};
+
 /** The band a 0-100 score falls in, matching the backend's score_to_band. */
 export function severityForScore(score: number): Severity {
 	if (score >= SEVERITY_MIN_SCORE.CRITICAL) return "CRITICAL";
 	if (score >= SEVERITY_MIN_SCORE.HIGH) return "HIGH";
 	// Strictly above the top of Informational, not >= MODERATE: scores are
 	// rounded to 2dp, so 30.5 must not fall into a dead zone and under-band.
-	if (score > SEVERITY_MIN_SCORE.MODERATE - 1) return "MODERATE";
+	if (score > SEVERITY_MAX_SCORE.INFORMATIONAL) return "MODERATE";
 	return "INFORMATIONAL";
 }
 
@@ -113,10 +131,10 @@ const SEVERITY_WORD: Record<Severity, string> = {
  */
 export function avgRiskHelp(score: number | null | undefined): string {
 	const scale =
-		`Mean risk score (0-100) across alerting transactions on this network. ` +
+		`Mean risk score (0-${SCORE_MAX}) across alerting transactions on this network. ` +
 		`Bands: Informational under ${SEVERITY_MIN_SCORE.MODERATE}, ` +
-		`Moderate ${SEVERITY_MIN_SCORE.MODERATE}-${SEVERITY_MIN_SCORE.HIGH - 1}, ` +
-		`High ${SEVERITY_MIN_SCORE.HIGH}-${SEVERITY_MIN_SCORE.CRITICAL - 1}, ` +
+		`Moderate ${SEVERITY_MIN_SCORE.MODERATE}-${SEVERITY_MAX_SCORE.MODERATE}, ` +
+		`High ${SEVERITY_MIN_SCORE.HIGH}-${SEVERITY_MAX_SCORE.HIGH}, ` +
 		`Critical ${SEVERITY_MIN_SCORE.CRITICAL}+.`;
 	const where =
 		score === null || score === undefined

@@ -13,7 +13,7 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -30,7 +30,15 @@ const state: {
 	groupAlerts: RiskAlert[];
 	critical: RiskAlert | null;
 	avgRisk: number | null;
-} = { groups: [], groupAlerts: [], critical: null, avgRisk: null };
+	/** Server-side total for the flat list, i.e. every alert under the filters. */
+	alertTotal: number;
+} = {
+	groups: [],
+	groupAlerts: [],
+	critical: null,
+	avgRisk: null,
+	alertTotal: 0,
+};
 
 vi.mock("@/lib/api/analysis", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/lib/api/analysis")>();
@@ -42,13 +50,26 @@ vi.mock("@/lib/api/analysis", async (importOriginal) => {
 			isError: false,
 			error: null,
 		}),
-		// One hook serves both the pinned critical row and an expanded group, so it
-		// branches on the params the page passes.
-		useRiskAlerts: (params: {
-			contract?: string;
-			severities?: string[];
-			pageSize?: number;
-		}) => {
+		// One hook serves three callers (an expanded group, the pinned critical row
+		// and the footer's alert total), so it branches on the params the page
+		// passes. `enabled` is honoured, since the page uses it to hold the pinned
+		// query off entirely rather than fetching a row it will not show.
+		useRiskAlerts: (
+			params: {
+				contract?: string;
+				severities?: string[];
+				pageSize?: number;
+				sort?: string;
+			},
+			options?: { enabled?: boolean },
+		) => {
+			const idle = {
+				data: undefined,
+				isPending: false,
+				isError: false,
+				error: null,
+			};
+			if (options?.enabled === false) return idle;
 			if (params.contract !== undefined) {
 				return {
 					data: { rows: state.groupAlerts, total: state.groupAlerts.length },
@@ -57,9 +78,20 @@ vi.mock("@/lib/api/analysis", async (importOriginal) => {
 					error: null,
 				};
 			}
-			const rows = state.critical ? [state.critical] : [];
+			// The pinned query is the only one that asks for one row in date order;
+			// the count probe passes no sort at all.
+			if (params.pageSize === 1 && params.sort === "date") {
+				const rows = state.critical ? [state.critical] : [];
+				return {
+					data: { rows, total: rows.length },
+					isPending: false,
+					isError: false,
+					error: null,
+				};
+			}
+			// The footer's count probe: only its `total` is read.
 			return {
-				data: { rows, total: rows.length },
+				data: { rows: [], total: state.alertTotal },
 				isPending: false,
 				isError: false,
 				error: null,
@@ -136,15 +168,22 @@ function alert(over: Partial<RiskAlert> = {}): RiskAlert {
 	};
 }
 
-async function renderPage() {
+/** Reports the live URL so a test can assert what navigation preserved. */
+function LocationProbe() {
+	const { pathname, search } = useLocation();
+	return <div data-testid="location">{`${pathname}${search}`}</div>;
+}
+
+async function renderPage(entry = "/dashboard") {
 	const { AttacksPage } = await import("@/pages/AttacksPage");
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false } },
 	});
 	return render(
-		<MemoryRouter initialEntries={["/dashboard"]}>
+		<MemoryRouter initialEntries={[entry]}>
 			<QueryClientProvider client={client}>
 				<TooltipProvider>
+					<LocationProbe />
 					<AttacksPage />
 				</TooltipProvider>
 			</QueryClientProvider>
@@ -157,6 +196,7 @@ beforeEach(() => {
 	state.groupAlerts = [];
 	state.critical = null;
 	state.avgRisk = null;
+	state.alertTotal = 0;
 });
 afterEach(cleanup);
 
@@ -312,6 +352,60 @@ describe("pinned latest critical alert", () => {
 		expect(screen.getByText("EEEEEEEE")).toBeInTheDocument();
 		// The empty-state row must not claim there are no alerts.
 		expect(screen.queryByText(/No alerts match/i)).not.toBeInTheDocument();
+	});
+
+	it("is absent when the severity filter excludes Critical", async () => {
+		// The pin must never contradict the filter the operator set: a Critical
+		// row above a Moderate-only table reads as the filter having failed.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group({ worstSeverity: "MODERATE" })];
+		await renderPage("/dashboard?severity=MODERATE");
+		expect(screen.queryByText(/latest critical/i)).not.toBeInTheDocument();
+	});
+
+	it("is present when no severity filter is applied", async () => {
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage("/dashboard?severity=");
+		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
+	});
+});
+
+describe("the footer alert total", () => {
+	it("counts every matching alert, not just the rows on this page", async () => {
+		// One group row can stand for dozens of alerts and the pager steps
+		// through ROWS, so neither the row count nor this page's group counts
+		// can answer "Total Risk Alerts".
+		state.groups = [group({ alertCount: 12 })];
+		state.alertTotal = 4213;
+		await renderPage();
+		expect(screen.getByText(/Total Risk Alerts: 4,213/)).toBeInTheDocument();
+	});
+});
+
+describe("filter state across the detail popup", () => {
+	it("keeps the filters and page when a row opens the detail", async () => {
+		// `/attacks/:id` renders this same page under the dialog, so dropping the
+		// query string would reset the table behind the popup and leave the
+		// operator at the defaults when they close it.
+		const hash = `${"b".repeat(63)}2`;
+		state.groups = [
+			{
+				kind: "alert",
+				contractAddress: "",
+				alertCount: 1,
+				worstScore: 71,
+				worstSeverity: "HIGH",
+				latestDate: "01.08.2026, 10:00 UTC",
+				txHash: hash,
+				attackType: "Large Datum",
+			},
+		];
+		await renderPage("/dashboard?severity=HIGH&page=2");
+		fireEvent.click(screen.getByText(shortHash(hash)));
+		expect(screen.getByTestId("location").textContent).toBe(
+			`/attacks/${hash}?severity=HIGH&page=2`,
+		);
 	});
 });
 

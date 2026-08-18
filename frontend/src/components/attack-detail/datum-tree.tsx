@@ -13,7 +13,7 @@
  *  - an `error` with no root means the payload could not be decoded. That is
  *    information about a flagged transaction, so it is stated, not hidden.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import type { DatumNode, DecodedDatum } from "@/lib/api/transactions";
@@ -23,6 +23,9 @@ import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 
 /** Indent per nesting level. Deep datums stay readable without a horizontal scroll. */
 const INDENT_REM = 0.85;
+
+/** How long the copy control shows its confirmation before reverting. */
+const COPIED_FEEDBACK_MS = 1200;
 
 /** Hex is monospace and wraps: a datum leaf can be kilobytes of it. */
 const HEX_CLS = "font-mono text-[11px] break-all text-muted-foreground";
@@ -103,6 +106,11 @@ function NodeRow({ node, depth }: { node: DatumNode; depth: number }) {
 
 function CopyButton({ text, label }: { text: string; label: string }) {
 	const [copied, setCopied] = useState(false);
+	// A datum panel unmounts as soon as the analyst closes the detail dialog,
+	// which can easily happen inside the confirmation window; a pending timer
+	// would then set state on a component that is gone.
+	const revert = useRef<number | undefined>(undefined);
+	useEffect(() => () => window.clearTimeout(revert.current), []);
 	return (
 		<button
 			type="button"
@@ -110,7 +118,11 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 			onClick={() => {
 				void copyToClipboard(text, { label });
 				setCopied(true);
-				window.setTimeout(() => setCopied(false), 1200);
+				window.clearTimeout(revert.current);
+				revert.current = window.setTimeout(
+					() => setCopied(false),
+					COPIED_FEEDBACK_MS,
+				);
 			}}
 		>
 			{copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
