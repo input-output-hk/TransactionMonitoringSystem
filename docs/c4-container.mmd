@@ -16,7 +16,7 @@ C4Container
         }
 
         Boundary(storage, "Storage") {
-            ContainerDb(datalake, "Analytics Warehouse", "ClickHouse MergeTree", "Structured blockchain facts: transactions, inputs, outputs, analysis results. Append-only columnar store, partitioned daily. Derived from the Data Lake.")
+            ContainerDb(datalake, "Analytics Warehouse", "ClickHouse ReplacingMergeTree", "Structured blockchain facts: transactions, inputs, outputs, analysis results. Columnar store, deliberately unpartitioned so FINAL can collapse re-ingested versions of a row. Derived from the Data Lake.")
             ContainerDb(clusterdb, "Clustering State", "ClickHouse (tms_clustering DB, same server)", "[Optional] The clustering module's own state: cluster_models, tx_classifications, and the tx_contract_anomaly projection the API reads. Empty unless the module runs.")
             ContainerDb(admin_db, "Operational Database", "PostgreSQL 18", "Mutable state: transaction lifecycle (PENDING / CONFIRMED / ROLLED_BACK / DROPPED), sync checkpoint, entity state, API keys, config, audit logs.")
             ContainerDb(rawstore, "Data Lake", "Local Filesystem → S3/MinIO", "Write-once gzip-compressed JSON blobs. confirmed/ and mempool/ prefixes. Schema-on-read. Source of truth for raw Ogmios payloads; the Analytics Warehouse is derived from this layer.")
