@@ -23,5 +23,11 @@ export function initials(
 export function shortHash(s: string, head = 12, tail = 8): string {
 	// 3 = the "..." glyph; below this a truncated string would be no shorter.
 	if (s.length <= head + tail + 3) return s;
+	// `slice(-0)` is `slice(0)`, i.e. the WHOLE string, so a zero tail has to be
+	// handled explicitly: without this, shortHash(s, 10, 0) returned
+	// head + "..." + s, longer than the untruncated input and reading as two
+	// values run together. A zero tail is how a caller asks for head-only
+	// truncation (a token name reads head-first and has no meaningful suffix).
+	if (tail === 0) return `${s.slice(0, head)}...`;
 	return `${s.slice(0, head)}...${s.slice(-tail)}`;
 }

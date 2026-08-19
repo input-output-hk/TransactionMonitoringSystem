@@ -1,4 +1,14 @@
 import { DonutCard } from "@/components/attack-detail/donut";
+import {
+	Divider,
+	KeyVal,
+	Section,
+	Stack,
+	TwoCol,
+} from "@/components/attack-detail/layout";
+import { TransactionDetailPanels } from "@/components/attack-detail/tx-detail-panels";
+import { EmptyText } from "@/components/ui/status-text";
+import { useTransactionDetail } from "@/lib/api/transactions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,13 +48,10 @@ import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/utils/clipboard";
 import { formatAdaExact } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
-import type { RiskAlert } from "@/lib/attacks";
+import type { AttackType, RiskAlert } from "@/lib/attacks";
+import { ARCHIVE_REASONS, ATTACK_META, SUB_SCORE_LABELS } from "@/lib/attacks";
 import {
-	ARCHIVE_REASONS,
-	ATTACK_META,
-	SUB_SCORE_LABELS,
-} from "@/lib/attacks";
-import {
+	AlertCircle,
 	AlertTriangle,
 	ArrowDown,
 	ArrowUp,
@@ -55,15 +62,14 @@ import {
 	Trash2,
 	X,
 } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
 import {
-	Children,
-	Fragment,
-	isValidElement,
-	useMemo,
-	useState,
-	type ReactNode,
-} from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+	Link,
+	Navigate,
+	useLocation,
+	useNavigate,
+	useParams,
+} from "react-router-dom";
 
 /** Cardanoscan transaction URL for the given network (the testnets use the
  *  network subdomain). Used by the detail header's block-explorer button. */
@@ -78,6 +84,17 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 	const { id } = useParams<{ id: string }>();
 	const { data: alert, isPending, isError } = useRiskAlert(id);
 	const archivedHere = useIsArchived(id);
+	const { search } = useLocation();
+	// Where every "back" affordance goes, computed once so the visible X button,
+	// the not-found link and the dialog's own Esc/overlay handler cannot diverge.
+	// The alerts table keeps its filters and page in the query string and
+	// `/attacks/:id` renders that same table under this card, so dropping the
+	// search would land the operator on the default view instead of the one they
+	// were triaging. `/archive` is a different table with its own state, so the
+	// alerts table's params are not carried there.
+	const backTo = archived
+		? { pathname: "/archive" }
+		: { pathname: "/dashboard", search };
 
 	// `archivedHere === undefined` means the archive lookup is still in flight.
 	// We can't decide the redirect until we know, otherwise a deep link to
@@ -100,7 +117,7 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 					The alert <code className="font-mono">{id}</code> does not exist.
 				</p>
 				<Link
-					to={archived ? "/archive" : "/dashboard"}
+					to={backTo}
 					className="border-border text-foreground hover:bg-accent mt-4 inline-flex h-10 items-center justify-center rounded-md border px-4 text-sm font-medium"
 				>
 					Back
@@ -122,9 +139,9 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 		<DetailCard
 			alert={alert}
 			archived={archived}
-			// `/dashboard` (not -1) so the close button works even on direct
+			// An explicit path (not -1) so the close button works even on direct
 			// deep-link / new-tab entry, where history.back() would do nothing.
-			onClose={() => void navigate(archived ? "/archive" : "/dashboard")}
+			onClose={() => void navigate(backTo)}
 			onArchived={() => void navigate("/archive", { replace: true })}
 			onRestored={() => void navigate("/dashboard", { replace: true })}
 		/>
@@ -146,14 +163,25 @@ function DetailCard({
 }) {
 	const [deleteOpen, setDeleteOpen] = useState(false);
 	const [restoreOpen, setRestoreOpen] = useState(false);
-	const meta = ATTACK_META[alert.attackType];
-	const Icon = ATTACK_ICON[alert.attackType];
+	// Both lookups are Records keyed by the KNOWN classes, but the list mapper
+	// deliberately admits an unrecognized backend class (via attackTypeFromSnake's
+	// title-case fallback) so a new class is never silently dropped from the
+	// operator's view. Unguarded, that made `meta.description` throw and took the
+	// whole detail modal down, which is worse than the missing panel it sat next
+	// to. Fall back instead of crashing.
+	const meta = ATTACK_META[alert.attackType] as
+		| (typeof ATTACK_META)[AttackType]
+		| undefined;
+	const Icon = ATTACK_ICON[alert.attackType] ?? AlertCircle;
 	const archiveMeta = useArchiveMeta(archived ? alert.slug : undefined);
 	const { mutate: archiveAlert, isPending: archivePending } =
 		useArchiveMutation();
 	const { mutate: restoreAlert, isPending: restorePending } =
 		useRestoreMutation();
 	const { user } = useAuth();
+	// Chain-level detail lives on a different endpoint: the scored-alert response
+	// carries only the score vector plus fee and output count.
+	const txDetail = useTransactionDetail(alert.fullHash);
 
 	const analyzed = alert.date;
 
@@ -204,13 +232,15 @@ function DetailCard({
 				<div className="text-brand flex items-center gap-2">
 					<Icon className="h-5 w-5" />
 					<span className="text-base font-semibold">{alert.attackType}:</span>
-					<button
-						type="button"
-						title={meta.description}
-						className="text-muted-foreground/80 hover:text-foreground"
-					>
-						<Info className="h-4 w-4" />
-					</button>
+					{meta && (
+						<button
+							type="button"
+							title={meta.description}
+							className="text-muted-foreground/80 hover:text-foreground"
+						>
+							<Info className="h-4 w-4" />
+						</button>
+					)}
 				</div>
 				<div className="text-foreground flex items-center gap-2 font-mono text-sm">
 					<span>{alert.fullHash}</span>
@@ -259,6 +289,20 @@ function DetailCard({
 
 			{/* Type-specific section */}
 			<AttackTypeSection alert={alert} />
+
+			<Divider />
+
+			{/* Chain-level detail: what actually moved, and what the script got.
+			    Placed after the evidence (why it fired) and before the sub-scores
+			    (the most technical breakdown), which is the order an analyst reads
+			    in. Fetched once per open and cached indefinitely: a confirmed
+			    transaction is immutable, so there is nothing to poll. */}
+			<TransactionDetailPanels
+				tx={txDetail.data}
+				isPending={txDetail.isPending}
+				isError={txDetail.isError}
+				error={txDetail.error}
+			/>
 
 			<Divider />
 
@@ -370,10 +414,7 @@ function RestoreDialog({
 }) {
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent
-				showClose={false}
-				className="max-w-xl gap-8 bg-dialog"
-			>
+			<DialogContent showClose={false} className="bg-dialog max-w-xl gap-8">
 				<DialogHeader>
 					<DialogTitle className="text-center text-base font-normal">
 						Are you sure you want to restore this attack?
@@ -407,8 +448,19 @@ function RestoreDialog({
  * `ATTACK_META.subScores` percentages when a dimension is missing.
  */
 function SubScores({ alert }: { alert: RiskAlert }) {
-	const labels = SUB_SCORE_LABELS[alert.attackType];
-	const fallback = ATTACK_META[alert.attackType].subScores;
+	// Same guard as the header's ATTACK_META lookup: an unrecognized backend class
+	// reaches this page by design, and an unguarded Record access here crashed the
+	// whole modal. No dimension metadata means no donuts to draw, which is a
+	// legitimate empty state for a class this build predates.
+	const labels = SUB_SCORE_LABELS[alert.attackType] ?? [];
+	const fallback = ATTACK_META[alert.attackType]?.subScores ?? [];
+	if (labels.length === 0) {
+		return (
+			<EmptyText>
+				No sub-score dimensions are defined for this attack class.
+			</EmptyText>
+		);
+	}
 	const cards = labels.map((entry, i) => {
 		const raw = alert.subScores?.[entry.key];
 		const percent =
@@ -469,6 +521,28 @@ function fmtAddress(addr: string | undefined, head = 12, tail = 8): string {
 
 function fmtTxHash(hash: string | undefined): string {
 	return fmtAddress(hash, 8, 8);
+}
+
+/**
+ * Render an evidence value of unknown type for the fallback panel.
+ *
+ * Scorer evidence is `Record<string, unknown>`, so a value may be a scalar, a
+ * list, or a nested object. Everything non-primitive goes through JSON rather
+ * than String(), which would render "[object Object]" and tell the analyst
+ * nothing about a class this UI has no bespoke panel for yet.
+ */
+function fmtUnknown(value: unknown): string {
+	if (value === null || value === undefined) return EVIDENCE_PLACEHOLDER;
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") {
+		return String(value);
+	}
+	try {
+		return JSON.stringify(value) ?? EVIDENCE_PLACEHOLDER;
+	} catch {
+		// Circular or non-serialisable: name the shape rather than crash the panel.
+		return "(unserialisable)";
+	}
 }
 
 function fmtPct(ratio: number | undefined, digits = 1): string {
@@ -1087,116 +1161,110 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 				</Section>
 			);
 		}
+		case "Contract Anomaly": {
+			// This arm was missing entirely, and the switch had no default, so a
+			// contract_anomaly alert rendered NOTHING between two dividers. It is the
+			// highest-volume class, so it was also the most likely one to be opened.
+			const target = ev<string>(alert, "target");
+			const modelId = ev<string>(alert, "model_id") ?? EVIDENCE_PLACEHOLDER;
+			const featureSet =
+				ev<string>(alert, "feature_set") ?? EVIDENCE_PLACEHOLDER;
+			const clusterId = ev<number>(alert, "cluster_id");
+			const consensus = ev<number>(alert, "consensus");
+			const votes = ev<number>(alert, "votes");
+			const verdict = ev<string>(alert, "verdict") ?? EVIDENCE_PLACEHOLDER;
+			return (
+				<Section>
+					<TwoCol
+						left={
+							<Stack title="Flagged Contract" dividers>
+								<KeyVal
+									label="TARGET"
+									value={
+										target ? (
+											<Link
+												to={`/validators/${target}`}
+												className="text-brand hover:underline"
+												title={target}
+											>
+												<span className="font-mono text-sm">
+													{fmtAddress(target)}
+												</span>
+											</Link>
+										) : (
+											EVIDENCE_PLACEHOLDER
+										)
+									}
+								/>
+								<KeyVal label="VERDICT" value={verdict} />
+								<KeyVal
+									label="CLUSTER"
+									value={
+										clusterId === undefined
+											? EVIDENCE_PLACEHOLDER
+											: // -1 is DBSCAN's noise label, not a cluster id.
+												clusterId < 0
+												? "noise (no cluster)"
+												: `#${clusterId}`
+									}
+								/>
+							</Stack>
+						}
+						right={
+							<Stack title="Model" dividers>
+								<KeyVal
+									label="CONSENSUS"
+									// fmtPct handles the undefined and non-finite cases and
+									// already renders the placeholder.
+									value={fmtPct(consensus, 0)}
+								/>
+								<KeyVal label="VOTES" value={fmtNumber(votes)} />
+								<KeyVal label="MODEL" value={modelId} />
+								<KeyVal label="FEATURE SET" value={featureSet} />
+							</Stack>
+						}
+					/>
+					{alert.unclusterableModel && (
+						<p className="text-muted-foreground mt-4 text-xs">
+							This contract's model could not cluster its own data, so the
+							anomaly is structural noise rather than a distinguishing signal.
+							It is de-prioritized and capped below the alerting bands.
+						</p>
+					)}
+				</Section>
+			);
+		}
+		default: {
+			// Safety net, not a design: a class with no arm above renders its raw
+			// evidence rather than an empty card between two dividers. Guarantees a
+			// future backend class is never silently invisible here.
+			const entries = Object.entries(alert.evidence ?? {});
+			return (
+				<Section>
+					<Stack title="Evidence" dividers>
+						{entries.length === 0 ? (
+							<EmptyText>No evidence recorded for this alert.</EmptyText>
+						) : (
+							entries.map(([key, value]) => (
+								<KeyVal
+									key={key}
+									label={key.replace(/_/g, " ")}
+									value={
+										<span className="font-mono text-xs break-all">
+											{fmtUnknown(value)}
+										</span>
+									}
+								/>
+							))
+						)}
+					</Stack>
+				</Section>
+			);
+		}
 	}
 }
 
 /* ---------- Layout primitives ---------- */
-
-function Section({
-	title,
-	children,
-}: {
-	title?: string;
-	children: React.ReactNode;
-}) {
-	return (
-		<div className="px-5 py-5">
-			{title && (
-				<>
-					<h2 className="text-foreground mb-3 text-base font-semibold">
-						{title}
-					</h2>
-					{/* Separator under the title — matches Figma's section style. */}
-					<div className="mb-4">
-						<Divider />
-					</div>
-				</>
-			)}
-			{children}
-		</div>
-	);
-}
-
-/**
- * React.Children.toArray treats a `<>…</>` as a single child rather than
- * walking into it. We want Stack `dividers` to interleave between each
- * inner KeyVal even when the caller wrapped them in a Fragment, so flatten
- * recursively here.
- */
-function flattenChildren(children: ReactNode): ReactNode[] {
-	const out: ReactNode[] = [];
-	Children.forEach(children, (child) => {
-		if (isValidElement(child) && child.type === Fragment) {
-			out.push(
-				...flattenChildren((child.props as { children?: ReactNode }).children),
-			);
-		} else if (child !== null && child !== undefined && child !== false) {
-			out.push(child);
-		}
-	});
-	return out;
-}
-
-function Stack({
-	title,
-	children,
-	dividers = false,
-}: {
-	title: string;
-	children: React.ReactNode;
-	/** Intersperse a horizontal divider between each direct child. */
-	dividers?: boolean;
-}) {
-	const items = flattenChildren(children);
-	return (
-		<div>
-			<h3 className="text-foreground mb-2 text-sm font-semibold">{title}</h3>
-			{/* Separator under the title — same treatment as Section. */}
-			<div className="mb-3">
-				<Divider />
-			</div>
-			<div className="space-y-3">
-				{dividers
-					? items.map((child, i) => (
-							<Fragment key={i}>
-								{child}
-								{i < items.length - 1 && <Divider />}
-							</Fragment>
-						))
-					: children}
-			</div>
-		</div>
-	);
-}
-
-function Divider() {
-	return <div className="bg-border h-px" />;
-}
-
-function TwoCol({
-	left,
-	right,
-	gapX = "default",
-}: {
-	left: React.ReactNode;
-	right: React.ReactNode;
-	/** Horizontal gap between the two columns. `wide` (~64px) is used where
-	 *  the two cards feel cramped at the default 40px (e.g. Multiple
-	 *  Satisfaction). */
-	gapX?: "default" | "wide";
-}) {
-	return (
-		<div
-			className={cn(
-				"grid gap-y-6 md:grid-cols-2",
-				gapX === "wide" ? "gap-x-16" : "gap-x-10",
-			)}
-		>
-			<div>{left}</div>
-			<div>{right}</div>
-		</div>
-	);
-}
 
 function MetricsTwoCol({
 	left,
@@ -1228,23 +1296,6 @@ function MetricsTwoCol({
 					{i < rows - 1 && <Divider />}
 				</Fragment>
 			))}
-		</div>
-	);
-}
-
-function KeyVal({
-	label,
-	value,
-}: {
-	label: React.ReactNode;
-	value: React.ReactNode;
-}) {
-	return (
-		<div className="flex items-start justify-between gap-4">
-			<div className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-				{label}
-			</div>
-			<div className="text-foreground text-right text-sm">{value}</div>
 		</div>
 	);
 }
@@ -1442,10 +1493,7 @@ function DeleteDialog({
 			{/* Figma palette: dialog frame on a slightly bluish-grey (#373D3F),
 			    while the fields and buttons sit on the regular card colour
 			    (#292929) so they read as recessed surfaces inside the frame. */}
-			<DialogContent
-				showClose={false}
-				className="max-w-sm bg-dialog"
-			>
+			<DialogContent showClose={false} className="bg-dialog max-w-sm">
 				<DialogHeader>
 					<DialogTitle>Are you sure this is not an attack?</DialogTitle>
 					<DialogDescription>

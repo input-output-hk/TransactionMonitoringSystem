@@ -5,6 +5,7 @@ import {
 	type RiskAlert,
 	type Severity,
 } from "@/lib/attacks";
+import { FINDING_MIN_SCORE } from "@/lib/constants";
 import { formatAnalyzedAt } from "@/lib/utils/dates";
 import { LOVELACE_PER_ADA } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
@@ -33,6 +34,7 @@ type ApiAnalysisResult = {
 	// un-clusterable fit: the "anomaly" is DBSCAN-noise, not a distinguishing
 	// signal, so the UI de-prioritizes it. Evidence only; never changes severity.
 	contract_anomaly_unclusterable?: boolean;
+	contract_address?: string;
 };
 
 type ApiAnalysisResults = {
@@ -93,19 +95,23 @@ export function attackTypeFromSnake(snake: string): AttackType {
 	);
 }
 
-export const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> = Object.fromEntries(
-	ATTACK_TYPES.map((t) => [t, toSnake(t)]),
-) as Record<AttackType, string>;
+export const SNAKE_BY_ATTACK_TYPE: Record<AttackType, string> =
+	Object.fromEntries(ATTACK_TYPES.map((t) => [t, toSnake(t)])) as Record<
+		AttackType,
+		string
+	>;
 
 /** {value: snake, label: display} options for the 9 SUPERVISED attack classes,
  *  derived from ATTACK_TYPES so a rename/addition happens in one place. The
  *  synthetic `contract_anomaly` class is excluded (callers add it conditionally
  *  on the clustering sidecar being enabled). */
-export const SUPERVISED_ATTACK_CLASS_OPTIONS: { value: string; label: string }[] =
-	ATTACK_TYPES.filter((t) => t !== "Contract Anomaly").map((t) => ({
-		value: SNAKE_BY_ATTACK_TYPE[t],
-		label: t,
-	}));
+export const SUPERVISED_ATTACK_CLASS_OPTIONS: {
+	value: string;
+	label: string;
+}[] = ATTACK_TYPES.filter((t) => t !== "Contract Anomaly").map((t) => ({
+	value: SNAKE_BY_ATTACK_TYPE[t],
+	label: t,
+}));
 
 export function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 	// A genuine no-finding row carries an empty max_class; drop it. A non-empty
@@ -134,6 +140,7 @@ export function toRiskAlert(r: ApiAnalysisResult): RiskAlert | null {
 		subScores,
 		evidence,
 		unclusterableModel: r.contract_anomaly_unclusterable ?? false,
+		contractAddress: r.contract_address ?? "",
 	};
 }
 
@@ -155,6 +162,14 @@ export type RiskAlertsParams = {
 	analyzedFrom?: string;
 	/** Exclusive upper bound on `analyzed_at` (ISO datetime). */
 	analyzedTo?: string;
+	/**
+	 * Restrict to one contract. Tri-state, and deliberately checked against
+	 * `undefined` rather than truthiness: omitted means no filter, an address
+	 * restricts to that contract, and the EMPTY STRING selects exactly the alerts
+	 * that name no contract, which is how the grouped view fetches its ungrouped
+	 * rows.
+	 */
+	contract?: string;
 };
 
 /** Shared query-string builder for the list endpoint. */
@@ -172,7 +187,7 @@ function buildResultsQuery(
 	// Only surface transactions that actually triggered an attack class.
 	// Without this, the backend includes scored-but-clean transactions
 	// (max_class="", max_score=0) which aren't really "alerts".
-	qs.set("min_score", "1");
+	qs.set("min_score", String(FINDING_MIN_SCORE));
 	if (p.attackType) qs.set("attack_class", SNAKE_BY_ATTACK_TYPE[p.attackType]);
 	// Backend expects the `risk_band` param repeated once per selected band.
 	// `URLSearchParams.append` is the right call here (not `set`, which would
@@ -184,6 +199,9 @@ function buildResultsQuery(
 	}
 	if (p.analyzedFrom) qs.set("from", p.analyzedFrom);
 	if (p.analyzedTo) qs.set("to", p.analyzedTo);
+	// `!== undefined`, not truthiness: "" is a meaningful value here (select the
+	// alerts with no contract identity), so a falsy check would silently drop it.
+	if (p.contract !== undefined) qs.set("contract", p.contract);
 	return qs;
 }
 
@@ -290,7 +308,9 @@ export async function fetchAlertsForExport(
 
 	while (offset < total && all.length < hardCap) {
 		const qs = buildResultsQuery({ ...params, limit: pageSize, offset });
-		const res = await fetchWithAuth(`/api/v1/analysis/results?${qs.toString()}`);
+		const res = await fetchWithAuth(
+			`/api/v1/analysis/results?${qs.toString()}`,
+		);
 		if (!res.ok) {
 			throw new Error(`Export fetch failed: ${res.status}`);
 		}
@@ -334,7 +354,7 @@ export function useRiskAlert(txHash: string | undefined) {
 
 export function useRiskAlerts(
 	params: RiskAlertsParams,
-	options?: { pollMs?: number },
+	options?: { pollMs?: number; enabled?: boolean },
 ) {
 	// 15s default matches the stats polling cadence. The dashboard mounts
 	// multiple `useRiskAlerts` instances (table + critical-alert banner)
@@ -348,11 +368,133 @@ export function useRiskAlerts(
 	return useQuery({
 		queryKey: ["analysis", "results", params],
 		queryFn: () => fetchRiskAlertsPage(params),
+		// Lets a caller hold the request off entirely rather than fetching a page
+		// it has already decided not to show (same contract as useGroupedAlerts).
+		enabled: options?.enabled ?? true,
 		refetchInterval,
 		refetchIntervalInBackground: false,
 		staleTime: pollMs > 0 ? pollMs / 2 : 30_000,
 		// Keep the previous page visible while the new one loads — avoids the
 		// loading flash when paging or changing filters.
+		placeholderData: keepPreviousData,
+	});
+}
+
+/* ---------- Contract-grouped alerts ---------- */
+
+type ApiGroupedAlertRow = {
+	kind: "group" | "alert";
+	contract_address: string;
+	alert_count: number;
+	worst_score: number;
+	worst_band: ApiRiskBand;
+	latest_analyzed_at: string;
+	tx_hash: string | null;
+	attack_class: string | null;
+	unclusterable_model: boolean;
+};
+
+type ApiGroupedAlertRows = {
+	count: number;
+	total: number;
+	alert_total: number;
+	data: ApiGroupedAlertRow[];
+};
+
+/**
+ * One row of the grouped alerts table.
+ *
+ * `kind: "group"` collapses a contract's alerts behind an expandable row;
+ * `kind: "alert"` is a single alert that names no contract and renders as an
+ * ordinary row. Both arrive in one ordered, server-paginated list, so a group
+ * and a lone alert interleave correctly and the pager knows the real total.
+ */
+export type GroupedAlertRow = {
+	kind: "group" | "alert";
+	contractAddress: string;
+	/**
+	 * Alerts under this row, using the same filters the flat list applies. A true
+	 * server-side count rather than the length of a fetched page, so it is safe to
+	 * display as the total. Always 1 for `kind: "alert"`.
+	 */
+	alertCount: number;
+	worstScore: number;
+	worstSeverity: Severity;
+	latestDate: string;
+	/** Present only for `kind: "alert"`. */
+	txHash?: string;
+	attackType?: AttackType;
+	unclusterableModel?: boolean;
+};
+
+export type GroupedAlertsPage = {
+	rows: GroupedAlertRow[];
+	/** Rows (groups + un-attributed alerts) matching the filters. Paginate on this. */
+	total: number;
+	/**
+	 * ALERTS matching the filters, network-wide. Distinct from `total`, which
+	 * counts rows: one group row can stand for dozens of alerts, so the pager's
+	 * total cannot answer "how many alerts". This is the sum of exactly the
+	 * `alertCount` values the rows carry, so it always agrees with the screen.
+	 */
+	alertTotal: number;
+};
+
+export type GroupedAlertsParams = Omit<
+	RiskAlertsParams,
+	"page" | "pageSize" | "contract"
+> & { page: number; pageSize: number };
+
+async function fetchGroupedAlertsPage(
+	p: GroupedAlertsParams,
+): Promise<GroupedAlertsPage> {
+	// Same builder as the flat list, so a group's count cannot drift from the
+	// rows the expanded group will show.
+	const qs = buildResultsQuery({
+		...p,
+		limit: p.pageSize,
+		offset: p.page * p.pageSize,
+	});
+	const res = await fetchWithAuth(
+		`/api/v1/analysis/results/grouped?${qs.toString()}`,
+	);
+	if (!res.ok) {
+		throw new Error(`Grouped alerts request failed: ${res.status}`);
+	}
+	const json = (await res.json()) as ApiGroupedAlertRows;
+	return {
+		rows: json.data.map((r) => ({
+			kind: r.kind,
+			contractAddress: r.contract_address,
+			alertCount: r.alert_count,
+			worstScore: Math.round(r.worst_score),
+			worstSeverity: RISK_BAND_TO_SEVERITY[r.worst_band] ?? "INFORMATIONAL",
+			latestDate: formatAnalyzedAt(r.latest_analyzed_at),
+			...(r.tx_hash ? { txHash: r.tx_hash } : {}),
+			...(r.attack_class
+				? { attackType: attackTypeFromSnake(r.attack_class) }
+				: {}),
+			unclusterableModel: r.unclusterable_model,
+		})),
+		total: json.total,
+		alertTotal: json.alert_total,
+	};
+}
+
+/** Grouped alert rows for the alerts table. Shares the list's poll cadence. */
+export function useGroupedAlerts(
+	params: GroupedAlertsParams,
+	options?: { pollMs?: number; enabled?: boolean },
+) {
+	const pollMs = options?.pollMs ?? 15_000;
+	const refetchInterval = pollMs > 0 ? pollMs : (false as const);
+	return useQuery({
+		queryKey: ["analysis", "results", "grouped", params],
+		queryFn: () => fetchGroupedAlertsPage(params),
+		enabled: options?.enabled ?? true,
+		refetchInterval,
+		refetchIntervalInBackground: false,
+		staleTime: pollMs > 0 ? pollMs / 2 : 30_000,
 		placeholderData: keepPreviousData,
 	});
 }

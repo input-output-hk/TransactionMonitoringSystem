@@ -1,4 +1,3 @@
-import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
@@ -22,26 +21,104 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { DEFAULT_PAGE_SIZE } from "@/lib/constants";
-import { useRiskAlerts } from "@/lib/api/analysis";
+import {
+	ALERT_COLUMN_COUNT,
+	AlertRow,
+	ContractGroupRow,
+} from "@/components/alerts/alert-rows";
+import { ContractGroupAlerts } from "@/components/alerts/contract-group-alerts";
+import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS } from "@/lib/constants";
+import {
+	useGroupedAlerts,
+	useRiskAlerts,
+	type GroupedAlertRow,
+} from "@/lib/api/analysis";
+import { useContracts } from "@/lib/api/clustering";
+import { useHealth } from "@/lib/api/health";
+import { qpEnum, useQueryParamState } from "@/lib/url-state";
 import {
 	useAlertTimeseries,
 	useAnalysisStats,
 	useTransactionThroughput,
 } from "@/lib/api/stats";
 import { useLatestTransactions, useRecentBlocks } from "@/lib/api/transactions";
-import { ATTACK_ICON, SEVERITY_VARIANT } from "@/lib/attack-display";
 import { cn } from "@/lib/utils";
-import { copyToClipboard } from "@/lib/utils/clipboard";
 import { formatTimeAgo } from "@/lib/utils/dates";
 import { formatAdaCompact, PLACEHOLDER_KPI } from "@/lib/utils/numbers";
 import { shortHash } from "@/lib/utils/strings";
-import { ATTACK_TYPES, type AttackType, type Severity } from "@/lib/attacks";
+import {
+	ATTACK_TYPES,
+	avgRiskHelp,
+	type RiskAlert,
+	type Severity,
+} from "@/lib/attacks";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
-import { AlertCircle, ArrowUp, Copy } from "lucide-react";
-import { useState } from "react";
+import { ArrowUp, Info } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import Sparkline from "@/components/sparkline";
+
+const SEVERITY_VALUES: readonly Severity[] = [
+	"INFORMATIONAL",
+	"MODERATE",
+	"HIGH",
+	"CRITICAL",
+];
+
+/** Default severity filter: open the dashboard on the actionable alerts. */
+const DEFAULT_SEVERITIES: readonly Severity[] = ["HIGH", "CRITICAL"];
+
+/**
+ * Parse the `?severity=` CSV, preserving the canonical option order.
+ *
+ * Order matters beyond cosmetics: the parsed array is part of the React Query
+ * key, so a differently-ordered but equivalent selection would miss the cache.
+ * An absent param means "use the default"; an explicitly empty one means "no
+ * severity filter", which is why the two are not collapsed.
+ */
+function parseSeverities(raw: string | null): Severity[] {
+	if (raw === null) return [...DEFAULT_SEVERITIES];
+	const picked = new Set(raw.split(",").filter(Boolean));
+	return SEVERITY_VALUES.filter((s) => picked.has(s));
+}
+
+/**
+ * Poll cadence for the contract registry, which supplies the group rows' display
+ * names. Slower than the alert polling on purpose: the registry only changes when
+ * an operator adds or renames a watched contract, so the hook's 10s default would
+ * put a steady request on the sidecar for data that is effectively static.
+ */
+const CONTRACT_LABEL_POLL_MS = 60_000;
+
+/** Validate `?size=` against the sizes the picker actually offers. */
+function parsePageSize(raw: string | null): number {
+	const n = Number(raw);
+	return PAGE_SIZE_OPTIONS.includes(n) ? n : DEFAULT_PAGE_SIZE;
+}
+
+/**
+ * Project an un-attributed grouped row onto the shape the shared row renderer
+ * takes. Returns null when the row is missing the transaction identity it needs
+ * to be clickable, so a malformed row is skipped rather than rendered as a dead
+ * row.
+ */
+function groupedRowToAlert(row: GroupedAlertRow): RiskAlert | null {
+	if (!row.txHash || !row.attackType) return null;
+	return {
+		slug: row.txHash,
+		id: shortHash(row.txHash),
+		fullHash: row.txHash,
+		date: row.latestDate,
+		attackType: row.attackType,
+		severity: row.worstSeverity,
+		riskScore: row.worstScore,
+		// Not carried by the grouped aggregate; the detail view fetches them.
+		feeAda: 0,
+		outputs: 0,
+		unclusterableModel: row.unclusterableModel ?? false,
+		contractAddress: "",
+	};
+}
 
 export function AttacksPage() {
 	const navigate = useNavigate();
@@ -49,45 +126,120 @@ export function AttacksPage() {
 	// dashboard at `/dashboard` (id undefined) and the dashboard + detail
 	// popup at `/attacks/:id`.
 	const { id: detailId } = useParams<{ id?: string }>();
-	const [attackFilter, setAttackFilter] = useState<string>("all");
-	// Multi-select: empty array means "no severity filter applied".
-	// Default to High + Critical so the dashboard opens focused on the
-	// actionable alerts. Order matches the MultiSelect option order
-	// (INFORMATIONAL → MODERATE → HIGH → CRITICAL) so the first user toggle doesn't
-	// cause a no-op reorder → cache miss in React Query.
-	const [severities, setSeverities] = useState<Severity[]>([
-		"HIGH",
-		"CRITICAL",
-	]);
-	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-	const [page, setPage] = useState(0);
+	// Filter and page state lives in the URL (same discipline as ReportsPage):
+	// grouping makes a view worth sharing and worth surviving a reload, and this
+	// was the only list page still holding it in component state.
+	const { searchParams, setParam } = useQueryParamState();
+	const attackFilter = qpEnum(
+		searchParams,
+		"attack",
+		["all", ...ATTACK_TYPES],
+		"all",
+	);
+	// Empty array means "no severity filter applied". Defaults to High + Critical
+	// so the dashboard opens focused on the actionable alerts. Order matches the
+	// MultiSelect option order so the first user toggle doesn't cause a no-op
+	// reorder and a React Query cache miss.
+	const severities = parseSeverities(searchParams.get("severity"));
+	const pageSize = parsePageSize(searchParams.get("size"));
+	// 1-based in the URL, 0-based in state.
+	const page = Math.max(0, (Number(searchParams.get("page")) || 1) - 1);
+	// Which contract group is expanded. Single-open, matching ClusterSummaryTable.
+	const [expandedContract, setExpandedContract] = useState<string | null>(null);
 
-	const { data, isPending, isError, error } = useRiskAlerts({
-		page,
-		pageSize,
-		attackType:
-			attackFilter !== "all" ? (attackFilter as AttackType) : undefined,
+	const filters = {
+		// qpEnum already narrows to "all" | AttackType, so no cast is needed.
+		attackType: attackFilter !== "all" ? attackFilter : undefined,
 		// Skip the param entirely when nothing is picked so the backend
 		// doesn't see an empty `?risk_band=` and apply a no-op filter.
 		severities: severities.length > 0 ? severities : undefined,
+	};
+
+	const { data, isPending, isError, error } = useGroupedAlerts({
+		...filters,
+		page,
+		pageSize,
 	});
 
+	// The pinned latest-critical row, never displaced by the sort below it.
+	// Filter-aware in both directions: it inherits the attack-type filter, and it
+	// exists at all only while the severity selection admits Critical. Pinning a
+	// Critical row above a Moderate-only table would contradict the filter the
+	// operator set, so the query is held off rather than merely hidden.
+	const criticalSelected =
+		severities.length === 0 || severities.includes("CRITICAL");
+	const { data: criticalData } = useRiskAlerts(
+		{
+			...filters,
+			severities: ["CRITICAL"],
+			page: 0,
+			pageSize: 1,
+			sort: "date",
+		},
+		{ enabled: criticalSelected },
+	);
+	const pinnedCritical = criticalSelected ? criticalData?.rows[0] : undefined;
+
+	// Human contract names come from the clustering registry. Gated on the health
+	// flag so a clustering-disabled deployment never polls the sidecar; without it
+	// a group falls back to its truncated address.
+	const health = useHealth();
+	const clusteringEnabled = health.data?.clustering_enabled === true;
+	const { data: contracts } = useContracts(
+		CONTRACT_LABEL_POLL_MS,
+		clusteringEnabled,
+	);
+	const contractLabels = useMemo(() => {
+		const byAddress = new Map<string, string>();
+		for (const c of contracts ?? []) {
+			if (c.label) byAddress.set(c.target, c.label);
+		}
+		return byAddress;
+	}, [contracts]);
+
+	// Rows for the pager, alerts for the label. The grouped endpoint reports both
+	// because they differ: one group row can stand for dozens of alerts, so the
+	// row total cannot answer "how many alerts". Asking the flat list instead
+	// would be neither free (a 1-row page still runs the contract_anomaly recall
+	// rescue) nor right (that rescue's date floor collapses to the single row it
+	// returned, so the count would omit the anomaly alerts this table shows).
 	const total = data?.total ?? 0;
+	const totalAlerts = data?.alertTotal ?? 0;
 	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`,
 	// so the rows we get are guaranteed not archived. No client filter needed.
 	const visibleRows = data?.rows ?? [];
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
+	// Rows that will actually render. An un-attributed row missing its tx identity
+	// is skipped, so keying the empty state off visibleRows.length could leave the
+	// table with no rows AND no message.
+	const renderableRows = visibleRows.filter(
+		(r) => r.kind === "group" || groupedRowToAlert(r) !== null,
+	);
 
+	// A filter change invalidates the page number and any open group.
+	const setFilterParam = (key: string, value: string | null) => {
+		setExpandedContract(null);
+		setParam(key, value, { alsoDelete: ["page"] });
+	};
 	const onAttackChange = (value: string) => {
-		setPage(0);
-		setAttackFilter(value);
+		setFilterParam("attack", value === "all" ? null : value);
 	};
 	const onSeveritiesChange = (next: Severity[]) => {
-		setPage(0);
-		setSeverities(next);
+		setFilterParam("severity", next.length ? next.join(",") : null);
 	};
+	const onPageChange = (next: number) => {
+		setExpandedContract(null);
+		setParam("page", next === 0 ? null : String(next + 1));
+	};
+	// Carry the query string across the detail route. The filters live in the URL
+	// now, and `/attacks/:id` renders this same page under the dialog, so
+	// navigating without them would reset the table behind the popup and leave the
+	// operator back at the defaults when they close it.
+	const search = searchParams.toString();
+	const openDetail = (slug: string) =>
+		void navigate({ pathname: `/attacks/${slug}`, search });
 
 	// Live KPI cards
 	const { data: analysisStats } = useAnalysisStats();
@@ -124,16 +276,23 @@ export function AttacksPage() {
 				analysisStats && analysisStats.avg_max_score !== null
 					? analysisStats.avg_max_score.toFixed(1)
 					: PLACEHOLDER_KPI,
+			// The client reported this number as unclear. The copy lives with the
+			// other operator-facing strings in lib/attacks.ts.
+			help: avgRiskHelp(analysisStats?.avg_max_score),
 		},
 	];
 
 	return (
 		<div className="flex flex-col gap-4">
 			{/* Top KPI row */}
-			<div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-7">
-				<CriticalAlertCard />
+			<div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
 				{kpis.map((k) => (
-					<KpiCard key={k.label} label={k.label} value={k.value} />
+					<KpiCard
+						key={k.label}
+						label={k.label}
+						value={k.value}
+						help={k.help}
+					/>
 				))}
 				<GraphBarCard />
 			</div>
@@ -177,70 +336,67 @@ export function AttacksPage() {
 				<Table>
 					<TableHeader>
 						<TableRow className="hover:bg-transparent">
-							{/* Roughly equal-quarter columns (was ID=42% which crammed
-							    the others). Severity is left-aligned to match Figma —
-							    badge sits flush with the "Severity" header text. */}
-							<TableHead className="w-[26%]">ID</TableHead>
-							<TableHead className="w-[24%]">Date</TableHead>
+							{/* Leading spacer for the group chevron. Severity is
+							    left-aligned to match Figma — badge sits flush with the
+							    "Severity" header text. */}
+							<TableHead className="w-8" />
+							<TableHead className="w-[26%]">Contract / ID</TableHead>
+							<TableHead className="w-[22%]">Date</TableHead>
 							<TableHead className="w-[26%]">Attack Type</TableHead>
-							<TableHead className="w-[24%]">Severity</TableHead>
+							<TableHead className="w-[22%]">Severity</TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>
-						{visibleRows.map((a) => {
-							const Icon = ATTACK_ICON[a.attackType] ?? AlertCircle;
+						{/* Pinned first, and de-duplicated against the body so the
+						    same transaction never appears twice. */}
+						{pinnedCritical && (
+							<AlertRow
+								key={`pinned-${pinnedCritical.slug}`}
+								alert={pinnedCritical}
+								onOpen={openDetail}
+								pinned
+							/>
+						)}
+						{visibleRows.map((row) => {
+							if (row.kind === "alert") {
+								// Names no contract, so it renders ungrouped rather than
+								// behind a chevron with nothing to label it.
+								const alert = groupedRowToAlert(row);
+								if (!alert || alert.slug === pinnedCritical?.slug) return null;
+								return (
+									<AlertRow
+										key={alert.slug}
+										alert={alert}
+										onOpen={openDetail}
+									/>
+								);
+							}
+							const expanded = expandedContract === row.contractAddress;
 							return (
-								<TableRow
-									key={a.slug}
-									onClick={() => void navigate(`/attacks/${a.slug}`)}
-									className="cursor-pointer"
-								>
-									<TableCell>
-										<div className="text-foreground flex items-center gap-2 font-mono text-[13px] uppercase">
-											<span>{a.id}</span>
-											<button
-												type="button"
-												className="text-muted-foreground hover:text-foreground"
-												title="Copy"
-												onClick={(e) => {
-													e.stopPropagation();
-													// Copy the FULL hash, not the short display id — the
-													// id is just the truncated render.
-													void copyToClipboard(a.fullHash);
-												}}
-											>
-												<Copy className="h-3.5 w-3.5" />
-											</button>
-										</div>
-									</TableCell>
-									<TableCell className="text-foreground">{a.date}</TableCell>
-									<TableCell>
-										<div className="text-foreground flex items-center gap-2">
-											<Icon className="text-muted-foreground h-4 w-4" />
-											{a.attackType}
-											{a.unclusterableModel && (
-												<Badge
-													variant="outline"
-													className="text-muted-foreground border-border/60 text-[9px] font-normal normal-case tracking-normal"
-													title="This contract's model could not cluster its own data, so the anomaly is structural noise rather than a distinguishing signal. De-prioritized; it does not affect severity."
-												>
-													unclusterable model
-												</Badge>
-											)}
-										</div>
-									</TableCell>
-									<TableCell>
-										<Badge variant={SEVERITY_VARIANT[a.severity]}>
-											{a.severity}
-										</Badge>
-									</TableCell>
-								</TableRow>
+								<Fragment key={`group-${row.contractAddress}`}>
+									<ContractGroupRow
+										row={row}
+										label={contractLabels.get(row.contractAddress)}
+										expanded={expanded}
+										onToggle={() =>
+											setExpandedContract(expanded ? null : row.contractAddress)
+										}
+									/>
+									{expanded && (
+										<ContractGroupAlerts
+											contract={row.contractAddress}
+											alertCount={row.alertCount}
+											filters={filters}
+											onOpen={openDetail}
+										/>
+									)}
+								</Fragment>
 							);
 						})}
-						{visibleRows.length === 0 && (
+						{renderableRows.length === 0 && !pinnedCritical && (
 							<TableRow>
 								<TableCell
-									colSpan={4}
+									colSpan={ALERT_COLUMN_COUNT}
 									className="text-muted-foreground py-8 text-center"
 								>
 									{isPending
@@ -257,13 +413,15 @@ export function AttacksPage() {
 				<TableFooter
 					pageSize={pageSize}
 					onPageSizeChange={(n) => {
-						setPageSize(n);
-						setPage(0);
+						setExpandedContract(null);
+						setParam("size", n === DEFAULT_PAGE_SIZE ? null : String(n), {
+							alsoDelete: ["page"],
+						});
 					}}
-					centerLabel={`Total Risk Alerts Shown: ${visibleRows.length}`}
+					centerLabel={`Total Risk Alerts: ${totalAlerts.toLocaleString()}`}
 					page={currentPage}
 					pageCount={pageCount}
-					onPageChange={setPage}
+					onPageChange={onPageChange}
 				/>
 			</section>
 
@@ -309,7 +467,7 @@ export function AttacksPage() {
 			<Dialog
 				open={!!detailId}
 				onOpenChange={(open) => {
-					if (!open) void navigate("/dashboard");
+					if (!open) void navigate({ pathname: "/dashboard", search });
 				}}
 			>
 				<DialogContent
@@ -326,109 +484,34 @@ export function AttacksPage() {
 	);
 }
 
-/**
- * Latest CRITICAL alert banner. Pulls the most recent risk_band=Critical
- * row from `/api/v1/analysis/results` (sorted by date, page size 1) and shares
- * the table's 15s poll cadence — `useRiskAlerts` uses its `params` as the
- * query key, so a separate page=0/pageSize=1 request lives independently.
- *
- * Three visual states:
- *  - Loading: muted placeholder, no critical styling yet.
- *  - Found: full critical theme, clickable, copy button.
- *  - Empty (no critical alerts at all): neutral border so the red doesn't lie.
- */
-/** Inline icon matching the Figma "critical" banner: red filled triangle
- *  with a white exclamation. Drawn here to avoid the lucide AlertTriangle
- *  stroke-only look. */
-function CriticalTriangleIcon({ className }: { className?: string }) {
+function KpiCard({
+	label,
+	value,
+	help,
+}: {
+	label: string;
+	value: string;
+	/** Explanatory text behind an info icon. Same pattern as DonutCard. */
+	help?: string;
+}) {
 	return (
-		<svg
-			className={className}
-			viewBox="0 0 24 24"
-			fill="none"
-			xmlns="http://www.w3.org/2000/svg"
-			aria-hidden="true"
-		>
-			<path
-				d="M10.95 3.06a1.2 1.2 0 0 1 2.1 0l9.45 16.74A1.2 1.2 0 0 1 21.45 21.6H2.55a1.2 1.2 0 0 1-1.05-1.8z"
-				fill="#dc2626"
-			/>
-			<path d="M12 9v5" stroke="white" strokeWidth="2" strokeLinecap="round" />
-			<circle cx="12" cy="17.2" r="1.05" fill="white" />
-		</svg>
-	);
-}
-
-function CriticalAlertCard() {
-	const navigate = useNavigate();
-	const { data, isPending } = useRiskAlerts({
-		page: 0,
-		pageSize: 1,
-		severities: ["CRITICAL"],
-		sort: "date",
-	});
-	const latest = data?.rows[0];
-
-	const baseCls =
-		"bg-card border-border flex flex-col justify-center rounded-lg border-2 p-4 md:col-span-2 transition-colors";
-	const interactiveCls = latest ? "cursor-pointer hover:bg-accent/50" : "";
-
-	return (
-		<div
-			className={cn(baseCls, interactiveCls)}
-			onClick={latest ? () => void navigate(`/attacks/${latest.slug}`) : undefined}
-			role={latest ? "button" : undefined}
-			tabIndex={latest ? 0 : undefined}
-			onKeyDown={
-				latest
-					? (e) => {
-							if (e.key === "Enter" || e.key === " ") {
-								e.preventDefault();
-								void navigate(`/attacks/${latest.slug}`);
-							}
-						}
-					: undefined
-			}
-		>
-			<div className="text-foreground flex items-center justify-center gap-2">
-				<CriticalTriangleIcon className="h-5 w-5 shrink-0" />
-				<span className="text-lg font-semibold">
-					{latest
-						? "New Critical Attack"
-						: isPending
-							? "Critical Attacks"
-							: "No Critical Attacks"}
-				</span>
-			</div>
-			<div className="text-foreground mt-2 flex items-center justify-center gap-2 font-mono text-xs">
-				<span className="truncate">
-					{latest
-						? shortHash(latest.fullHash.toUpperCase(), 19, 11)
-						: isPending
-							? "Loading…"
-							: "—"}
-				</span>
-				{latest && (
-					<button
-						type="button"
-						className="text-muted-foreground hover:text-foreground shrink-0"
-						title="Copy"
-						onClick={(e) => {
-							e.stopPropagation();
-							void copyToClipboard(latest.fullHash);
-						}}
-					>
-						<Copy className="h-3.5 w-3.5" />
-					</button>
-				)}
-			</div>
-		</div>
-	);
-}
-
-function KpiCard({ label, value }: { label: string; value: string }) {
-	return (
-		<div className="border-border bg-card flex flex-col justify-center rounded-lg border-2 p-4">
+		<div className="border-border bg-card relative flex flex-col justify-center rounded-lg border-2 p-4">
+			{help && (
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							type="button"
+							aria-label={`What ${label} means`}
+							className="text-muted-foreground/70 hover:text-foreground focus-visible:ring-ring absolute top-3 right-3 rounded focus-visible:ring-2 focus-visible:outline-none"
+						>
+							<Info className="h-3.5 w-3.5" />
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="top" align="end" className="max-w-xs text-xs">
+						{help}
+					</TooltipContent>
+				</Tooltip>
+			)}
 			<div className="text-foreground text-center text-lg font-semibold">
 				{label}
 			</div>

@@ -57,7 +57,100 @@ export type RiskAlert = {
 	 * signal. The list badges and de-prioritizes it; it never changes severity.
 	 */
 	unclusterableModel?: boolean;
+	/**
+	 * The contract this alert implicates, normalized server-side from whichever
+	 * evidence key the winning class used. Empty string means the class names no
+	 * contract (phishing, circular and front_running describe a relationship
+	 * between addresses), and those alerts render as ungrouped rows rather than
+	 * being collapsed into a bucket with nothing to name it.
+	 */
+	contractAddress?: string;
 };
+
+/**
+ * Lowest 0-100 score that lands in each risk band.
+ *
+ * Mirrors the backend's single source of truth, `BAND_*_THRESHOLD` in
+ * `backend/app/analysis/normalise.py`. Duplicated here only because no endpoint
+ * exposes the thresholds and the Avg Risk helper has to answer "is this high or
+ * low" in terms the operator sees elsewhere in the UI. Keep in step with that
+ * module if the bands are ever recalibrated.
+ */
+export const SEVERITY_MIN_SCORE: Record<Severity, number> = {
+	INFORMATIONAL: 0,
+	MODERATE: 31,
+	HIGH: 60,
+	CRITICAL: 80,
+};
+
+/** Top of the risk scale. Scores are normalised to 0-100 backend-side. */
+export const SCORE_MAX = 100;
+
+/**
+ * Highest score still banded Informational.
+ *
+ * The one band edge that is not a floor: `severityForScore` tests `> this` for
+ * Moderate rather than `>= SEVERITY_MIN_SCORE.MODERATE`, because scores carry
+ * decimals and 30.5 must not land in a dead zone between the two. Named because
+ * it appears in both the banding function and the operator-facing copy, which
+ * must not drift apart.
+ *
+ * The other bands deliberately have no ceiling constant: they have no exact
+ * integer one (59.9 is still Moderate), so quoting `31-59` style ranges would
+ * misdescribe the very scores this scale produces. They are stated by floor.
+ */
+export const SEVERITY_INFORMATIONAL_MAX = SEVERITY_MIN_SCORE.MODERATE - 1;
+
+/** The band a 0-100 score falls in, matching the backend's score_to_band. */
+export function severityForScore(score: number): Severity {
+	if (score >= SEVERITY_MIN_SCORE.CRITICAL) return "CRITICAL";
+	if (score >= SEVERITY_MIN_SCORE.HIGH) return "HIGH";
+	// Strictly above the top of Informational, not >= MODERATE: scores are
+	// rounded to 2dp, so 30.5 must not fall into a dead zone and under-band.
+	if (score > SEVERITY_INFORMATIONAL_MAX) return "MODERATE";
+	return "INFORMATIONAL";
+}
+
+const SEVERITY_WORD: Record<Severity, string> = {
+	INFORMATIONAL: "Informational",
+	MODERATE: "Moderate",
+	HIGH: "High",
+	CRITICAL: "Critical",
+};
+
+/**
+ * Operator-facing explanation of the Avg Risk KPI.
+ *
+ * The client reported this number as unclear, and it had two problems: nothing
+ * said what it measured, and it averaged every scored transaction including the
+ * clean ones, so it described a different population than the table beside it.
+ * The aggregate now applies the alert list's finding floor; this text supplies
+ * the rest, including where the value sits among the bands so "high or low" is
+ * answerable without a second lookup. Same house style as SUB_SCORE_LABELS:
+ * short, and for an operator rather than a researcher.
+ */
+export function avgRiskHelp(score: number | null | undefined): string {
+	// Stated as FLOORS, not as `31-59` style ranges. Scores carry decimals, and
+	// severityForScore bands anything above 30 as Moderate, so "Moderate 31-59"
+	// would call a displayed 30.5 Informational while the KPI beside it reads
+	// Moderate. Floors are the predicates the banding function actually applies.
+	const scale =
+		`Mean risk score (0-${SCORE_MAX}) across alerting transactions on this network. ` +
+		`Bands: Informational up to ${SEVERITY_INFORMATIONAL_MAX}, ` +
+		`Moderate above ${SEVERITY_INFORMATIONAL_MAX}, ` +
+		`High from ${SEVERITY_MIN_SCORE.HIGH}, ` +
+		`Critical from ${SEVERITY_MIN_SCORE.CRITICAL}.`;
+	const where =
+		score === null || score === undefined
+			? ""
+			: ` The current average sits in the ${SEVERITY_WORD[severityForScore(score)]} band.`;
+	// Say this explicitly: it is network-wide by design, so it will not move when
+	// the table's attack-type or severity filters change.
+	const scope =
+		" Counts only transactions a detector flagged, not clean ones, and is not" +
+		" affected by the filters on this table.";
+	return scale + where + scope;
+}
 
 /**
  * Per-attack-class ordered list of sub-score dimensions to display as donuts.
