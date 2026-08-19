@@ -154,6 +154,7 @@ export function AlertRow({
 	onOpen,
 	indented = false,
 	pinned = false,
+	contractLabel,
 }: {
 	alert: RiskAlert;
 	onOpen: (slug: string) => void;
@@ -161,7 +162,14 @@ export function AlertRow({
 	indented?: boolean;
 	/** The pinned latest-critical row: tinted, accented, and marked as pinned. */
 	pinned?: boolean;
+	/** Registry display name for this alert's contract, when one is known. */
+	contractLabel?: string;
 }) {
+	// Which contract this alert implicates, shown only where nothing else says it.
+	// Inside an expanded group the contract IS the heading above these rows, and a
+	// flat row is flat precisely because its class names no contract, so the only
+	// row this line has anything to add to is the pinned one.
+	const contract = !indented ? alert.contractAddress : undefined;
 	return (
 		<TableRow
 			onClick={() => onOpen(alert.slug)}
@@ -187,6 +195,20 @@ export function AlertRow({
 					<CopyButton value={alert.fullHash} label="Copy transaction hash" />
 					{pinned && <PinnedCriticalMarker />}
 				</div>
+				{/* A second line rather than a third item on the first one: width is
+				    what broke the marker, and a group row already states its contract
+				    above its own count in exactly this shape. */}
+				{contract && (
+					<div
+						className={cn(
+							"text-muted-foreground truncate text-xs",
+							!contractLabel && "font-mono",
+						)}
+						title={contract}
+					>
+						{contractLabel ?? shortHash(contract, CONTRACT_HEAD, CONTRACT_TAIL)}
+					</div>
+				)}
 			</TableCell>
 			<TableCell className="text-foreground">{alert.date}</TableCell>
 			<TableCell>

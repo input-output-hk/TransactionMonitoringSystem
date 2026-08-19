@@ -509,6 +509,73 @@ describe("pinned latest critical alert", () => {
 		expect(screen.queryByText(/No alerts match/i)).not.toBeInTheDocument();
 	});
 
+	it("names the contract it implicates, by its registry label", async () => {
+		// The column is headed "Contract / ID" and every group row states its
+		// contract; the pinned alert used the renderer meant for alerts that name
+		// NO contract, so the most important row on the page was the one hiding the
+		// attribution an analyst wants first. A second line, not a third item on the
+		// first one: width is what broke the marker.
+		state.critical = alert({
+			fullHash: CRIT_HASH,
+			severity: "CRITICAL",
+			contractAddress: DJED,
+		});
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		expect(cell?.textContent).toContain("Djed StableCoin");
+	});
+
+	it("falls back to the truncated address when the registry has no label", async () => {
+		state.critical = alert({
+			fullHash: CRIT_HASH,
+			severity: "CRITICAL",
+			contractAddress: STRIKE,
+		});
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		expect(cell?.textContent).toContain(STRIKE.slice(0, 14));
+		expect(cell?.textContent).not.toContain("Djed StableCoin");
+	});
+
+	it("says nothing about a contract when the alert names none", async () => {
+		// An un-attributed alert is pinned as a bare hash rather than gaining an
+		// empty line or a placeholder.
+		state.critical = alert({
+			fullHash: CRIT_HASH,
+			severity: "CRITICAL",
+			contractAddress: "",
+		});
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		// Hash, copy button and the marker, and nothing else.
+		expect(cell?.textContent?.replace(/pinned/i, "").trim()).toBe("EEEEEEEE");
+	});
+
+	it("is absent past the first page, where there is no top of the list", async () => {
+		// This page has no sort control: the list is date-ordered server-side, so
+		// the pin's whole job is keeping the latest Critical at the top of the list.
+		// Page 2 onwards has no top of the list, and the query is held off rather
+		// than fetched and hidden.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage("/dashboard?page=2");
+		expect(screen.queryByText(/pinned/i)).not.toBeInTheDocument();
+		expect(screen.queryByText("EEEEEEEE")).not.toBeInTheDocument();
+	});
+
+	it("is present on the first page whether or not the URL says so", async () => {
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		for (const entry of ["/dashboard", "/dashboard?page=1"]) {
+			await renderPage(entry);
+			expect(screen.getByText(/pinned/i)).toBeInTheDocument();
+			cleanup();
+		}
+	});
+
 	it("is absent when the severity filter excludes Critical", async () => {
 		// The pin must never contradict the filter the operator set: a Critical
 		// row above a Moderate-only table reads as the filter having failed.
