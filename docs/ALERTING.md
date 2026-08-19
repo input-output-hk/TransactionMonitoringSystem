@@ -561,7 +561,7 @@ cd backend
 
 **On signing.** Signing is off unless `WEBHOOK_SIGNING_SECRET` is set; the sender simply omits the header and delivery is otherwise identical. Set the secret on both sides or neither. A receiver holding a secret will flag every request from an unsigned sender.
 
-Automated coverage for this deliverable is 74 tests across `backend/tests/notifications/` and `backend/tests/api/test_notifications_config.py`, plus the frontend linter and settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
+Automated coverage for this deliverable is 97 tests across `backend/tests/notifications/` (92) and `backend/tests/api/test_notifications_config.py` (5), plus the frontend linter and settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
 
 ## Common Misconfigurations
 
