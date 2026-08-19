@@ -43,21 +43,21 @@ const CONTRACT_HEAD = 14;
 const CONTRACT_TAIL = 6;
 
 /**
- * Tint for the pinned latest-critical row, and `border-b-0` so no divider splits
- * the block. The accent is PINNED_ACCENT, on the first cell rather than here.
- */
-const PINNED_ROW = "bg-severity-critical/25 border-b-0";
-
-/**
- * The left accent, applied to the row's FIRST CELL.
+ * The pinned latest-critical row: tint, and an outline on all four sides.
  *
- * Tailwind's preflight sets `border-collapse: collapse` on every table, which
- * means a border declared on a `<tr>` is resolved against the borders of the
- * cells, the row group and the column before it paints. A cell's left border in
- * the first column has nothing to be resolved against, so it always paints the
- * full cell height: the accent cannot come up short or land off the row edge.
+ * An OUTLINE, not a border. Tailwind's preflight sets `border-collapse: collapse`
+ * on every table, so a border declared on a `<tr>` is resolved against the
+ * borders of the cells, the row group and the column before it paints, which is
+ * why a left accent here was fragile enough to need moving onto a cell. An
+ * outline takes no part in that resolution and takes no space in the layout, so
+ * it draws one even 1px edge right round the row.
+ *
+ * A bounded shape rather than more red: the tint alone said "critical", which the
+ * severity badge on the same row already says, so it could not also say "pinned".
+ * `border-b-0` still matters, or TableRow's divider crosses the outlined box.
  */
-const PINNED_ACCENT = "border-l-severity-critical-foreground border-l-2";
+const PINNED_ROW =
+	"bg-severity-critical/25 border-b-0 outline-1 -outline-offset-1 outline-severity-critical-foreground/60";
 
 /**
  * Copies an identifier the table can only show truncated.
@@ -107,7 +107,7 @@ function UnclusterableBadge() {
 }
 
 /**
- * Marks the row the table holds at the top.
+ * Names the state the outline and the gutter pin announce.
  *
  * Deliberately NOT a badge. As an outlined box it was wide enough to wrap onto
  * two lines inside the ID cell, which made a tall red rectangle beside a
@@ -115,9 +115,11 @@ function UnclusterableBadge() {
  * shares the hash's line box, so it is aligned by construction and `nowrap`
  * keeps it that way.
  *
- * One word, because the severity badge at the other end of the same row already
- * reads CRITICAL; repeating it there bought width and no information. Which
- * critical alert this is belongs in the title, not in the row.
+ * No icon of its own: the pin is in the gutter, and repeating it here read as
+ * two markers for one state. One word, because the severity badge at the other
+ * end of the same row already says CRITICAL; repeating that bought width and no
+ * information, and width was what broke the earlier badge. Which critical alert
+ * this is belongs in the title, not in the row.
  *
  * Placed AFTER the hash so every row's ID still starts on the same column: an
  * indented hash on one row reads as a broken table.
@@ -125,10 +127,9 @@ function UnclusterableBadge() {
 function PinnedCriticalMarker() {
 	return (
 		<span
-			className="text-severity-critical-foreground flex shrink-0 items-center gap-1 text-[10px] font-semibold tracking-wider whitespace-nowrap uppercase"
+			className="text-severity-critical-foreground flex shrink-0 items-center text-[10px] font-semibold tracking-wider whitespace-nowrap uppercase"
 			title="The most recent Critical alert, pinned above the list."
 		>
-			<Pin className="h-2.5 w-2.5" />
 			Pinned
 		</span>
 	);
@@ -182,9 +183,14 @@ export function AlertRow({
 				pinned && `${PINNED_ROW} hover:bg-severity-critical/30`,
 			)}
 		>
-			<TableCell
-				className={cn("w-8", indented && "pl-6", pinned && PINNED_ACCENT)}
-			/>
+			{/* The gutter is where a group row shows its chevron, i.e. the column an
+			    operator already scans for what a row IS rather than what it holds. The
+			    pin belongs there for the same reason. */}
+			<TableCell className={cn("w-8", indented && "pl-6")}>
+				{pinned && (
+					<Pin className="text-severity-critical-foreground h-3.5 w-3.5" />
+				)}
+			</TableCell>
 			<TableCell>
 				<div className="flex items-center gap-2">
 					{/* Mono and uppercase belong to the hash, not to the cell: the marker

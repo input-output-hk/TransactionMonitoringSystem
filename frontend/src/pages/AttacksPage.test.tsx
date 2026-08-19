@@ -402,22 +402,38 @@ describe("pinned latest critical alert", () => {
 		expect(screen.getAllByRole("row")).toHaveLength(3);
 	});
 
-	it("tints the row and accents its first cell, with no divider anywhere", async () => {
+	it("outlines the row on all four sides, with no divider crossing it", async () => {
 		// Asserted on classes because the defect is purely visual: every
 		// behavioural test passed while the block looked cut in half.
 		//
-		// The accent lives on the CELL, not the row: preflight collapses table
-		// borders, so a `<tr>` border is resolved against the cells and the column
-		// before it paints, while a first-column cell border has nothing to be
-		// resolved against and always spans the full row height.
+		// An OUTLINE, not a border: preflight collapses table borders, so a `<tr>`
+		// border is resolved against the cells, the row group and the column before
+		// it paints, which is what made a left accent here fragile. An outline takes
+		// no part in that and draws one even edge right round the row.
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage();
 		const row = screen.getAllByRole("row")[1];
 		expect(row.className).toContain("bg-severity-critical/25");
 		expect(row.className).toContain("border-b-0");
+		expect(row.className).toContain("outline-1");
+		expect(row.className).toContain("outline-severity-critical-foreground/60");
+		// A single-sided border would leave three edges of the box undrawn.
 		expect(row.className).not.toContain("border-l-2");
-		expect(row.children[0].className).toContain("border-l-2");
+		expect(row.children[0].className).not.toContain("border-l-2");
+	});
+
+	it("puts the pin in the gutter, where a group row shows its chevron", async () => {
+		// That column is the one an operator scans for what a row IS rather than
+		// what it holds, so the pin belongs there and not beside the hash, where it
+		// read as a second marker for one state.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [];
+		await renderPage();
+		const gutter = screen.getAllByRole("row")[1].children[0];
+		expect(gutter.querySelector("svg")).not.toBeNull();
+		// And the word beside the hash carries no icon of its own.
+		expect(screen.getByText(/pinned/i).querySelector("svg")).toBeNull();
 	});
 
 	it("leaves no horizontal rule under the block", async () => {
