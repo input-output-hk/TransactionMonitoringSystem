@@ -10,15 +10,15 @@ latest commit.
 
 | Tier | Location | Count | Services needed | CI job |
 |---|---|---|---|---|
-| Backend hermetic | `backend/tests/` | 1147 | none (all I/O mocked) | Backend (pytest + recall gate) |
-| Recall gate | `backend/tests/analysis/` | 505 (subset of the above) | none | Backend (run first, on its own) |
+| Backend hermetic | `backend/tests/` | 1276 | none (all I/O mocked) | Backend (pytest + recall gate) |
+| Recall gate | `backend/tests/analysis/` | 554 (subset of the above) | none | Backend (run first, on its own) |
 | Live-DB tier | `backend/tests/live_db/` | 28 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 5 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
 | Clustering sidecar | `services/clustering/backend/tests/` | 495 | none | Clustering sidecar (pytest) |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 58 | none | Frontend (lint + build) |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 131 | none | Frontend (lint + build) |
 
-That is 1,736 tests across the six independent tiers (the recall gate is a
+That is 1,938 tests across the six independent tiers (the recall gate is a
 subset of the backend suite, not an additional tier).
 
 The default developer command, `pytest tests/` from `backend/`, runs the
@@ -58,7 +58,7 @@ protection is a pending repository-admin step.
 
 CI measures line coverage on the full backend suite (`--cov=app`) and reports
 it in the job summary; there is no enforced threshold yet (report-only). At the
-commit this document ships in, backend coverage is 76% over 8,888 statements
+commit this document ships in, backend coverage is 76% over 9,289 statements
 (`cd backend && ../.venv/bin/python -m pytest tests/ --cov=app`), and the
 clustering sidecar is 85%. CI has reported a point lower than a local run on the
 same commit; the difference is environment-gated branches.
@@ -132,8 +132,10 @@ uv run pytest -q
 
 ## Frontend
 
-The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 58 tests)
-over the API client and helper libraries, run under jsdom.
+The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 131
+tests) under jsdom, over the API client, the helper libraries, and rendered
+components and pages (the datum tree, the transaction-detail panels, the alerts
+page and the attack-detail page).
 
 ```bash
 cd frontend

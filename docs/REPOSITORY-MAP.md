@@ -32,15 +32,15 @@ sidecar.
 
 | Tree | Files | Lines | Contents |
 |---|---|---|---|
-| `backend/` | 230 | 51,094 | FastAPI application, ingestion, detection scorers, API, tests |
+| `backend/` | 240 | 54,567 | FastAPI application, ingestion, detection scorers, API, tests |
 | `services/clustering/` | 169 | 30,123 | Clustering sidecar: its own deployable, own Python project, own CI job |
 | `config/` | 2 | 1,029 | `detection.yaml` (913 lines), `performance.yaml` (116 lines) |
 
 Counts exclude lockfiles (`services/clustering/backend/uv.lock`).
 
-Within `backend/`: `backend/app/` is 98 Python files and 26,906 lines of source;
-`backend/tests/` is 103 files and 19,756 lines. The largest application modules,
-counted in Python files, are `analysis/` (24, the nine detection scorers), `api/`
+Within `backend/`: `backend/app/` is 100 Python files and 28,368 lines of source;
+`backend/tests/` is 110 files and 21,500 lines. The largest application modules,
+counted in Python files, are `analysis/` (26, the nine detection scorers), `api/`
 (13), `notifications/` (12), `ingestion/` (10), and `db/` (8). The Alerting table
 below counts every tracked file rather than only Python, so `notifications/`
 appears there as 13: the thirteenth is `ADDING_A_CHANNEL.md`.
@@ -74,10 +74,10 @@ The operator dashboard.
 
 | Tree | Files | Lines | Contents |
 |---|---|---|---|
-| `frontend/` | 135 | 16,341 | React SPA: pages, components, API client, tests. Excludes `pnpm-lock.yaml` |
+| `frontend/` | 146 | 19,372 | React SPA: pages, components, API client, tests. Excludes `pnpm-lock.yaml` |
 
-`frontend/src/` is 116 TypeScript and TSX files totalling 15,575 lines, of which
-110 files and 14,853 lines are non-test source. It carries 12 page components
+`frontend/src/` is 127 TypeScript and TSX files totalling 18,606 lines, of which
+115 files and 16,485 lines are non-test source. It carries 12 page components
 across 15 routes, 51 components, and 21 API-client modules.
 
 **Stack, as built:** React 19.2.6 on TypeScript 6.0.2, bundled by Vite 8.1.2,
@@ -149,17 +149,17 @@ These belong to no single deliverable.
 
 ## Test inventory
 
-1,736 automated tests across six tiers. Counts measured at this commit, not
+1,938 automated tests across six tiers. Counts measured at this commit, not
 quoted from an earlier report.
 
 | Tier | Location | Tests |
 |---|---|---|
-| Backend hermetic | `backend/tests/` | 1,147 |
-| Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 505 |
+| Backend hermetic | `backend/tests/` | 1,276 |
+| Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 554 |
 | Backend live-DB | `backend/tests/live_db/` | 28 |
 | Clustering sidecar | `services/clustering/backend/tests/` | 495 |
 | Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 5 |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 58 |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 131 |
 | Performance | `backend/tests/perf/` | 3 |
 
 See [TESTING.md](TESTING.md) for what each tier covers and how to run it.
