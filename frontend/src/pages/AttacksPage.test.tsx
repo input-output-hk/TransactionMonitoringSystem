@@ -385,7 +385,7 @@ describe("pinned latest critical alert", () => {
 		// The label used to occupy a strip of its own, which spent a table row on
 		// two words and read as a second alert above the real one.
 		expect(rows[1].textContent).toContain("EEEEEEEE");
-		expect(rows[1].textContent).toMatch(/latest critical/i);
+		expect(rows[1].textContent).toMatch(/pinned/i);
 		const groupRow = rows.findIndex((r) =>
 			r.textContent?.includes("Djed StableCoin"),
 		);
@@ -402,16 +402,51 @@ describe("pinned latest critical alert", () => {
 		expect(screen.getAllByRole("row")).toHaveLength(3);
 	});
 
-	it("tints and accents that one row, with no divider splitting it", async () => {
+	it("tints the row and accents its first cell, with no divider anywhere", async () => {
 		// Asserted on classes because the defect is purely visual: every
 		// behavioural test passed while the block looked cut in half.
+		//
+		// The accent lives on the CELL, not the row: preflight collapses table
+		// borders, so a `<tr>` border is resolved against the cells and the column
+		// before it paints, while a first-column cell border has nothing to be
+		// resolved against and always spans the full row height.
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage();
 		const row = screen.getAllByRole("row")[1];
-		expect(row.className).toContain("border-l-2");
 		expect(row.className).toContain("bg-severity-critical/25");
 		expect(row.className).toContain("border-b-0");
+		expect(row.className).not.toContain("border-l-2");
+		expect(row.children[0].className).toContain("border-l-2");
+	});
+
+	it("leaves no horizontal rule under the block", async () => {
+		// TableRow ships `border-b`, so the spacer drew a divider 12px below the
+		// tint, belonging to nothing and reading as a line out of alignment with
+		// the block above it. Nothing between the pin and the list may draw one.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage();
+		const rows = screen.getAllByRole("row");
+		// Rows 1 and 2 are the pinned alert and the spacer that follows it.
+		for (const row of [rows[1], rows[2]]) {
+			expect(row.className).toContain("border-b-0");
+		}
+	});
+
+	it("marks the row with plain text, not a bordered box", async () => {
+		// As an outlined badge the marker was wide enough to wrap onto two lines
+		// inside the ID cell: a tall red rectangle beside a single-line hash,
+		// aligned with nothing. Plain text shares the hash's line box.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [];
+		await renderPage();
+		const marker = screen.getByText(/pinned/i);
+		expect(marker.className).toContain("whitespace-nowrap");
+		expect(marker.className).not.toMatch(/\bborder(-2)?\b/);
+		// The severity badge on the same row already says CRITICAL, so the marker
+		// must not spend width repeating it.
+		expect(marker.textContent).not.toMatch(/critical/i);
 	});
 
 	it("keeps the hash on the same column as every other row's", async () => {
@@ -422,16 +457,17 @@ describe("pinned latest critical alert", () => {
 		await renderPage();
 		const cell = screen.getByText("EEEEEEEE").closest("td");
 		const text = cell?.textContent ?? "";
-		expect(text.indexOf("EEEEEEEE")).toBeLessThan(text.search(/latest/i));
+		expect(text.indexOf("EEEEEEEE")).toBeLessThan(text.search(/pinned/i));
 	});
 
 	it("labels the row without explaining the sort order", async () => {
 		// The sentence "kept in view regardless of the sort below" was cut as
-		// superfluous: the pin icon and the position already say it.
+		// superfluous: the pin icon and the position already say it. Which critical
+		// alert this is stays in the marker's title, off the row.
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage();
-		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
+		expect(screen.getByText(/pinned/i)).toBeInTheDocument();
 		expect(
 			screen.queryByText(/regardless of the sort/i),
 		).not.toBeInTheDocument();
@@ -442,7 +478,7 @@ describe("pinned latest critical alert", () => {
 		state.groups = [group()];
 		await renderPage();
 		// No empty placeholder on a clean system.
-		expect(screen.queryByText(/latest critical/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/pinned/i)).not.toBeInTheDocument();
 	});
 
 	it("is not duplicated when it also appears in the body", async () => {
@@ -479,14 +515,14 @@ describe("pinned latest critical alert", () => {
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group({ worstSeverity: "MODERATE" })];
 		await renderPage("/dashboard?severity=MODERATE");
-		expect(screen.queryByText(/latest critical/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/pinned/i)).not.toBeInTheDocument();
 	});
 
 	it("is present when no severity filter is applied", async () => {
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage("/dashboard?severity=");
-		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
+		expect(screen.getByText(/pinned/i)).toBeInTheDocument();
 	});
 });
 

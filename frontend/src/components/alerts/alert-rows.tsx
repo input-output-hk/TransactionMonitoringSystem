@@ -43,17 +43,21 @@ const CONTRACT_HEAD = 14;
 const CONTRACT_TAIL = 6;
 
 /**
- * Tint and left accent for the pinned latest-critical row.
- *
- * ONE row carries it. The label used to sit on a strip above, which cost a
- * second table row for two words and read as another entry in the list; it also
- * let TableRow's bottom border run between the strip and the row it described,
- * so the accent appeared to cut the block in half. With a single row the accent
- * spans its full height by construction, `border-b-0` keeps the tint from being
- * split by a divider, and the spacer row below separates it from the list.
+ * Tint for the pinned latest-critical row, and `border-b-0` so no divider splits
+ * the block. The accent is PINNED_ACCENT, on the first cell rather than here.
  */
-const PINNED_ROW =
-	"bg-severity-critical/25 border-l-severity-critical-foreground border-l-2 border-b-0";
+const PINNED_ROW = "bg-severity-critical/25 border-b-0";
+
+/**
+ * The left accent, applied to the row's FIRST CELL.
+ *
+ * Tailwind's preflight sets `border-collapse: collapse` on every table, which
+ * means a border declared on a `<tr>` is resolved against the borders of the
+ * cells, the row group and the column before it paints. A cell's left border in
+ * the first column has nothing to be resolved against, so it always paints the
+ * full cell height: the accent cannot come up short or land off the row edge.
+ */
+const PINNED_ACCENT = "border-l-severity-critical-foreground border-l-2";
 
 /**
  * Copies an identifier the table can only show truncated.
@@ -105,22 +109,28 @@ function UnclusterableBadge() {
 /**
  * Marks the row the table holds at the top.
  *
- * Shaped like UnclusterableBadge so the table speaks one visual language for
- * "metadata about this row", and placed AFTER the hash rather than before it so
- * every row's ID still starts on the same column: an indented hash on one row
- * reads as a broken table. Critical-toned and outlined rather than filled,
- * because the row it sits on already carries the filled critical tint.
+ * Deliberately NOT a badge. As an outlined box it was wide enough to wrap onto
+ * two lines inside the ID cell, which made a tall red rectangle beside a
+ * single-line hash: nothing about it lined up with anything. As plain text it
+ * shares the hash's line box, so it is aligned by construction and `nowrap`
+ * keeps it that way.
+ *
+ * One word, because the severity badge at the other end of the same row already
+ * reads CRITICAL; repeating it there bought width and no information. Which
+ * critical alert this is belongs in the title, not in the row.
+ *
+ * Placed AFTER the hash so every row's ID still starts on the same column: an
+ * indented hash on one row reads as a broken table.
  */
 function PinnedCriticalMarker() {
 	return (
-		<Badge
-			variant="outline"
-			className="border-severity-critical-foreground/60 text-severity-critical-foreground gap-1 px-1.5 py-0 text-[9px] font-semibold"
+		<span
+			className="text-severity-critical-foreground flex shrink-0 items-center gap-1 text-[10px] font-semibold tracking-wider whitespace-nowrap uppercase"
 			title="The most recent Critical alert, pinned above the list."
 		>
 			<Pin className="h-2.5 w-2.5" />
-			Latest critical
-		</Badge>
+			Pinned
+		</span>
 	);
 }
 
@@ -164,7 +174,9 @@ export function AlertRow({
 				pinned && `${PINNED_ROW} hover:bg-severity-critical/30`,
 			)}
 		>
-			<TableCell className={cn("w-8", indented && "pl-6")} />
+			<TableCell
+				className={cn("w-8", indented && "pl-6", pinned && PINNED_ACCENT)}
+			/>
 			<TableCell>
 				<div className="flex items-center gap-2">
 					{/* Mono and uppercase belong to the hash, not to the cell: the marker
@@ -294,10 +306,16 @@ export function ContractGroupRow({
 	);
 }
 
-/** Air below the pinned row, so it and the sorted list read as two things. */
+/**
+ * Air below the pinned row, so it and the sorted list read as two things.
+ *
+ * `border-b-0` matters: TableRow ships `border-b`, so this row drew a divider
+ * 12px under the pinned block, belonging to nothing and reading as a line out of
+ * alignment with the block above it.
+ */
 export function PinnedCriticalSpacerRow() {
 	return (
-		<TableRow className="hover:bg-transparent">
+		<TableRow className="border-b-0 hover:bg-transparent">
 			<TableCell colSpan={ALERT_COLUMN_COUNT} className="h-3 p-0" />
 		</TableRow>
 	);
