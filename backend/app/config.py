@@ -509,6 +509,23 @@ class Settings(BaseSettings):
     # 0 disables. Staleness only affects KPI cards, never detection.
     STATS_CACHE_TTL_SECONDS: int = 10
 
+    # Grouped alerts view: the contract-grouped list paginates in Python because
+    # a winning sidecar verdict can move a transaction between groups, which SQL
+    # LIMIT/OFFSET cannot account for. Group cardinality is distinct contracts
+    # with alerts, orders of magnitude below alert cardinality, so fetching them
+    # all is cheap. This bounds the fetch anyway; hitting it is logged, never
+    # silent, because a truncated group set would hide a contract's alerts.
+    GROUPED_ALERTS_MAX_CONTRACTS: int = 5_000
+
+    # Node budget for decoding one datum into the display tree shown on the
+    # transaction detail view. A datum is attacker-controlled on-chain data, and
+    # the nesting-depth cap alone bounds only depth: one flat list of a million
+    # entries is shallow but would still build a million response nodes. Hitting
+    # this marks the result truncated rather than silently serving a partial
+    # tree. 20k is far above any legitimate datum's node count while keeping a
+    # single response small.
+    DATUM_DECODE_MAX_NODES: int = 20_000
+
     # Lifecycle cleanup — PENDING → DROPPED sweep
     # PENDING transactions older than this threshold are marked DROPPED by the
     # background cleanup sweep that runs alongside the analysis engine.

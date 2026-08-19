@@ -23,8 +23,9 @@ from datetime import datetime
 from functools import partial
 from typing import Any
 
+from app.analysis.contract_identity import NO_CONTRACT
 from app.config import settings
-from app.models.transaction import ALERT_BANDS
+from app.models.transaction import ALERT_BANDS, FINDING_MIN_SCORE
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ _SCORE_COLS = (
     "evidence",
     "corroboration_count",
     "corroborating_classes",
+    "contract_address",
     "analysis_version",
     "analyzed_at",
 )
@@ -135,6 +137,7 @@ def insert_class_scores(results: list[dict[str, Any]]):
                 json.dumps(r.get("evidence", {}), default=str),
                 r.get("corroboration_count", 0),
                 r.get("corroborating_classes", ""),
+                r.get("contract_address", NO_CONTRACT),
                 r["analysis_version"],
                 r["analyzed_at"],
             )
@@ -311,6 +314,8 @@ def _score_filter_conditions(
     analyzed_to: Any | None,
     include_archived: bool,
     min_corroboration: int = 0,
+    contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Build the shared WHERE conditions + params for the class-scores list and
     count queries.
@@ -322,6 +327,19 @@ def _score_filter_conditions(
     so callers cannot inject an unvalidated class. Returns ``(conditions,
     params)``; the caller joins with " AND " and adds any query-specific params
     (e.g. limit/offset).
+
+    ``contract`` is tri-state and is deliberately tested against None rather
+    than truthiness: None means "no filter", a non-empty address restricts to
+    that contract, and the empty string selects exactly the alerts that name no
+    contract at all (contract_identity.NO_CONTRACT), which is what the grouped
+    alerts view needs to render its ungrouped rows.
+
+    ``exclude_tx_hashes`` removes specific transactions from the match set. It
+    exists because ``contract_address`` is the STORED winning class's contract,
+    while a sidecar contract_anomaly verdict can re-home a transaction to a
+    different one at read time: the grouped view counts such a transaction under
+    its effective contract, so the query that lists the OTHER bucket has to stop
+    claiming it too, or one alert renders twice on one page.
     """
     if attack_class and attack_class not in _CLASS_COLS:
         raise ValueError(f"Invalid attack_class '{attack_class}'")
@@ -345,6 +363,14 @@ def _score_filter_conditions(
     if min_score > 0:
         conditions.append("max_score >= %(min_score)s")
         params["min_score"] = min_score
+    if contract is not None:
+        conditions.append("contract_address = %(contract)s")
+        params["contract"] = contract
+    if exclude_tx_hashes:
+        # Same list-param idiom as get_class_scores_by_hashes: clickhouse-driver
+        # renders a Python list as a SQL list, so one placeholder covers the set.
+        conditions.append("tx_hash NOT IN %(exclude_tx_hashes)s")
+        params["exclude_tx_hashes"] = exclude_tx_hashes
     if min_corroboration > 0:
         # Multi-signal filter: only transactions where at least this many
         # distinct classes independently corroborated. Flag-only; orthogonal
@@ -374,6 +400,8 @@ def get_class_scores_list(
     offset: int = 0,
     include_archived: bool = False,
     min_corroboration: int = 0,
+    contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return multi-class score rows with optional filters.
 
@@ -402,6 +430,8 @@ def get_class_scores_list(
         analyzed_to,
         include_archived,
         min_corroboration,
+        contract,
+        exclude_tx_hashes,
     )
     params["limit"] = limit
     params["offset"] = offset
@@ -456,6 +486,8 @@ async def get_class_scores_list_async(
     analyzed_from: Any | None = None,
     analyzed_to: Any | None = None,
     min_corroboration: int = 0,
+    contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     # Bind by keyword so a future reorder of the sync signature can't silently
     # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
@@ -473,6 +505,8 @@ async def get_class_scores_list_async(
             offset=offset,
             include_archived=include_archived,
             min_corroboration=min_corroboration,
+            contract=contract,
+            exclude_tx_hashes=exclude_tx_hashes,
         )
     )
 
@@ -486,6 +520,8 @@ def count_class_scores(
     analyzed_to: Any | None = None,
     include_archived: bool = False,
     min_corroboration: int = 0,
+    contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> int:
     """Total number of class-score rows matching the given filters.
 
@@ -506,6 +542,8 @@ def count_class_scores(
         analyzed_to,
         include_archived,
         min_corroboration,
+        contract,
+        exclude_tx_hashes,
     )
 
     where = " AND ".join(conditions)
@@ -525,6 +563,8 @@ async def count_class_scores_async(
     analyzed_to: Any | None = None,
     include_archived: bool = False,
     min_corroboration: int = 0,
+    contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> int:
     return await _run(
         partial(
@@ -535,6 +575,120 @@ async def count_class_scores_async(
             min_score=min_score,
             analyzed_from=analyzed_from,
             analyzed_to=analyzed_to,
+            include_archived=include_archived,
+            min_corroboration=min_corroboration,
+            contract=contract,
+            exclude_tx_hashes=exclude_tx_hashes,
+        )
+    )
+
+
+# Group orderings for the contract-grouped alerts view, mirroring the flat
+# list's two sorts. The aggregate aliases must NOT reuse a source column name
+# (max_score / risk_band / analyzed_at): ClickHouse 26.x raises Code 184 when an
+# aggregate alias shadows a column referenced by a sibling aggregate.
+_GROUP_SORTS: dict[str, str] = {
+    "score": "worst_score DESC, latest_analyzed_at DESC",
+    "date": "latest_analyzed_at DESC, worst_score DESC",
+}
+
+
+def group_class_scores_by_contract(
+    network: str,
+    risk_band: list[str] | None = None,
+    attack_class: str | None = None,
+    min_score: float = 0.0,
+    sort: str = "date",
+    analyzed_from: Any | None = None,
+    analyzed_to: Any | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    include_archived: bool = False,
+    min_corroboration: int = 0,
+) -> list[dict[str, Any]]:
+    """One row per contract for the grouped alerts view.
+
+    Applies the identical filter as ``get_class_scores_list`` so a group's
+    ``alert_count`` is the true number of alerts the flat list would show for
+    that contract under the same filters, not an artefact of a page window.
+    Rows naming no contract are excluded here and fetched separately (see
+    ``_score_filter_conditions``' tri-state ``contract``), because the UI
+    interleaves them as ungrouped rows rather than collapsing them into one
+    meaningless bucket.
+
+    ``worst_band`` is the STORED band of the highest-scoring alert in the group
+    (via argMax), not a band re-derived from ``worst_score``: a past
+    recalibration can move the thresholds, and the badge should agree with the
+    row the analyst sees when they expand the group.
+    """
+    conditions, params = _score_filter_conditions(
+        network,
+        risk_band,
+        attack_class,
+        min_score,
+        analyzed_from,
+        analyzed_to,
+        include_archived,
+        min_corroboration,
+    )
+    conditions.append("contract_address != %(no_contract)s")
+    params["no_contract"] = NO_CONTRACT
+    params["limit"] = limit
+    params["offset"] = offset
+    order_clause = _GROUP_SORTS.get(sort, _GROUP_SORTS["date"])
+    where = " AND ".join(conditions)
+    rows = _client().execute(
+        f"""
+        SELECT contract_address,
+               count() AS alert_count,
+               max(max_score) AS worst_score,
+               argMax(risk_band, max_score) AS worst_band,
+               max(analyzed_at) AS latest_analyzed_at
+        FROM tx_class_scores FINAL
+        WHERE {where}
+        GROUP BY contract_address
+        ORDER BY {order_clause}
+        LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        params,
+    )
+    return [
+        {
+            "contract_address": r[0],
+            "alert_count": int(r[1]),
+            "worst_score": float(r[2]),
+            "worst_band": r[3],
+            "latest_analyzed_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+async def group_class_scores_by_contract_async(
+    network: str,
+    risk_band: list[str] | None = None,
+    attack_class: str | None = None,
+    min_score: float = 0.0,
+    sort: str = "date",
+    analyzed_from: Any | None = None,
+    analyzed_to: Any | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    include_archived: bool = False,
+    min_corroboration: int = 0,
+) -> list[dict[str, Any]]:
+    return await _run(
+        partial(
+            group_class_scores_by_contract,
+            network=network,
+            risk_band=risk_band,
+            attack_class=attack_class,
+            min_score=min_score,
+            sort=sort,
+            analyzed_from=analyzed_from,
+            analyzed_to=analyzed_to,
+            limit=limit,
+            offset=offset,
             include_archived=include_archived,
             min_corroboration=min_corroboration,
         )
@@ -659,13 +813,21 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> dict
                -- 'low' is the pre-2026-06 label for the Informational band;
                -- counted here too so the stat stays correct mid-migration.
                countIf(lower(risk_band) IN ('informational', 'low')) AS informational_count,
-               avg(max_score) AS avg_max_score,
+               -- Averaged over FINDINGS only, matching the list endpoint's
+               -- floor. Averaging the whole table instead mixes in the mass of
+               -- scored-but-clean (max_score = 0) rows that are never listed,
+               -- which dragged this KPI far below the alerts shown next to it.
+               avgIf(max_score, max_score >= %(finding_min_score)s) AS avg_max_score,
+               -- Population size behind avg_max_score. Exposed because any
+               -- consumer adjusting the mean needs its real denominator; using
+               -- `total` (which counts clean rows too) would skew the result.
+               countIf(max_score >= %(finding_min_score)s) AS finding_count,
                max(analyzed_at) AS last_analyzed_at,
                {agg_sql}
         FROM tx_class_scores FINAL
         WHERE network = %(network)s{archive_clause}
         """,
-        {"network": network},
+        {"network": network, "finding_min_score": FINDING_MIN_SCORE},
     )
     if not rows:
         return {}
@@ -690,6 +852,7 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> dict
         "moderate_count",
         "informational_count",
         "avg_max_score",
+        "finding_count",
         "last_analyzed_at",
     )
     agg_cols = [f"{col}_{stat}" for col in _CLASS_COLS for stat in ("count", "avg", "max")]
@@ -702,6 +865,7 @@ def get_class_scores_stats(network: str, include_archived: bool = False) -> dict
         "moderate_count": d["moderate_count"],
         "informational_count": d["informational_count"],
         "avg_max_score": _safe(d["avg_max_score"]),
+        "finding_count": d["finding_count"],
         "last_analyzed_at": d["last_analyzed_at"],
     }
     result["per_class"] = {

@@ -308,3 +308,63 @@ class TestRescanBoundAndFallback:
 
         with _pytest.raises(RuntimeError):
             _engine_mod.run_once("preprod")
+
+
+class _EvidenceScorer:
+    """Test double that gates open and returns a fixed score plus evidence."""
+
+    def __init__(self, name, score, evidence):
+        self.name = name
+        self._score = score
+        self._evidence = evidence
+
+    def gate(self, features):
+        return True
+
+    def score(self, features):
+        return ScorerResult(score=self._score, evidence=self._evidence)
+
+
+class TestContractAddressOnScoreRow:
+    """The engine normalizes the winning class's contract into its own column.
+
+    Grouping alerts by contract reads this column, so it has to be written at
+    scoring time from whichever evidence key the winning scorer used.
+    """
+
+    SCRIPT_ADDR = "addr_test1wq9contracttarget"
+
+    def test_winning_class_target_is_persisted(self):
+        row = _make_row()
+        scorer = _EvidenceScorer(
+            "large_datum",
+            70.0,
+            {"target_script_address": self.SCRIPT_ADDR},
+        )
+        result = _score_transaction(row, [scorer])
+        assert result["max_class"] == "large_datum"
+        assert result["contract_address"] == self.SCRIPT_ADDR
+
+    def test_losing_class_target_is_not_attributed_to_the_winner(self):
+        row = _make_row()
+        winner = _EvidenceScorer("token_dust", 80.0, {"target_script_address": self.SCRIPT_ADDR})
+        loser = _EvidenceScorer(
+            "large_datum",
+            20.0,
+            {"target_script_address": "addr_test1wq9OTHER"},
+        )
+        result = _score_transaction(row, [winner, loser])
+        assert result["max_class"] == "token_dust"
+        assert result["contract_address"] == self.SCRIPT_ADDR
+
+    def test_class_without_contract_identity_writes_the_sentinel(self):
+        row = _make_row()
+        scorer = _EvidenceScorer("phishing", 75.0, {"urls": ["http://evil.example"]})
+        result = _score_transaction(row, [scorer])
+        assert result["max_class"] == "phishing"
+        assert result["contract_address"] == ""
+
+    def test_no_applicable_class_writes_the_sentinel(self):
+        result = _score_transaction(_make_row(), _build_scorers())
+        assert result["max_class"] == ""
+        assert result["contract_address"] == ""

@@ -336,43 +336,22 @@ def _is_decoded_payment_credential(script_key: str) -> bool:
 def _spend_redeemer_payloads(raw_data: dict) -> list[str]:
     """Return the list of spend-purpose redeemer payloads in the tx.
 
-    Both Ogmios v5 (dict keyed by "purpose:index") and v6 (list with the
-    purpose on each entry) shapes are handled. Entries without a
-    recognisable spend purpose are skipped, matching the way
-    multiple-satisfaction can only be evaluated against script spends.
+    Thin projection of :func:`features.extract_redeemers`, which owns the
+    Ogmios v5 (dict keyed by "purpose:index") vs v6 (list with the purpose under
+    ``validator``) shape handling. Reading the purpose from the wrong place for
+    the v5 shape once returned [] for every entry, silently disabling the
+    uniform-sweep guard and zeroing the redeemer_count evidence, so that logic
+    lives in one place rather than being restated per consumer.
+
+    A redeemer whose payload key is absent is dropped; one present but empty is
+    kept, because the uniform-sweep guard compares payload identity and the two
+    cases are not interchangeable for it.
     """
-    redeemers = raw_data.get("redeemers")
-    if not redeemers:
-        return []
-    payloads: list[str] = []
-    if isinstance(redeemers, dict):
-        # Ogmios v5: the PURPOSE lives in the key ("spend:N" / "mint:N" / ...),
-        # not in the value. The previous code looked for validator.purpose /
-        # purpose on the value, so for the keyed shape every entry was skipped
-        # and this returned [] — silently disabling the uniform-sweep guard
-        # (it was active on the list shape) and zeroing the redeemer_count
-        # evidence. Reading by key restores v5/v6 parity; the spend-purpose
-        # detection mirrors features.has_spend_redeemer.
-        for key, r in redeemers.items():
-            if not str(key).startswith("spend"):
-                continue
-            payload = r.get("redeemer") if isinstance(r, dict) else None
-            if isinstance(payload, str):
-                payloads.append(payload)
-        return payloads
-    # Ogmios v6 (live v6.14 shape): a list of redeemer dicts carrying an
-    # explicit purpose under "validator" (or, in older payloads, inline).
-    for r in redeemers:
-        if not isinstance(r, dict):
-            continue
-        validator = r.get("validator") or {}
-        purpose = validator.get("purpose") or r.get("purpose")
-        if purpose != "spend":
-            continue
-        payload = r.get("redeemer")
-        if isinstance(payload, str):
-            payloads.append(payload)
-    return payloads
+    return [
+        entry.payload_hex
+        for entry in feat_mod.extract_redeemers(raw_data)
+        if entry.purpose == feat_mod.REDEEMER_PURPOSE_SPEND and entry.payload_hex is not None
+    ]
 
 
 def _is_uniform_sweep(

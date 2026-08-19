@@ -7,12 +7,18 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Security
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.analysis.features import (
+    REDEEMER_INDEX_UNKNOWN,
+    assessable_datum,
+    extract_redeemers,
+)
+from app.analysis.plutus_structure import DecodedDatum, decode_datum_structure
 from app.api._params import ADDRESS_RE, NetworkParam, PageLimit, TimeFromParam, TimeToParam
 from app.auth import verify_api_key
 from app.config import settings
-from app.db import clickhouse
+from app.db import clickhouse, raw_store
 from app.models.common import ListResponse
 from app.utils.datetime_utils import UtcDateTime
 
@@ -43,12 +49,74 @@ class TransactionResponse(BaseModel):
     addresses: list[str]
 
 
+class OutputDatum(BaseModel):
+    """The datum attached to one transaction output.
+
+    A datum reaches an output two ways: inline, or as a hash whose preimage sits
+    in the transaction's witness set. Both are reported, and
+    ``resolved_from_witness`` says which, because "the datum is this" and "the
+    datum hashes to this and here is the preimage we found" are different
+    statements about a flagged transaction.
+    """
+
+    output_index: int
+    datum_hash: str | None = Field(None, description="Datum hash, when the output carries one")
+    resolved_from_witness: bool = Field(
+        False,
+        description="True when the payload came from the witness preimage map rather than inline",
+    )
+    size_bytes: int | None = Field(
+        None,
+        description="Payload size. None when the datum could not be measured, not zero.",
+    )
+    hex: str | None = Field(
+        None,
+        description="Raw CBOR hex, when the datum arrived in hex form rather than as Plutus JSON",
+    )
+    structure: DecodedDatum | None = Field(
+        None,
+        description="Decoded structure for display; see DecodedDatum.error when undecodable",
+    )
+
+
+class TransactionRedeemer(BaseModel):
+    """One redeemer from the transaction's witness set."""
+
+    purpose: str = Field("", description="spend / mint / publish / withdraw, '' when not stated")
+    index: int = Field(
+        REDEEMER_INDEX_UNKNOWN,
+        description=(
+            f"Ledger pointer index, or {REDEEMER_INDEX_UNKNOWN} when the payload does not state one"
+        ),
+    )
+    hex: str | None = Field(None, description="Raw redeemer CBOR hex, when present")
+    structure: DecodedDatum | None = Field(
+        None,
+        description="Decoded redeemer structure; redeemers are Plutus data too",
+    )
+    memory_units: int = Field(0, description="Execution budget: memory units")
+    cpu_units: int = Field(0, description="Execution budget: CPU steps")
+
+
 class TransactionDetailResponse(TransactionResponse):
     """Detailed transaction response with inputs and outputs"""
 
     inputs: list[dict[str, Any]]
     outputs: list[dict[str, Any]]
     metadata: dict[str, Any] | None = None
+    datums: list[OutputDatum] = Field(
+        default_factory=list,
+        description="Per-output datums, only for outputs that carry one",
+    )
+    redeemers: list[TransactionRedeemer] = Field(default_factory=list)
+    script_data_available: bool = Field(
+        True,
+        description=(
+            "False when the raw Ogmios payload could not be recovered, so empty "
+            "datums/redeemers mean 'unknown', not 'none'. The distinction matters "
+            "on a flagged transaction and must be shown, not hidden."
+        ),
+    )
 
 
 def _row_to_transaction(row: Any) -> TransactionResponse:
@@ -146,6 +214,72 @@ async def get_transactions(
         raise HTTPException(status_code=500, detail="Failed to query transactions")
 
 
+def _extract_script_detail(
+    raw_data: dict[str, Any] | None,
+) -> tuple[list[OutputDatum], list[TransactionRedeemer]]:
+    """Per-output datums and the redeemer list, decoded for display.
+
+    Reads the same witness structures the scoring path reads, through the same
+    accessor (:func:`features.assessable_datum`), so the detail view and the
+    detectors cannot disagree about what a transaction's datum is: notably, both
+    resolve a hash-only output from the witness preimage map rather than
+    reporting "no datum".
+
+    Returns empty lists when ``raw_data`` is absent; the caller reports that as
+    unavailable rather than as an absence of script data.
+    """
+    if not raw_data:
+        return [], []
+    max_nodes = settings.DATUM_DECODE_MAX_NODES
+    witness_datums = raw_data.get("datums")
+    witness_datums = witness_datums if isinstance(witness_datums, dict) else None
+
+    datums: list[OutputDatum] = []
+    raw_outputs = raw_data.get("outputs")
+    if isinstance(raw_outputs, list):
+        for index, output in enumerate(raw_outputs):
+            if not isinstance(output, dict):
+                continue
+            payload = assessable_datum(output, witness_datums)
+            datum_hash = output.get("datumHash")
+            datum_hash = datum_hash if isinstance(datum_hash, str) else None
+            if payload is None and datum_hash is None:
+                continue
+            size_bytes: int | None = None
+            payload_hex: str | None = None
+            if isinstance(payload, str):
+                payload_hex = payload
+                try:
+                    size_bytes = len(bytes.fromhex(payload))
+                except ValueError:
+                    # Malformed hex: leave size None ("not measurable") rather
+                    # than reporting a character count as a byte count.
+                    size_bytes = None
+            datums.append(
+                OutputDatum(
+                    output_index=index,
+                    datum_hash=datum_hash,
+                    resolved_from_witness=output.get("datum") is None and payload is not None,
+                    size_bytes=size_bytes,
+                    hex=payload_hex,
+                    structure=decode_datum_structure(payload, max_nodes),
+                )
+            )
+
+    redeemers = [
+        TransactionRedeemer(
+            purpose=entry.purpose,
+            index=entry.index,
+            hex=entry.payload_hex,
+            structure=decode_datum_structure(entry.payload_hex, max_nodes),
+            memory_units=entry.memory_units,
+            cpu_units=entry.cpu_units,
+        )
+        for entry in extract_redeemers(raw_data)
+    ]
+    return datums, redeemers
+
+
 @router.get("/{tx_hash}", response_model=TransactionDetailResponse)
 async def get_transaction_by_hash(
     tx_hash: str,
@@ -165,7 +299,8 @@ async def get_transaction_by_hash(
             """
             SELECT
                 tx_hash, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
-                input_count, output_count, total_input_value, total_output_value, addresses, metadata
+                input_count, output_count, total_input_value, total_output_value, addresses,
+                metadata, raw_data, raw_data_truncated
             FROM transactions
             WHERE tx_hash = %(tx_hash)s AND network = %(network)s
             LIMIT 1
@@ -251,11 +386,41 @@ async def get_transaction_by_hash(
             except Exception:
                 metadata = {"raw": tx_row[13]}
 
+        # Datum and redeemer payloads live only in the raw Ogmios blob; no column
+        # holds them. An oversized blob is stored empty with raw_data_truncated=1,
+        # in which case the gzipped raw store is the fallback (the same recovery
+        # the scoring path uses, so both see the same bytes).
+        raw_json, raw_truncated = tx_row[14], bool(tx_row[15])
+        raw_data: dict[str, Any] | None = None
+        if raw_json:
+            try:
+                raw_data = json.loads(raw_json)
+            except Exception:
+                logger.warning("raw_data for %s is not parseable JSON", tx_hash)
+        if raw_data is None and raw_truncated and settings.RAW_STORE_ENABLED:
+            timestamp = tx_row[5]
+            if isinstance(timestamp, datetime):
+                try:
+                    # Blocking gzip read, so it goes through the store's async
+                    # entry point rather than the event loop.
+                    raw_data = await raw_store.read_confirmed_async(
+                        query_network,
+                        tx_hash,
+                        timestamp,
+                    )
+                except Exception:
+                    # Degrade to "unavailable" rather than failing the page: the
+                    # inputs/outputs half of the response is still useful.
+                    logger.exception("Raw store fallback failed for %s", tx_hash[:16])
+        datums, redeemers = _extract_script_detail(raw_data)
         return TransactionDetailResponse(
             **_row_to_transaction(tx_row).model_dump(),
             inputs=inputs,
             outputs=outputs,
             metadata=metadata,
+            datums=datums,
+            redeemers=redeemers,
+            script_data_available=raw_data is not None,
         )
 
     except HTTPException:

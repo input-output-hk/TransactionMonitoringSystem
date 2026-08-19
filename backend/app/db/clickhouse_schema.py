@@ -228,11 +228,13 @@ SCHEMA_DDL: dict[str, str] = {
             evidence         String DEFAULT '{{}}',
             corroboration_count   UInt8 DEFAULT 0,
             corroborating_classes String DEFAULT '',
+            contract_address String DEFAULT '',
             analysis_version String,
             analyzed_at      DateTime,
             INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
             INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
-            INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1
+            INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1,
+            INDEX idx_contract_address contract_address TYPE bloom_filter GRANULARITY 1
         ) ENGINE = ReplacingMergeTree(analyzed_at)
         ORDER BY (network, tx_hash)
     """,
@@ -660,6 +662,19 @@ def _create_detection_tables(client: Client) -> None:
     client.execute(
         "ALTER TABLE tx_class_scores "
         "ADD COLUMN IF NOT EXISTS corroborating_classes String DEFAULT ''"
+    )
+    # Normalized contract identity for alert grouping (see
+    # app/analysis/contract_identity). Additive and default-'' so historical
+    # rows read as "no contract identity" until scripts/backfill_contract_address
+    # derives them from the evidence blob; the bloom filter serves the
+    # group-by/equality reads the grouped alerts endpoint issues.
+    client.execute(
+        "ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS contract_address String DEFAULT ''"
+    )
+    client.execute(
+        "ALTER TABLE tx_class_scores "
+        "ADD INDEX IF NOT EXISTS idx_contract_address contract_address "
+        "TYPE bloom_filter GRANULARITY 1"
     )
 
     # Admin-curated archive of flagged transactions (see SCHEMA_DDL).

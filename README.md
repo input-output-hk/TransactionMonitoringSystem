@@ -173,9 +173,10 @@ Lifecycle statuses: `PENDING` (mempool), `CONFIRMED` (in block), `ROLLED_BACK` (
 ### Analysis
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/v1/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`). Valid `attack_class` values are the nine stored classes (`token_dust`, `large_value`, `large_datum`, `multiple_sat`, `front_running`, `sandwich`, `circular`, `fake_token`, `phishing`) plus the synthetic `contract_anomaly` (resolved at read time; returns empty when the clustering profile is off). |
+| GET | `/api/v1/analysis/results` | Analysis results (params: `risk_band`, `min_score`, `min_corroboration`, `attack_class`, `contract`, `sort`, `analyzed_from`, `analyzed_to`, `limit`, `offset`). `contract` is tri-state: omitted means no filter, an address restricts to that contract, and the EMPTY string selects exactly the alerts that name no contract at all. Valid `attack_class` values are the nine stored classes (`token_dust`, `large_value`, `large_datum`, `multiple_sat`, `front_running`, `sandwich`, `circular`, `fake_token`, `phishing`) plus the synthetic `contract_anomaly` (resolved at read time; returns empty when the clustering profile is off). |
+| GET | `/api/v1/analysis/results/grouped` | Alerts collapsed to one row per contract, for the grouped alerts table. Same filters as `/results`. Returns one ordered list mixing `kind="group"` rows with `kind="alert"` rows for alerts that name no contract, so both shapes interleave correctly across page boundaries. The envelope carries two totals: `total` counts ROWS (what the pager steps through) and `alert_total` counts ALERTS. |
 | GET | `/api/v1/analysis/results/{tx_hash}` | Analysis result for a single transaction |
-| GET | `/api/v1/analysis/stats` | Risk-band distribution and per-class score stats |
+| GET | `/api/v1/analysis/stats` | Risk-band distribution and per-class score stats. `avg_max_score` averages the FINDING population (`max_score >= 1`), matching the alert list beside it rather than every scored transaction; `finding_count` is that population's size |
 | GET | `/api/v1/analysis/stats/timeseries` | Daily High and Critical alert counts (params: `days`) |
 | GET | `/api/v1/analysis/baselines/{scope_type}/{scope_id}` | Baseline percentiles for a scope |
 

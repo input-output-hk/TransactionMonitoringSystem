@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # the descent makes the walk always terminate and return the spans found so far
 # instead of crashing. 64 is far deeper than any legitimate Plutus datum yet
 # well under CPython's default recursion limit given the closures' own frames.
-_MAX_WALK_DEPTH = 64
+MAX_WALK_DEPTH = 64
 
 
 def decode_datum_strings(datum: Any, min_len: int) -> list[str]:
@@ -85,8 +85,8 @@ def decode_datum_strings(datum: Any, min_len: int) -> list[str]:
         arrays as ``list``/``tuple``, and Plutus-Data constructors as
         ``cbor2.CBORTag`` whose ``.value`` is the fields array. Match maps
         by ``Mapping`` so frozendict leaves are not silently skipped."""
-        if depth > _MAX_WALK_DEPTH:
-            logger.debug("datum CBOR walk hit depth cap %d", _MAX_WALK_DEPTH)
+        if depth > MAX_WALK_DEPTH:
+            logger.debug("datum CBOR walk hit depth cap %d", MAX_WALK_DEPTH)
             return
         if isinstance(node, bytes):
             _emit_bytes(node)
@@ -132,8 +132,8 @@ def decode_datum_strings(datum: Any, min_len: int) -> list[str]:
         return True
 
     def _walk(node: Any, depth: int = 0) -> None:
-        if depth > _MAX_WALK_DEPTH:
-            logger.debug("datum walk hit depth cap %d", _MAX_WALK_DEPTH)
+        if depth > MAX_WALK_DEPTH:
+            logger.debug("datum walk hit depth cap %d", MAX_WALK_DEPTH)
             return
         if node is None:
             return

@@ -510,6 +510,8 @@ Variables are layered across files:
 | `WS_HANDSHAKE_RATE_LIMIT_WINDOW_SECONDS` | `60` | WebSocket handshake rate-limit window |
 | `AUDIT_LOG_RETENTION_DAYS` | `0` | Prune audit rows older than N days; `0` keeps forever (audit rows are the suppression accountability record) |
 | `STATS_CACHE_TTL_SECONDS` | `10` | In-process TTL for the dashboard stats aggregate; `0` disables |
+| `GROUPED_ALERTS_MAX_CONTRACTS` | `5000` | Cap on the contracts fetched for the contract-grouped alerts view. That list paginates in Python (a winning clustering verdict can move a transaction between groups, which SQL LIMIT/OFFSET cannot express), so the fetch is bounded. Hitting the cap is logged at WARNING and means some contracts are absent from the grouped view; raise it rather than leaving it truncated |
+| `DATUM_DECODE_MAX_NODES` | `20000` | Node budget for decoding one Plutus datum into the tree shown on the transaction detail view. A datum is attacker-controlled data and the depth cap alone bounds only depth, so a flat list of a million entries would still build a million response nodes. Exceeding it marks the result truncated rather than serving a partial tree as if it were complete |
 | `RAW_FALLBACK_RETRY_SECONDS` | `30` | Wall-clock spacing between counted raw-store fallback attempts |
 | `ROLLBACK_SCORE_REPURGE_DELAY_SECONDS` | `60` | Delay before the second `tx_class_scores` rollback purge pass |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background risk scoring |
@@ -939,8 +941,16 @@ Restore:
 The app image bundles the backend and the built dashboard; databases and
 their schemas are separate. Schema changes are applied automatically at
 startup (idempotent `CREATE TABLE IF NOT EXISTS` / `ALTER ... IF NOT EXISTS`),
-so a routine upgrade is pull-and-restart. The one exception is the legacy
-dedup migration below, which the startup guard will demand explicitly.
+so a routine upgrade is pull-and-restart. Two kinds of step are not automatic,
+and they fail in opposite ways:
+
+- The legacy dedup migration below. The startup guard demands it by name, so the
+  app refuses to start until it has run. You cannot miss it.
+- A **post-upgrade backfill**, for a release that adds a column derived from data
+  already on the row. Nothing demands these. The app starts, ingests and scores
+  normally while the new column sits empty on historical rows, so the only
+  symptom is a dashboard feature that looks broken for everything older than the
+  upgrade. Check "Post-upgrade backfills" below before calling an upgrade done.
 
 1. Back up first (see "Backup & restore"): a schema-changing release is the
    moment a rollback path matters most.
@@ -953,7 +963,10 @@ dedup migration below, which the startup guard will demand explicitly.
    schema changes itself.
 4. If the app refuses to start and names `scripts/migrate_dedup_schema.py`, run
    the one-shot migration below, then start again.
-5. Verify: `curl -s -H "X-API-Key: $TMS_API_KEY" localhost:8000/health/detail`
+5. Run any backfill this release needs (see "Post-upgrade backfills"). The app is
+   already serving at this point: a backfill only fills history in, so it is safe
+   to run against a live instance and safe to defer to a quieter hour.
+6. Verify: `curl -s -H "X-API-Key: $TMS_API_KEY" localhost:8000/health/detail`
    (the endpoint requires an API key) should report `pipeline_state: OK` once
    ingestion catches up from the sync checkpoint (a brief `DEGRADED` while it
    replays the gap is normal).
@@ -991,6 +1004,37 @@ Deployments created before the ReplacingMergeTree schema must run the one-shot m
 2. Dry-run: `cd backend && python scripts/migrate_dedup_schema.py` (prints per-table row and duplicate counts).
 3. Apply: `python scripts/migrate_dedup_schema.py --apply`
 4. Restart the instances. Legacy data is preserved as `<table>__legacy_<date>`; drop those tables manually after a verification window.
+
+### Post-upgrade backfills
+
+A backfill populates a newly added column for rows that were written before the
+upgrade. The column itself is created automatically at startup; only the
+historical values are missing. Nothing in the app fails or warns while they are
+missing, which is why this list exists.
+
+Each script is idempotent and resumable: it guards on the rows it can still
+improve, so an interrupted run is resumed by simply running it again, and a
+completed one reports nothing pending. All of them are dry-run by default and
+write only with `--apply`. Run from `backend/`, and with `-m` (the scripts import
+`app.*`, so invoking them by path fails with `ModuleNotFoundError: No module
+named 'app'`).
+
+| Release adds | Script | Symptom if skipped |
+|---|---|---|
+| `tx_class_scores.contract_address` | `scripts.oneoff.backfill_contract_address` | The contract-grouped risk-alerts table shows no group for any transaction scored before the upgrade: every one of them renders as an ungrouped row instead |
+
+```bash
+# In the container (WORKDIR is already /app/backend):
+docker compose exec app python -m scripts.oneoff.backfill_contract_address
+# Dry-run: prints the pending count per chunk and a sample of the derived values.
+docker compose exec app python -m scripts.oneoff.backfill_contract_address --apply
+```
+
+`--chunk-days` (default 30) sizes each `ALTER TABLE ... UPDATE`, and `--sync`
+waits for each mutation before starting the next, which keeps load predictable
+on a busy instance. ClickHouse mutations run in the background and do not block
+inserts, so ingestion and scoring continue throughout; the write touches only the
+one column, and the others are hardlinked.
 
 ## API quick reference
 

@@ -655,7 +655,8 @@ def test_class_scores_stats_sql_excludes_archived_by_default():
             captured["queries"].append(query)
             # Return a single row matching the schema the parser expects.
             zero_per_class = [0, 0.0, 0.0] * 9
-            return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
+            # total, 4 band counts, avg, finding_count, last_analyzed_at
+            return [(0, 0, 0, 0, 0, 0.0, 0, None, *zero_per_class)]
 
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod")
@@ -676,7 +677,8 @@ def test_class_scores_stats_sql_skips_filter_when_include_archived():
         def execute(self, query, params=None):
             captured["queries"].append(query)
             zero_per_class = [0, 0.0, 0.0] * 9
-            return [(0, 0, 0, 0, 0, 0.0, None, *zero_per_class)]
+            # total, 4 band counts, avg, finding_count, last_analyzed_at
+            return [(0, 0, 0, 0, 0, 0.0, 0, None, *zero_per_class)]
 
     with patch("app.db.clickhouse._get_client", return_value=FakeClient()):
         clickhouse.get_class_scores_stats(network="preprod", include_archived=True)

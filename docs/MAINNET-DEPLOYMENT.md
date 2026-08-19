@@ -934,10 +934,16 @@ docker compose --profile app up -d app
 ```
 
 Schema changes are additive and applied idempotently at startup, so a routine upgrade is
-build-and-restart and a rollback to the immediately preceding commit is safe. The
-exception is the one-shot dedup migration, which the startup guard demands by name if it
-is needed and which is not backward compatible; keep the `<table>__legacy_<date>` tables
-until the new version has proven healthy. If you rebuilt the frontend with a different
+build-and-restart and a rollback to the immediately preceding commit is safe. There are
+two exceptions, and only one of them announces itself. The one-shot dedup migration is
+demanded by the startup guard by name if it is needed and is not backward compatible;
+keep the `<table>__legacy_<date>` tables until the new version has proven healthy. A
+post-upgrade **backfill** is the quiet one: a release that adds a column derived from data
+already on the row leaves that column empty for all pre-upgrade history, and nothing
+fails or warns, so the only symptom is a dashboard feature that looks broken for
+everything older than the deploy. Check RUNBOOK.md's "Post-upgrade backfills" table
+before calling a mainnet upgrade done, and run what it lists (they are dry-run by default
+and safe against a live instance). If you rebuilt the frontend with a different
 `VITE_NETWORK`, remember that a rollback must rebuild too, not just restart. Note that
 the rollback leaves the checkout on a detached HEAD, so return to the branch before the
 next `git pull`.

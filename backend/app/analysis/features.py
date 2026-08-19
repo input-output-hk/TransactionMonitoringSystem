@@ -14,6 +14,7 @@ import json
 import logging
 import math
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 from app.analysis.normalise import EPSILON
@@ -477,7 +478,7 @@ def _object_datum_byte_leaves(datum: Any) -> list[bytes]:
 _MAX_BYTE_ENTROPY_BITS = 8.0
 
 
-def _assessable_datum(
+def assessable_datum(
     output: dict[str, Any],
     datums: dict[str, Any] | None = None,
 ) -> Any:
@@ -509,7 +510,7 @@ def _datum_raw_bytes(
     datum with no ByteArray leaves), never "measured and empty": callers use
     that distinction to avoid reading an unmeasured datum as a benign one.
     """
-    datum = _assessable_datum(output, datums)
+    datum = assessable_datum(output, datums)
     if isinstance(datum, dict):
         # Object-shaped datum: assess its decoded ByteArray leaves so
         # object-form padding is measurable too.
@@ -541,7 +542,7 @@ def datum_shannon_entropy_bits(
     :func:`datum_content_assessable` is how a caller tells the two apart.
 
     ``datums`` is the transaction's witness datum map, forwarded to
-    :func:`_assessable_datum` so a hash-delivered datum is assessed from its
+    :func:`assessable_datum` so a hash-delivered datum is assessed from its
     preimage rather than reported as unmeasurable.
 
     Limitation: an adaptive attacker could pad with random (high-entropy) bytes
@@ -608,7 +609,7 @@ def datum_leaf_concentration(
     a caller that reads a low value as evidence of legitimate structure must
     first consult :func:`datum_content_assessable`.
     """
-    datum = _assessable_datum(output, datums)
+    datum = assessable_datum(output, datums)
     if isinstance(datum, dict):
         # Object-shaped datum: concentration over its decoded ByteArray
         # leaves (largest leaf / total leaf bytes), mirroring the hex path so
@@ -647,7 +648,7 @@ def datum_content_assessable(
     raw = _datum_raw_bytes(output, datums)
     if raw is None:
         return False
-    if isinstance(_assessable_datum(output, datums), dict):
+    if isinstance(assessable_datum(output, datums), dict):
         # Object form is pre-decoded by the ingester: reaching its ByteArray
         # leaves is the whole measurement, there is no CBOR left to walk.
         return True
@@ -732,6 +733,106 @@ def _redeemer_exunits(entry: Any) -> tuple[int, int]:
     except (TypeError, ValueError):
         return 0, 0
     return mem, cpu
+
+
+# Ogmios redeemer purposes. "spend" is the only one the detection path keys on
+# (a Plutus script input), but the display path reports whichever purpose the
+# payload carries, so the value is named rather than inlined at both sites.
+REDEEMER_PURPOSE_SPEND = "spend"
+
+# Pointer index for a redeemer whose payload does not carry one. Distinct from
+# any real index (which is a ledger pointer, always >= 0) so a consumer can tell
+# "not stated by the payload" from index 0.
+REDEEMER_INDEX_UNKNOWN = -1
+
+
+@dataclass(frozen=True)
+class RedeemerEntry:
+    """One redeemer as it appears in the transaction witness set.
+
+    ``payload_hex`` is tri-state on purpose: ``None`` means the payload key was
+    absent, and ``""`` means it was present but empty. Collapsing the two would
+    change how many redeemers ``multiple_sat``'s uniform-sweep guard compares,
+    which is a detection behaviour, not a display detail.
+    """
+
+    purpose: str
+    index: int
+    payload_hex: str | None
+    memory_units: int
+    cpu_units: int
+
+
+def extract_redeemers(raw_data: dict[str, Any]) -> list[RedeemerEntry]:
+    """Every redeemer in the tx, across both Ogmios payload shapes.
+
+    Ogmios v5 keys a dict by "<purpose>:<index>" and carries no purpose on the
+    value; v6 emits a list with the purpose under ``validator`` (or, in older
+    payloads, inline). Reading the purpose from the wrong place is what once
+    silently disabled the uniform-sweep guard on the v5 shape, so both are
+    handled here, once, rather than at each call site.
+
+    Tolerates malformed chain data the same way the rest of this module does: a
+    non-dict entry is skipped and a garbage index degrades to
+    :data:`REDEEMER_INDEX_UNKNOWN` rather than raising, because this runs over
+    untrusted payloads inside batch ingestion.
+    """
+    redeemers = raw_data.get("redeemers")
+    if not redeemers:
+        return []
+    entries: list[RedeemerEntry] = []
+
+    def _payload(entry: dict[str, Any]) -> str | None:
+        payload = entry.get("redeemer")
+        return payload if isinstance(payload, str) else None
+
+    def _int_or_unknown(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return REDEEMER_INDEX_UNKNOWN
+
+    if isinstance(redeemers, dict):
+        for key, entry in redeemers.items():
+            if not isinstance(entry, dict):
+                continue
+            purpose, _, raw_index = str(key).partition(":")
+            mem, cpu = _redeemer_exunits(entry)
+            entries.append(
+                RedeemerEntry(
+                    purpose=purpose,
+                    index=_int_or_unknown(raw_index) if raw_index else REDEEMER_INDEX_UNKNOWN,
+                    payload_hex=_payload(entry),
+                    memory_units=mem,
+                    cpu_units=cpu,
+                )
+            )
+        return entries
+
+    if not isinstance(redeemers, list):
+        return []
+    for entry in redeemers:
+        if not isinstance(entry, dict):
+            continue
+        validator = entry.get("validator")
+        validator = validator if isinstance(validator, dict) else {}
+        purpose = validator.get("purpose") or entry.get("purpose") or ""
+        pointer_index = validator.get("index", entry.get("index"))
+        mem, cpu = _redeemer_exunits(entry)
+        entries.append(
+            RedeemerEntry(
+                purpose=str(purpose),
+                index=(
+                    _int_or_unknown(pointer_index)
+                    if pointer_index is not None
+                    else REDEEMER_INDEX_UNKNOWN
+                ),
+                payload_hex=_payload(entry),
+                memory_units=mem,
+                cpu_units=cpu,
+            )
+        )
+    return entries
 
 
 def extract_tx_script_features(

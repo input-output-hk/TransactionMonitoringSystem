@@ -1,14 +1,17 @@
 """API endpoints for the multi-class Analysis Engine"""
 
 import logging
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Security
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.analysis.contract_identity import NO_CONTRACT
 from app.analysis.engine import _CLASS_NAMES
 from app.api._params import NetworkParam, PageLimit, PageOffset, TimeFromParam, TimeToParam
 from app.api.contract_anomaly_read import (
     _CONTRACT_ANOMALY,
+    _augment_groups_with_contract_anomaly,
     _augment_stats_with_contract_anomaly,
     _augment_timeseries_with_contract_anomaly,
     _list_contract_anomaly_results,
@@ -22,7 +25,7 @@ from app.config import settings
 from app.db import archive_queries, clickhouse, clustering_queries
 from app.models.common import ListResponse
 from app.models.transaction import ClassScoreResult, RiskBand
-from app.utils.datetime_utils import UtcDateTime, format_iso_utc
+from app.utils.datetime_utils import UtcDateTime, format_iso_utc, to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,354 @@ router = APIRouter(prefix="/analysis", tags=["analysis"])
 # _list_contract_anomaly_results). It stays out of _CLASS_NAMES so the engine's
 # scorer-order contract is unaffected.
 _VALID_ATTACK_CLASSES = (*_CLASS_NAMES, _CONTRACT_ANOMALY)
+
+
+class GroupedAlertRow(BaseModel):
+    """One row of the grouped risk-alerts table.
+
+    Two shapes share one ordered, paginated list, discriminated by ``kind``:
+
+    - ``group``: a contract's alerts collapsed behind an expandable row.
+    - ``alert``: a single alert that names no contract. Those are returned here
+      rather than in a separate request so ordering and pagination stay correct.
+      Paginating groups and un-attributed alerts as two independent lists would
+      interleave them wrongly across page boundaries and double-count the pager.
+    """
+
+    kind: Literal["group", "alert"] = Field(
+        ...,
+        description="'group' = a contract's collapsed alerts, 'alert' = one un-attributed alert",
+    )
+    contract_address: str = Field(
+        "",
+        description="The contract implicated. Always empty for kind='alert'.",
+    )
+    alert_count: int = Field(
+        ...,
+        description=(
+            "Alerts under this row, using the SAME filters the flat list applies. "
+            "A true server-side count, not a page-window artefact, so it is safe "
+            "to display as the total. Always 1 for kind='alert'."
+        ),
+    )
+    worst_score: float = Field(..., description="Highest max_score under this row (0-100)")
+    worst_band: RiskBand = Field(
+        ...,
+        description=(
+            "For a group, the STORED band of its highest-scoring alert rather "
+            "than a band re-derived from worst_score, so the badge agrees with "
+            "the row the analyst sees on expanding it."
+        ),
+    )
+    latest_analyzed_at: UtcDateTime = Field(
+        ...,
+        description="Most recent analyzed_at under this row",
+    )
+    tx_hash: str | None = Field(
+        None,
+        description="The transaction, for kind='alert' only",
+    )
+    attack_class: str | None = Field(
+        None,
+        description="Winning class, for kind='alert' only",
+    )
+    unclusterable_model: bool = Field(
+        False,
+        description=(
+            "Mirrors the flat row's un-clusterable contract_anomaly marker: True "
+            "when this row's worst alert is a sidecar verdict whose model could "
+            "not cluster the contract, so the operator can de-prioritise it."
+        ),
+    )
+
+
+async def _unattributed_alert_rows(
+    network: str,
+    *,
+    risk_band: list[str] | None,
+    attack_class: str | None,
+    min_score: float,
+    sort: str,
+    analyzed_from: Any,
+    analyzed_to: Any,
+    min_corroboration: int,
+    skip: int,
+    need: int,
+    exclude_tx_hashes: list[str],
+) -> tuple[list[dict[str, Any]], int]:
+    """Alerts that name no contract, shaped as rows of the grouped list.
+
+    Selected with the tri-state contract filter's empty-string value, i.e. the
+    complement of what the grouped aggregate returns, so the two together cover
+    every alert the flat list would show exactly once.
+
+    These render as ordinary rows: an alert with no contract has nothing to put
+    behind a chevron, and a single "Unattributed" bucket would hide four
+    unrelated attack classes behind one meaningless label.
+
+    Returns ``(rows, total)``. Only the window ``[skip, skip + need)`` is fetched,
+    in the SAME order the caller merges on, because that window is provably the
+    only part of this list that can surface on the requested page (see the caller
+    for the bound). ``total`` is a separate COUNT so the pager still reports every
+    matching alert rather than the fetched slice.
+
+    ``exclude_tx_hashes`` drops the transactions the contract_anomaly
+    reconciliation has already counted under a contract group. Their STORED
+    contract is empty, so this query would otherwise claim them as well and one
+    alert would render twice on one page, once as a group member and once as a
+    lone row showing its now-superseded stored score. Applying it to the COUNT
+    too keeps the pager exact.
+    """
+    rows = await clickhouse.get_class_scores_list_async(
+        network=network,
+        risk_band=risk_band,
+        attack_class=attack_class,
+        min_score=min_score,
+        sort=sort,
+        analyzed_from=analyzed_from,
+        analyzed_to=analyzed_to,
+        limit=need,
+        offset=skip,
+        min_corroboration=min_corroboration,
+        contract=NO_CONTRACT,
+        exclude_tx_hashes=exclude_tx_hashes,
+    )
+    total = await clickhouse.count_class_scores_async(
+        network=network,
+        risk_band=risk_band,
+        attack_class=attack_class,
+        min_score=min_score,
+        analyzed_from=analyzed_from,
+        analyzed_to=analyzed_to,
+        min_corroboration=min_corroboration,
+        contract=NO_CONTRACT,
+        exclude_tx_hashes=exclude_tx_hashes,
+    )
+    return [
+        {
+            "kind": "alert",
+            "contract_address": "",
+            "alert_count": 1,
+            "worst_score": float(r["max_score"]),
+            "worst_band": r["risk_band"],
+            "latest_analyzed_at": r["analyzed_at"],
+            "tx_hash": r["tx_hash"],
+            "attack_class": r["max_class"],
+            "unclusterable_model": False,
+        }
+        for r in rows
+    ], total
+
+
+class GroupedAlertsResponse(ListResponse[GroupedAlertRow]):
+    """The grouped list plus the alert count its pager cannot express.
+
+    ``total`` counts ROWS, because rows are what the pager steps through: one
+    contract group is one row however many alerts it stands for. ``alert_total``
+    is the number of ALERTS under the same filters, which is what an operator
+    reads beside a table of groups. It is the sum of exactly the ``alert_count``
+    values these rows carry, so it always agrees with what the screen shows and
+    with what each group's expansion lists; a transaction that implicates two
+    contracts therefore counts once per contract.
+    """
+
+    alert_total: int
+
+
+# NOTE: declared BEFORE /results/{tx_hash}. FastAPI matches routes in
+# declaration order, so this literal segment must precede the path-parameter
+# route that would otherwise capture "grouped" as a tx_hash.
+@router.get(
+    "/results/grouped",
+    dependencies=[Security(verify_api_key)],
+    response_model=GroupedAlertsResponse,
+)
+async def list_analysis_result_groups(
+    network: NetworkParam = None,
+    risk_band: list[RiskBand] = Query(
+        default_factory=list,
+        description="Filter by risk band. Repeat the param to OR-match multiple values.",
+    ),
+    attack_class: str | None = Query(None, description="Filter by attack class name"),
+    min_score: float = Query(0.0, ge=0.0, le=100.0, description="Minimum score filter"),
+    min_corroboration: int = Query(0, ge=0, le=len(_CLASS_NAMES)),
+    sort: str = Query("date", description="Group order: 'score' or 'date'"),
+    analyzed_from: TimeFromParam = None,
+    analyzed_to: TimeToParam = None,
+    limit: PageLimit = 100,
+    offset: PageOffset = 0,
+):
+    """Alerts collapsed to one row per contract, for the grouped alerts table.
+
+    Applies the same filters as ``/results`` so a group's ``alert_count`` matches
+    what the flat list returns for that contract. Alerts naming no contract are
+    returned in the SAME list as ungrouped ``kind='alert'`` rows: paginating them
+    separately would interleave the two shapes wrongly across page boundaries and
+    leave neither pager knowing the combined total.
+
+    Pagination is applied in Python, after the contract_anomaly reconciliation,
+    because a winning sidecar verdict can move a transaction between groups (or
+    create one) and SQL LIMIT/OFFSET cannot account for that. Group cardinality
+    is distinct contracts, orders of magnitude below alert cardinality, so the
+    full set is cheap to fetch; the fetch is bounded by
+    ``GROUPED_ALERTS_MAX_CONTRACTS`` and hitting that bound is logged. The
+    un-attributed side arrives DB-ordered, so only the window that can reach the
+    requested page is fetched (bounded by that same contract cap plus the page
+    size, whatever the offset) and its total comes from a COUNT.
+    """
+    if attack_class and attack_class not in _VALID_ATTACK_CLASSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown attack class '{attack_class}'. Valid: {list(_VALID_ATTACK_CLASSES)}",
+        )
+    if sort not in ("score", "date"):
+        raise HTTPException(status_code=422, detail="sort must be 'score' or 'date'")
+    query_network = network or settings.CARDANO_NETWORK
+    try:
+        rbs = [b.value for b in risk_band] if risk_band else None
+        anomaly_only = attack_class == _CONTRACT_ANOMALY
+        if anomaly_only and not settings.CLUSTERING_ENABLED:
+            # The class cannot exist with clustering off, so the page is
+            # legitimately empty rather than an error (matching /results).
+            return {"count": 0, "total": 0, "alert_total": 0, "data": []}
+        cap = settings.GROUPED_ALERTS_MAX_CONTRACTS
+        groups: list[dict[str, Any]] = []
+        if not anomaly_only:
+            # contract_anomaly is never a STORED max_class, so SQL cannot filter
+            # for it and must not be asked to: querying unfiltered and letting
+            # the reconciliation add to it would return every contract group.
+            # Under that filter the reconciliation builds the whole result.
+            groups = await clickhouse.group_class_scores_by_contract_async(
+                network=query_network,
+                risk_band=rbs,
+                attack_class=attack_class,
+                min_score=min_score,
+                sort=sort,
+                analyzed_from=analyzed_from,
+                analyzed_to=analyzed_to,
+                limit=cap,
+                offset=0,
+                min_corroboration=min_corroboration,
+            )
+            if len(groups) >= cap:
+                logger.warning(
+                    "grouped alerts hit the contract cap (%d); some contracts are absent "
+                    "from the grouped view. Raise GROUPED_ALERTS_MAX_CONTRACTS.",
+                    cap,
+                )
+        # Mirrors the flat list's rescue gate (_rescue_flagged_onto_page): a
+        # 9-class attack_class filter is not a predicate the synthetic class can
+        # satisfy, so reconciling under it would add groups the filter excludes
+        # and decrement groups SQL never counted. The one exception is the filter
+        # BEING contract_anomaly, where the reconciliation is the whole answer.
+        reconcile = settings.CLUSTERING_ENABLED and (anomaly_only or not attack_class)
+        # Transactions the reconciliation counts under a contract group even
+        # though their STORED contract is empty. The un-attributed query selects
+        # on that stored column, so without this it would claim them too.
+        rehomed: list[str] = []
+        if reconcile:
+            # Best-effort: the sidecar being down must not fail the alerts table.
+            # Exception under anomaly_only, where the augmentation IS the result:
+            # degrading to stored groups would silently answer a different
+            # question, so the caller gets a 503 instead.
+            try:
+                rehomed = await _augment_groups_with_contract_anomaly(
+                    query_network,
+                    groups,
+                    bands=rbs,
+                    min_score=min_score,
+                    analyzed_from=analyzed_from,
+                    analyzed_to=analyzed_to,
+                    min_corroboration=min_corroboration,
+                    anomaly_only=anomaly_only,
+                )
+            except Exception:
+                logger.error(
+                    "contract_anomaly group augmentation failed",
+                    exc_info=True,
+                )
+                if anomaly_only:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="contract_anomaly grouping unavailable",
+                    ) from None
+        rows: list[dict[str, Any]] = [
+            {
+                "kind": "group",
+                "contract_address": g["contract_address"],
+                "alert_count": int(g["alert_count"]),
+                "worst_score": float(g["worst_score"]),
+                "worst_band": g["worst_band"],
+                "latest_analyzed_at": g["latest_analyzed_at"],
+                "unclusterable_model": bool(g.get("unclusterable_model", False)),
+            }
+            for g in groups
+        ]
+        group_rows = len(rows)
+        total = group_rows
+        alert_total = sum(int(g["alert_count"]) for g in groups)
+        # How many un-attributed rows the fetch below skips. Every skipped row
+        # ranks above the requested page, so the page shifts left by exactly this
+        # much (see the slice at the end).
+        page_skip = 0
+        # Alerts naming no contract join the SAME list rather than being fetched
+        # separately by the client. Two independently paginated lists cannot be
+        # interleaved correctly across page boundaries, and neither pager would
+        # know the combined total.
+        if not anomaly_only:
+            # Only a window of the un-attributed list can reach the requested
+            # page. A group row can only push an un-attributed row DOWN the merged
+            # order, and there are exactly `group_rows` of them, so an
+            # un-attributed row landing at merged position p has un-attributed
+            # rank in [p - group_rows, p]. Fetching [offset - group_rows,
+            # offset + limit) therefore covers the page and nothing else.
+            #
+            # The window matters: `offset` has no upper bound (PageOffset is
+            # ge=0 only), so a fetch sized offset + limit is caller-controlled and
+            # could materialise the whole un-attributed set. This one is bounded
+            # by GROUPED_ALERTS_MAX_CONTRACTS + limit whatever the offset.
+            page_skip = max(0, offset - group_rows)
+            unattributed, unattributed_total = await _unattributed_alert_rows(
+                query_network,
+                risk_band=rbs,
+                attack_class=attack_class,
+                min_score=min_score,
+                sort=sort,
+                analyzed_from=analyzed_from,
+                analyzed_to=analyzed_to,
+                min_corroboration=min_corroboration,
+                skip=page_skip,
+                need=offset + limit - page_skip,
+                exclude_tx_hashes=rehomed,
+            )
+            rows.extend(unattributed)
+            total += unattributed_total
+            alert_total += unattributed_total
+        # One ordering over both shapes, so a group and a lone alert interleave by
+        # the same key the flat list sorts on.
+        sort_key = (
+            (lambda r: (r["worst_score"], to_aware_utc(r["latest_analyzed_at"])))
+            if sort == "score"
+            else (lambda r: (to_aware_utc(r["latest_analyzed_at"]), r["worst_score"]))
+        )
+        rows.sort(key=sort_key, reverse=True)
+        # Each row `page_skip` dropped has un-attributed rank < offset - group_rows
+        # and at most `group_rows` groups can precede it, so its position in the
+        # full merge is strictly below `offset`: all of them sit before the page,
+        # and the page is simply shifted left by that count.
+        page_start = offset - page_skip
+        page = rows[page_start : page_start + limit]
+        return {
+            "count": len(page),
+            "total": total,
+            "alert_total": alert_total,
+            "data": page,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error grouping results: {e}")
+        raise HTTPException(status_code=500, detail="Failed to group results")
 
 
 @router.get("/results/{tx_hash}", dependencies=[Security(verify_api_key)])
@@ -122,6 +473,15 @@ async def list_analysis_results(
         ),
     ),
     sort: str = Query("score", description="Sort order: 'score' or 'date'"),
+    contract: str | None = Query(
+        None,
+        description=(
+            "Filter by the contract the alert implicates. Pass an address to "
+            "restrict to that contract; pass an empty string to select only the "
+            "alerts that name no contract at all (the grouped view's ungrouped "
+            "rows). Omit for no filter."
+        ),
+    ),
     analyzed_from: TimeFromParam = None,
     analyzed_to: TimeToParam = None,
     limit: PageLimit = 100,
@@ -162,6 +522,7 @@ async def list_analysis_results(
                     sort=sort,
                     limit=limit,
                     offset=offset,
+                    contract=contract,
                 )
             except Exception:
                 # Degrade to an empty page rather than fail the request (matching
@@ -189,6 +550,7 @@ async def list_analysis_results(
             analyzed_from=analyzed_from,
             analyzed_to=analyzed_to,
             min_corroboration=min_corroboration,
+            contract=contract,
         )
         rows = await clickhouse.get_class_scores_list_async(
             **filters,
@@ -214,6 +576,7 @@ async def list_analysis_results(
             sort=sort,
             limit=limit,
             offset=offset,
+            contract=contract,
         )
         return {
             "count": len(data),
@@ -238,6 +601,14 @@ class AnalysisStatsOut(BaseModel):
     moderate_count: int
     informational_count: int
     avg_max_score: float | None
+    finding_count: int = Field(
+        0,
+        description=(
+            "Number of transactions behind avg_max_score: those scoring at or "
+            "above the finding floor. `total` counts every scored transaction "
+            "including the clean ones, so it is NOT this average's denominator."
+        ),
+    )
     last_analyzed_at: UtcDateTime | None
     per_class: dict[str, PerClassStats]
     pending_count: int

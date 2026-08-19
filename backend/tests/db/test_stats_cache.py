@@ -24,9 +24,9 @@ def _clear_cache():
 @pytest.fixture
 def client(monkeypatch):
     mock = MagicMock()
-    # One row shaped like the stats SELECT: totals, band counts, avg, last,
-    # then 3 per-class aggregates for every class column.
-    base = [10, 1, 2, 3, 4, 50.0, None]
+    # One row shaped like the stats SELECT: totals, band counts, avg, finding
+    # count, last, then 3 per-class aggregates for every class column.
+    base = [10, 1, 2, 3, 4, 50.0, 6, None]
     per_class = [0, 0.0, 0.0] * len(clickhouse_scores._CLASS_COLS)
     mock.execute.return_value = [tuple(base + per_class)]
     monkeypatch.setattr(clickhouse_scores, "_client", lambda: mock)
