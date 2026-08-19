@@ -15,7 +15,7 @@
  *  - a resolved input value is a LOWER BOUND when enrichment could not resolve
  *    every parent UTxO, so the total is labelled rather than presented as exact.
  */
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 
 import { DatumPayload } from "@/components/attack-detail/datum-tree";
 import {
@@ -62,6 +62,64 @@ const DATUM_HASH_TAIL = 8;
 /** ADA is shown to 2dp here: these are per-UTxO amounts, not aggregates. */
 const ADA_DECIMALS = 2;
 
+/**
+ * Assets listed before the rest collapse behind a toggle.
+ *
+ * One mainnet consolidation transaction put 20 policies in a single output,
+ * which pushed its three sibling outputs off the panel: the reader saw a wall of
+ * token lines and could not tell there were only four outputs. Six keeps a
+ * typical NFT bundle fully visible while capping the long tail.
+ */
+const ASSET_PREVIEW_COUNT = 6;
+
+/**
+ * CIP-67 asset-name label prefixes, as used by CIP-68 (4 bytes = 8 hex chars).
+ * The bytes AFTER the label are the readable name, so decoding without stripping
+ * them turns "PUGCHAMP" into mojibake. Values from CIP-67's registry.
+ */
+const CIP67_LABELS: Record<string, string> = {
+	"000643b0": "CIP-68 (100) reference",
+	"000de140": "CIP-68 (222) NFT",
+	"0014df10": "CIP-68 (333) fungible",
+	"001bc280": "CIP-68 (444) rich FT",
+};
+const CIP67_LABEL_HEX_LEN = 8;
+
+/** Printable ASCII, the range an asset name may be shown as text (RFC 20). */
+const ASCII_PRINTABLE_MIN = 0x20;
+const ASCII_PRINTABLE_MAX = 0x7e;
+
+/**
+ * An asset name as text when its bytes are printable ASCII, else as hex.
+ *
+ * On-chain names are arbitrary bytes, and 42414e4b means nothing to an operator
+ * while BANK is instantly recognisable, which is why every explorer decodes
+ * them. A name with even one non-printable byte stays hex: partial decoding
+ * would let a binary name smuggle control characters into the panel, and a half
+ * decoded name is less trustworthy than an honest hex string.
+ */
+function decodeAssetName(hex: string): {
+	text: string;
+	decoded: boolean;
+	label?: string;
+} {
+	if (!hex) return { text: "", decoded: false };
+	const label = CIP67_LABELS[hex.slice(0, CIP67_LABEL_HEX_LEN).toLowerCase()];
+	const body = label ? hex.slice(CIP67_LABEL_HEX_LEN) : hex;
+	if (!body || body.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(body)) {
+		return { text: hex, decoded: false, ...(label ? { label } : {}) };
+	}
+	let out = "";
+	for (let i = 0; i < body.length; i += 2) {
+		const byte = Number.parseInt(body.slice(i, i + 2), 16);
+		if (byte < ASCII_PRINTABLE_MIN || byte > ASCII_PRINTABLE_MAX) {
+			return { text: hex, decoded: false, ...(label ? { label } : {}) };
+		}
+		out += String.fromCharCode(byte);
+	}
+	return { text: out, decoded: true, ...(label ? { label } : {}) };
+}
+
 function AddressCell({ address }: { address: string }) {
 	if (!address) {
 		// An unresolved input has no address, which is a real state worth naming
@@ -82,32 +140,80 @@ function AddressCell({ address }: { address: string }) {
 	);
 }
 
-/** Native assets on one UTxO, as `policy.name × quantity` rows. */
+/**
+ * Native assets on one UTxO, indented under the output they belong to.
+ *
+ * The indent and the count header exist because without them the panel lied by
+ * omission: an asset line looked exactly like an output line, so "Outputs (4)"
+ * above 29 visually identical rows read as a wrong count rather than as four
+ * outputs carrying 25 tokens. The list also collapses past
+ * ASSET_PREVIEW_COUNT, so one fat output can no longer bury its siblings.
+ */
 function AssetLines({ assets }: { assets: Record<string, number> | null }) {
+	const [expanded, setExpanded] = useState(false);
 	const entries = Object.entries(assets ?? {});
 	if (entries.length === 0) return null;
+	const hidden = entries.length - ASSET_PREVIEW_COUNT;
+	const shown = expanded ? entries : entries.slice(0, ASSET_PREVIEW_COUNT);
 	return (
-		<div className="mt-1 space-y-0.5">
-			{entries.map(([unit, quantity]) => {
-				// Stored as "policyId.assetNameHex"; show the name and keep the policy
-				// in the title so a long unit does not dominate the row.
+		// The left rule is the nesting cue: these belong to the row above.
+		<div className="border-border/60 mt-1 space-y-0.5 border-l pl-2">
+			<div className="text-muted-foreground text-[10px] tracking-wide uppercase">
+				{entries.length === 1 ? "1 asset" : `${entries.length} assets`}
+			</div>
+			{shown.map(([unit, quantity]) => {
+				// Stored as "policyId.assetNameHex". The policy stays truncated and the
+				// full unit lives in the title, so a long unit cannot dominate the row.
 				const dot = unit.indexOf(".");
 				const policy = dot > 0 ? unit.slice(0, dot) : unit;
 				const name = dot > 0 ? unit.slice(dot + 1) : "";
+				const asset = decodeAssetName(name);
+				const title = [unit, asset.label, asset.decoded ? `hex: ${name}` : null]
+					.filter(Boolean)
+					.join("\n");
 				return (
 					<div
 						key={unit}
-						className="text-muted-foreground flex items-baseline justify-between gap-2 font-mono text-[11px]"
-						title={unit}
+						className="text-muted-foreground flex items-baseline justify-between gap-2 text-[11px]"
+						title={title}
 					>
 						<span className="break-all">
-							{shortHash(policy, POLICY_HEAD, POLICY_TAIL)}
-							{name && `.${shortHash(name, ASSET_NAME_HEAD, ASSET_NAME_TAIL)}`}
+							<span className="font-mono">
+								{shortHash(policy, POLICY_HEAD, POLICY_TAIL)}
+							</span>
+							{asset.text && (
+								<>
+									<span className="font-mono">.</span>
+									{/* Decoded names are prose, so they drop the mono face; a
+									    name that stayed hex keeps it. */}
+									<span className={asset.decoded ? "" : "font-mono"}>
+										{asset.decoded
+											? asset.text
+											: shortHash(asset.text, ASSET_NAME_HEAD, ASSET_NAME_TAIL)}
+									</span>
+								</>
+							)}
 						</span>
-						<span className="tabular-nums">×{quantity.toLocaleString()}</span>
+						<span className="shrink-0 tabular-nums">
+							×{quantity.toLocaleString()}
+						</span>
 					</div>
 				);
 			})}
+			{hidden > 0 && (
+				<button
+					type="button"
+					className="text-muted-foreground hover:text-foreground text-[10px] underline underline-offset-2"
+					onClick={(e) => {
+						// The panel sits inside a clickable detail surface; keep the toggle
+						// from doubling as a navigation.
+						e.stopPropagation();
+						setExpanded((v) => !v);
+					}}
+				>
+					{expanded ? "show fewer" : `show all ${entries.length}`}
+				</button>
+			)}
 		</div>
 	);
 }

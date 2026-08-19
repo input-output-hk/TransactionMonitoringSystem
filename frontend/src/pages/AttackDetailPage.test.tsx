@@ -107,6 +107,24 @@ afterEach(() => {
 	cleanup();
 });
 
+describe("panel order", () => {
+	it("puts the sub-scores above the chain-level transaction detail", async () => {
+		// The transaction panels run to dozens of lines on a multi-asset
+		// transaction, so anything below them is effectively hidden. The sub-scores
+		// explain the score the whole modal is about and have to come first.
+		state.alert = baseAlert();
+		await renderDetail();
+		const body = document.body.textContent ?? "";
+		const subScores = body.indexOf("Sub-scores");
+		// With the transaction mocked as absent, the panels render their
+		// missing-transaction message; its position is the panels' position.
+		const txPanels = body.indexOf("no longer in the store");
+		expect(subScores).toBeGreaterThan(-1);
+		expect(txPanels).toBeGreaterThan(-1);
+		expect(subScores).toBeLessThan(txPanels);
+	});
+});
+
 describe("Contract Anomaly evidence", () => {
 	it("renders the flagged contract and the model that flagged it", async () => {
 		state.alert = baseAlert({
@@ -187,7 +205,6 @@ describe("unknown attack class fallback", () => {
 		expect(screen.getByText(/No evidence recorded/i)).toBeInTheDocument();
 	});
 });
-
 
 describe("closing the detail keeps the table's filters", () => {
 	it("the X button carries the query string back to the dashboard", async () => {

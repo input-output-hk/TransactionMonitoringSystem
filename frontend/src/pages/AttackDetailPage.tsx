@@ -292,24 +292,26 @@ function DetailCard({
 
 			<Divider />
 
+			{/* Sub-scores come before the chain detail, not after it. They explain
+			    the score the whole modal is about, and the transaction panels below
+			    are tall enough (a multi-asset transaction runs to dozens of lines)
+			    that anything after them is effectively hidden. */}
+			<Section title="Sub-scores">
+				<SubScores alert={alert} />
+			</Section>
+
+			<Divider />
+
 			{/* Chain-level detail: what actually moved, and what the script got.
-			    Placed after the evidence (why it fired) and before the sub-scores
-			    (the most technical breakdown), which is the order an analyst reads
-			    in. Fetched once per open and cached indefinitely: a confirmed
-			    transaction is immutable, so there is nothing to poll. */}
+			    Last because it is the longest and the least summarised. Fetched once
+			    per open and cached indefinitely: a confirmed transaction is
+			    immutable, so there is nothing to poll. */}
 			<TransactionDetailPanels
 				tx={txDetail.data}
 				isPending={txDetail.isPending}
 				isError={txDetail.isError}
 				error={txDetail.error}
 			/>
-
-			<Divider />
-
-			{/* Sub-scores */}
-			<Section title="Sub-scores">
-				<SubScores alert={alert} />
-			</Section>
 
 			{!archived && (
 				<DeleteDialog
