@@ -25,6 +25,8 @@ import {
 	ALERT_COLUMN_COUNT,
 	AlertRow,
 	ContractGroupRow,
+	PinnedCriticalHeaderRow,
+	PinnedCriticalSpacerRow,
 } from "@/components/alerts/alert-rows";
 import { ContractGroupAlerts } from "@/components/alerts/contract-group-alerts";
 import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS } from "@/lib/constants";
@@ -347,15 +349,15 @@ export function AttacksPage() {
 						</TableRow>
 					</TableHeader>
 					<TableBody>
-						{/* Pinned first, and de-duplicated against the body so the
-						    same transaction never appears twice. */}
+						{/* Pinned first, and de-duplicated against the body so the same
+						    transaction never appears twice. The strip above it carries the
+						    label, because being pinned describes the placement, not the tx. */}
 						{pinnedCritical && (
-							<AlertRow
-								key={`pinned-${pinnedCritical.slug}`}
-								alert={pinnedCritical}
-								onOpen={openDetail}
-								pinned
-							/>
+							<Fragment key={`pinned-${pinnedCritical.slug}`}>
+								<PinnedCriticalHeaderRow />
+								<AlertRow alert={pinnedCritical} onOpen={openDetail} pinned />
+								<PinnedCriticalSpacerRow />
+							</Fragment>
 						)}
 						{visibleRows.map((row) => {
 							if (row.kind === "alert") {

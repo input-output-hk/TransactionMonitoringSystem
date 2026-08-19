@@ -144,6 +144,8 @@ function group(over: Partial<GroupedAlertRow> = {}): GroupedAlertRow {
 		worstScore: 92,
 		worstSeverity: "CRITICAL",
 		latestDate: "01.08.2026, 10:00 UTC",
+		attackType: "Large Datum",
+		attackTypes: ["Large Datum"],
 		...over,
 	};
 }
@@ -255,6 +257,72 @@ describe("contract grouping", () => {
 			screen.getByText(/399 older alerts are not listed/i),
 		).toBeInTheDocument();
 	});
+
+	it("names the worst alert's attack type, and does not count in that column", async () => {
+		// The Attack Type column used to hold the alert count, which promised a
+		// type and delivered a number. The type shown is the worst alert's, the
+		// same one the severity badge on that line describes.
+		state.groups = [
+			group({ attackType: "Large Datum", attackTypes: ["Large Datum"] }),
+		];
+		await renderPage();
+		const row = screen
+			.getAllByRole("row")
+			.find((r) => r.textContent?.includes("Djed StableCoin"));
+		expect(row?.textContent).toContain("Large Datum");
+		// The count is still on the row, just no longer in that column.
+		expect(screen.getByText("12 alerts")).toBeInTheDocument();
+	});
+
+	it("says how many other kinds of alert the group holds", async () => {
+		// Answers "is this contract one problem or several" without an expand.
+		state.groups = [
+			group({
+				attackType: "Large Datum",
+				attackTypes: ["Large Datum", "Large Value", "Token Dust"],
+			}),
+		];
+		await renderPage();
+		const more = screen.getByText("+2 more");
+		expect(more).toBeInTheDocument();
+		expect(more.getAttribute("title")).toContain("Large Value");
+		expect(more.getAttribute("title")).toContain("Token Dust");
+	});
+
+	it("does not offer a +N hint for a single-class group", async () => {
+		state.groups = [
+			group({ attackType: "Large Datum", attackTypes: ["Large Datum"] }),
+		];
+		await renderPage();
+		expect(screen.queryByText(/\+\d+ more/)).not.toBeInTheDocument();
+	});
+
+	it("copies the FULL contract address, not the label on screen", async () => {
+		// The cell shows a registry label or a truncated address, so neither can
+		// be selected off the screen; the button has to hand over the real thing.
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, "clipboard", {
+			value: { writeText },
+			configurable: true,
+		});
+		state.groups = [group()];
+		await renderPage();
+		fireEvent.click(screen.getByLabelText("Copy contract address"));
+		expect(writeText).toHaveBeenCalledWith(DJED);
+	});
+
+	it("does not expand the group when the copy button is clicked", async () => {
+		// The row expands on click, so the nested control has to stop propagation.
+		Object.defineProperty(navigator, "clipboard", {
+			value: { writeText: vi.fn().mockResolvedValue(undefined) },
+			configurable: true,
+		});
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		fireEvent.click(screen.getByLabelText("Copy contract address"));
+		expect(screen.queryByText("BBBBBBBB")).not.toBeInTheDocument();
+	});
 });
 
 describe("alerts with no contract", () => {
@@ -269,6 +337,7 @@ describe("alerts with no contract", () => {
 				latestDate: "01.08.2026, 09:00 UTC",
 				txHash: `${"d".repeat(63)}4`,
 				attackType: "Phishing",
+				attackTypes: ["Phishing"],
 			},
 		];
 		await renderPage();
@@ -290,6 +359,8 @@ describe("alerts with no contract", () => {
 				worstScore: 65,
 				worstSeverity: "HIGH",
 				latestDate: "01.08.2026, 09:00 UTC",
+				// No class either: the row is skipped before it can render one.
+				attackTypes: [],
 			},
 		];
 		await renderPage();
@@ -301,7 +372,7 @@ describe("alerts with no contract", () => {
 describe("pinned latest critical alert", () => {
 	const CRIT_HASH = `${"e".repeat(63)}5`;
 
-	it("is the first row and is marked as pinned", async () => {
+	it("is the first row, under a section strip, ahead of the groups", async () => {
 		state.critical = alert({
 			fullHash: CRIT_HASH,
 			severity: "CRITICAL",
@@ -309,10 +380,17 @@ describe("pinned latest critical alert", () => {
 		});
 		state.groups = [group()];
 		await renderPage();
-		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
 		const rows = screen.getAllByRole("row");
-		// Row 0 is the header; the pinned alert precedes the grouped rows.
-		expect(rows[1].textContent).toContain("EEEEEEEE");
+		// Row 0 is the header. The label lives on its own strip so it annotates
+		// the placement rather than reading as a field of the transaction, so the
+		// alert is row 2 and it still precedes every grouped row.
+		expect(rows[1].textContent).toMatch(/latest critical/i);
+		expect(rows[1].textContent).not.toContain("EEEEEEEE");
+		expect(rows[2].textContent).toContain("EEEEEEEE");
+		const groupRow = rows.findIndex((r) =>
+			r.textContent?.includes("Djed StableCoin"),
+		);
+		expect(groupRow).toBeGreaterThan(2);
 	});
 
 	it("is absent when no critical alert exists", async () => {
@@ -335,6 +413,7 @@ describe("pinned latest critical alert", () => {
 				latestDate: "01.08.2026, 10:00 UTC",
 				txHash: CRIT_HASH,
 				attackType: "Large Datum",
+				attackTypes: ["Large Datum"],
 			},
 		];
 		await renderPage();
@@ -407,6 +486,23 @@ describe("the un-clusterable marker on a group row", () => {
 		await renderPage();
 		expect(screen.queryByText(/unclusterable model/i)).not.toBeInTheDocument();
 	});
+
+	it("survives a row that names no attack type", async () => {
+		// The marker lives in the same cell as the attack type but must not depend
+		// on it: "do not trust this model" is the signal that has to survive
+		// longest, and a row from a backend older than attack_class still carries
+		// it. Today that pairing cannot occur, which is exactly why the coupling
+		// would rot unnoticed.
+		state.groups = [
+			group({
+				unclusterableModel: true,
+				attackType: undefined,
+				attackTypes: [],
+			}),
+		];
+		await renderPage();
+		expect(screen.getByText(/unclusterable model/i)).toBeInTheDocument();
+	});
 });
 
 describe("filter state across the detail popup", () => {
@@ -425,6 +521,7 @@ describe("filter state across the detail popup", () => {
 				latestDate: "01.08.2026, 10:00 UTC",
 				txHash: hash,
 				attackType: "Large Datum",
+				attackTypes: ["Large Datum"],
 			},
 		];
 		await renderPage("/dashboard?severity=HIGH&page=2");
