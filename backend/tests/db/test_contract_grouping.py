@@ -105,10 +105,35 @@ class TestGroupedAggregateSql:
         clickhouse_scores.group_class_scores_by_contract(network="preprod")
         assert "argMax(risk_band, max_score)" in fake.queries[0]
 
+    def test_worst_class_is_the_class_of_the_worst_row(self, monkeypatch):
+        # Same argMax ordering as worst_band, so the attack type a group row
+        # names and the severity badge beside it always describe one alert.
+        # Aliased to worst_class, NOT max_class: on 26.x an aggregate aliased to
+        # a source column a sibling aggregate reads returns Code 184.
+        fake = _patch_client(monkeypatch, [])
+        clickhouse_scores.group_class_scores_by_contract(network="preprod")
+        assert "argMax(max_class, max_score) AS worst_class" in fake.queries[0]
+        assert "AS max_class" not in fake.queries[0]
+
+    def test_distinct_classes_are_collected_for_the_group(self, monkeypatch):
+        fake = _patch_client(monkeypatch, [])
+        clickhouse_scores.group_class_scores_by_contract(network="preprod")
+        assert "groupUniqArray(max_class) AS classes" in fake.queries[0]
+
     def test_rows_are_mapped_by_name(self, monkeypatch):
         _patch_client(
             monkeypatch,
-            [("addr_test1wq9", 12, 92.5, "Critical", "2026-08-01 10:00:00")],
+            [
+                (
+                    "addr_test1wq9",
+                    12,
+                    92.5,
+                    "Critical",
+                    "large_datum",
+                    ("large_datum", "large_value"),
+                    "2026-08-01 10:00:00",
+                )
+            ],
         )
         groups = clickhouse_scores.group_class_scores_by_contract(network="preprod")
         assert groups == [
@@ -117,6 +142,10 @@ class TestGroupedAggregateSql:
                 "alert_count": 12,
                 "worst_score": 92.5,
                 "worst_band": "Critical",
+                "worst_class": "large_datum",
+                # The driver hands back an array column as a tuple; the row map
+                # normalises it so callers can treat it as a plain list.
+                "classes": ["large_datum", "large_value"],
                 "latest_analyzed_at": "2026-08-01 10:00:00",
             }
         ]

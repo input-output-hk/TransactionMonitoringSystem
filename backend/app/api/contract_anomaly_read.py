@@ -626,7 +626,7 @@ async def _augment_groups_with_contract_anomaly(
 
     1. it is added to its effective group, creating that group if SQL produced
        none for the target;
-    2. that group's ``worst_score`` / ``worst_band`` / ``latest_analyzed_at``
+    2. that group's ``worst_score`` / ``worst_band`` / ``worst_class`` / ``latest_analyzed_at``
        rise to the effective values.
 
     A transaction is never REMOVED from the group its stored contract names,
@@ -705,6 +705,8 @@ async def _augment_groups_with_contract_anomaly(
                 "alert_count": 0,
                 "worst_score": 0.0,
                 "worst_band": res.risk_band.value,
+                "worst_class": res.max_class,
+                "classes": [],
                 "latest_analyzed_at": res.analyzed_at,
                 "unclusterable_model": False,
             }
@@ -713,9 +715,19 @@ async def _augment_groups_with_contract_anomaly(
         # Already counted by SQL only when it was counted under THIS contract.
         if not (stored_counted and stored_contract == effective_contract):
             group["alert_count"] = int(group["alert_count"]) + 1
+        # The class set is UNION-only. Removing the stored class when a verdict
+        # rewrites a row would require knowing no sibling row still carries it,
+        # which a set-valued aggregate cannot answer; over-stating by one is the
+        # safe direction for a "+N other kinds" hint.
+        classes = group.setdefault("classes", [])
+        if res.max_class not in classes:
+            classes.append(res.max_class)
         if res.max_score > float(group["worst_score"]):
             group["worst_score"] = res.max_score
             group["worst_band"] = res.risk_band.value
+            # Kept in step with worst_band: both describe the group's top row, so
+            # a row that takes over the group renames its attack type too.
+            group["worst_class"] = res.max_class
             # Tracks the WORST row, so it flips back off when a stored-class
             # alert outranks the un-clusterable verdict. A group marked
             # un-clusterable on a row that no longer tops it would tell the

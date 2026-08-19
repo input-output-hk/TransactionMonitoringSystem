@@ -28,7 +28,7 @@ import {
 	ChevronDown,
 	ChevronRight,
 	Copy,
-	FileWarning,
+	Pin,
 } from "lucide-react";
 
 /**
@@ -42,19 +42,26 @@ export const ALERT_COLUMN_COUNT = 5;
 const CONTRACT_HEAD = 14;
 const CONTRACT_TAIL = 6;
 
-function CopyHashButton({ hash }: { hash: string }) {
+/**
+ * Copies an identifier the table can only show truncated.
+ *
+ * Serves a transaction hash and a group's contract address alike: both are shown
+ * shortened, and the address is often replaced outright by its registry label,
+ * so neither can be selected off the screen.
+ */
+function CopyButton({ value, label }: { value: string; label: string }) {
 	return (
 		<button
 			type="button"
-			className="text-muted-foreground hover:text-foreground"
+			className="text-muted-foreground hover:text-foreground shrink-0"
 			title="Copy"
-			aria-label="Copy transaction hash"
+			aria-label={label}
 			onClick={(e) => {
-				// The row navigates on click; without this the copy also opens the
-				// detail view.
+				// The row navigates or expands on click; without this the copy also
+				// triggers that.
 				e.stopPropagation();
-				// The FULL hash, not the truncated display id.
-				void copyToClipboard(hash);
+				// The FULL value, not the truncated display form.
+				void copyToClipboard(value);
 			}}
 		>
 			<Copy className="h-3.5 w-3.5" />
@@ -107,7 +114,7 @@ export function AlertRow({
 	onOpen: (slug: string) => void;
 	/** Nested inside an expanded group, so the chevron cell is a spacer. */
 	indented?: boolean;
-	/** The pinned latest-critical row, marked so it reads as deliberate. */
+	/** The pinned latest-critical row. Rendered under PinnedCriticalHeaderRow. */
 	pinned?: boolean;
 }) {
 	return (
@@ -115,25 +122,19 @@ export function AlertRow({
 			onClick={() => onOpen(alert.slug)}
 			className={cn(
 				"cursor-pointer",
-				// Left accent in the critical token so the pinned row is legible as
-				// pinned context rather than as a sort anomaly.
-				pinned && "border-severity-critical-foreground/60 border-l-2",
+				// A tinted band closed by a faint critical edge, with the strong
+				// accent scoped to the LEFT border only. Setting the border COLOUR
+				// unscoped also recoloured the row's own bottom border, which read
+				// as an accidental red underline instead of a deliberate block.
+				pinned &&
+					"bg-severity-critical/25 border-l-severity-critical-foreground border-b-severity-critical-foreground/30 border-l-2",
 			)}
 		>
 			<TableCell className={cn("w-8", indented && "pl-6")} />
 			<TableCell>
 				<div className="text-foreground flex items-center gap-2 font-mono text-[13px] uppercase">
 					<span>{alert.id}</span>
-					<CopyHashButton hash={alert.fullHash} />
-					{pinned && (
-						<Badge
-							variant="outline"
-							className="text-muted-foreground border-border/60 text-[9px] font-normal tracking-normal normal-case"
-							title="The most recent Critical alert, kept in view regardless of the sort order below."
-						>
-							latest critical
-						</Badge>
-					)}
+					<CopyButton value={alert.fullHash} label="Copy transaction hash" />
 				</div>
 			</TableCell>
 			<TableCell className="text-foreground">{alert.date}</TableCell>
@@ -150,8 +151,40 @@ export function AlertRow({
 }
 
 /**
- * A contract's collapsed alerts. `alertCount` is a server-side count under the
- * active filters, not the number of rows fetched, so it is shown as the total.
+ * The attack type a group row names: the class of its WORST alert, which is the
+ * same alert the severity badge on that line describes, plus a count of the
+ * other kinds the group holds so a mixed contract is visible without expanding.
+ */
+function GroupAttackTypeCell({ row }: { row: GroupedAlertRow }) {
+	// A deployment older than the field sends no class at all. The cell stays
+	// empty rather than inventing a type for the row.
+	if (!row.attackType) return null;
+	const Icon = ATTACK_ICON[row.attackType] ?? AlertCircle;
+	const others = row.attackTypes.filter((t) => t !== row.attackType);
+	return (
+		<div className="text-foreground flex items-center gap-2">
+			<Icon className="text-muted-foreground h-4 w-4 shrink-0" />
+			<span className="truncate">{row.attackType}</span>
+			{others.length > 0 && (
+				<span
+					className="text-muted-foreground shrink-0 text-xs"
+					title={`Also under this contract: ${others.join(", ")}`}
+				>
+					+{others.length} more
+				</span>
+			)}
+			{row.unclusterableModel && <UnclusterableBadge />}
+		</div>
+	);
+}
+
+/**
+ * A contract's collapsed alerts.
+ *
+ * `alertCount` is a server-side count under the active filters, not the number
+ * of rows fetched, so it is safe to show as the group's total. It sits under the
+ * contract name, where it describes the group; putting it in the Attack Type
+ * column left that column promising a type and delivering a number.
  */
 export function ContractGroupRow({
 	row,
@@ -177,7 +210,6 @@ export function ContractGroupRow({
 			</TableCell>
 			<TableCell>
 				<div className="flex items-center gap-2">
-					<FileWarning className="text-muted-foreground h-4 w-4 shrink-0" />
 					<span
 						className={cn(
 							"text-foreground truncate",
@@ -188,20 +220,61 @@ export function ContractGroupRow({
 						{label ??
 							shortHash(row.contractAddress, CONTRACT_HEAD, CONTRACT_TAIL)}
 					</span>
+					<CopyButton
+						value={row.contractAddress}
+						label="Copy contract address"
+					/>
+				</div>
+				<div className="text-muted-foreground text-xs">
+					{row.alertCount === 1
+						? "1 alert"
+						: `${row.alertCount.toLocaleString()} alerts`}
 				</div>
 			</TableCell>
 			<TableCell className="text-foreground">{row.latestDate}</TableCell>
-			<TableCell className="text-muted-foreground">
-				<div className="flex items-center gap-2">
-					{row.alertCount === 1 ? "1 alert" : `${row.alertCount} alerts`}
-					{row.unclusterableModel && <UnclusterableBadge />}
-				</div>
+			<TableCell>
+				<GroupAttackTypeCell row={row} />
 			</TableCell>
 			<TableCell>
 				<Badge variant={SEVERITY_VARIANT[row.worstSeverity]}>
 					{row.worstSeverity}
 				</Badge>
 			</TableCell>
+		</TableRow>
+	);
+}
+
+/**
+ * Section label for the pinned latest-critical row.
+ *
+ * A strip ABOVE the row rather than a badge inside it: being pinned is a
+ * property of the row's placement, so a badge sitting beside the hash reads as
+ * an attribute of that transaction instead.
+ */
+export function PinnedCriticalHeaderRow() {
+	return (
+		<TableRow className="hover:bg-transparent">
+			<TableCell
+				colSpan={ALERT_COLUMN_COUNT}
+				className="bg-severity-critical/25 border-t-severity-critical-foreground/30 text-severity-critical-foreground border-t py-1.5"
+			>
+				<div className="flex items-center gap-1.5 text-[10px] font-medium tracking-wider uppercase">
+					<Pin className="h-3 w-3" />
+					Latest critical
+					<span className="text-muted-foreground font-normal tracking-normal normal-case">
+						kept in view regardless of the sort below
+					</span>
+				</div>
+			</TableCell>
+		</TableRow>
+	);
+}
+
+/** Air below the pinned block, so it and the sorted list read as two things. */
+export function PinnedCriticalSpacerRow() {
+	return (
+		<TableRow className="hover:bg-transparent">
+			<TableCell colSpan={ALERT_COLUMN_COUNT} className="h-3 p-0" />
 		</TableRow>
 	);
 }

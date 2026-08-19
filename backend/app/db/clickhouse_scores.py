@@ -620,6 +620,16 @@ def group_class_scores_by_contract(
     (via argMax), not a band re-derived from ``worst_score``: a past
     recalibration can move the thresholds, and the badge should agree with the
     row the analyst sees when they expand the group.
+
+    ``worst_class`` is that same highest-scoring alert's class, so the row can
+    name an attack type instead of only counting alerts, and it agrees with
+    ``worst_band`` by construction (both argMax the same ordering). ``classes``
+    is every distinct class under the group, which lets the caller say how many
+    OTHER kinds of alert the group holds. It is aliased away from ``max_class``
+    for the reason ``worst_score`` is aliased away from ``max_score``: on
+    ClickHouse 26.x, aliasing an aggregate to a source column name that a
+    sibling aggregate also reads returns Code 184. ``groupUniqArray`` is bounded
+    by the nine-class vocabulary, so the array is at most nine short strings.
     """
     conditions, params = _score_filter_conditions(
         network,
@@ -643,6 +653,8 @@ def group_class_scores_by_contract(
                count() AS alert_count,
                max(max_score) AS worst_score,
                argMax(risk_band, max_score) AS worst_band,
+               argMax(max_class, max_score) AS worst_class,
+               groupUniqArray(max_class) AS classes,
                max(analyzed_at) AS latest_analyzed_at
         FROM tx_class_scores FINAL
         WHERE {where}
@@ -658,7 +670,9 @@ def group_class_scores_by_contract(
             "alert_count": int(r[1]),
             "worst_score": float(r[2]),
             "worst_band": r[3],
-            "latest_analyzed_at": r[4],
+            "worst_class": r[4],
+            "classes": list(r[5]),
+            "latest_analyzed_at": r[6],
         }
         for r in rows
     ]

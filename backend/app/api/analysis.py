@@ -89,7 +89,22 @@ class GroupedAlertRow(BaseModel):
     )
     attack_class: str | None = Field(
         None,
-        description="Winning class, for kind='alert' only",
+        description=(
+            "The winning class of the alert this row stands for: the alert "
+            "itself for kind='alert', and the group's highest-scoring alert for "
+            "kind='group'. Same row worst_band and worst_score describe, so a "
+            "group names an attack type instead of only counting alerts."
+        ),
+    )
+    attack_classes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every distinct class under this row, so a client can say how many "
+            "OTHER kinds of alert a group holds without expanding it. One "
+            "element for kind='alert'. Bounded by the nine-class vocabulary. A "
+            "contract_anomaly verdict is unioned in, never subtracted: see "
+            "_augment_groups_with_contract_anomaly."
+        ),
     )
     unclusterable_model: bool = Field(
         False,
@@ -173,6 +188,7 @@ async def _unattributed_alert_rows(
             "latest_analyzed_at": r["analyzed_at"],
             "tx_hash": r["tx_hash"],
             "attack_class": r["max_class"],
+            "attack_classes": [r["max_class"]],
             "unclusterable_model": False,
         }
         for r in rows
@@ -319,6 +335,8 @@ async def list_analysis_result_groups(
                 "worst_score": float(g["worst_score"]),
                 "worst_band": g["worst_band"],
                 "latest_analyzed_at": g["latest_analyzed_at"],
+                "attack_class": g.get("worst_class"),
+                "attack_classes": list(g.get("classes") or []),
                 "unclusterable_model": bool(g.get("unclusterable_model", False)),
             }
             for g in groups

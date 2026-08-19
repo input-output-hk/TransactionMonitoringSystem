@@ -43,7 +43,15 @@ def _clustering_off(monkeypatch):
     monkeypatch.setattr(settings, "CLUSTERING_ENABLED", False)
 
 
-def _group(address, count=3, worst=72.0, band="High", at=None):
+def _group(
+    address,
+    count=3,
+    worst=72.0,
+    band="High",
+    at=None,
+    worst_class="large_value",
+    classes=None,
+):
     # clickhouse-driver hands back tz-NAIVE datetimes; the reconciliation has
     # to normalise before comparing against the tz-aware model value.
     at = at if at is not None else datetime(2026, 8, 1, 10, 0)
@@ -52,6 +60,8 @@ def _group(address, count=3, worst=72.0, band="High", at=None):
         "alert_count": count,
         "worst_score": worst,
         "worst_band": band,
+        "worst_class": worst_class,
+        "classes": [worst_class] if classes is None else list(classes),
         "latest_analyzed_at": at,
     }
 
@@ -344,6 +354,44 @@ class TestReconciliationGate:
         assert calls[0]["anomaly_only"] is True
 
 
+class TestGroupAttackType:
+    """A group row names an attack type, not only a count.
+
+    The row's severity badge is its worst alert's stored band, so the type shown
+    beside it has to be that SAME alert's class or the two disagree on one line.
+    """
+
+    def test_a_group_names_the_class_of_its_worst_alert(self, client, monkeypatch):
+        _stub_groups(
+            monkeypatch,
+            [_group(DJED, worst_class="large_datum", classes=["large_datum", "token_dust"])],
+            unattributed=[],
+        )
+        row = client.get(f"{GROUPED_URL}?network=preprod").json()["data"][0]
+        assert row["kind"] == "group"
+        assert row["attack_class"] == "large_datum"
+
+    def test_a_group_lists_every_distinct_class_it_holds(self, client, monkeypatch):
+        # Feeds the "+N other kinds" hint, so the client never has to expand a
+        # group just to learn whether it is homogeneous.
+        _stub_groups(
+            monkeypatch,
+            [_group(DJED, worst_class="large_datum", classes=["large_datum", "token_dust"])],
+            unattributed=[],
+        )
+        row = client.get(f"{GROUPED_URL}?network=preprod").json()["data"][0]
+        assert row["attack_classes"] == ["large_datum", "token_dust"]
+
+    def test_an_unattributed_alert_is_its_own_single_class(self, client, monkeypatch):
+        # One alert cannot hold two classes, so the set is exactly its own and a
+        # client can render both row shapes through one code path.
+        _stub_groups(monkeypatch, [], unattributed=[_alert_row("tx9", cls="phishing")])
+        row = client.get(f"{GROUPED_URL}?network=preprod").json()["data"][0]
+        assert row["kind"] == "alert"
+        assert row["attack_class"] == "phishing"
+        assert row["attack_classes"] == ["phishing"]
+
+
 class TestValidation:
     def test_unknown_attack_class_is_422(self, client, monkeypatch):
         _stub_groups(monkeypatch, [])
@@ -421,6 +469,73 @@ class TestAnomalyReconciliation:
         assert by_address[STRIKE]["alert_count"] == 1
         assert by_address[STRIKE]["worst_band"] == "Critical"
         assert by_address[DJED]["alert_count"] == 1
+        # The group the verdict invented is named by the verdict's own class:
+        # there is no stored class under it to name instead.
+        assert by_address[STRIKE]["worst_class"] == "contract_anomaly"
+
+    @pytest.mark.anyio
+    async def test_a_verdict_that_takes_over_renames_the_group_attack_type(self, monkeypatch):
+        # worst_class has to move with worst_band. A group badged Critical by the
+        # verdict while still naming the stored class would put two different
+        # alerts on one line.
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        stored = _full_score_row("tx1", 20.0)
+        stored["contract_address"] = DJED
+        self._stored(monkeypatch, [stored], {"tx1": [self._flagged_row(DJED)]})
+
+        groups = [
+            _group(
+                DJED,
+                count=1,
+                worst=20.0,
+                band="Informational",
+                worst_class="phishing",
+                classes=["phishing"],
+            )
+        ]
+        await _augment_groups_with_contract_anomaly(
+            "preprod",
+            groups,
+            bands=None,
+            min_score=1.0,
+            analyzed_from=None,
+            analyzed_to=None,
+            min_corroboration=0,
+        )
+        assert groups[0]["worst_band"] == "Critical"
+        assert groups[0]["worst_class"] == "contract_anomaly"
+
+    @pytest.mark.anyio
+    async def test_the_verdict_class_is_added_to_the_group_class_set(self, monkeypatch):
+        # SQL cannot see the synthetic class, so without the union a mixed group
+        # would under-report how many kinds of alert it holds.
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        stored = _full_score_row("tx1", 20.0)
+        stored["contract_address"] = DJED
+        self._stored(monkeypatch, [stored], {"tx1": [self._flagged_row(DJED)]})
+
+        groups = [
+            _group(
+                DJED,
+                count=1,
+                worst=20.0,
+                band="Informational",
+                worst_class="phishing",
+                classes=["phishing"],
+            )
+        ]
+        await _augment_groups_with_contract_anomaly(
+            "preprod",
+            groups,
+            bands=None,
+            min_score=1.0,
+            analyzed_from=None,
+            analyzed_to=None,
+            min_corroboration=0,
+        )
+        assert sorted(groups[0]["classes"]) == ["contract_anomaly", "phishing"]
 
     @pytest.mark.anyio
     async def test_group_is_created_when_sql_produced_none(self, monkeypatch):

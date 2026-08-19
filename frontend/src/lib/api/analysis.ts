@@ -391,6 +391,7 @@ type ApiGroupedAlertRow = {
 	latest_analyzed_at: string;
 	tx_hash: string | null;
 	attack_class: string | null;
+	attack_classes: string[];
 	unclusterable_model: boolean;
 };
 
@@ -423,7 +424,17 @@ export type GroupedAlertRow = {
 	latestDate: string;
 	/** Present only for `kind: "alert"`. */
 	txHash?: string;
+	/**
+	 * For an alert, its own class. For a group, the class of the alert that gives
+	 * the row its `worstSeverity`, so the type and the badge describe one alert.
+	 */
 	attackType?: AttackType;
+	/**
+	 * Every distinct class under the row, worst-first only in the sense that
+	 * `attackType` is one of them. A group holding more than one can say so
+	 * without being expanded; an alert's list is just itself.
+	 */
+	attackTypes: AttackType[];
 	unclusterableModel?: boolean;
 };
 
@@ -474,6 +485,9 @@ async function fetchGroupedAlertsPage(
 			...(r.attack_class
 				? { attackType: attackTypeFromSnake(r.attack_class) }
 				: {}),
+			// Older deployments predate the field; an absent set is not an error,
+			// it just means the row can only name its worst class.
+			attackTypes: (r.attack_classes ?? []).map(attackTypeFromSnake),
 			unclusterableModel: r.unclusterable_model,
 		})),
 		total: json.total,
