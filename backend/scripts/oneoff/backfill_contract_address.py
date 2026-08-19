@@ -76,7 +76,12 @@ def _case_expression() -> str:
             f"WHEN max_class = '{attack_class}' "
             f"THEN JSONExtractString(evidence, '{attack_class}', '{key}')"
         )
-    return "CASE " + " ".join(branches) + " ELSE '' END"
+    # trimBoth mirrors contract_address_of's .strip(). Without it the two
+    # projections of the same evidence disagree on padded input: the write path
+    # stores the trimmed address while this would store the padded one, which
+    # groups as a SECOND contract and misses the registry's display label, and a
+    # whitespace-only value would become a junk address instead of NO_CONTRACT.
+    return "trimBoth(CASE " + " ".join(branches) + " ELSE '' END)"
 
 
 def _pending_conditions() -> str:
@@ -92,7 +97,9 @@ def _pending_conditions() -> str:
       evidence key, which :func:`contract_identity.contract_address_of` returns
       NO_CONTRACT for). Those rows derive '' too, so without this guard they
       would stay "pending" for ever and every re-run would resubmit a mutation
-      over the whole of history to write '' onto ''.
+      over the whole of history to write '' onto ''. The derived value is
+      TRIMMED, so a whitespace-only evidence value counts as no address here
+      exactly as it does on the write path.
     """
     return (
         "network = %(network)s "
@@ -182,6 +189,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.chunk_days < 1:
         logger.error("--chunk-days must be at least 1")
+        sys.exit(2)
+    if args.lookback_days < 1:
+        # Zero or negative makes start >= now, so every count matches nothing and
+        # the run reports "Nothing to backfill" without examining a row. An
+        # operator would read that as "history is already done".
+        logger.error("--lookback-days must be at least 1")
         sys.exit(2)
 
     client = clickhouse._get_client()

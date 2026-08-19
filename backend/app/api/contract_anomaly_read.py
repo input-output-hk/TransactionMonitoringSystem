@@ -485,7 +485,7 @@ async def _rescue_flagged_onto_page(
     This re-admits those on page 1 so a filtered triage view can never hide a
     sidecar detection.
 
-    Scope: page 1 only; score/band filters only (attack_class and
+    Scope: page 1 only; score/band/contract filters only (attack_class and
     min_corroboration are 9-class-specific, so the rescue is inactive under them).
     Rescued rows are ADDITIVE (the DB excluded them), so they never strand a DB
     row; after merging, ``data`` is re-ranked and capped back to ``limit``. For
@@ -504,7 +504,13 @@ async def _rescue_flagged_onto_page(
     rescue_active = (
         settings.CLUSTERING_ENABLED
         and offset == 0
-        and (min_score > 0 or bool(bands))
+        # Any predicate the DB applies to the STORED row can drop a tx the merged
+        # verdict qualifies. `contract` is one of those: the column holds the
+        # stored winning class's contract, so a re-homed tx is missing from a
+        # contract-filtered page for a reason its score alone does not explain.
+        # Without this term a group's count would exceed what its expansion lists
+        # whenever no score or band filter happened to be active as well.
+        and (min_score > 0 or bool(bands) or bool(contract))
         and not attack_class
         and min_corroboration == 0
     )
@@ -606,7 +612,7 @@ async def _augment_groups_with_contract_anomaly(
     analyzed_to: datetime | None,
     min_corroboration: int,
     anomaly_only: bool = False,
-) -> None:
+) -> list[str]:
     """Reconcile contract-grouped alert counts to the EFFECTIVE per-tx verdict.
 
     The SQL grouping keys on the STORED ``contract_address``, which was derived
@@ -616,24 +622,29 @@ async def _augment_groups_with_contract_anomaly(
     single noisiest class (contract_anomaly) would be invisible in the grouped
     view, which is precisely the view meant to tame it.
 
-    Three corrections are applied per flagged transaction:
+    Two corrections are applied per flagged transaction:
 
-    1. it moves out of its stored group when the verdict re-homes it, or when
-       the verdict leaves it failing the filter;
-    2. it is added to its effective group, creating that group if SQL produced
+    1. it is added to its effective group, creating that group if SQL produced
        none for the target;
-    3. the group's ``worst_score`` / ``worst_band`` / ``latest_analyzed_at``
+    2. that group's ``worst_score`` / ``worst_band`` / ``latest_analyzed_at``
        rise to the effective values.
 
-    The corrections are one-directional: a group's ``worst_score`` is never
-    LOWERED when correction 1 moves its highest-scoring alert out, because the
-    second-worst alert's score is not in hand and re-querying per group would
-    cost a query per row of the page. The residual error therefore overstates a
-    group's severity, never understates it, which is the side of the trade-off
-    CLAUDE.md's recall-first order asks for: the analyst opens the group and sees
-    the true rows.
+    A transaction is never REMOVED from the group its stored contract names,
+    even when the verdict re-homes it elsewhere. That is what keeps a group's
+    count equal to what expanding it lists: the expansion is a ``?contract=``
+    request, the DB filters that on the stored column, and no read path drops a
+    row post-merge (see ``_merge_overlay_onto_page``). So a transaction with a
+    stored finding on one contract and a winning verdict on another is counted
+    under both, which is honest in both directions: each contract really does
+    have a finding naming it, and each group's expansion really does list it.
+    Over-counting distinct transactions is the recall-first side of that
+    trade-off, and the alert the analyst opens is the same one either way.
 
-    Mutates ``groups`` in place. Groups emptied by correction 1 are dropped.
+    Mutates ``groups`` in place and returns the tx_hashes it counted under a
+    contract despite an EMPTY stored contract. Those are the one case where the
+    same alert would otherwise appear twice on a single page (as a group member
+    and as a lone un-attributed row showing its superseded stored score), so the
+    caller excludes them from the un-attributed query and its COUNT.
     Best-effort by contract: the caller treats a sidecar failure as "no
     augmentation" rather than failing the page.
 
@@ -649,8 +660,11 @@ async def _augment_groups_with_contract_anomaly(
         "some flagged txs may be missing from their contract's group",
     )
     if not flagged:
-        return
+        return []
     by_address = {g["contract_address"]: g for g in groups}
+    # Counted under a contract group despite an empty stored contract, so the
+    # caller's un-attributed query must stop claiming them.
+    rehomed_from_unattributed: list[str] = []
 
     def _passes(res: ClassScoreResult) -> bool:
         """The grouped view's full predicate, mirroring _score_filter_conditions."""
@@ -676,12 +690,13 @@ async def _augment_groups_with_contract_anomaly(
             # detection and does not belong under this filter.
             effective_counted = False
 
-        if stored_counted and (effective_contract != stored_contract or not effective_counted):
-            stale = by_address.get(stored_contract)
-            if stale is not None:
-                stale["alert_count"] = max(0, int(stale["alert_count"]) - 1)
         if not effective_counted:
             continue
+        if not stored_contract:
+            # Its stored row names no contract, so SQL put it in the
+            # un-attributed bucket rather than in any group. It is about to be
+            # counted under `effective_contract`, and it must not be in both.
+            rehomed_from_unattributed.append(res.tx_hash)
 
         group = by_address.get(effective_contract)
         if group is None:
@@ -717,4 +732,4 @@ async def _augment_groups_with_contract_anomaly(
         if current is not None and (latest is None or current > latest):
             group["latest_analyzed_at"] = res.analyzed_at
 
-    groups[:] = [g for g in groups if int(g["alert_count"]) > 0]
+    return rehomed_from_unattributed

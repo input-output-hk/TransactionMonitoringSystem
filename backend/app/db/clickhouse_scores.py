@@ -315,6 +315,7 @@ def _score_filter_conditions(
     include_archived: bool,
     min_corroboration: int = 0,
     contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Build the shared WHERE conditions + params for the class-scores list and
     count queries.
@@ -332,6 +333,13 @@ def _score_filter_conditions(
     that contract, and the empty string selects exactly the alerts that name no
     contract at all (contract_identity.NO_CONTRACT), which is what the grouped
     alerts view needs to render its ungrouped rows.
+
+    ``exclude_tx_hashes`` removes specific transactions from the match set. It
+    exists because ``contract_address`` is the STORED winning class's contract,
+    while a sidecar contract_anomaly verdict can re-home a transaction to a
+    different one at read time: the grouped view counts such a transaction under
+    its effective contract, so the query that lists the OTHER bucket has to stop
+    claiming it too, or one alert renders twice on one page.
     """
     if attack_class and attack_class not in _CLASS_COLS:
         raise ValueError(f"Invalid attack_class '{attack_class}'")
@@ -358,6 +366,11 @@ def _score_filter_conditions(
     if contract is not None:
         conditions.append("contract_address = %(contract)s")
         params["contract"] = contract
+    if exclude_tx_hashes:
+        # Same list-param idiom as get_class_scores_by_hashes: clickhouse-driver
+        # renders a Python list as a SQL list, so one placeholder covers the set.
+        conditions.append("tx_hash NOT IN %(exclude_tx_hashes)s")
+        params["exclude_tx_hashes"] = exclude_tx_hashes
     if min_corroboration > 0:
         # Multi-signal filter: only transactions where at least this many
         # distinct classes independently corroborated. Flag-only; orthogonal
@@ -388,6 +401,7 @@ def get_class_scores_list(
     include_archived: bool = False,
     min_corroboration: int = 0,
     contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return multi-class score rows with optional filters.
 
@@ -417,6 +431,7 @@ def get_class_scores_list(
         include_archived,
         min_corroboration,
         contract,
+        exclude_tx_hashes,
     )
     params["limit"] = limit
     params["offset"] = offset
@@ -472,6 +487,7 @@ async def get_class_scores_list_async(
     analyzed_to: Any | None = None,
     min_corroboration: int = 0,
     contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     # Bind by keyword so a future reorder of the sync signature can't silently
     # shuffle limit/offset into analyzed_from/analyzed_to (or vice versa).
@@ -490,6 +506,7 @@ async def get_class_scores_list_async(
             include_archived=include_archived,
             min_corroboration=min_corroboration,
             contract=contract,
+            exclude_tx_hashes=exclude_tx_hashes,
         )
     )
 
@@ -504,6 +521,7 @@ def count_class_scores(
     include_archived: bool = False,
     min_corroboration: int = 0,
     contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> int:
     """Total number of class-score rows matching the given filters.
 
@@ -525,6 +543,7 @@ def count_class_scores(
         include_archived,
         min_corroboration,
         contract,
+        exclude_tx_hashes,
     )
 
     where = " AND ".join(conditions)
@@ -545,6 +564,7 @@ async def count_class_scores_async(
     include_archived: bool = False,
     min_corroboration: int = 0,
     contract: str | None = None,
+    exclude_tx_hashes: list[str] | None = None,
 ) -> int:
     return await _run(
         partial(
@@ -558,6 +578,7 @@ async def count_class_scores_async(
             include_archived=include_archived,
             min_corroboration=min_corroboration,
             contract=contract,
+            exclude_tx_hashes=exclude_tx_hashes,
         )
     )
 

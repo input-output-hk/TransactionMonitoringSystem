@@ -46,3 +46,23 @@ class TestMinCorroborationFilter:
         clause = next(c for c in conditions if "corroboration_count" in c)
         assert "%(min_corroboration)s" in clause
         assert "3" not in clause
+
+
+class TestExcludeTxHashes:
+    """The grouped view's re-homing exclusion, shared by the list and the count."""
+
+    def test_renders_a_not_in_clause_with_one_list_param(self):
+        # Same list-param idiom as get_class_scores_by_hashes: clickhouse-driver
+        # renders a Python list as a SQL list, so the hash set is one placeholder
+        # rather than one per hash.
+        conditions, params = _build(exclude_tx_hashes=["tx1", "tx2"])
+        assert "tx_hash NOT IN %(exclude_tx_hashes)s" in conditions
+        assert params["exclude_tx_hashes"] == ["tx1", "tx2"]
+
+    def test_absent_and_empty_add_no_clause(self):
+        # An empty list must not render `NOT IN ()`, which is a syntax error, and
+        # must not narrow the match set either.
+        for value in (None, []):
+            conditions, params = _build(exclude_tx_hashes=value)
+            assert not any("NOT IN %(exclude_tx_hashes)s" in c for c in conditions)
+            assert "exclude_tx_hashes" not in params

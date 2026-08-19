@@ -84,13 +84,32 @@ def _stub_groups(monkeypatch, groups, unattributed=None, unattributed_total=None
 
     async def _flat(**kwargs):
         captured_flat.update(kwargs)
-        # Honour the endpoint's page-depth bound so the stub cannot hide a
-        # regression that fetches (or slices) the wrong number of rows.
-        return [dict(r) for r in rows[: kwargs.get("limit")]]
+        # Honour the endpoint's fetch WINDOW (offset and limit both), and the
+        # re-homing exclusion, so the stub cannot hide a regression that reads or
+        # slices the wrong range. A stub that ignored offset would make the
+        # windowed fetch look correct while the page came out shifted.
+        excluded = set(kwargs.get("exclude_tx_hashes") or ())
+        kept = [r for r in rows if r["tx_hash"] not in excluded]
+        # DB-ORDERED, like the real query: the endpoint fetches a window on the
+        # assumption that rank N in this list is rank N in the requested sort. A
+        # stub returning fixture order would let a mis-ordered window pass.
+        by_score = kwargs.get("sort") == "score"
+        kept.sort(
+            key=lambda r: (
+                (r["max_score"], r["analyzed_at"])
+                if by_score
+                else (r["analyzed_at"], r["max_score"])
+            ),
+            reverse=True,
+        )
+        start = kwargs.get("offset") or 0
+        return [dict(r) for r in kept[start : start + kwargs["limit"]]]
 
     async def _count(**kwargs):
         captured_count.update(kwargs)
-        return len(rows) if unattributed_total is None else unattributed_total
+        excluded = set(kwargs.get("exclude_tx_hashes") or ())
+        kept = [r for r in rows if r["tx_hash"] not in excluded]
+        return len(kept) if unattributed_total is None else unattributed_total
 
     monkeypatch.setattr(clickhouse, "group_class_scores_by_contract_async", _grouped)
     monkeypatch.setattr(clickhouse, "get_class_scores_list_async", _flat)
@@ -243,13 +262,30 @@ class TestUnattributedPaging:
         assert body["total"] == 1 + 4_211
         assert body["count"] == 2
 
-    def test_fetch_is_bounded_to_the_requested_page_depth(self, client, monkeypatch):
-        # Nothing ranked below offset+limit can enter the merge window, so the
-        # fetch must not pull the whole un-attributed set to sort it in Python.
-        captured = _stub_groups(monkeypatch, [], unattributed=[])
+    def test_fetch_is_a_window_around_the_requested_page(self, client, monkeypatch):
+        # Only [offset - groups, offset + limit) can reach the page: a group row
+        # can push an un-attributed row down the merge by at most one position
+        # each. With two groups and a page at 50, that is ranks 48..74.
+        captured = _stub_groups(monkeypatch, [_group(DJED), _group(STRIKE)], unattributed=[])
         client.get(f"{GROUPED_URL}?network=preprod&limit=25&offset=50")
-        assert captured["_flat"]["limit"] == 75
+        assert captured["_flat"]["offset"] == 48
+        assert captured["_flat"]["limit"] == 27
+
+    def test_fetch_size_does_not_grow_with_the_offset(self, client, monkeypatch):
+        # `offset` has no upper bound (PageOffset is ge=0 only), so a fetch sized
+        # offset + limit is caller-controlled: ?offset=100000000 would pull the
+        # whole un-attributed set, decode two JSON blobs per row and sort it in
+        # Python. The window is bounded by the contract count plus the page size.
+        captured = _stub_groups(monkeypatch, [_group(DJED)], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&limit=100&offset=100000000")
+        assert captured["_flat"]["limit"] == 1 + 100
+        assert captured["_flat"]["offset"] == 100000000 - 1
+
+    def test_page_one_still_starts_at_the_top(self, client, monkeypatch):
+        captured = _stub_groups(monkeypatch, [_group(DJED)], unattributed=[])
+        client.get(f"{GROUPED_URL}?network=preprod&limit=10")
         assert captured["_flat"]["offset"] == 0
+        assert captured["_flat"]["limit"] == 10
 
     def test_fetch_uses_the_requested_sort(self, client, monkeypatch):
         # Fetching the newest N and then merging by score would leave a
@@ -322,7 +358,7 @@ class TestValidation:
         # honest answer rather than an error.
         _stub_groups(monkeypatch, [_group(DJED)])
         body = client.get(f"{GROUPED_URL}?network=preprod&attack_class=contract_anomaly").json()
-        assert body == {"count": 0, "total": 0, "data": []}
+        assert body == {"count": 0, "total": 0, "alert_total": 0, "data": []}
 
 
 class TestAnomalyReconciliation:
@@ -378,11 +414,13 @@ class TestAnomalyReconciliation:
             min_corroboration=0,
         )
         by_address = {g["contract_address"]: g for g in groups}
-        # It left the stored contract's group, which is now empty and dropped,
-        # and appears under the target the verdict actually implicates.
-        assert DJED not in by_address
+        # It appears under the target the verdict implicates AND stays in the
+        # group its stored finding named. Removing it from DJED would put that
+        # group's count below what expanding it lists: the expansion filters on
+        # the stored contract, and no read path drops a row after the merge.
         assert by_address[STRIKE]["alert_count"] == 1
         assert by_address[STRIKE]["worst_band"] == "Critical"
+        assert by_address[DJED]["alert_count"] == 1
 
     @pytest.mark.anyio
     async def test_group_is_created_when_sql_produced_none(self, monkeypatch):
@@ -623,3 +661,237 @@ class TestGroupExpansionAgreesWithTheCount:
             contract=STRIKE,
         )
         assert rescued == 0
+
+
+class TestPageWindowMatchesAFullMerge:
+    """The windowed fetch must produce the page a full merge would."""
+
+    @staticmethod
+    def _reference(groups, alerts, offset, limit):
+        """The page a naive implementation would return: merge everything, sort,
+        slice. The endpoint must agree with this while reading only a window."""
+        rows = [
+            {"key": (g["latest_analyzed_at"], g["worst_score"]), "id": g["contract_address"]}
+            for g in groups
+        ] + [{"key": (a["analyzed_at"], a["max_score"]), "id": a["tx_hash"]} for a in alerts]
+        rows.sort(key=lambda r: r["key"], reverse=True)
+        return [r["id"] for r in rows[offset : offset + limit]]
+
+    @pytest.mark.parametrize("offset,limit", [(0, 3), (3, 3), (5, 3), (9, 3), (2, 10)])
+    def test_page_equals_the_reference_at_every_offset(self, client, monkeypatch, offset, limit):
+        # Dates interleave the two shapes so a page-boundary error cannot hide:
+        # groups land on odd hours, un-attributed alerts on even ones.
+        groups = [
+            _group(f"addr{i}", worst=50.0, at=datetime(2026, 8, 1, 2 * i + 1)) for i in range(3)
+        ]
+        alerts = [
+            _alert_row(f"tx{i}", score=40.0, at=datetime(2026, 8, 1, 2 * i)) for i in range(9)
+        ]
+        _stub_groups(monkeypatch, groups, unattributed=alerts)
+        body = client.get(f"{GROUPED_URL}?network=preprod&limit={limit}&offset={offset}").json()
+        got = [r["contract_address"] or r["tx_hash"] for r in body["data"]]
+        assert got == self._reference(groups, alerts, offset, limit)
+
+
+class TestAlertTotal:
+    """`total` counts rows; `alert_total` counts alerts. Both are needed."""
+
+    def test_alert_total_sums_the_group_counts_and_the_lone_alerts(self, client, monkeypatch):
+        # One group row can stand for dozens of alerts, so the pager's row total
+        # cannot answer "how many alerts". Summing the counts the rows carry can,
+        # and it agrees with what the operator sees on the screen.
+        _stub_groups(
+            monkeypatch,
+            [_group(DJED, count=12), _group(STRIKE, count=30)],
+            unattributed=[_alert_row("tx1")],
+            unattributed_total=7,
+        )
+        body = client.get(f"{GROUPED_URL}?network=preprod").json()
+        assert body["total"] == 2 + 7  # rows: two groups plus the lone alerts
+        assert body["alert_total"] == 12 + 30 + 7
+
+    def test_alert_total_is_zero_on_an_empty_network(self, client, monkeypatch):
+        _stub_groups(monkeypatch, [], unattributed=[], unattributed_total=0)
+        body = client.get(f"{GROUPED_URL}?network=preprod").json()
+        assert body["alert_total"] == 0
+
+
+class TestRehomedAlertIsNotCountedTwice:
+    """A re-homed alert whose stored contract is empty must render once."""
+
+    @staticmethod
+    def _rehoming(monkeypatch, stored_class="phishing", stored_score=40.0):
+        """A flagged tx whose STORED class names no contract, with a winning
+        verdict that re-homes it to STRIKE."""
+        from app.config import settings
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        stored = _full_score_row("tx1", stored_score)
+        stored["max_class"] = stored_class
+        stored["contract_address"] = ""
+        TestAnomalyReconciliation._stored(
+            monkeypatch,
+            [stored],
+            {"tx1": [TestAnomalyReconciliation._flagged_row(STRIKE)]},
+        )
+
+    def test_it_is_excluded_from_the_unattributed_rows_and_the_count(self, client, monkeypatch):
+        # Before the exclusion this rendered twice on one page: inside STRIKE's
+        # group and again as a lone row showing its superseded stored score.
+        self._rehoming(monkeypatch)
+        captured = _stub_groups(monkeypatch, [], unattributed=[_alert_row("tx1")])
+        body = client.get(f"{GROUPED_URL}?network=preprod&min_score=1").json()
+        assert captured["_flat"]["exclude_tx_hashes"] == ["tx1"]
+        assert captured["_count"]["exclude_tx_hashes"] == ["tx1"]
+        kinds = [(r["kind"], r["contract_address"], r.get("tx_hash")) for r in body["data"]]
+        assert kinds == [("group", STRIKE, None)]
+        assert body["total"] == 1
+        assert body["alert_total"] == 1
+
+    def test_an_alert_that_stays_unattributed_is_not_excluded(self, client, monkeypatch):
+        # The verdict loses, so nothing is re-homed and the lone row must stay:
+        # excluding it would drop an alert from the operator's view.
+        from app.config import settings
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        # The verdict resolves to 100, and the merge only takes over on a STRICT
+        # increase, so a stored 100 is what leaves the tx un-re-homed.
+        stored = _full_score_row("tx1", 100.0)
+        stored["max_class"] = "phishing"
+        stored["contract_address"] = ""
+        TestAnomalyReconciliation._stored(
+            monkeypatch,
+            [stored],
+            {"tx1": [TestAnomalyReconciliation._flagged_row(STRIKE)]},
+        )
+        captured = _stub_groups(monkeypatch, [], unattributed=[_alert_row("tx1")])
+        body = client.get(f"{GROUPED_URL}?network=preprod&min_score=1").json()
+        assert captured["_flat"]["exclude_tx_hashes"] == []
+        assert [r["kind"] for r in body["data"]] == ["alert"]
+
+    @pytest.mark.anyio
+    async def test_the_reconciliation_reports_what_it_rehomed(self, monkeypatch):
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        stored = _full_score_row("tx1", 20.0)
+        stored["contract_address"] = ""
+        TestAnomalyReconciliation._stored(
+            monkeypatch,
+            [stored],
+            {"tx1": [TestAnomalyReconciliation._flagged_row(STRIKE)]},
+        )
+        groups: list[dict] = []
+        rehomed = await _augment_groups_with_contract_anomaly(
+            "preprod",
+            groups,
+            bands=None,
+            min_score=1.0,
+            analyzed_from=None,
+            analyzed_to=None,
+            min_corroboration=0,
+        )
+        assert rehomed == ["tx1"]
+
+    @pytest.mark.anyio
+    async def test_a_stored_contract_is_not_reported_as_rehomed(self, monkeypatch):
+        # It was in DJED's SQL group, not the un-attributed bucket, and it stays
+        # in DJED. Excluding it from the un-attributed query would be a no-op at
+        # best and is not what the exclusion is for.
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        stored = _full_score_row("tx1", 20.0)
+        stored["contract_address"] = DJED
+        TestAnomalyReconciliation._stored(
+            monkeypatch,
+            [stored],
+            {"tx1": [TestAnomalyReconciliation._flagged_row(STRIKE)]},
+        )
+        groups = [_group(DJED, count=1, worst=20.0, band="Informational")]
+        rehomed = await _augment_groups_with_contract_anomaly(
+            "preprod",
+            groups,
+            bands=None,
+            min_score=1.0,
+            analyzed_from=None,
+            analyzed_to=None,
+            min_corroboration=0,
+        )
+        assert rehomed == []
+
+
+class TestRescueActivatesOnAContractFilter:
+    """A contract filter alone must arm the rescue that re-admits re-homed rows."""
+
+    @pytest.mark.anyio
+    async def test_rescue_runs_with_no_score_or_band_filter(self, monkeypatch):
+        # `contract` is a predicate the DB applies to the STORED row, so it drops
+        # re-homed transactions for a reason their score does not explain. Before
+        # this the rescue only armed on a score/band filter, so a group's count
+        # exceeded what its expansion listed whenever neither was set.
+        from app.api.contract_anomaly_read import _rescue_flagged_onto_page
+        from app.config import settings
+        from tests.analysis.test_contract_anomaly_projection import _full_score_row
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        stored = _full_score_row("tx1", 70.0)
+        stored["contract_address"] = DJED  # re-homed to STRIKE by the verdict
+        stored["risk_band"] = "High"
+        TestAnomalyReconciliation._stored(
+            monkeypatch,
+            [stored],
+            {"tx1": [TestAnomalyReconciliation._flagged_row(STRIKE)]},
+        )
+
+        data: list = []
+        rescued = await _rescue_flagged_onto_page(
+            "preprod",
+            data,
+            min_score=0.0,
+            bands=None,
+            attack_class=None,
+            min_corroboration=0,
+            analyzed_from=None,
+            analyzed_to=None,
+            sort="date",
+            limit=50,
+            offset=0,
+            contract=STRIKE,
+        )
+        assert [d.tx_hash for d in data] == ["tx1"]
+        assert rescued == 1
+
+    @pytest.mark.anyio
+    async def test_rescue_stays_inert_with_no_filter_at_all(self, monkeypatch):
+        # No filter means the DB dropped nothing, so there is nothing to re-admit
+        # and the flagged fetch is pure cost.
+        from app.api.contract_anomaly_read import _rescue_flagged_onto_page
+        from app.config import settings
+        from app.db import clustering_queries
+
+        monkeypatch.setattr(settings, "CLUSTERING_ENABLED", True)
+        called = False
+
+        async def _flagged(_net, *a, **k):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
+        rescued = await _rescue_flagged_onto_page(
+            "preprod",
+            [],
+            min_score=0.0,
+            bands=None,
+            attack_class=None,
+            min_corroboration=0,
+            analyzed_from=None,
+            analyzed_to=None,
+            sort="date",
+            limit=50,
+            offset=0,
+            contract=None,
+        )
+        assert rescued == 0
+        assert called is False
