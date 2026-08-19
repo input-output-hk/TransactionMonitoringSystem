@@ -140,6 +140,76 @@ class TestScoreReadPath:
         assert isinstance(timeseries, list)
 
 
+class TestContractGrouping:
+    """The grouped alerts aggregate, on a real server.
+
+    Two reasons this cannot be left to the hermetic suite. The aggregate reads
+    ``max_class`` from two places at once (an argMax over a tuple and a
+    groupUniqArray), which is the shape that returns Code 184 on 26.x when an
+    alias collides with a source column, and a mocked client only ever proves
+    the query TEXT. And the band/class pairing is a tie-breaking property of
+    argMax that no string assertion can establish.
+    """
+
+    @staticmethod
+    def _row(contract: str, cls: str, score: float, band: str) -> dict:
+        row = _score_row(uuid.uuid4().hex * 2)
+        row["contract_address"] = contract
+        row["max_class"] = cls
+        row["max_score"] = score
+        row["risk_band"] = band
+        # Keep the per-class column in step with max_class, so the row is not
+        # self-contradictory to anything that reads the vector.
+        row.pop("token_dust", None)
+        row[cls] = score
+        return row
+
+    def _group_for(self, contract: str) -> dict:
+        groups = scores.group_class_scores_by_contract(
+            network=LIVE_NETWORK, min_score=1.0, limit=100
+        )
+        found = [g for g in groups if g["contract_address"] == contract]
+        assert found, f"no group for {contract} in {len(groups)} groups"
+        return found[0]
+
+    def test_group_counts_and_names_its_worst_alert(self, ch):
+        contract = f"addr_livedb_{uuid.uuid4().hex[:12]}"
+        scores.insert_class_scores(
+            [
+                self._row(contract, "token_dust", 82.0, "Critical"),
+                self._row(contract, "large_value", 40.0, "Moderate"),
+            ]
+        )
+        group = self._group_for(contract)
+        assert group["alert_count"] == 2
+        assert group["worst_score"] == 82.0
+        assert group["worst_band"] == "Critical"
+        assert group["worst_class"] == "token_dust"
+        # Sorted server-side, so the UI's "+N more" list cannot reshuffle between
+        # two identical refreshes.
+        assert group["classes"] == ["large_value", "token_dust"]
+
+    def test_band_and_class_describe_the_SAME_alert_on_a_tie(self, ch):
+        # Equal max_score is where two independent argMax calls could each pick a
+        # different winner and hand the UI a severity from one alert with the
+        # attack type of another. One argMax over the tuple cannot: whichever row
+        # wins, the pair it returns is that row's own.
+        contract = f"addr_livedb_{uuid.uuid4().hex[:12]}"
+        tie = 90.0
+        scores.insert_class_scores(
+            [
+                self._row(contract, "phishing", tie, "High"),
+                self._row(contract, "circular", tie, "Critical"),
+            ]
+        )
+        group = self._group_for(contract)
+        assert group["worst_score"] == tie
+        assert (group["worst_band"], group["worst_class"]) in {
+            ("High", "phishing"),
+            ("Critical", "circular"),
+        }
+
+
 class TestBaselines:
     def test_insert_then_get_roundtrip(self, ch):
         # Fresh scope_id per run so the read misses the in-process TTL

@@ -337,7 +337,7 @@ describe("alerts with no contract", () => {
 				latestDate: "01.08.2026, 09:00 UTC",
 				txHash: `${"d".repeat(63)}4`,
 				attackType: "Phishing",
-			attackTypes: ["Phishing"],
+				attackTypes: ["Phishing"],
 			},
 		];
 		await renderPage();
@@ -359,8 +359,8 @@ describe("alerts with no contract", () => {
 				worstScore: 65,
 				worstSeverity: "HIGH",
 				latestDate: "01.08.2026, 09:00 UTC",
-			// No class either: the row is skipped before it can render one.
-			attackTypes: [],
+				// No class either: the row is skipped before it can render one.
+				attackTypes: [],
 			},
 		];
 		await renderPage();
@@ -413,7 +413,7 @@ describe("pinned latest critical alert", () => {
 				latestDate: "01.08.2026, 10:00 UTC",
 				txHash: CRIT_HASH,
 				attackType: "Large Datum",
-			attackTypes: ["Large Datum"],
+				attackTypes: ["Large Datum"],
 			},
 		];
 		await renderPage();
@@ -486,6 +486,23 @@ describe("the un-clusterable marker on a group row", () => {
 		await renderPage();
 		expect(screen.queryByText(/unclusterable model/i)).not.toBeInTheDocument();
 	});
+
+	it("survives a row that names no attack type", async () => {
+		// The marker lives in the same cell as the attack type but must not depend
+		// on it: "do not trust this model" is the signal that has to survive
+		// longest, and a row from a backend older than attack_class still carries
+		// it. Today that pairing cannot occur, which is exactly why the coupling
+		// would rot unnoticed.
+		state.groups = [
+			group({
+				unclusterableModel: true,
+				attackType: undefined,
+				attackTypes: [],
+			}),
+		];
+		await renderPage();
+		expect(screen.getByText(/unclusterable model/i)).toBeInTheDocument();
+	});
 });
 
 describe("filter state across the detail popup", () => {
@@ -504,7 +521,7 @@ describe("filter state across the detail popup", () => {
 				latestDate: "01.08.2026, 10:00 UTC",
 				txHash: hash,
 				attackType: "Large Datum",
-			attackTypes: ["Large Datum"],
+				attackTypes: ["Large Datum"],
 			},
 		];
 		await renderPage("/dashboard?severity=HIGH&page=2");

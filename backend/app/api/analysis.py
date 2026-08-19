@@ -336,7 +336,10 @@ async def list_analysis_result_groups(
                 "worst_band": g["worst_band"],
                 "latest_analyzed_at": g["latest_analyzed_at"],
                 "attack_class": g.get("worst_class"),
-                "attack_classes": list(g.get("classes") or []),
+                # SQL already sorts these, but the contract_anomaly merge APPENDS
+                # its synthetic class, so re-sort at the boundary or an augmented
+                # group reshuffles its list between two identical refreshes.
+                "attack_classes": sorted(g.get("classes") or []),
                 "unclusterable_model": bool(g.get("unclusterable_model", False)),
             }
             for g in groups

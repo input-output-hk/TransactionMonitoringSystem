@@ -81,9 +81,10 @@ class TestGroupedAggregateSql:
         clickhouse_scores.group_class_scores_by_contract(network="preprod")
         sql = fake.queries[0]
         assert "AS worst_score" in sql
-        assert "AS worst_band" in sql
+        assert "AS worst_pair" in sql
+        assert "AS classes" in sql
         assert "AS latest_analyzed_at" in sql
-        for shadowed in ("AS max_score", "AS risk_band", "AS analyzed_at"):
+        for shadowed in ("AS max_score", "AS risk_band", "AS analyzed_at", "AS max_class"):
             assert shadowed not in sql
 
     def test_excludes_rows_naming_no_contract(self, monkeypatch):
@@ -97,28 +98,31 @@ class TestGroupedAggregateSql:
         clickhouse_scores.group_class_scores_by_contract(network="preprod")
         assert "GROUP BY contract_address" in fake.queries[0]
 
-    def test_worst_band_is_the_stored_band_of_the_worst_row(self, monkeypatch):
-        # argMax, not a band re-derived from worst_score: a past recalibration can
-        # move the thresholds and the badge must agree with the row the analyst
-        # sees on expanding the group.
+    def test_band_and_class_come_from_ONE_argmax(self, monkeypatch):
+        # The band is argMax, not re-derived from worst_score: a past
+        # recalibration can move the thresholds and the badge must agree with the
+        # row the analyst sees on expanding the group.
+        #
+        # And band and class come out of a single argMax over a TUPLE. Two
+        # separate argMax calls sharing an ordering can break a tie on different
+        # rows, which would put a severity badge and an attack type belonging to
+        # two different alerts on one line.
         fake = _patch_client(monkeypatch, [])
         clickhouse_scores.group_class_scores_by_contract(network="preprod")
-        assert "argMax(risk_band, max_score)" in fake.queries[0]
-
-    def test_worst_class_is_the_class_of_the_worst_row(self, monkeypatch):
-        # Same argMax ordering as worst_band, so the attack type a group row
-        # names and the severity badge beside it always describe one alert.
-        # Aliased to worst_class, NOT max_class: on 26.x an aggregate aliased to
-        # a source column a sibling aggregate reads returns Code 184.
-        fake = _patch_client(monkeypatch, [])
-        clickhouse_scores.group_class_scores_by_contract(network="preprod")
-        assert "argMax(max_class, max_score) AS worst_class" in fake.queries[0]
+        assert "argMax((risk_band, max_class), max_score) AS worst_pair" in fake.queries[0]
+        assert "argMax(risk_band, max_score)" not in fake.queries[0]
+        assert "argMax(max_class, max_score)" not in fake.queries[0]
+        # Aliased away from the source column names: on 26.x an aggregate aliased
+        # to a column a sibling aggregate reads returns Code 184.
         assert "AS max_class" not in fake.queries[0]
+        assert "AS max_score" not in fake.queries[0]
 
-    def test_distinct_classes_are_collected_for_the_group(self, monkeypatch):
+    def test_distinct_classes_are_collected_and_sorted(self, monkeypatch):
+        # Sorted so an unchanged group does not reshuffle its "+N more" tooltip
+        # between two identical refreshes; groupUniqArray has no stable order.
         fake = _patch_client(monkeypatch, [])
         clickhouse_scores.group_class_scores_by_contract(network="preprod")
-        assert "groupUniqArray(max_class) AS classes" in fake.queries[0]
+        assert "arraySort(groupUniqArray(max_class)) AS classes" in fake.queries[0]
 
     def test_rows_are_mapped_by_name(self, monkeypatch):
         _patch_client(
@@ -128,8 +132,9 @@ class TestGroupedAggregateSql:
                     "addr_test1wq9",
                     12,
                     92.5,
-                    "Critical",
-                    "large_datum",
+                    # One argMax over a tuple, so the driver hands back the band
+                    # and the class of the SAME row as one value.
+                    ("Critical", "large_datum"),
                     ("large_datum", "large_value"),
                     "2026-08-01 10:00:00",
                 )

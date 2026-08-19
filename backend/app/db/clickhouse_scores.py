@@ -621,15 +621,22 @@ def group_class_scores_by_contract(
     recalibration can move the thresholds, and the badge should agree with the
     row the analyst sees when they expand the group.
 
-    ``worst_class`` is that same highest-scoring alert's class, so the row can
-    name an attack type instead of only counting alerts, and it agrees with
-    ``worst_band`` by construction (both argMax the same ordering). ``classes``
-    is every distinct class under the group, which lets the caller say how many
-    OTHER kinds of alert the group holds. It is aliased away from ``max_class``
-    for the reason ``worst_score`` is aliased away from ``max_score``: on
-    ClickHouse 26.x, aliasing an aggregate to a source column name that a
-    sibling aggregate also reads returns Code 184. ``groupUniqArray`` is bounded
-    by the nine-class vocabulary, so the array is at most nine short strings.
+    The band and the class come out of ONE ``argMax`` over the tuple
+    ``(risk_band, max_class)``, not two argMax calls sharing an ordering. Two
+    aggregates can break a tie on DIFFERENT rows (ClickHouse picks arbitrarily
+    among equal ``max_score`` values, the more so across merge threads), which
+    would put a severity badge and an attack type from two different alerts on
+    one line. One aggregate returns one row's pair, so the invariant holds by
+    construction rather than by luck.
+
+    ``classes`` is every distinct class under the group, which lets the caller
+    say how many OTHER kinds of alert it holds. ``arraySort`` makes the order
+    stable, so an unchanged group does not reshuffle its tooltip between two
+    identical refreshes. Both are aliased away from ``max_class`` for the reason
+    ``worst_score`` is aliased away from ``max_score``: on ClickHouse 26.x,
+    aliasing an aggregate to a source column name that a sibling aggregate also
+    reads returns Code 184. ``groupUniqArray`` is bounded by the nine-class
+    vocabulary, so the array is at most nine short strings.
     """
     conditions, params = _score_filter_conditions(
         network,
@@ -652,9 +659,8 @@ def group_class_scores_by_contract(
         SELECT contract_address,
                count() AS alert_count,
                max(max_score) AS worst_score,
-               argMax(risk_band, max_score) AS worst_band,
-               argMax(max_class, max_score) AS worst_class,
-               groupUniqArray(max_class) AS classes,
+               argMax((risk_band, max_class), max_score) AS worst_pair,
+               arraySort(groupUniqArray(max_class)) AS classes,
                max(analyzed_at) AS latest_analyzed_at
         FROM tx_class_scores FINAL
         WHERE {where}
@@ -669,10 +675,10 @@ def group_class_scores_by_contract(
             "contract_address": r[0],
             "alert_count": int(r[1]),
             "worst_score": float(r[2]),
-            "worst_band": r[3],
-            "worst_class": r[4],
-            "classes": list(r[5]),
-            "latest_analyzed_at": r[6],
+            "worst_band": r[3][0],
+            "worst_class": r[3][1],
+            "classes": list(r[4]),
+            "latest_analyzed_at": r[5],
         }
         for r in rows
     ]

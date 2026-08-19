@@ -126,8 +126,14 @@ export function AlertRow({
 				// accent scoped to the LEFT border only. Setting the border COLOUR
 				// unscoped also recoloured the row's own bottom border, which read
 				// as an accidental red underline instead of a deliberate block.
+				//
+				// The hover tint has to be restated: TableRow ships
+				// `hover:bg-muted/40`, and tailwind-merge does not drop it for a
+				// plain `bg-*`, so without this the row turns grey on hover while
+				// the strip above stays red and the block visibly comes apart at
+				// the moment the analyst is pointing at it.
 				pinned &&
-					"bg-severity-critical/25 border-l-severity-critical-foreground border-b-severity-critical-foreground/30 border-l-2",
+					"bg-severity-critical/25 hover:bg-severity-critical/30 border-l-severity-critical-foreground border-b-severity-critical-foreground/30 border-l-2",
 			)}
 		>
 			<TableCell className={cn("w-8", indented && "pl-6")} />
@@ -156,22 +162,33 @@ export function AlertRow({
  * other kinds the group holds so a mixed contract is visible without expanding.
  */
 function GroupAttackTypeCell({ row }: { row: GroupedAlertRow }) {
-	// A deployment older than the field sends no class at all. The cell stays
-	// empty rather than inventing a type for the row.
-	if (!row.attackType) return null;
-	const Icon = ATTACK_ICON[row.attackType] ?? AlertCircle;
+	const Icon = row.attackType
+		? (ATTACK_ICON[row.attackType] ?? AlertCircle)
+		: null;
 	const others = row.attackTypes.filter((t) => t !== row.attackType);
 	return (
 		<div className="text-foreground flex items-center gap-2">
-			<Icon className="text-muted-foreground h-4 w-4 shrink-0" />
-			<span className="truncate">{row.attackType}</span>
-			{others.length > 0 && (
-				<span
-					className="text-muted-foreground shrink-0 text-xs"
-					title={`Also under this contract: ${others.join(", ")}`}
-				>
-					+{others.length} more
-				</span>
+			{/* A deployment older than the field sends no class, and the cell then
+			    names no type rather than inventing one. The un-clusterable marker
+			    is deliberately OUTSIDE that condition: "do not trust this model"
+			    is the signal that must survive longest, and tying it to a field it
+			    does not depend on would be a trap for whoever changes this next. */}
+			{Icon && row.attackType && (
+				<>
+					<Icon className="text-muted-foreground h-4 w-4 shrink-0" />
+					<span className="truncate">{row.attackType}</span>
+					{others.length > 0 && (
+						<span
+							className="text-muted-foreground shrink-0 text-xs"
+							// Scoped to the filter, like every other number on the row:
+							// `classes` comes from the same filtered GROUP BY, so under an
+							// attack-class filter a mixed contract honestly shows none.
+							title={`Also under this contract, matching the current filter: ${others.join(", ")}`}
+						>
+							+{others.length} more
+						</span>
+					)}
+				</>
 			)}
 			{row.unclusterableModel && <UnclusterableBadge />}
 		</div>
