@@ -9,6 +9,8 @@ import { describe, expect, it } from "vitest";
 
 import {
 	avgRiskHelp,
+	SCORE_MAX,
+	SEVERITY_INFORMATIONAL_MAX,
 	SEVERITY_MIN_SCORE,
 	severityForScore,
 	type Severity,
@@ -43,12 +45,24 @@ describe("severityForScore", () => {
 });
 
 describe("avgRiskHelp", () => {
-	it("states the scale and every band boundary", () => {
+	it("states the scale and the boundaries the banding function applies", () => {
 		const text = avgRiskHelp(50);
-		expect(text).toContain("0-100");
-		for (const bound of Object.values(SEVERITY_MIN_SCORE)) {
-			if (bound > 0) expect(text).toContain(String(bound));
-		}
+		expect(text).toContain(`0-${SCORE_MAX}`);
+		expect(text).toContain(`up to ${SEVERITY_INFORMATIONAL_MAX}`);
+		expect(text).toContain(`above ${SEVERITY_INFORMATIONAL_MAX}`);
+		expect(text).toContain(`from ${SEVERITY_MIN_SCORE.HIGH}`);
+		expect(text).toContain(`from ${SEVERITY_MIN_SCORE.CRITICAL}`);
+	});
+
+	it("never contradicts itself on a fractional score", () => {
+		// The client asked for a helper saying whether the number is high or low,
+		// so the boundaries it quotes have to agree with the band it names. Stated
+		// as whole-number ranges they did not: 30.5 bands as MODERATE while
+		// "Informational under 31" in the same tooltip called it Informational.
+		const text = avgRiskHelp(30.5);
+		expect(severityForScore(30.5)).toBe("MODERATE");
+		expect(text).toContain("Moderate band");
+		expect(text).not.toContain(`under ${SEVERITY_MIN_SCORE.MODERATE}`);
 	});
 
 	it("says which band the current value is in, so 'high or low' is answerable", () => {

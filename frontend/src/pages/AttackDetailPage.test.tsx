@@ -8,8 +8,8 @@
  */
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -79,15 +79,22 @@ function baseAlert(over: Partial<RiskAlert> = {}): RiskAlert {
 	};
 }
 
-async function renderDetail() {
+/** Reports the live URL so a test can assert what a navigation preserved. */
+function LocationProbe() {
+	const { pathname, search } = useLocation();
+	return <div data-testid="location">{`${pathname}${search}`}</div>;
+}
+
+async function renderDetail(entry = `/attacks/${"a".repeat(64)}`) {
 	const { AttackDetailPage } = await import("@/pages/AttackDetailPage");
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false } },
 	});
 	return render(
-		<MemoryRouter initialEntries={[`/attacks/${"a".repeat(64)}`]}>
+		<MemoryRouter initialEntries={[entry]}>
 			<QueryClientProvider client={client}>
 				<TooltipProvider>
+					<LocationProbe />
 					<AttackDetailPage />
 				</TooltipProvider>
 			</QueryClientProvider>
@@ -178,5 +185,34 @@ describe("unknown attack class fallback", () => {
 		});
 		await renderDetail();
 		expect(screen.getByText(/No evidence recorded/i)).toBeInTheDocument();
+	});
+});
+
+
+describe("closing the detail keeps the table's filters", () => {
+	it("the X button carries the query string back to the dashboard", async () => {
+		// The alerts table keeps its filters and page in the URL and `/attacks/:id`
+		// renders that table under this card. The dialog's Esc/overlay path already
+		// carried the search; the visible close button did not, so the primary way
+		// out of a detail view reset the operator to the default table.
+		state.alert = baseAlert();
+		await renderDetail(
+			`/attacks/${"a".repeat(64)}?severity=HIGH&attack=Phishing&page=3`,
+		);
+		fireEvent.click(screen.getByTitle("Close"));
+		expect(screen.getByTestId("location").textContent).toBe(
+			"/dashboard?severity=HIGH&attack=Phishing&page=3",
+		);
+	});
+
+	it("the not-found link carries it too", async () => {
+		// Same affordance, different branch: a stale link should not silently cost
+		// the operator their filters either.
+		state.alert = null;
+		await renderDetail(`/attacks/${"a".repeat(64)}?severity=HIGH&page=3`);
+		fireEvent.click(screen.getByText("Back"));
+		expect(screen.getByTestId("location").textContent).toBe(
+			"/dashboard?severity=HIGH&page=3",
+		);
 	});
 });

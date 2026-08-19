@@ -197,18 +197,14 @@ export function AttacksPage() {
 		return byAddress;
 	}, [contracts]);
 
-	// Alerts matching the filters, network-wide. The grouped list's own `total`
-	// counts ROWS (groups + un-attributed alerts) because that is what the pager
-	// steps through, so it cannot answer "how many alerts"; the flat list's total
-	// under the same filters can, and a one-row page is the cheapest way to ask.
-	const { data: alertTotalData } = useRiskAlerts({
-		...filters,
-		page: 0,
-		pageSize: 1,
-	});
-	const totalAlerts = alertTotalData?.total ?? 0;
-
+	// Rows for the pager, alerts for the label. The grouped endpoint reports both
+	// because they differ: one group row can stand for dozens of alerts, so the
+	// row total cannot answer "how many alerts". Asking the flat list instead
+	// would be neither free (a 1-row page still runs the contract_anomaly recall
+	// rescue) nor right (that rescue's date floor collapses to the single row it
+	// returned, so the count would omit the anomaly alerts this table shows).
 	const total = data?.total ?? 0;
+	const totalAlerts = data?.alertTotal ?? 0;
 	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`,
 	// so the rows we get are guaranteed not archived. No client filter needed.
 	const visibleRows = data?.rows ?? [];

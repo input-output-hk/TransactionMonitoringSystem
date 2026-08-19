@@ -109,6 +109,35 @@ describe("ValueTransferredPanel", () => {
 		expect(screen.getByText("×1,234")).toBeInTheDocument();
 	});
 
+	it("truncates a long asset name instead of echoing it whole", () => {
+		// The asset name is truncated head-only (it reads head-first and has no
+		// meaningful suffix), which passes tail = 0 to shortHash. `slice(-0)` is
+		// `slice(0)`, so that used to render head + "..." + the FULL name: longer
+		// than the untruncated unit and reading as two assets run together. The
+		// name here is 30 chars, past shortHash's break-even point; the previous
+		// fixture's 10-char name was under it and could not catch this.
+		const policy = "d".repeat(56);
+		const name = "4361726461536e656b4e4654313233";
+		render(
+			<ValueTransferredPanel
+				tx={tx({
+					outputs: [
+						{
+							index: 0,
+							address: PAYMENT_ADDR,
+							amount: LOVELACE,
+							assets: { [`${policy}.${name}`]: 1 },
+							is_collateral: false,
+						},
+					],
+				})}
+			/>,
+		);
+		const rendered = screen.getByTitle(`${policy}.${name}`).textContent ?? "";
+		expect(rendered).not.toContain(name);
+		expect(rendered).toContain("4361726461...");
+	});
+
 	it("labels the input total as a lower bound when a parent was unresolved", () => {
 		// The values come from a separate enrichment pass that can miss a parent
 		// UTxO, so a total that will not balance must say so.

@@ -30,7 +30,7 @@ const state: {
 	groupAlerts: RiskAlert[];
 	critical: RiskAlert | null;
 	avgRisk: number | null;
-	/** Server-side total for the flat list, i.e. every alert under the filters. */
+	/** The grouped endpoint's alert count, i.e. every alert under the filters. */
 	alertTotal: number;
 } = {
 	groups: [],
@@ -44,16 +44,22 @@ vi.mock("@/lib/api/analysis", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/lib/api/analysis")>();
 	return {
 		...actual,
+		// `total` counts ROWS (what the pager steps through) and `alertTotal` counts
+		// ALERTS; the page reads each for a different purpose, so the mock has to
+		// keep them independent or a test could pass on the wrong one.
 		useGroupedAlerts: () => ({
-			data: { rows: state.groups, total: state.groups.length },
+			data: {
+				rows: state.groups,
+				total: state.groups.length,
+				alertTotal: state.alertTotal,
+			},
 			isPending: false,
 			isError: false,
 			error: null,
 		}),
-		// One hook serves three callers (an expanded group, the pinned critical row
-		// and the footer's alert total), so it branches on the params the page
-		// passes. `enabled` is honoured, since the page uses it to hold the pinned
-		// query off entirely rather than fetching a row it will not show.
+		// Two callers now: an expanded group (which always sets `contract`) and the
+		// pinned critical row. `enabled` is honoured, since the page uses it to hold
+		// the pinned query off entirely rather than fetching a row it will not show.
 		useRiskAlerts: (
 			params: {
 				contract?: string;
@@ -78,20 +84,10 @@ vi.mock("@/lib/api/analysis", async (importOriginal) => {
 					error: null,
 				};
 			}
-			// The pinned query is the only one that asks for one row in date order;
-			// the count probe passes no sort at all.
-			if (params.pageSize === 1 && params.sort === "date") {
-				const rows = state.critical ? [state.critical] : [];
-				return {
-					data: { rows, total: rows.length },
-					isPending: false,
-					isError: false,
-					error: null,
-				};
-			}
-			// The footer's count probe: only its `total` is read.
+			// The pinned latest-critical row.
+			const rows = state.critical ? [state.critical] : [];
 			return {
-				data: { rows: [], total: state.alertTotal },
+				data: { rows, total: rows.length },
 				isPending: false,
 				isError: false,
 				error: null,
@@ -380,6 +376,36 @@ describe("the footer alert total", () => {
 		state.alertTotal = 4213;
 		await renderPage();
 		expect(screen.getByText(/Total Risk Alerts: 4,213/)).toBeInTheDocument();
+	});
+
+	it("is neither the row count nor the visible group counts summed", async () => {
+		// Both wrong answers are reachable from the same data, and both were
+		// shipped at some point: the row count understates by orders of magnitude,
+		// and summing this page's counts is a page-window artefact.
+		state.groups = [group({ alertCount: 12 }), group({ alertCount: 30 })];
+		state.alertTotal = 4213;
+		await renderPage();
+		const label = screen.getByText(/Total Risk Alerts:/);
+		expect(label.textContent).toContain("4,213");
+		expect(label.textContent).not.toContain("42"); // 12 + 30
+		expect(label.textContent).not.toMatch(/Alerts: 2\b/); // the row count
+	});
+});
+
+describe("the un-clusterable marker on a group row", () => {
+	it("is shown, so the de-prioritise signal does not need an expand", async () => {
+		// The backend sets this from the group's WORST alert. Without it on the row
+		// the operator only learns the anomaly is structural noise after opening
+		// the group, which is the opposite of what a summary row is for.
+		state.groups = [group({ unclusterableModel: true })];
+		await renderPage();
+		expect(screen.getByText(/unclusterable model/i)).toBeInTheDocument();
+	});
+
+	it("is absent when the group's worst alert is a real finding", async () => {
+		state.groups = [group({ unclusterableModel: false })];
+		await renderPage();
+		expect(screen.queryByText(/unclusterable model/i)).not.toBeInTheDocument();
 	});
 });
 

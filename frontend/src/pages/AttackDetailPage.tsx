@@ -63,7 +63,13 @@ import {
 	X,
 } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import {
+	Link,
+	Navigate,
+	useLocation,
+	useNavigate,
+	useParams,
+} from "react-router-dom";
 
 /** Cardanoscan transaction URL for the given network (the testnets use the
  *  network subdomain). Used by the detail header's block-explorer button. */
@@ -78,6 +84,17 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 	const { id } = useParams<{ id: string }>();
 	const { data: alert, isPending, isError } = useRiskAlert(id);
 	const archivedHere = useIsArchived(id);
+	const { search } = useLocation();
+	// Where every "back" affordance goes, computed once so the visible X button,
+	// the not-found link and the dialog's own Esc/overlay handler cannot diverge.
+	// The alerts table keeps its filters and page in the query string and
+	// `/attacks/:id` renders that same table under this card, so dropping the
+	// search would land the operator on the default view instead of the one they
+	// were triaging. `/archive` is a different table with its own state, so the
+	// alerts table's params are not carried there.
+	const backTo = archived
+		? { pathname: "/archive" }
+		: { pathname: "/dashboard", search };
 
 	// `archivedHere === undefined` means the archive lookup is still in flight.
 	// We can't decide the redirect until we know, otherwise a deep link to
@@ -100,7 +117,7 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 					The alert <code className="font-mono">{id}</code> does not exist.
 				</p>
 				<Link
-					to={archived ? "/archive" : "/dashboard"}
+					to={backTo}
 					className="border-border text-foreground hover:bg-accent mt-4 inline-flex h-10 items-center justify-center rounded-md border px-4 text-sm font-medium"
 				>
 					Back
@@ -122,9 +139,9 @@ export function AttackDetailPage({ archived = false }: { archived?: boolean }) {
 		<DetailCard
 			alert={alert}
 			archived={archived}
-			// `/dashboard` (not -1) so the close button works even on direct
+			// An explicit path (not -1) so the close button works even on direct
 			// deep-link / new-tab entry, where history.back() would do nothing.
-			onClose={() => void navigate(archived ? "/archive" : "/dashboard")}
+			onClose={() => void navigate(backTo)}
 			onArchived={() => void navigate("/archive", { replace: true })}
 			onRestored={() => void navigate("/dashboard", { replace: true })}
 		/>

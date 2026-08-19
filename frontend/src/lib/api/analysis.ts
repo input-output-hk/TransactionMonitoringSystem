@@ -397,6 +397,7 @@ type ApiGroupedAlertRow = {
 type ApiGroupedAlertRows = {
 	count: number;
 	total: number;
+	alert_total: number;
 	data: ApiGroupedAlertRow[];
 };
 
@@ -428,8 +429,15 @@ export type GroupedAlertRow = {
 
 export type GroupedAlertsPage = {
 	rows: GroupedAlertRow[];
-	/** Rows (groups + un-attributed alerts) matching the filters. */
+	/** Rows (groups + un-attributed alerts) matching the filters. Paginate on this. */
 	total: number;
+	/**
+	 * ALERTS matching the filters, network-wide. Distinct from `total`, which
+	 * counts rows: one group row can stand for dozens of alerts, so the pager's
+	 * total cannot answer "how many alerts". This is the sum of exactly the
+	 * `alertCount` values the rows carry, so it always agrees with the screen.
+	 */
+	alertTotal: number;
 };
 
 export type GroupedAlertsParams = Omit<
@@ -469,6 +477,7 @@ async function fetchGroupedAlertsPage(
 			unclusterableModel: r.unclusterable_model,
 		})),
 		total: json.total,
+		alertTotal: json.alert_total,
 	};
 }
 

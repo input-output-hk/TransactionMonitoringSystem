@@ -62,21 +62,33 @@ function CopyHashButton({ hash }: { hash: string }) {
 	);
 }
 
+/**
+ * Marks an auto-anomaly whose model could not cluster the contract.
+ *
+ * Shared by the alert row and the group row: the backend sets the marker on a
+ * group from that group's WORST alert, so a group whose top row is an
+ * un-clusterable verdict has to say so, or the operator gets the de-prioritise
+ * signal only after expanding it.
+ */
+function UnclusterableBadge() {
+	return (
+		<Badge
+			variant="outline"
+			className="text-muted-foreground border-border/60 text-[9px] font-normal tracking-normal normal-case"
+			title="This contract's model could not cluster its own data, so the anomaly is structural noise rather than a distinguishing signal. De-prioritized; it does not affect severity."
+		>
+			unclusterable model
+		</Badge>
+	);
+}
+
 function AttackTypeCell({ alert }: { alert: RiskAlert }) {
 	const Icon = ATTACK_ICON[alert.attackType] ?? AlertCircle;
 	return (
 		<div className="text-foreground flex items-center gap-2">
 			<Icon className="text-muted-foreground h-4 w-4" />
 			{alert.attackType}
-			{alert.unclusterableModel && (
-				<Badge
-					variant="outline"
-					className="text-muted-foreground border-border/60 text-[9px] font-normal tracking-normal normal-case"
-					title="This contract's model could not cluster its own data, so the anomaly is structural noise rather than a distinguishing signal. De-prioritized; it does not affect severity."
-				>
-					unclusterable model
-				</Badge>
-			)}
+			{alert.unclusterableModel && <UnclusterableBadge />}
 		</div>
 	);
 }
@@ -180,7 +192,10 @@ export function ContractGroupRow({
 			</TableCell>
 			<TableCell className="text-foreground">{row.latestDate}</TableCell>
 			<TableCell className="text-muted-foreground">
-				{row.alertCount === 1 ? "1 alert" : `${row.alertCount} alerts`}
+				<div className="flex items-center gap-2">
+					{row.alertCount === 1 ? "1 alert" : `${row.alertCount} alerts`}
+					{row.unclusterableModel && <UnclusterableBadge />}
+				</div>
 			</TableCell>
 			<TableCell>
 				<Badge variant={SEVERITY_VARIANT[row.worstSeverity]}>

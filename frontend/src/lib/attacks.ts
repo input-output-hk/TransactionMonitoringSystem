@@ -87,19 +87,19 @@ export const SEVERITY_MIN_SCORE: Record<Severity, number> = {
 export const SCORE_MAX = 100;
 
 /**
- * Highest score still inside each band.
+ * Highest score still banded Informational.
  *
- * The bands are contiguous over the scale, so each one ends a point below the
- * next one's floor. Named rather than written as `SEVERITY_MIN_SCORE.HIGH - 1`
- * at each use: the offset is a property of the scale, and it appears in both
- * the banding function and the operator-facing copy, which must not drift.
+ * The one band edge that is not a floor: `severityForScore` tests `> this` for
+ * Moderate rather than `>= SEVERITY_MIN_SCORE.MODERATE`, because scores carry
+ * decimals and 30.5 must not land in a dead zone between the two. Named because
+ * it appears in both the banding function and the operator-facing copy, which
+ * must not drift apart.
+ *
+ * The other bands deliberately have no ceiling constant: they have no exact
+ * integer one (59.9 is still Moderate), so quoting `31-59` style ranges would
+ * misdescribe the very scores this scale produces. They are stated by floor.
  */
-export const SEVERITY_MAX_SCORE: Record<Severity, number> = {
-	INFORMATIONAL: SEVERITY_MIN_SCORE.MODERATE - 1,
-	MODERATE: SEVERITY_MIN_SCORE.HIGH - 1,
-	HIGH: SEVERITY_MIN_SCORE.CRITICAL - 1,
-	CRITICAL: SCORE_MAX,
-};
+export const SEVERITY_INFORMATIONAL_MAX = SEVERITY_MIN_SCORE.MODERATE - 1;
 
 /** The band a 0-100 score falls in, matching the backend's score_to_band. */
 export function severityForScore(score: number): Severity {
@@ -107,7 +107,7 @@ export function severityForScore(score: number): Severity {
 	if (score >= SEVERITY_MIN_SCORE.HIGH) return "HIGH";
 	// Strictly above the top of Informational, not >= MODERATE: scores are
 	// rounded to 2dp, so 30.5 must not fall into a dead zone and under-band.
-	if (score > SEVERITY_MAX_SCORE.INFORMATIONAL) return "MODERATE";
+	if (score > SEVERITY_INFORMATIONAL_MAX) return "MODERATE";
 	return "INFORMATIONAL";
 }
 
@@ -130,12 +130,16 @@ const SEVERITY_WORD: Record<Severity, string> = {
  * short, and for an operator rather than a researcher.
  */
 export function avgRiskHelp(score: number | null | undefined): string {
+	// Stated as FLOORS, not as `31-59` style ranges. Scores carry decimals, and
+	// severityForScore bands anything above 30 as Moderate, so "Moderate 31-59"
+	// would call a displayed 30.5 Informational while the KPI beside it reads
+	// Moderate. Floors are the predicates the banding function actually applies.
 	const scale =
 		`Mean risk score (0-${SCORE_MAX}) across alerting transactions on this network. ` +
-		`Bands: Informational under ${SEVERITY_MIN_SCORE.MODERATE}, ` +
-		`Moderate ${SEVERITY_MIN_SCORE.MODERATE}-${SEVERITY_MAX_SCORE.MODERATE}, ` +
-		`High ${SEVERITY_MIN_SCORE.HIGH}-${SEVERITY_MAX_SCORE.HIGH}, ` +
-		`Critical ${SEVERITY_MIN_SCORE.CRITICAL}+.`;
+		`Bands: Informational up to ${SEVERITY_INFORMATIONAL_MAX}, ` +
+		`Moderate above ${SEVERITY_INFORMATIONAL_MAX}, ` +
+		`High from ${SEVERITY_MIN_SCORE.HIGH}, ` +
+		`Critical from ${SEVERITY_MIN_SCORE.CRITICAL}.`;
 	const where =
 		score === null || score === undefined
 			? ""
