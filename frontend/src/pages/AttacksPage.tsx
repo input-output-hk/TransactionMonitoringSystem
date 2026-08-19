@@ -162,13 +162,22 @@ export function AttacksPage() {
 		pageSize,
 	});
 
-	// The pinned latest-critical row, never displaced by the sort below it.
+	// The pinned latest-critical row.
+	//
 	// Filter-aware in both directions: it inherits the attack-type filter, and it
 	// exists at all only while the severity selection admits Critical. Pinning a
 	// Critical row above a Moderate-only table would contradict the filter the
 	// operator set, so the query is held off rather than merely hidden.
+	//
+	// FIRST PAGE ONLY. This page offers no sort control: the list is ordered by
+	// date server-side, so the pin's whole job is keeping the latest Critical at
+	// the top of the list even when the newest alerts are not Critical. Page 2
+	// onwards has no top of the list, and a July Critical pinned above August
+	// alerts belongs to neither that page nor the operator's intent.
 	const criticalSelected =
 		severities.length === 0 || severities.includes("CRITICAL");
+	const onFirstPage = page === 0;
+	const pinEnabled = criticalSelected && onFirstPage;
 	const { data: criticalData } = useRiskAlerts(
 		{
 			...filters,
@@ -177,9 +186,9 @@ export function AttacksPage() {
 			pageSize: 1,
 			sort: "date",
 		},
-		{ enabled: criticalSelected },
+		{ enabled: pinEnabled },
 	);
-	const pinnedCritical = criticalSelected ? criticalData?.rows[0] : undefined;
+	const pinnedCritical = pinEnabled ? criticalData?.rows[0] : undefined;
 
 	// Human contract names come from the clustering registry. Gated on the health
 	// flag so a clustering-disabled deployment never polls the sidecar; without it
@@ -354,7 +363,14 @@ export function AttacksPage() {
 						    second row the operator would read as another alert. */}
 						{pinnedCritical && (
 							<Fragment key={`pinned-${pinnedCritical.slug}`}>
-								<AlertRow alert={pinnedCritical} onOpen={openDetail} pinned />
+								<AlertRow
+									alert={pinnedCritical}
+									onOpen={openDetail}
+									pinned
+									contractLabel={contractLabels.get(
+										pinnedCritical.contractAddress ?? "",
+									)}
+								/>
 								<PinnedCriticalSpacerRow />
 							</Fragment>
 						)}

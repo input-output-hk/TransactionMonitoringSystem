@@ -43,17 +43,21 @@ const CONTRACT_HEAD = 14;
 const CONTRACT_TAIL = 6;
 
 /**
- * Tint and left accent for the pinned latest-critical row.
+ * The pinned latest-critical row: tint, and an outline on all four sides.
  *
- * ONE row carries it. The label used to sit on a strip above, which cost a
- * second table row for two words and read as another entry in the list; it also
- * let TableRow's bottom border run between the strip and the row it described,
- * so the accent appeared to cut the block in half. With a single row the accent
- * spans its full height by construction, `border-b-0` keeps the tint from being
- * split by a divider, and the spacer row below separates it from the list.
+ * An OUTLINE, not a border. Tailwind's preflight sets `border-collapse: collapse`
+ * on every table, so a border declared on a `<tr>` is resolved against the
+ * borders of the cells, the row group and the column before it paints, which is
+ * why a left accent here was fragile enough to need moving onto a cell. An
+ * outline takes no part in that resolution and takes no space in the layout, so
+ * it draws one even 1px edge right round the row.
+ *
+ * A bounded shape rather than more red: the tint alone said "critical", which the
+ * severity badge on the same row already says, so it could not also say "pinned".
+ * `border-b-0` still matters, or TableRow's divider crosses the outlined box.
  */
 const PINNED_ROW =
-	"bg-severity-critical/25 border-l-severity-critical-foreground border-l-2 border-b-0";
+	"bg-severity-critical/25 border-b-0 outline-1 -outline-offset-1 outline-severity-critical-foreground/60";
 
 /**
  * Copies an identifier the table can only show truncated.
@@ -103,24 +107,31 @@ function UnclusterableBadge() {
 }
 
 /**
- * Marks the row the table holds at the top.
+ * Names the state the outline and the gutter pin announce.
  *
- * Shaped like UnclusterableBadge so the table speaks one visual language for
- * "metadata about this row", and placed AFTER the hash rather than before it so
- * every row's ID still starts on the same column: an indented hash on one row
- * reads as a broken table. Critical-toned and outlined rather than filled,
- * because the row it sits on already carries the filled critical tint.
+ * Deliberately NOT a badge. As an outlined box it was wide enough to wrap onto
+ * two lines inside the ID cell, which made a tall red rectangle beside a
+ * single-line hash: nothing about it lined up with anything. As plain text it
+ * shares the hash's line box, so it is aligned by construction and `nowrap`
+ * keeps it that way.
+ *
+ * No icon of its own: the pin is in the gutter, and repeating it here read as
+ * two markers for one state. One word, because the severity badge at the other
+ * end of the same row already says CRITICAL; repeating that bought width and no
+ * information, and width was what broke the earlier badge. Which critical alert
+ * this is belongs in the title, not in the row.
+ *
+ * Placed AFTER the hash so every row's ID still starts on the same column: an
+ * indented hash on one row reads as a broken table.
  */
 function PinnedCriticalMarker() {
 	return (
-		<Badge
-			variant="outline"
-			className="border-severity-critical-foreground/60 text-severity-critical-foreground gap-1 px-1.5 py-0 text-[9px] font-semibold"
+		<span
+			className="text-severity-critical-foreground flex shrink-0 items-center text-[10px] font-semibold tracking-wider whitespace-nowrap uppercase"
 			title="The most recent Critical alert, pinned above the list."
 		>
-			<Pin className="h-2.5 w-2.5" />
-			Latest critical
-		</Badge>
+			Pinned
+		</span>
 	);
 }
 
@@ -144,6 +155,7 @@ export function AlertRow({
 	onOpen,
 	indented = false,
 	pinned = false,
+	contractLabel,
 }: {
 	alert: RiskAlert;
 	onOpen: (slug: string) => void;
@@ -151,7 +163,14 @@ export function AlertRow({
 	indented?: boolean;
 	/** The pinned latest-critical row: tinted, accented, and marked as pinned. */
 	pinned?: boolean;
+	/** Registry display name for this alert's contract, when one is known. */
+	contractLabel?: string;
 }) {
+	// Which contract this alert implicates, shown only where nothing else says it.
+	// Inside an expanded group the contract IS the heading above these rows, and a
+	// flat row is flat precisely because its class names no contract, so the only
+	// row this line has anything to add to is the pinned one.
+	const contract = !indented ? alert.contractAddress : undefined;
 	return (
 		<TableRow
 			onClick={() => onOpen(alert.slug)}
@@ -164,7 +183,14 @@ export function AlertRow({
 				pinned && `${PINNED_ROW} hover:bg-severity-critical/30`,
 			)}
 		>
-			<TableCell className={cn("w-8", indented && "pl-6")} />
+			{/* The gutter is where a group row shows its chevron, i.e. the column an
+			    operator already scans for what a row IS rather than what it holds. The
+			    pin belongs there for the same reason. */}
+			<TableCell className={cn("w-8", indented && "pl-6")}>
+				{pinned && (
+					<Pin className="text-severity-critical-foreground h-3.5 w-3.5" />
+				)}
+			</TableCell>
 			<TableCell>
 				<div className="flex items-center gap-2">
 					{/* Mono and uppercase belong to the hash, not to the cell: the marker
@@ -175,6 +201,20 @@ export function AlertRow({
 					<CopyButton value={alert.fullHash} label="Copy transaction hash" />
 					{pinned && <PinnedCriticalMarker />}
 				</div>
+				{/* A second line rather than a third item on the first one: width is
+				    what broke the marker, and a group row already states its contract
+				    above its own count in exactly this shape. */}
+				{contract && (
+					<div
+						className={cn(
+							"text-muted-foreground truncate text-xs",
+							!contractLabel && "font-mono",
+						)}
+						title={contract}
+					>
+						{contractLabel ?? shortHash(contract, CONTRACT_HEAD, CONTRACT_TAIL)}
+					</div>
+				)}
 			</TableCell>
 			<TableCell className="text-foreground">{alert.date}</TableCell>
 			<TableCell>
@@ -294,10 +334,16 @@ export function ContractGroupRow({
 	);
 }
 
-/** Air below the pinned row, so it and the sorted list read as two things. */
+/**
+ * Air below the pinned row, so it and the sorted list read as two things.
+ *
+ * `border-b-0` matters: TableRow ships `border-b`, so this row drew a divider
+ * 12px under the pinned block, belonging to nothing and reading as a line out of
+ * alignment with the block above it.
+ */
 export function PinnedCriticalSpacerRow() {
 	return (
-		<TableRow className="hover:bg-transparent">
+		<TableRow className="border-b-0 hover:bg-transparent">
 			<TableCell colSpan={ALERT_COLUMN_COUNT} className="h-3 p-0" />
 		</TableRow>
 	);

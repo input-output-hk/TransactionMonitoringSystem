@@ -385,7 +385,7 @@ describe("pinned latest critical alert", () => {
 		// The label used to occupy a strip of its own, which spent a table row on
 		// two words and read as a second alert above the real one.
 		expect(rows[1].textContent).toContain("EEEEEEEE");
-		expect(rows[1].textContent).toMatch(/latest critical/i);
+		expect(rows[1].textContent).toMatch(/pinned/i);
 		const groupRow = rows.findIndex((r) =>
 			r.textContent?.includes("Djed StableCoin"),
 		);
@@ -402,16 +402,67 @@ describe("pinned latest critical alert", () => {
 		expect(screen.getAllByRole("row")).toHaveLength(3);
 	});
 
-	it("tints and accents that one row, with no divider splitting it", async () => {
+	it("outlines the row on all four sides, with no divider crossing it", async () => {
 		// Asserted on classes because the defect is purely visual: every
 		// behavioural test passed while the block looked cut in half.
+		//
+		// An OUTLINE, not a border: preflight collapses table borders, so a `<tr>`
+		// border is resolved against the cells, the row group and the column before
+		// it paints, which is what made a left accent here fragile. An outline takes
+		// no part in that and draws one even edge right round the row.
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage();
 		const row = screen.getAllByRole("row")[1];
-		expect(row.className).toContain("border-l-2");
 		expect(row.className).toContain("bg-severity-critical/25");
 		expect(row.className).toContain("border-b-0");
+		expect(row.className).toContain("outline-1");
+		expect(row.className).toContain("outline-severity-critical-foreground/60");
+		// A single-sided border would leave three edges of the box undrawn.
+		expect(row.className).not.toContain("border-l-2");
+		expect(row.children[0].className).not.toContain("border-l-2");
+	});
+
+	it("puts the pin in the gutter, where a group row shows its chevron", async () => {
+		// That column is the one an operator scans for what a row IS rather than
+		// what it holds, so the pin belongs there and not beside the hash, where it
+		// read as a second marker for one state.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [];
+		await renderPage();
+		const gutter = screen.getAllByRole("row")[1].children[0];
+		expect(gutter.querySelector("svg")).not.toBeNull();
+		// And the word beside the hash carries no icon of its own.
+		expect(screen.getByText(/pinned/i).querySelector("svg")).toBeNull();
+	});
+
+	it("leaves no horizontal rule under the block", async () => {
+		// TableRow ships `border-b`, so the spacer drew a divider 12px below the
+		// tint, belonging to nothing and reading as a line out of alignment with
+		// the block above it. Nothing between the pin and the list may draw one.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage();
+		const rows = screen.getAllByRole("row");
+		// Rows 1 and 2 are the pinned alert and the spacer that follows it.
+		for (const row of [rows[1], rows[2]]) {
+			expect(row.className).toContain("border-b-0");
+		}
+	});
+
+	it("marks the row with plain text, not a bordered box", async () => {
+		// As an outlined badge the marker was wide enough to wrap onto two lines
+		// inside the ID cell: a tall red rectangle beside a single-line hash,
+		// aligned with nothing. Plain text shares the hash's line box.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [];
+		await renderPage();
+		const marker = screen.getByText(/pinned/i);
+		expect(marker.className).toContain("whitespace-nowrap");
+		expect(marker.className).not.toMatch(/\bborder(-2)?\b/);
+		// The severity badge on the same row already says CRITICAL, so the marker
+		// must not spend width repeating it.
+		expect(marker.textContent).not.toMatch(/critical/i);
 	});
 
 	it("keeps the hash on the same column as every other row's", async () => {
@@ -422,16 +473,17 @@ describe("pinned latest critical alert", () => {
 		await renderPage();
 		const cell = screen.getByText("EEEEEEEE").closest("td");
 		const text = cell?.textContent ?? "";
-		expect(text.indexOf("EEEEEEEE")).toBeLessThan(text.search(/latest/i));
+		expect(text.indexOf("EEEEEEEE")).toBeLessThan(text.search(/pinned/i));
 	});
 
 	it("labels the row without explaining the sort order", async () => {
 		// The sentence "kept in view regardless of the sort below" was cut as
-		// superfluous: the pin icon and the position already say it.
+		// superfluous: the pin icon and the position already say it. Which critical
+		// alert this is stays in the marker's title, off the row.
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage();
-		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
+		expect(screen.getByText(/pinned/i)).toBeInTheDocument();
 		expect(
 			screen.queryByText(/regardless of the sort/i),
 		).not.toBeInTheDocument();
@@ -442,7 +494,7 @@ describe("pinned latest critical alert", () => {
 		state.groups = [group()];
 		await renderPage();
 		// No empty placeholder on a clean system.
-		expect(screen.queryByText(/latest critical/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/pinned/i)).not.toBeInTheDocument();
 	});
 
 	it("is not duplicated when it also appears in the body", async () => {
@@ -473,20 +525,87 @@ describe("pinned latest critical alert", () => {
 		expect(screen.queryByText(/No alerts match/i)).not.toBeInTheDocument();
 	});
 
+	it("names the contract it implicates, by its registry label", async () => {
+		// The column is headed "Contract / ID" and every group row states its
+		// contract; the pinned alert used the renderer meant for alerts that name
+		// NO contract, so the most important row on the page was the one hiding the
+		// attribution an analyst wants first. A second line, not a third item on the
+		// first one: width is what broke the marker.
+		state.critical = alert({
+			fullHash: CRIT_HASH,
+			severity: "CRITICAL",
+			contractAddress: DJED,
+		});
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		expect(cell?.textContent).toContain("Djed StableCoin");
+	});
+
+	it("falls back to the truncated address when the registry has no label", async () => {
+		state.critical = alert({
+			fullHash: CRIT_HASH,
+			severity: "CRITICAL",
+			contractAddress: STRIKE,
+		});
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		expect(cell?.textContent).toContain(STRIKE.slice(0, 14));
+		expect(cell?.textContent).not.toContain("Djed StableCoin");
+	});
+
+	it("says nothing about a contract when the alert names none", async () => {
+		// An un-attributed alert is pinned as a bare hash rather than gaining an
+		// empty line or a placeholder.
+		state.critical = alert({
+			fullHash: CRIT_HASH,
+			severity: "CRITICAL",
+			contractAddress: "",
+		});
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		// Hash, copy button and the marker, and nothing else.
+		expect(cell?.textContent?.replace(/pinned/i, "").trim()).toBe("EEEEEEEE");
+	});
+
+	it("is absent past the first page, where there is no top of the list", async () => {
+		// This page has no sort control: the list is date-ordered server-side, so
+		// the pin's whole job is keeping the latest Critical at the top of the list.
+		// Page 2 onwards has no top of the list, and the query is held off rather
+		// than fetched and hidden.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage("/dashboard?page=2");
+		expect(screen.queryByText(/pinned/i)).not.toBeInTheDocument();
+		expect(screen.queryByText("EEEEEEEE")).not.toBeInTheDocument();
+	});
+
+	it("is present on the first page whether or not the URL says so", async () => {
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		for (const entry of ["/dashboard", "/dashboard?page=1"]) {
+			await renderPage(entry);
+			expect(screen.getByText(/pinned/i)).toBeInTheDocument();
+			cleanup();
+		}
+	});
+
 	it("is absent when the severity filter excludes Critical", async () => {
 		// The pin must never contradict the filter the operator set: a Critical
 		// row above a Moderate-only table reads as the filter having failed.
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group({ worstSeverity: "MODERATE" })];
 		await renderPage("/dashboard?severity=MODERATE");
-		expect(screen.queryByText(/latest critical/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/pinned/i)).not.toBeInTheDocument();
 	});
 
 	it("is present when no severity filter is applied", async () => {
 		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
 		state.groups = [group()];
 		await renderPage("/dashboard?severity=");
-		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
+		expect(screen.getByText(/pinned/i)).toBeInTheDocument();
 	});
 });
 
