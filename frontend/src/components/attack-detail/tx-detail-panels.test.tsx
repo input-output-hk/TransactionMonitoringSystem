@@ -7,7 +7,7 @@
  * bound rather than presented as exact.
  */
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -109,15 +109,19 @@ describe("ValueTransferredPanel", () => {
 		expect(screen.getByText("×1,234")).toBeInTheDocument();
 	});
 
-	it("truncates a long asset name instead of echoing it whole", () => {
+	it("truncates a long HEX asset name instead of echoing it whole", () => {
 		// The asset name is truncated head-only (it reads head-first and has no
 		// meaningful suffix), which passes tail = 0 to shortHash. `slice(-0)` is
 		// `slice(0)`, so that used to render head + "..." + the FULL name: longer
 		// than the untruncated unit and reading as two assets run together. The
 		// name here is 30 chars, past shortHash's break-even point; the previous
 		// fixture's 10-char name was under it and could not catch this.
+		//
+		// The first byte is 0x01, deliberately non-printable: a printable name is
+		// now decoded to text and shown in full, so only a name that STAYS hex
+		// still exercises truncation.
 		const policy = "d".repeat(56);
-		const name = "4361726461536e656b4e4654313233";
+		const name = "01" + "61726461536e656b4e46543132";
 		render(
 			<ValueTransferredPanel
 				tx={tx({
@@ -135,7 +139,137 @@ describe("ValueTransferredPanel", () => {
 		);
 		const rendered = screen.getByTitle(`${policy}.${name}`).textContent ?? "";
 		expect(rendered).not.toContain(name);
-		expect(rendered).toContain("4361726461...");
+		expect(rendered).toContain("0161726461...");
+	});
+
+	it("shows a printable asset name as text, keeping the hex in the title", () => {
+		// 42414e4b is BANK. An operator recognises the ticker, not the bytes, which
+		// is why every explorer decodes this.
+		const policy = "d".repeat(56);
+		const name = "42414e4b";
+		render(
+			<ValueTransferredPanel
+				tx={tx({
+					outputs: [
+						{
+							index: 0,
+							address: PAYMENT_ADDR,
+							amount: LOVELACE,
+							assets: { [`${policy}.${name}`]: 5 },
+							is_collateral: false,
+						},
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByText("BANK")).toBeInTheDocument();
+		const row = screen.getByText("BANK").closest("div");
+		expect(row?.getAttribute("title") ?? "").toContain(name);
+	});
+
+	it("keeps a non-printable asset name as hex rather than half-decoding it", () => {
+		// One unprintable byte and the whole name stays hex: a partial decode would
+		// let arbitrary bytes put control characters on screen, and a half-decoded
+		// name is less trustworthy than an honest hex string.
+		const policy = "d".repeat(56);
+		const name = "4241004b";
+		render(
+			<ValueTransferredPanel
+				tx={tx({
+					outputs: [
+						{
+							index: 0,
+							address: PAYMENT_ADDR,
+							amount: LOVELACE,
+							assets: { [`${policy}.${name}`]: 1 },
+							is_collateral: false,
+						},
+					],
+				})}
+			/>,
+		);
+		const rendered = screen.getByTitle(`${policy}.${name}`).textContent ?? "";
+		expect(rendered).toContain(name);
+		expect(screen.queryByText("BANK")).not.toBeInTheDocument();
+	});
+
+	it("strips a CIP-68 label before decoding the name under it", () => {
+		// 0014df10 is CIP-67 label (333). Decoding the label bytes along with the
+		// name yields mojibake, so the label is recognised and named instead.
+		const policy = "d".repeat(56);
+		const name = "0014df1042414e4b";
+		render(
+			<ValueTransferredPanel
+				tx={tx({
+					outputs: [
+						{
+							index: 0,
+							address: PAYMENT_ADDR,
+							amount: LOVELACE,
+							assets: { [`${policy}.${name}`]: 7 },
+							is_collateral: false,
+						},
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByText("BANK")).toBeInTheDocument();
+		const title =
+			screen.getByText("BANK").closest("div")?.getAttribute("title") ?? "";
+		expect(title).toContain("CIP-68 (333)");
+	});
+
+	it("counts the assets on a UTxO and collapses a long list", () => {
+		// Without the count and the collapse, one output holding 20 tokens rendered
+		// 20 lines indistinguishable from output lines, so "Outputs (N)" read as a
+		// wrong count and the sibling outputs were pushed off the panel.
+		const assets: Record<string, number> = {};
+		for (let i = 0; i < 9; i++) {
+			assets[`${i.toString().repeat(56)}.42414e4b`] = i + 1;
+		}
+		render(
+			<ValueTransferredPanel
+				tx={tx({
+					outputs: [
+						{
+							index: 0,
+							address: PAYMENT_ADDR,
+							amount: LOVELACE,
+							assets,
+							is_collateral: false,
+						},
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByText("9 assets")).toBeInTheDocument();
+		// Six shown, three behind the toggle.
+		expect(screen.getAllByText("BANK")).toHaveLength(6);
+		fireEvent.click(screen.getByText("show all 9"));
+		expect(screen.getAllByText("BANK")).toHaveLength(9);
+		fireEvent.click(screen.getByText("show fewer"));
+		expect(screen.getAllByText("BANK")).toHaveLength(6);
+	});
+
+	it("singularises a single asset and offers no toggle", () => {
+		const policy = "d".repeat(56);
+		render(
+			<ValueTransferredPanel
+				tx={tx({
+					outputs: [
+						{
+							index: 0,
+							address: PAYMENT_ADDR,
+							amount: LOVELACE,
+							assets: { [`${policy}.42414e4b`]: 1 },
+							is_collateral: false,
+						},
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByText("1 asset")).toBeInTheDocument();
+		expect(screen.queryByText(/show all/)).not.toBeInTheDocument();
 	});
 
 	it("labels the input total as a lower bound when a parent was unresolved", () => {

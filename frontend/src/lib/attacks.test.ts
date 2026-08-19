@@ -54,6 +54,15 @@ describe("avgRiskHelp", () => {
 		expect(text).toContain(`from ${SEVERITY_MIN_SCORE.CRITICAL}`);
 	});
 
+	it("names the table it is independent of instead of saying 'this table'", () => {
+		// The tooltip hangs off a KPI card at the top of the page, where "this
+		// table" has no visible referent: the reader cannot tell whether it means
+		// the card, the alerts list further down, or something off-screen.
+		const text = avgRiskHelp(50);
+		expect(text).toContain("Risk Alerts table");
+		expect(text).not.toContain("this table");
+	});
+
 	it("never contradicts itself on a fractional score", () => {
 		// The client asked for a helper saying whether the number is high or low,
 		// so the boundaries it quotes have to agree with the band it names. Stated

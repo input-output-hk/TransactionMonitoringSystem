@@ -43,6 +43,19 @@ const CONTRACT_HEAD = 14;
 const CONTRACT_TAIL = 6;
 
 /**
+ * Tint and left accent for the pinned latest-critical row.
+ *
+ * ONE row carries it. The label used to sit on a strip above, which cost a
+ * second table row for two words and read as another entry in the list; it also
+ * let TableRow's bottom border run between the strip and the row it described,
+ * so the accent appeared to cut the block in half. With a single row the accent
+ * spans its full height by construction, `border-b-0` keeps the tint from being
+ * split by a divider, and the spacer row below separates it from the list.
+ */
+const PINNED_ROW =
+	"bg-severity-critical/25 border-l-severity-critical-foreground border-l-2 border-b-0";
+
+/**
  * Copies an identifier the table can only show truncated.
  *
  * Serves a transaction hash and a group's contract address alike: both are shown
@@ -89,6 +102,28 @@ function UnclusterableBadge() {
 	);
 }
 
+/**
+ * Marks the row the table holds at the top.
+ *
+ * Shaped like UnclusterableBadge so the table speaks one visual language for
+ * "metadata about this row", and placed AFTER the hash rather than before it so
+ * every row's ID still starts on the same column: an indented hash on one row
+ * reads as a broken table. Critical-toned and outlined rather than filled,
+ * because the row it sits on already carries the filled critical tint.
+ */
+function PinnedCriticalMarker() {
+	return (
+		<Badge
+			variant="outline"
+			className="border-severity-critical-foreground/60 text-severity-critical-foreground gap-1 px-1.5 py-0 text-[9px] font-semibold"
+			title="The most recent Critical alert, pinned above the list."
+		>
+			<Pin className="h-2.5 w-2.5" />
+			Latest critical
+		</Badge>
+	);
+}
+
 function AttackTypeCell({ alert }: { alert: RiskAlert }) {
 	const Icon = ATTACK_ICON[alert.attackType] ?? AlertCircle;
 	return (
@@ -114,7 +149,7 @@ export function AlertRow({
 	onOpen: (slug: string) => void;
 	/** Nested inside an expanded group, so the chevron cell is a spacer. */
 	indented?: boolean;
-	/** The pinned latest-critical row. Rendered under PinnedCriticalHeaderRow. */
+	/** The pinned latest-critical row: tinted, accented, and marked as pinned. */
 	pinned?: boolean;
 }) {
 	return (
@@ -122,25 +157,23 @@ export function AlertRow({
 			onClick={() => onOpen(alert.slug)}
 			className={cn(
 				"cursor-pointer",
-				// A tinted band closed by a faint critical edge, with the strong
-				// accent scoped to the LEFT border only. Setting the border COLOUR
-				// unscoped also recoloured the row's own bottom border, which read
-				// as an accidental red underline instead of a deliberate block.
-				//
 				// The hover tint has to be restated: TableRow ships
 				// `hover:bg-muted/40`, and tailwind-merge does not drop it for a
-				// plain `bg-*`, so without this the row turns grey on hover while
-				// the strip above stays red and the block visibly comes apart at
-				// the moment the analyst is pointing at it.
-				pinned &&
-					"bg-severity-critical/25 hover:bg-severity-critical/30 border-l-severity-critical-foreground border-b-severity-critical-foreground/30 border-l-2",
+				// plain `bg-*`, so without this the row turns grey the moment the
+				// analyst points at it and stops reading as pinned.
+				pinned && `${PINNED_ROW} hover:bg-severity-critical/30`,
 			)}
 		>
 			<TableCell className={cn("w-8", indented && "pl-6")} />
 			<TableCell>
-				<div className="text-foreground flex items-center gap-2 font-mono text-[13px] uppercase">
-					<span>{alert.id}</span>
+				<div className="flex items-center gap-2">
+					{/* Mono and uppercase belong to the hash, not to the cell: the marker
+					    beside it is prose and would inherit both. */}
+					<span className="text-foreground font-mono text-[13px] uppercase">
+						{alert.id}
+					</span>
 					<CopyButton value={alert.fullHash} label="Copy transaction hash" />
+					{pinned && <PinnedCriticalMarker />}
 				</div>
 			</TableCell>
 			<TableCell className="text-foreground">{alert.date}</TableCell>
@@ -261,33 +294,7 @@ export function ContractGroupRow({
 	);
 }
 
-/**
- * Section label for the pinned latest-critical row.
- *
- * A strip ABOVE the row rather than a badge inside it: being pinned is a
- * property of the row's placement, so a badge sitting beside the hash reads as
- * an attribute of that transaction instead.
- */
-export function PinnedCriticalHeaderRow() {
-	return (
-		<TableRow className="hover:bg-transparent">
-			<TableCell
-				colSpan={ALERT_COLUMN_COUNT}
-				className="bg-severity-critical/25 border-t-severity-critical-foreground/30 text-severity-critical-foreground border-t py-1.5"
-			>
-				<div className="flex items-center gap-1.5 text-[10px] font-medium tracking-wider uppercase">
-					<Pin className="h-3 w-3" />
-					Latest critical
-					<span className="text-muted-foreground font-normal tracking-normal normal-case">
-						kept in view regardless of the sort below
-					</span>
-				</div>
-			</TableCell>
-		</TableRow>
-	);
-}
-
-/** Air below the pinned block, so it and the sorted list read as two things. */
+/** Air below the pinned row, so it and the sorted list read as two things. */
 export function PinnedCriticalSpacerRow() {
 	return (
 		<TableRow className="hover:bg-transparent">

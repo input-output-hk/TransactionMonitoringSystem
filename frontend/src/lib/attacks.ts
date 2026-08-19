@@ -145,10 +145,14 @@ export function avgRiskHelp(score: number | null | undefined): string {
 			? ""
 			: ` The current average sits in the ${SEVERITY_WORD[severityForScore(score)]} band.`;
 	// Say this explicitly: it is network-wide by design, so it will not move when
-	// the table's attack-type or severity filters change.
+	// the attack-type or severity filters change. Name the Risk Alerts table
+	// rather than saying "this table": the tooltip lives on a KPI card at the top
+	// of the page, where "this" has no obvious referent and the reader has to
+	// guess whether it means the card, the alerts list, or something off-screen.
 	const scope =
-		" Counts only transactions a detector flagged, not clean ones, and is not" +
-		" affected by the filters on this table.";
+		" Counts only transactions a detector flagged, never clean ones. It covers" +
+		" the whole network, so the filters on the Risk Alerts table below do not" +
+		" change it.";
 	return scale + where + scope;
 }
 

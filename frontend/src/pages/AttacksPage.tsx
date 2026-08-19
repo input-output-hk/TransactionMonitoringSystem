@@ -25,7 +25,6 @@ import {
 	ALERT_COLUMN_COUNT,
 	AlertRow,
 	ContractGroupRow,
-	PinnedCriticalHeaderRow,
 	PinnedCriticalSpacerRow,
 } from "@/components/alerts/alert-rows";
 import { ContractGroupAlerts } from "@/components/alerts/contract-group-alerts";
@@ -350,11 +349,11 @@ export function AttacksPage() {
 					</TableHeader>
 					<TableBody>
 						{/* Pinned first, and de-duplicated against the body so the same
-						    transaction never appears twice. The strip above it carries the
-						    label, because being pinned describes the placement, not the tx. */}
+						    transaction never appears twice. One row: the tint, the accent and
+						    the marker inside the row say it is pinned, so nothing here adds a
+						    second row the operator would read as another alert. */}
 						{pinnedCritical && (
 							<Fragment key={`pinned-${pinnedCritical.slug}`}>
-								<PinnedCriticalHeaderRow />
 								<AlertRow alert={pinnedCritical} onOpen={openDetail} pinned />
 								<PinnedCriticalSpacerRow />
 							</Fragment>

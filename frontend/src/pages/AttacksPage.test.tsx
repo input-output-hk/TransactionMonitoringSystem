@@ -372,7 +372,7 @@ describe("alerts with no contract", () => {
 describe("pinned latest critical alert", () => {
 	const CRIT_HASH = `${"e".repeat(63)}5`;
 
-	it("is the first row, under a section strip, ahead of the groups", async () => {
+	it("is the first row, ahead of the groups, and carries its own label", async () => {
 		state.critical = alert({
 			fullHash: CRIT_HASH,
 			severity: "CRITICAL",
@@ -381,16 +381,60 @@ describe("pinned latest critical alert", () => {
 		state.groups = [group()];
 		await renderPage();
 		const rows = screen.getAllByRole("row");
-		// Row 0 is the header. The label lives on its own strip so it annotates
-		// the placement rather than reading as a field of the transaction, so the
-		// alert is row 2 and it still precedes every grouped row.
+		// Row 0 is the header, so the pinned alert is row 1 and the label is ON it.
+		// The label used to occupy a strip of its own, which spent a table row on
+		// two words and read as a second alert above the real one.
+		expect(rows[1].textContent).toContain("EEEEEEEE");
 		expect(rows[1].textContent).toMatch(/latest critical/i);
-		expect(rows[1].textContent).not.toContain("EEEEEEEE");
-		expect(rows[2].textContent).toContain("EEEEEEEE");
 		const groupRow = rows.findIndex((r) =>
 			r.textContent?.includes("Djed StableCoin"),
 		);
-		expect(groupRow).toBeGreaterThan(2);
+		expect(groupRow).toBeGreaterThan(1);
+	});
+
+	it("spends exactly one table row on the pin", async () => {
+		// Guards the shape rather than the styling: an extra <tr> for the label is
+		// the regression, and it is invisible to every behavioural assertion.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [];
+		await renderPage();
+		// Header, the pinned alert, and the spacer that separates it from the list.
+		expect(screen.getAllByRole("row")).toHaveLength(3);
+	});
+
+	it("tints and accents that one row, with no divider splitting it", async () => {
+		// Asserted on classes because the defect is purely visual: every
+		// behavioural test passed while the block looked cut in half.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage();
+		const row = screen.getAllByRole("row")[1];
+		expect(row.className).toContain("border-l-2");
+		expect(row.className).toContain("bg-severity-critical/25");
+		expect(row.className).toContain("border-b-0");
+	});
+
+	it("keeps the hash on the same column as every other row's", async () => {
+		// The marker trails the hash. Ahead of it, the pinned row's ID would start
+		// ~80px right of every other row's and the column would look broken.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [];
+		await renderPage();
+		const cell = screen.getByText("EEEEEEEE").closest("td");
+		const text = cell?.textContent ?? "";
+		expect(text.indexOf("EEEEEEEE")).toBeLessThan(text.search(/latest/i));
+	});
+
+	it("labels the row without explaining the sort order", async () => {
+		// The sentence "kept in view regardless of the sort below" was cut as
+		// superfluous: the pin icon and the position already say it.
+		state.critical = alert({ fullHash: CRIT_HASH, severity: "CRITICAL" });
+		state.groups = [group()];
+		await renderPage();
+		expect(screen.getByText(/latest critical/i)).toBeInTheDocument();
+		expect(
+			screen.queryByText(/regardless of the sort/i),
+		).not.toBeInTheDocument();
 	});
 
 	it("is absent when no critical alert exists", async () => {
