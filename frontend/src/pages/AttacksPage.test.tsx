@@ -247,6 +247,89 @@ describe("contract grouping", () => {
 		expect(screen.queryByText("BBBBBBBB")).not.toBeInTheDocument();
 	});
 
+	it("indents a child's CONTENT cell, not the empty gutter beside it", async () => {
+		// The original bug: the indent was applied to the gutter cell, which is
+		// empty on a child row, so it moved nothing and the transactions read as
+		// siblings of the contract holding them. Padding needs content to push.
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		fireEvent.click(screen.getByText("Djed StableCoin"));
+		const cell = screen.getByText("BBBBBBBB").closest("td");
+		expect(cell?.className).toContain("pl-8");
+		// And the gutter is not where the indent lives.
+		const gutter = cell?.previousElementSibling;
+		expect(gutter?.className).not.toContain("pl-8");
+	});
+
+	it("runs a rule down the gutter, from the parent's chevron through its children", async () => {
+		// The device that says "these belong to the row above": a continuous line
+		// descending from the control that opened the group. Asserted on classes
+		// because jsdom computes no geometry for a pseudo-element.
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		fireEvent.click(screen.getByText("Djed StableCoin"));
+		const rows = screen.getAllByRole("row");
+		const parent = rows.find((r) => r.textContent?.includes("Djed StableCoin"));
+		const child = screen.getByText("BBBBBBBB").closest("tr");
+		// The parent draws it from its chevron down; the child spans its full height.
+		expect(parent?.children[0].className).toContain("before:top-1/2");
+		expect(child?.children[0].className).toContain("before:inset-y-0");
+		for (const el of [parent?.children[0], child?.children[0]]) {
+			expect(el?.className).toContain("before:left-6");
+			expect(el?.className).toContain("before:bg-border");
+		}
+	});
+
+	it("insets a child's divider so it stops reading as a top-level row", async () => {
+		// A divider running the table's whole width is what says "top-level row".
+		// The child keeps a divider, but the gutter segment stays undrawn, which is
+		// exactly where the rule runs.
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		fireEvent.click(screen.getByText("Djed StableCoin"));
+		const child = screen.getByText("BBBBBBBB").closest("tr");
+		expect(child?.className).toContain("border-b-0");
+		expect(child?.className).toContain("[&>td:not(:first-child)]:border-b");
+	});
+
+	it("tints the open contract, so the region has a top and the top is the control", async () => {
+		// While open, the contract row is both the heading of the rows beneath it
+		// and the row you click to close them. Neutral, not a severity colour, or it
+		// would compete with the badge on the same line.
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		const label = screen.getByText("Djed StableCoin");
+		// The class LIST, not a substring: TableRow ships `hover:bg-muted/40`, so a
+		// substring check for the tint matches the hover state and always passes.
+		const classes = (el: Element | null | undefined) =>
+			(el?.className ?? "").split(/\s+/);
+		expect(classes(label.closest("tr"))).not.toContain("bg-muted/40");
+		fireEvent.click(label);
+		const open = screen.getByText("Djed StableCoin").closest("tr");
+		expect(classes(open)).toContain("bg-muted/40");
+		expect(classes(open)).toContain("hover:bg-muted/60");
+	});
+
+	it("keeps the beyond-the-limit note inside the group it describes", async () => {
+		// Outside the rule it read as a note from the table itself, which is how
+		// "399 older alerts are not listed here" ends up looking as though it were
+		// about the whole list.
+		state.groups = [group({ alertCount: 400 })];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		fireEvent.click(screen.getByText("Djed StableCoin"));
+		const note = screen
+			.getByText(/399 older alerts are not listed/i)
+			.closest("td");
+		expect(note?.className).toContain("before:left-6");
+		// And it closes the region, since it is the last row in it.
+		expect(note?.className).toContain("after:h-px");
+	});
+
 	it("reports alerts beyond the expansion limit instead of hiding them", async () => {
 		// A truncated list must never read as the whole group.
 		state.groups = [group({ alertCount: 400 })];
