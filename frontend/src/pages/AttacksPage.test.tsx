@@ -281,6 +281,12 @@ describe("contract grouping", () => {
 		const child = screen.getByText("BBBBBBBB").closest("tr");
 		// The parent draws it from its chevron down; the child spans its full height.
 		expect(parent?.children[0].className).toContain("before:top-1/2");
+		// And it starts BELOW the glyph. The chevron is 1rem tall and vertically
+		// centred, so `top-1/2` alone begins the line at the glyph's middle and
+		// draws through its lower half, which is visible as the line crossing the
+		// arrow. The 0.5rem offset is that half. Asserted on the class because
+		// jsdom computes no geometry for a pseudo-element.
+		expect(parent?.children[0].className).toContain("before:mt-2");
 		expect(child?.children[0].className).toContain("before:inset-y-0");
 		for (const el of [parent?.children[0], child?.children[0]]) {
 			expect(el?.className).toContain("before:left-6");

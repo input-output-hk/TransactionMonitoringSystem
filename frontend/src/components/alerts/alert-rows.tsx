@@ -339,10 +339,12 @@ export function ContractGroupRow({
 			<TableCell
 				className={cn(
 					"w-8",
-					// Only the lower half, so the line leaves the chevron rather than
-					// passing through it.
+					// From below the chevron, not from its centre. The icon is 1rem tall
+					// and vertically centred, so `top-1/2` starts the line at the glyph's
+					// middle and draws through its lower half; the extra 0.5rem is that
+					// half, which clears it exactly.
 					expanded &&
-						"before:bg-border relative before:absolute before:top-1/2 before:bottom-0 before:left-6 before:w-px",
+						"before:bg-border relative before:absolute before:top-1/2 before:bottom-0 before:left-6 before:mt-2 before:w-px",
 				)}
 			>
 				<Chevron className="text-muted-foreground h-4 w-4" />
