@@ -38,9 +38,13 @@ import {
  */
 export const ALERT_COLUMN_COUNT = 5;
 
-/** Truncation for a bech32 contract address shown as a group's fallback name. */
-const CONTRACT_HEAD = 14;
-const CONTRACT_TAIL = 6;
+/**
+ * Truncation for a bech32 contract address shown in place of a registry name.
+ * Exported because the contract-scoped view's chip names the same addresses and
+ * has to truncate them the same way.
+ */
+export const CONTRACT_HEAD = 14;
+export const CONTRACT_TAIL = 6;
 
 /**
  * The pinned latest-critical row: tint, and an outline on all four sides.
@@ -58,6 +62,22 @@ const CONTRACT_TAIL = 6;
  */
 const PINNED_ROW =
 	"bg-severity-critical/25 border-b-0 outline-1 -outline-offset-1 outline-severity-critical-foreground/60";
+
+/**
+ * The rule that runs down a child row's gutter, marking it as nested.
+ *
+ * Drawn as a pseudo-element spanning the cell's full height, so consecutive
+ * children abut into ONE continuous line rather than a dashed column of
+ * segments. It sits at 1.5rem, the centre of the parent's chevron, so the line
+ * visibly descends from the control that opened the group: the structure is the
+ * device, not decoration on top of it.
+ *
+ * A rule and not a bigger indent, because the columns have to stay columns. The
+ * date and severity of a child must line up with every other row's or the table
+ * stops being readable across.
+ */
+const CHILD_RULE =
+	"relative before:absolute before:inset-y-0 before:left-6 before:w-px before:bg-border";
 
 /**
  * Copies an identifier the table can only show truncated.
@@ -156,26 +176,37 @@ export function AlertRow({
 	indented = false,
 	pinned = false,
 	contractLabel,
+	contractNamed = false,
 }: {
 	alert: RiskAlert;
 	onOpen: (slug: string) => void;
-	/** Nested inside an expanded group, so the chevron cell is a spacer. */
+	/** Nested inside an expanded group: rule in the gutter, content indented. */
 	indented?: boolean;
 	/** The pinned latest-critical row: tinted, accented, and marked as pinned. */
 	pinned?: boolean;
 	/** Registry display name for this alert's contract, when one is known. */
 	contractLabel?: string;
+	/** The surrounding view already names this contract, so the row must not. */
+	contractNamed?: boolean;
 }) {
 	// Which contract this alert implicates, shown only where nothing else says it.
-	// Inside an expanded group the contract IS the heading above these rows, and a
-	// flat row is flat precisely because its class names no contract, so the only
-	// row this line has anything to add to is the pinned one.
-	const contract = !indented ? alert.contractAddress : undefined;
+	// Inside an expanded group the contract IS the heading above these rows, in a
+	// contract-scoped table the chip names it once, and a flat row is flat
+	// precisely because its class names no contract. What is left is the pinned
+	// row, which is the only one this line has anything to add to.
+	const contract =
+		indented || contractNamed ? undefined : alert.contractAddress;
 	return (
 		<TableRow
 			onClick={() => onOpen(alert.slug)}
 			className={cn(
 				"cursor-pointer",
+				// A divider running the table's whole width is what says "top-level
+				// row". A child keeps its divider but starts it after the gutter, so
+				// the rows still separate, the last one still closes the group, and
+				// the undrawn segment is exactly where the rule runs.
+				indented &&
+					"[&>td:not(:first-child)]:border-border/60 border-b-0 [&>td:not(:first-child)]:border-b",
 				// The hover tint has to be restated: TableRow ships
 				// `hover:bg-muted/40`, and tailwind-merge does not drop it for a
 				// plain `bg-*`, so without this the row turns grey the moment the
@@ -185,13 +216,16 @@ export function AlertRow({
 		>
 			{/* The gutter is where a group row shows its chevron, i.e. the column an
 			    operator already scans for what a row IS rather than what it holds. The
-			    pin belongs there for the same reason. */}
-			<TableCell className={cn("w-8", indented && "pl-6")}>
+			    pin belongs there for the same reason, and so does a child's rule. */}
+			<TableCell className={cn("w-8", indented && CHILD_RULE)}>
 				{pinned && (
 					<Pin className="text-severity-critical-foreground h-3.5 w-3.5" />
 				)}
 			</TableCell>
-			<TableCell>
+			{/* The indent goes on the CONTENT cell. It used to sit on the gutter cell,
+			    which is empty on a child row, so it moved nothing: the reason these
+			    rows read as siblings of the contract that holds them. */}
+			<TableCell className={cn(indented && "pl-8")}>
 				<div className="flex items-center gap-2">
 					{/* Mono and uppercase belong to the hash, not to the cell: the marker
 					    beside it is prose and would inherit both. */}
@@ -292,10 +326,27 @@ export function ContractGroupRow({
 	return (
 		<TableRow
 			onClick={onToggle}
-			className="cursor-pointer"
+			className={cn(
+				"cursor-pointer",
+				// While open, the contract is the heading of the rows beneath it, and it
+				// is also the row you click to close them again. Tinting it says both:
+				// the region has a top, and the top is a control. Neutral, not a
+				// severity colour, or it would compete with the badge on the same line.
+				expanded && "bg-muted/40 hover:bg-muted/60",
+			)}
 			aria-expanded={expanded}
 		>
-			<TableCell className="w-8">
+			<TableCell
+				className={cn(
+					"w-8",
+					// From below the chevron, not from its centre. The icon is 1rem tall
+					// and vertically centred, so `top-1/2` starts the line at the glyph's
+					// middle and draws through its lower half; the extra 0.5rem is that
+					// half, which clears it exactly.
+					expanded &&
+						"before:bg-border relative before:absolute before:top-1/2 before:bottom-0 before:left-6 before:mt-2 before:w-px",
+				)}
+			>
 				<Chevron className="text-muted-foreground h-4 w-4" />
 			</TableCell>
 			<TableCell>
@@ -349,13 +400,30 @@ export function PinnedCriticalSpacerRow() {
 	);
 }
 
-/** Full-width message row inside an expanded group (loading / error / empty). */
+/**
+ * Full-width message row inside an expanded group (loading, error, empty, or the
+ * count of alerts beyond the expansion limit).
+ *
+ * Carries the same gutter rule as the child rows, because it speaks about THIS
+ * group. Outside the rule it read as a note from the table itself, which is how
+ * a sentence like "134 older alerts are not listed here" ends up looking as
+ * though it were about the whole list.
+ */
 export function GroupMessageRow({ children }: { children: React.ReactNode }) {
 	return (
-		<TableRow className="hover:bg-transparent">
+		<TableRow className="border-b-0 hover:bg-transparent">
 			<TableCell
 				colSpan={ALERT_COLUMN_COUNT}
-				className="text-muted-foreground py-4 pl-12 text-sm"
+				className={cn(
+					CHILD_RULE,
+					// Closes the region when this row ends it, which it does whenever a
+					// group holds more alerts than one expansion lists. Inset to match
+					// the children's dividers: the segment the rule occupies stays
+					// undrawn, so the group ends without a full-width line claiming to
+					// separate two top-level rows.
+					"after:bg-border/60 after:absolute after:right-0 after:bottom-0 after:left-8 after:h-px",
+					"text-muted-foreground py-3 pl-14 text-xs",
+				)}
 			>
 				{children}
 			</TableCell>

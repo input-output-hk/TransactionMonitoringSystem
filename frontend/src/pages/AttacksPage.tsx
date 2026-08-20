@@ -24,6 +24,8 @@ import {
 import {
 	ALERT_COLUMN_COUNT,
 	AlertRow,
+	CONTRACT_HEAD,
+	CONTRACT_TAIL,
 	ContractGroupRow,
 	PinnedCriticalSpacerRow,
 } from "@/components/alerts/alert-rows";
@@ -54,7 +56,7 @@ import {
 	type Severity,
 } from "@/lib/attacks";
 import { AttackDetailPage } from "@/pages/AttackDetailPage";
-import { ArrowUp, Info } from "lucide-react";
+import { ArrowUp, Info, X } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import Sparkline from "@/components/sparkline";
@@ -145,6 +147,16 @@ export function AttacksPage() {
 	const pageSize = parsePageSize(searchParams.get("size"));
 	// 1-based in the URL, 0-based in state.
 	const page = Math.max(0, (Number(searchParams.get("page")) || 1) - 1);
+	// Scoping the whole table to one contract. Set from the note that reports the
+	// alerts an expansion could not list: a group holding more than
+	// GROUP_EXPANSION_LIMIT alerts had no way to show the rest, so the note told
+	// the truth and led nowhere.
+	//
+	// An empty value is treated as absent. `contract=''` is meaningful to the API
+	// (it selects exactly the alerts that name NO contract) but that is the
+	// grouped view's own business, and reaching it from the URL would produce a
+	// view that cannot be described or cleared.
+	const contractScope = searchParams.get("contract") || undefined;
 	// Which contract group is expanded. Single-open, matching ClusterSummaryTable.
 	const [expandedContract, setExpandedContract] = useState<string | null>(null);
 
@@ -156,11 +168,18 @@ export function AttacksPage() {
 		severities: severities.length > 0 ? severities : undefined,
 	};
 
-	const { data, isPending, isError, error } = useGroupedAlerts({
-		...filters,
-		page,
-		pageSize,
-	});
+	// Grouping by contract is pointless once a contract is chosen, so the two
+	// views are exclusive and the unused query is held off rather than fetched
+	// and discarded.
+	const grouped = useGroupedAlerts(
+		{ ...filters, page, pageSize },
+		{ enabled: !contractScope },
+	);
+	const scoped = useRiskAlerts(
+		{ ...filters, contract: contractScope, page, pageSize },
+		{ enabled: Boolean(contractScope) },
+	);
+	const { isPending, isError, error } = contractScope ? scoped : grouped;
 
 	// The pinned latest-critical row.
 	//
@@ -181,6 +200,9 @@ export function AttacksPage() {
 	const { data: criticalData } = useRiskAlerts(
 		{
 			...filters,
+			// Inherits the contract scope for the same reason it inherits the attack
+			// type: a pin from outside the view contradicts the view.
+			contract: contractScope,
 			severities: ["CRITICAL"],
 			page: 0,
 			pageSize: 1,
@@ -213,20 +235,28 @@ export function AttacksPage() {
 	// would be neither free (a 1-row page still runs the contract_anomaly recall
 	// rescue) nor right (that rescue's date floor collapses to the single row it
 	// returned, so the count would omit the anomaly alerts this table shows).
-	const total = data?.total ?? 0;
-	const totalAlerts = data?.alertTotal ?? 0;
+	// Scoped to one contract, rows ARE alerts, so the pager's unit and the alert
+	// count are the same number. Grouped, they differ: one group row can stand for
+	// dozens of alerts, which is why the endpoint reports both.
+	const total = contractScope
+		? (scoped.data?.total ?? 0)
+		: (grouped.data?.total ?? 0);
+	const totalAlerts = contractScope ? total : (grouped.data?.alertTotal ?? 0);
 	// Backend already anti-joins `archived_alerts` from `/api/v1/analysis/results`,
 	// so the rows we get are guaranteed not archived. No client filter needed.
-	const visibleRows = data?.rows ?? [];
+	const visibleRows = grouped.data?.rows ?? [];
+	const scopedRows = scoped.data?.rows ?? [];
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);
 	// Rows that will actually render. An un-attributed row missing its tx identity
 	// is skipped, so keying the empty state off visibleRows.length could leave the
 	// table with no rows AND no message.
-	const renderableRows = visibleRows.filter(
-		(r) => r.kind === "group" || groupedRowToAlert(r) !== null,
-	);
+	const renderableRows = contractScope
+		? scopedRows
+		: visibleRows.filter(
+				(r) => r.kind === "group" || groupedRowToAlert(r) !== null,
+			);
 
 	// A filter change invalidates the page number and any open group.
 	const setFilterParam = (key: string, value: string | null) => {
@@ -242,6 +272,16 @@ export function AttacksPage() {
 	const onPageChange = (next: number) => {
 		setExpandedContract(null);
 		setParam("page", next === 0 ? null : String(next + 1));
+	};
+	// Entering the scope drops the page, or the operator lands on page 4 of a list
+	// they have just started reading, and closes the expansion that led here,
+	// which has no meaning once the whole table is that contract.
+	const scopeToContract = (address: string) => {
+		setExpandedContract(null);
+		setParam("contract", address, { alsoDelete: ["page"] });
+	};
+	const clearContractScope = () => {
+		setParam("contract", null, { alsoDelete: ["page"] });
 	};
 	// Carry the query string across the detail route. The filters live in the URL
 	// now, and `/attacks/:id` renders this same page under the dialog, so
@@ -310,9 +350,31 @@ export function AttacksPage() {
 			{/* Risk Alerts */}
 			<section className="border-border bg-card rounded-lg border-2">
 				<header className="border-border flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
-					<h2 className="text-foreground text-base font-semibold">
-						Risk Alerts
-					</h2>
+					<div className="flex flex-wrap items-center gap-2">
+						<h2 className="text-foreground text-base font-semibold">
+							Risk Alerts
+						</h2>
+						{/* Names the scope and is the way out of it. Without it the table
+						    looks like a short, unexplained list: the URL says why, and
+						    nobody reads the URL. */}
+						{contractScope && (
+							<span className="border-border bg-muted/40 text-muted-foreground flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2.5 text-xs">
+								<span className="text-foreground">
+									{contractLabels.get(contractScope) ??
+										shortHash(contractScope, CONTRACT_HEAD, CONTRACT_TAIL)}
+								</span>
+								<button
+									type="button"
+									onClick={clearContractScope}
+									className="hover:bg-muted hover:text-foreground rounded-full p-0.5"
+									aria-label="Show all contracts again"
+									title="Show all contracts again"
+								>
+									<X className="h-3 w-3" />
+								</button>
+							</span>
+						)}
+					</div>
 					<div className="flex items-center gap-2">
 						<Select value={attackFilter} onValueChange={onAttackChange}>
 							<SelectTrigger className="h-8 w-40">
@@ -374,42 +436,60 @@ export function AttacksPage() {
 								<PinnedCriticalSpacerRow />
 							</Fragment>
 						)}
-						{visibleRows.map((row) => {
-							if (row.kind === "alert") {
-								// Names no contract, so it renders ungrouped rather than
-								// behind a chevron with nothing to label it.
-								const alert = groupedRowToAlert(row);
-								if (!alert || alert.slug === pinnedCritical?.slug) return null;
-								return (
+						{contractScope &&
+							scopedRows.map((alert) =>
+								alert.slug === pinnedCritical?.slug ? null : (
 									<AlertRow
 										key={alert.slug}
 										alert={alert}
 										onOpen={openDetail}
+										// The chip above names the contract; repeating it on every
+										// row would restate one fact ten times.
+										contractNamed
 									/>
-								);
-							}
-							const expanded = expandedContract === row.contractAddress;
-							return (
-								<Fragment key={`group-${row.contractAddress}`}>
-									<ContractGroupRow
-										row={row}
-										label={contractLabels.get(row.contractAddress)}
-										expanded={expanded}
-										onToggle={() =>
-											setExpandedContract(expanded ? null : row.contractAddress)
-										}
-									/>
-									{expanded && (
-										<ContractGroupAlerts
-											contract={row.contractAddress}
-											alertCount={row.alertCount}
-											filters={filters}
+								),
+							)}
+						{!contractScope &&
+							visibleRows.map((row) => {
+								if (row.kind === "alert") {
+									// Names no contract, so it renders ungrouped rather than
+									// behind a chevron with nothing to label it.
+									const alert = groupedRowToAlert(row);
+									if (!alert || alert.slug === pinnedCritical?.slug)
+										return null;
+									return (
+										<AlertRow
+											key={alert.slug}
+											alert={alert}
 											onOpen={openDetail}
 										/>
-									)}
-								</Fragment>
-							);
-						})}
+									);
+								}
+								const expanded = expandedContract === row.contractAddress;
+								return (
+									<Fragment key={`group-${row.contractAddress}`}>
+										<ContractGroupRow
+											row={row}
+											label={contractLabels.get(row.contractAddress)}
+											expanded={expanded}
+											onToggle={() =>
+												setExpandedContract(
+													expanded ? null : row.contractAddress,
+												)
+											}
+										/>
+										{expanded && (
+											<ContractGroupAlerts
+												contract={row.contractAddress}
+												alertCount={row.alertCount}
+												filters={filters}
+												onOpen={openDetail}
+												onSeeAll={scopeToContract}
+											/>
+										)}
+									</Fragment>
+								);
+							})}
 						{renderableRows.length === 0 && !pinnedCritical && (
 							<TableRow>
 								<TableCell
