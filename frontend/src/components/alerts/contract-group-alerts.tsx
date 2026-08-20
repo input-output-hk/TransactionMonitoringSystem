@@ -24,6 +24,7 @@ export function ContractGroupAlerts({
 	alertCount,
 	filters,
 	onOpen,
+	onSeeAll,
 }: {
 	contract: string;
 	/** Server-side total for the group, used to report anything beyond the limit. */
@@ -31,6 +32,8 @@ export function ContractGroupAlerts({
 	/** The table's active filters, so expansion agrees with the group's count. */
 	filters: Omit<RiskAlertsParams, "page" | "pageSize" | "contract">;
 	onOpen: (slug: string) => void;
+	/** Scopes the whole table to this contract, which is how the surplus is read. */
+	onSeeAll: (contract: string) => void;
 }) {
 	const { data, isPending, isError, error } = useRiskAlerts({
 		...filters,
@@ -61,9 +64,23 @@ export function ContractGroupAlerts({
 			))}
 			{hidden > 0 && (
 				<GroupMessageRow>
-					{`Showing the ${rows.length} most recent of ${alertCount}. ${hidden} older ${
-						hidden === 1 ? "alert is" : "alerts are"
-					} not listed here.`}
+					{`Showing the ${rows.length} most recent of ${alertCount}. `}
+					{/* The surplus used to be stated and then unreachable: one expansion
+					    fetches one page and has no pager of its own. Scoping the table to
+					    this contract hands the surplus to the pager that already exists,
+					    and puts the view in the URL so it can be shared. */}
+					<button
+						type="button"
+						onClick={(e) => {
+							// The row itself is inert, but the group row above toggles on
+							// click and event order is not worth relying on here.
+							e.stopPropagation();
+							onSeeAll(contract);
+						}}
+						className="text-foreground underline decoration-dotted underline-offset-2 hover:decoration-solid"
+					>
+						{`See all ${alertCount.toLocaleString()} for this contract`}
+					</button>
 				</GroupMessageRow>
 			)}
 		</Fragment>

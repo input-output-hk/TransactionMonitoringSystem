@@ -38,9 +38,13 @@ import {
  */
 export const ALERT_COLUMN_COUNT = 5;
 
-/** Truncation for a bech32 contract address shown as a group's fallback name. */
-const CONTRACT_HEAD = 14;
-const CONTRACT_TAIL = 6;
+/**
+ * Truncation for a bech32 contract address shown in place of a registry name.
+ * Exported because the contract-scoped view's chip names the same addresses and
+ * has to truncate them the same way.
+ */
+export const CONTRACT_HEAD = 14;
+export const CONTRACT_TAIL = 6;
 
 /**
  * The pinned latest-critical row: tint, and an outline on all four sides.
@@ -172,6 +176,7 @@ export function AlertRow({
 	indented = false,
 	pinned = false,
 	contractLabel,
+	contractNamed = false,
 }: {
 	alert: RiskAlert;
 	onOpen: (slug: string) => void;
@@ -181,12 +186,16 @@ export function AlertRow({
 	pinned?: boolean;
 	/** Registry display name for this alert's contract, when one is known. */
 	contractLabel?: string;
+	/** The surrounding view already names this contract, so the row must not. */
+	contractNamed?: boolean;
 }) {
 	// Which contract this alert implicates, shown only where nothing else says it.
-	// Inside an expanded group the contract IS the heading above these rows, and a
-	// flat row is flat precisely because its class names no contract, so the only
-	// row this line has anything to add to is the pinned one.
-	const contract = !indented ? alert.contractAddress : undefined;
+	// Inside an expanded group the contract IS the heading above these rows, in a
+	// contract-scoped table the chip names it once, and a flat row is flat
+	// precisely because its class names no contract. What is left is the pinned
+	// row, which is the only one this line has anything to add to.
+	const contract =
+		indented || contractNamed ? undefined : alert.contractAddress;
 	return (
 		<TableRow
 			onClick={() => onOpen(alert.slug)}

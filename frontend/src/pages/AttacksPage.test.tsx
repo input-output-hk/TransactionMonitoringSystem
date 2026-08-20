@@ -76,6 +76,19 @@ vi.mock("@/lib/api/analysis", async (importOriginal) => {
 				error: null,
 			};
 			if (options?.enabled === false) return idle;
+			// The pinned query is the one asking for a single row in date order.
+			// Checked BEFORE `contract`, because in a contract-scoped view the pin
+			// inherits the scope and both queries then carry it.
+			if (params.pageSize === 1 && params.sort === "date") {
+				const pinned = state.critical ? [state.critical] : [];
+				return {
+					data: { rows: pinned, total: pinned.length },
+					isPending: false,
+					isError: false,
+					error: null,
+				};
+			}
+			// An expanded group, or the whole table scoped to one contract.
 			if (params.contract !== undefined) {
 				return {
 					data: { rows: state.groupAlerts, total: state.groupAlerts.length },
@@ -84,14 +97,7 @@ vi.mock("@/lib/api/analysis", async (importOriginal) => {
 					error: null,
 				};
 			}
-			// The pinned latest-critical row.
-			const rows = state.critical ? [state.critical] : [];
-			return {
-				data: { rows, total: rows.length },
-				isPending: false,
-				isError: false,
-				error: null,
-			};
+			return idle;
 		},
 	};
 });
@@ -323,7 +329,7 @@ describe("contract grouping", () => {
 		await renderPage();
 		fireEvent.click(screen.getByText("Djed StableCoin"));
 		const note = screen
-			.getByText(/399 older alerts are not listed/i)
+			.getByText(/Showing the 1 most recent of 400/i)
 			.closest("td");
 		expect(note?.className).toContain("before:left-6");
 		// And it closes the region, since it is the last row in it.
@@ -331,13 +337,26 @@ describe("contract grouping", () => {
 	});
 
 	it("reports alerts beyond the expansion limit instead of hiding them", async () => {
-		// A truncated list must never read as the whole group.
+		// A truncated list must never read as the whole group. "The 1 most recent of
+		// 400" says both how many are shown and how many exist.
 		state.groups = [group({ alertCount: 400 })];
 		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
 		await renderPage();
 		fireEvent.click(screen.getByText("Djed StableCoin"));
 		expect(
-			screen.getByText(/399 older alerts are not listed/i),
+			screen.getByText(/Showing the 1 most recent of 400/i),
+		).toBeInTheDocument();
+	});
+
+	it("offers a way to the surplus instead of only naming it", async () => {
+		// One expansion fetches one page and has no pager of its own, so the alerts
+		// beyond it used to be stated and then unreachable.
+		state.groups = [group({ alertCount: 400 })];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage();
+		fireEvent.click(screen.getByText("Djed StableCoin"));
+		expect(
+			screen.getByRole("button", { name: /See all 400 for this contract/i }),
 		).toBeInTheDocument();
 	});
 
@@ -405,6 +424,100 @@ describe("contract grouping", () => {
 		await renderPage();
 		fireEvent.click(screen.getByLabelText("Copy contract address"));
 		expect(screen.queryByText("BBBBBBBB")).not.toBeInTheDocument();
+	});
+});
+
+describe("the contract-scoped view", () => {
+	it("clicking through to the surplus scopes the table and drops the page", async () => {
+		// The page number belonged to the grouped list. Carrying it over lands the
+		// operator on page 4 of a list they have just started reading.
+		state.groups = [group({ alertCount: 400 })];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage("/dashboard?page=4");
+		fireEvent.click(screen.getByText("Djed StableCoin"));
+		fireEvent.click(
+			screen.getByRole("button", { name: /See all 400 for this contract/i }),
+		);
+		expect(screen.getByTestId("location").textContent).toBe(
+			`/dashboard?contract=${DJED}`,
+		);
+	});
+
+	it("lists that contract's alerts flat, with no grouping left to do", async () => {
+		// Grouping by contract is pointless once one contract is chosen.
+		state.groups = [group()];
+		state.groupAlerts = [
+			alert({ fullHash: `${"b".repeat(63)}2` }),
+			alert({ fullHash: `${"c".repeat(63)}3` }),
+		];
+		await renderPage(`/dashboard?contract=${DJED}`);
+		expect(screen.getByText("BBBBBBBB")).toBeInTheDocument();
+		expect(screen.getByText("CCCCCCCC")).toBeInTheDocument();
+		// The group summary row is gone: no chevron, no alert count.
+		expect(screen.queryByText("12 alerts")).not.toBeInTheDocument();
+	});
+
+	it("names the scope and offers the way out of it", async () => {
+		// Without the chip the table looks like a short, unexplained list. The URL
+		// says why, and nobody reads the URL.
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage(`/dashboard?contract=${DJED}`);
+		expect(screen.getByText("Djed StableCoin")).toBeInTheDocument();
+		fireEvent.click(
+			screen.getByRole("button", { name: /Show all contracts again/i }),
+		);
+		expect(screen.getByTestId("location").textContent).toBe("/dashboard");
+	});
+
+	it("falls back to a truncated address when the registry has no label", async () => {
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage(`/dashboard?contract=${STRIKE}`);
+		// Scoped to the chip: the test harness prints the URL, which contains the
+		// full address, so a document-wide text query matches that instead.
+		const chip = screen
+			.getByRole("button", { name: /Show all contracts again/i })
+			.closest("span");
+		expect(chip?.textContent).toContain(STRIKE.slice(0, 14));
+		expect(chip?.textContent).not.toContain("Djed StableCoin");
+	});
+
+	it("does not repeat the contract on every row", async () => {
+		// The chip states it once. Restating one fact ten times is the noise the
+		// grouping was built to remove.
+		state.groups = [group()];
+		state.groupAlerts = [
+			alert({ fullHash: `${"b".repeat(63)}2`, contractAddress: DJED }),
+			alert({ fullHash: `${"c".repeat(63)}3`, contractAddress: DJED }),
+		];
+		await renderPage(`/dashboard?contract=${DJED}`);
+		// Asserted on the cell, not on the label: a scoped row is given no registry
+		// label, so dropping the suppression would repeat the truncated ADDRESS and
+		// an assertion about "Djed StableCoin" would pass while the bug was present.
+		for (const hash of ["BBBBBBBB", "CCCCCCCC"]) {
+			const cell = screen.getByText(hash).closest("td");
+			expect(cell?.textContent?.trim()).toBe(hash);
+		}
+		// And the chip still names it, once.
+		expect(screen.getAllByText("Djed StableCoin")).toHaveLength(1);
+	});
+
+	it("holds the grouped query off while scoped, and the scoped one while grouped", async () => {
+		// Both hooks honour `enabled`, so the view that is not shown is not fetched.
+		// Asserted through the mock: an un-held query would return rows here.
+		state.groups = [group()];
+		state.groupAlerts = [alert({ fullHash: `${"b".repeat(63)}2` })];
+		await renderPage(`/dashboard?contract=${DJED}`);
+		// Scoped: the group row's label is absent from the body, so the grouped
+		// query produced nothing.
+		expect(screen.queryByText("12 alerts")).not.toBeInTheDocument();
+		cleanup();
+		await renderPage("/dashboard");
+		// Grouped: the child rows are absent until a group is expanded, so the
+		// scoped query produced nothing.
+		expect(screen.queryByText("BBBBBBBB")).not.toBeInTheDocument();
+		expect(screen.getByText("12 alerts")).toBeInTheDocument();
 	});
 });
 
