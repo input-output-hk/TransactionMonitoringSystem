@@ -149,7 +149,11 @@ function AnomaliesTab({ target }: { target: string }) {
 
 			<AnomalyHelp showColumnKey={!!effectiveRunId} />
 			{effectiveRunId ? (
-				<AnomalyTable runId={effectiveRunId} target={target} />
+				<AnomalyTable
+					runId={effectiveRunId}
+					target={target}
+					expectedFlagged={selectedRun?.n_flagged}
+				/>
 			) : (
 				<p className="text-muted-foreground text-sm">
 					No anomaly run yet. The system scores one automatically once the
@@ -291,6 +295,7 @@ export function ValidatorDetailPage() {
 							target={decoded}
 							selectedCluster={selectedCluster}
 							onSelectCluster={setSelectedCluster}
+							expectedClusters={activeRun?.n_clusters}
 						/>
 					</TabsContent>
 
