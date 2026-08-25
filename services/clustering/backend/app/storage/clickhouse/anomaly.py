@@ -200,7 +200,7 @@ class _AnomalyMixin(_RepoBase):
                        votes, score_rank
                 FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}}
             ) s
-            INNER JOIN {self._tx_relation()} t USING (tx_hash)
+            INNER JOIN {self._tx_relation_for_run(self._anomaly_run_hashes())} t USING (tx_hash)
             ORDER BY s.score_rank ASC
             LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,

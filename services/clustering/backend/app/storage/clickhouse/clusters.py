@@ -189,7 +189,7 @@ class _ClusterMixin(_RepoBase):
                 SELECT tx_hash, cluster_id FROM {self._db}.cluster_labels FINAL
                 WHERE run_id = {{r:String}}
             ) l
-            INNER JOIN {self._tx_relation()} t USING (tx_hash)
+            INNER JOIN {self._tx_relation_for_run(self._cluster_run_hashes())} t USING (tx_hash)
             GROUP BY cluster_id
             ORDER BY (cluster_id = -1), cluster_size DESC
             """,
@@ -228,7 +228,8 @@ class _ClusterMixin(_RepoBase):
                 SELECT tx_hash FROM {self._db}.cluster_labels FINAL
                 WHERE run_id = {{r:String}} AND cluster_id = {{c:Int32}}
             ) l
-            INNER JOIN {self._tx_relation()} t USING (tx_hash)
+            INNER JOIN {self._tx_relation_for_run(self._cluster_run_hashes(one_cluster=True))} t
+                USING (tx_hash)
             ORDER BY t.block_time DESC
             LIMIT {{rlim:UInt32}} OFFSET {{off:UInt32}}
             """,

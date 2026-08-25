@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.clustering.projection import project
-from app.service._common import load_clustering_input
+from app.service._common import load_clustering_input_for
 from app.service.verdicts import VERDICT_NORMAL, _resolve_run, _subset_membership
 from app.storage.protocol import Repo
 
@@ -30,14 +30,18 @@ def build_projection(
     dims = min(max(int(dims), 2), 3)
     ctx = _resolve_run(repo, run_id)
 
-    # Rebuild the exact matrix DBSCAN clustered on, then keep only the txs that are
-    # both in this run's membership and present in the (possibly newer) feature set.
-    ci = load_clustering_input(repo, ctx.target, ctx.feature_set)
+    # Rebuild the exact matrix DBSCAN clustered on, from the run's OWN membership.
+    # Loading the target's current population instead would rebuild a different
+    # space (the rolling window moves), and once the window has moved clear of the
+    # run the intersection below is empty and the run projects as a blank chart.
+    ci = load_clustering_input_for(repo, ctx.target, ctx.feature_set, list(ctx.labels))
     ci_index = {h: i for i, h in enumerate(ci.tx_hashes)}
 
-    # `total` is the projectable count (∩ with the feature matrix), which for the
-    # graph feature set can be below the run's tx_count when the Jaccard build was
-    # down-sampled to MAX_GRAPH_TXS — we can only place what we have vectors for.
+    # `total` is the projectable count (the intersection with the feature matrix),
+    # which for the graph feature set can be below the run's tx_count when the
+    # Jaccard build was down-sampled to MAX_GRAPH_TXS: we can only place what we
+    # have vectors for. It can also fall short if the host no longer holds one of
+    # the run's transactions.
     subset, total = _subset_membership(ctx.labels, limit=limit, cluster=cluster, keep=ci_index)
 
     idx = [ci_index[tx] for tx, _ in subset]

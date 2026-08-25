@@ -3,7 +3,7 @@ the client-safe error mapper, DBSCAN parameter selection, and the feature loader
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from app.clustering.evaluate import FALLBACK_EPS, MIN_POINTS, MIN_SAMPLES_FLOOR
@@ -99,6 +99,39 @@ def _recommended_params(ev: dict[str, Any]) -> tuple[float, int]:
 def load_clustering_input(repo: Repo, target: str, feature_set: str) -> Any:
     shape_df = repo.fetch_shape_features(target) if feature_set in ("shape", "combined") else None
     addr_df = repo.fetch_tx_addresses(target) if feature_set in ("graph", "combined") else None
+    return build_features(
+        feature_set, shape_df, addr_df, max_graph_txs=get_settings().max_graph_txs
+    )
+
+
+def load_clustering_input_for(
+    repo: Repo, target: str, feature_set: str, tx_hashes: Sequence[str]
+) -> Any:
+    """``load_clustering_input`` over an EXPLICIT transaction set.
+
+    The windowed sibling above answers "the population to cluster now". This one
+    answers "the population a given run clustered", which is what a read about a
+    past run has to reconstruct: the target's rolling window moves, so rebuilding
+    a historical run's feature space from it yields the wrong space, and once the
+    window has moved clear of the run it yields an empty one.
+
+    Transaction features are immutable, so the same hashes give back the same
+    vectors the run fitted on. One difference from the windowed loader: the
+    per-tx frame carries no ``block_time``, so if a run ever exceeds
+    ``max_graph_txs`` the graph down-sample keeps a hash-ordered slice instead of
+    the most recent transactions (a documented fallback in ``build_jaccard_distance``).
+    That needs a run larger than MAX_GRAPH_TXS to bite; no window this ships with
+    reaches it."""
+    shape_df = (
+        repo.fetch_shape_features_for(target, tx_hashes)
+        if feature_set in ("shape", "combined")
+        else None
+    )
+    addr_df = (
+        repo.fetch_addresses_for_txs(target, tx_hashes)
+        if feature_set in ("graph", "combined")
+        else None
+    )
     return build_features(
         feature_set, shape_df, addr_df, max_graph_txs=get_settings().max_graph_txs
     )

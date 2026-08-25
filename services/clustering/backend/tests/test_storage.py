@@ -98,8 +98,13 @@ def test_host_backed_top_anomalies_includes_hour_and_day_of_week() -> None:
     # row arity alone can't catch dropping the columns from the SELECT only).
     assert "toHour(t.block_time)" in fake.queries[-1]
     assert "toDayOfWeek(t.block_time)" in fake.queries[-1]
-    # The tx source is the host-shaped windowed relation, not the module table.
-    assert "address_transactions" in fake.queries[-1]
+    # The tx source is the host-shaped relation, not the module table...
+    assert "tms_analytics.transactions" in fake.queries[-1]
+    # ...shaped over the RUN's own scored hashes, never the target's rolling
+    # window: joining a run against the window empties it as soon as the window
+    # moves past the transactions the run scored (see _tx_relation_for_run).
+    assert "anomaly_scores FINAL WHERE run_id" in fake.queries[-1]
+    assert "address_transactions" not in fake.queries[-1]
 
 
 def test_top_anomalies_sql_is_identical_across_repos_except_tx_source() -> None:
@@ -113,8 +118,14 @@ def test_top_anomalies_sql_is_identical_across_repos_except_tx_source() -> None:
     base_repo.top_anomalies("run-1", "addr", limit=10)
     host_repo.top_anomalies("run-1", "addr", limit=10)
 
-    base_sql = base_fake.queries[-1].replace(base_repo._tx_relation(), "<TX>")
-    host_sql = host_fake.queries[-1].replace(host_repo._tx_relation(), "<TX>")
+    # top_anomalies is run-scoped, so the substituted relation is the run-scoped
+    # hook, not the plain (windowed, under host_ch) one.
+    base_sql = base_fake.queries[-1].replace(
+        base_repo._tx_relation_for_run(base_repo._anomaly_run_hashes()), "<TX>"
+    )
+    host_sql = host_fake.queries[-1].replace(
+        host_repo._tx_relation_for_run(host_repo._anomaly_run_hashes()), "<TX>"
+    )
     assert base_sql == host_sql
 
 
@@ -130,6 +141,43 @@ def test_cluster_summary_sql_keeps_the_cluster_size_alias_both_repos() -> None:
         sql = fake.queries[-1]
         assert "count() AS cluster_size" in sql
         assert "count() AS size" not in sql
+
+
+def test_run_scoped_reads_never_join_the_rolling_window() -> None:
+    """The three reads ABOUT one run take their transactions from that run's own
+    membership, not from the target's latest-N window.
+
+    Under host_ch the window is a rolling "latest N transactions of this
+    address". Joining a run against it is only correct while the run is still
+    inside the window: once the target has produced N newer transactions the
+    join matches nothing and the cluster table, the per-cluster drill-down and
+    the anomaly ranking all come back empty, under run metadata still reporting
+    the clusters and the flagged count. Nothing recovers on its own, because a
+    replacement run needs a re-fit and a stable model is never re-fit.
+
+    The window is reachable only through the host address index, so its absence
+    from the query text is what pins the fix."""
+    host_fake = FakeClient([])
+    repo = HostBackedRepo(Settings(CLICKHOUSE_DB="tms"), client=host_fake)
+
+    reads = (
+        ("cluster_summary", lambda: repo.cluster_summary("run-1", "addr"), "cluster_labels"),
+        (
+            "cluster_transactions",
+            lambda: repo.cluster_transactions("run-1", "addr", 0, limit=10, offset=0),
+            "cluster_labels",
+        ),
+        ("top_anomalies", lambda: repo.top_anomalies("run-1", "addr", limit=10), "anomaly_scores"),
+    )
+    for name, call, hash_source in reads:
+        call()
+        sql = host_fake.queries[-1]
+        assert "address_transactions" not in sql, f"{name} still joins the rolling window"
+        assert f"{hash_source} FINAL WHERE run_id" in sql, f"{name} lost its run-scoped tx source"
+
+    # The windowed reads are the ones about NOW, and they must keep the window.
+    repo.latest_transactions("addr", "shape", limit=10)
+    assert "address_transactions" in host_fake.queries[-1]
 
 
 def _tx() -> TxRecord:
