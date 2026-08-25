@@ -126,6 +126,46 @@ class _RepoBase:
         """The query parameters ``_tx_relation``/``_tx_hashes_relation`` consume."""
         return {"tgt": target}
 
+    # --- Run-scoped transaction source -------------------------------------------
+    # A read ABOUT one run (its cluster summary, one cluster's transactions, its
+    # top anomalies) must describe the transactions THAT RUN scored, which is a
+    # fixed set recorded in cluster_labels/anomaly_scores. The plain
+    # `_tx_relation` is the population to analyse NOW: under HostBackedRepo that
+    # is a rolling window of the target's latest N txs, so joining a run against
+    # it silently empties every historical run once the window has moved past the
+    # transactions it clustered. Busy contracts hit this in days (a 1000-tx
+    # window over a contract doing 1000 txs a week is a 7-day horizon) and it
+    # does not self-heal: a new run is only produced by a re-fit, and a stable
+    # model is never re-fit. So run-scoped reads take their tx source from the
+    # run's own membership instead.
+
+    def _tx_relation_for_run(self, run_hashes: str) -> str:
+        """``_tx_relation`` restricted to the tx_hashes in ``run_hashes``.
+
+        The base repo reads the engine's own ``transactions`` table, which is
+        target-scoped and never windowed, so it already holds every transaction
+        any of that target's runs scored: the caller's INNER JOIN against the run
+        is the only restriction needed and ``run_hashes`` is redundant here.
+        ``HostBackedRepo`` overrides this, because there the default source IS
+        windowed."""
+        return self._tx_relation()
+
+    def _cluster_run_hashes(self, *, one_cluster: bool = False) -> str:
+        """Parenthesized subquery yielding the tx_hashes a cluster run labelled,
+        for the run bound as ``{r:String}`` (and, with ``one_cluster``, the single
+        cluster bound as ``{c:Int32}``). A result set, never an ``IN`` array, so a
+        thousand-member run cannot overflow the ClickHouse form-field limit."""
+        one = " AND cluster_id = {c:Int32}" if one_cluster else ""
+        return (
+            f"(SELECT tx_hash FROM {self._db}.cluster_labels FINAL "
+            f"WHERE run_id = {{r:String}}{one})"
+        )
+
+    def _anomaly_run_hashes(self) -> str:
+        """The ``_cluster_run_hashes`` sibling for an anomaly run: the tx_hashes
+        that run scored, for the run bound as ``{r:String}``."""
+        return f"(SELECT tx_hash FROM {self._db}.anomaly_scores FINAL WHERE run_id = {{r:String}})"
+
     # The schema the code expects of a live database. Init SQL creates it on a
     # fresh volume; `python -m app.cli migrate` brings an existing volume up to
     # date. Listed explicitly so the startup guard fails fast with a precise

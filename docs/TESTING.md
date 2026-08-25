@@ -13,12 +13,12 @@ latest commit.
 | Backend hermetic | `backend/tests/` | 1276 | none (all I/O mocked) | Backend (pytest + recall gate) |
 | Recall gate | `backend/tests/analysis/` | 554 (subset of the above) | none | Backend (run first, on its own) |
 | Live-DB tier | `backend/tests/live_db/` | 28 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
-| Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 5 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 8 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
-| Clustering sidecar | `services/clustering/backend/tests/` | 495 | none | Clustering sidecar (pytest) |
+| Clustering sidecar | `services/clustering/backend/tests/` | 497 | none | Clustering sidecar (pytest) |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 131 | none | Frontend (lint + build) |
 
-That is 1,938 tests across the six independent tiers (the recall gate is a
+That is 1,943 tests across the six independent tiers (the recall gate is a
 subset of the backend suite, not an additional tier).
 
 The default developer command, `pytest tests/` from `backend/`, runs the
@@ -119,7 +119,7 @@ artifact.
 ## Clustering sidecar
 
 The optional clustering sidecar keeps its own suite under
-`services/clustering/backend/tests/` (495 tests), covering its chain sources,
+`services/clustering/backend/tests/` (497 tests), covering its chain sources,
 storage layer, scoring pipeline, and API. It runs in its own CI job. Its
 opt-in live tier (`tests/live_db/`, gated like the host's) is described in
 the Live-DB section above.

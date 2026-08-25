@@ -149,7 +149,7 @@ These belong to no single deliverable.
 
 ## Test inventory
 
-1,938 automated tests across six tiers. Counts measured at this commit, not
+1,943 automated tests across six tiers. Counts measured at this commit, not
 quoted from an earlier report.
 
 | Tier | Location | Tests |
@@ -157,8 +157,8 @@ quoted from an earlier report.
 | Backend hermetic | `backend/tests/` | 1,276 |
 | Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 554 |
 | Backend live-DB | `backend/tests/live_db/` | 28 |
-| Clustering sidecar | `services/clustering/backend/tests/` | 495 |
-| Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 5 |
+| Clustering sidecar | `services/clustering/backend/tests/` | 497 |
+| Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 8 |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 131 |
 | Performance | `backend/tests/perf/` | 3 |
 

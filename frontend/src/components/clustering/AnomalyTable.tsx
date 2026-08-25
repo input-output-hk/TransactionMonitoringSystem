@@ -29,9 +29,16 @@ import { TxLabelControl } from "./TxLabelControl";
 // highlighting (each detector flags only its most extreme ~5%).
 const STRONG_VOTE_THRESHOLD = 2;
 
-type Props = { runId: string; target: string };
+type Props = {
+	runId: string;
+	target: string;
+	// What the run itself recorded as flagged. An empty list under a non-zero
+	// count is a discrepancy, not a run that flagged nothing, and calling it "no
+	// flagged transactions" contradicts the count shown right above the table.
+	expectedFlagged?: number;
+};
 
-export function AnomalyTable({ runId, target }: Props) {
+export function AnomalyTable({ runId, target, expectedFlagged }: Props) {
 	const { isAdmin } = useAuth();
 	const { data, isLoading, isError } = useTopAnomalies(runId, 100);
 	const [showAll, setShowAll] = useState(false);
@@ -44,7 +51,13 @@ export function AnomalyTable({ runId, target }: Props) {
 
 	const rows = data?.candidates ?? [];
 	if (!rows.length)
-		return <EmptyText>No flagged transactions in this run.</EmptyText>;
+		return (
+			<EmptyText>
+				{expectedFlagged
+					? `This run flagged ${expectedFlagged} transaction${expectedFlagged === 1 ? "" : "s"}, but none of them could be loaded.`
+					: "No flagged transactions in this run."}
+			</EmptyText>
+		);
 
 	const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
 	const currentPage = Math.min(page, pageCount - 1);

@@ -3,6 +3,8 @@ verdicts) and the top-anomalies page (evidence + effective verdict)."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pandas as pd
 import pytest
 
@@ -56,7 +58,14 @@ def _shape_row(tx_hash: str, scale: float) -> dict[str, object]:
 
 class FakeProjectionRepo(FakeGraphRepo):
     """FakeGraphRepo plus the shape features build_projection rebuilds the matrix
-    from. Two clusters at clearly different scales so the projection is non-trivial."""
+    from. Two clusters at clearly different scales so the projection is non-trivial.
+
+    The two feature reads deliberately disagree. The windowed read returns a
+    population that shares NOTHING with the run, which is what host_ch really
+    looks like once the target's rolling window has moved past the transactions a
+    run clustered: a busy contract does that in days. A projection rebuilt from
+    the window would therefore intersect to nothing and render a blank chart, so
+    every projection assertion below doubles as the regression test for that."""
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -65,7 +74,12 @@ class FakeProjectionRepo(FakeGraphRepo):
         )
 
     def fetch_shape_features(self, target: str) -> pd.DataFrame:
-        return self._shape
+        # The window as it stands NOW: later transactions, none of them this run's.
+        return pd.DataFrame([_shape_row(f"rolled-{i}", 7.0) for i in range(4)])
+
+    def fetch_shape_features_for(self, target: str, tx_hashes: Sequence[str]) -> pd.DataFrame:
+        wanted = set(tx_hashes)
+        return self._shape[self._shape["tx_hash"].isin(wanted)].reset_index(drop=True)
 
 
 def test_build_projection_2d_nodes_carry_coords_and_verdicts() -> None:
@@ -106,6 +120,26 @@ def test_build_projection_caps_and_filters_by_cluster() -> None:
 
     only1 = build_projection(repo, "r1", dims=2, cluster=1)
     assert {n["id"] for n in only1["nodes"]} == {"c", "d"}
+
+
+def test_build_projection_survives_a_window_that_moved_past_the_run() -> None:
+    """A run projects from its OWN membership, never the target's window as it
+    stands now.
+
+    Under host_ch that window is the target's latest N transactions, so every run
+    ages out of it: a contract doing N transactions a week has a one-week horizon.
+    Nothing replaces the aged-out run either, because a new run only comes from a
+    re-fit and a stable model is never re-fit, so the view stays broken for good.
+    Rebuilding the matrix from the window intersected the run to nothing, and the
+    UI drew an empty chart under a header still reporting the run's cluster count.
+    FakeProjectionRepo's windowed read shares no transaction with the run, so a
+    regression here comes back with zero nodes."""
+    repo = FakeProjectionRepo(membership={"a": 0, "b": 0, "c": 1, "d": 1}, explicit={}, votes={})
+
+    out = build_projection(repo, "r1", dims=2, limit=10)
+
+    assert out["total"] == 4 and out["shown"] == 4
+    assert {n["id"] for n in out["nodes"]} == {"a", "b", "c", "d"}
 
 
 # --- Latest interactions: recency feed, unclassified txs surfaced ------------

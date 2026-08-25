@@ -44,6 +44,10 @@ type Props = {
 	// Lifted selection so a graph/scatter click can focus a cluster here.
 	selectedCluster?: number | null;
 	onSelectCluster?: (clusterId: number | null) => void;
+	// The cluster count the run itself recorded. An empty table under a non-zero
+	// count is a discrepancy, not a run that found nothing, and saying "no
+	// clusters" there contradicts the header two lines above it.
+	expectedClusters?: number;
 };
 
 export function ClusterSummaryTable({
@@ -51,6 +55,7 @@ export function ClusterSummaryTable({
 	target,
 	selectedCluster,
 	onSelectCluster,
+	expectedClusters,
 }: Props) {
 	const { isAdmin } = useAuth();
 	const { data: clusters, isLoading } = useClusterSummary(runId);
@@ -65,7 +70,14 @@ export function ClusterSummaryTable({
 		onSelectCluster ? onSelectCluster(id) : setLocalExpanded(id);
 
 	if (isLoading) return <LoadingText>Loading clusters…</LoadingText>;
-	if (!clusters?.length) return <EmptyText>No clusters in this run.</EmptyText>;
+	if (!clusters?.length)
+		return (
+			<EmptyText>
+				{expectedClusters
+					? `This run recorded ${expectedClusters} cluster${expectedClusters === 1 ? "" : "s"}, but none of its transactions could be loaded.`
+					: "No clusters in this run."}
+			</EmptyText>
+		);
 
 	const toggle = (id: number) => setExpanded(expanded === id ? null : id);
 

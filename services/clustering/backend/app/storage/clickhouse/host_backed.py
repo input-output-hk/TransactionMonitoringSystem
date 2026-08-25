@@ -197,6 +197,14 @@ class HostBackedRepo(ClickHouseRepo):
     def _tx_relation(self) -> str:
         return self._windowed_tx()
 
+    def _tx_relation_for_run(self, run_hashes: str) -> str:
+        # Shape the host tables over the RUN's hashes rather than the target's
+        # rolling window (see base._tx_relation_for_run for why). The host keeps
+        # every transaction it ever ingested, so the rows are still there: it is
+        # only the window that excluded them. Same derived table, same column
+        # contract, different hash source, so the row mapping cannot drift.
+        return self._tx_shaped(run_hashes)
+
     def _tx_hashes_relation(self) -> str:
         return self._hashes_expr()
 
