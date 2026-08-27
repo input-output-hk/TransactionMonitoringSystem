@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorers.circular import CircularScorer
 
 
@@ -44,7 +45,13 @@ class TestGate:
 
 
 class TestScore:
+    @pytest.mark.attack_must_fire
     def test_high_similarity_scores_well(self, scorer):
+        """A recurring 3-hop cycle with near-identical amounts must stay High.
+
+        Measured 82.71, which clears Critical by under three points; the floor
+        sits at High for the same reason as the sandwich case.
+        """
         cycle = {
             "cycle_length": 3,
             "addresses": ["a", "b", "c"],
@@ -58,7 +65,7 @@ class TestScore:
             "origin_cluster": "cluster01",
         }
         result = scorer.score(_features(cycle=cycle))
-        assert result.score > 30
+        assert result.score >= BAND_HIGH_THRESHOLD
         assert result.sub_scores["amount_similarity"] > 0.5
 
     def test_low_entropy_boosts_score(self, scorer):
@@ -144,8 +151,10 @@ class TestScore:
             "origin_cluster": "c",
         }
         result = scorer.score(_features(cycle=corroborated))
-        assert result.score > 59.0, (
-            f"corroborated cycle should exceed Moderate cap; got {result.score}"
+        # Pinned to the band constant rather than a literal just under it, so
+        # the bar moves with the bands if they are ever retuned.
+        assert result.score >= BAND_HIGH_THRESHOLD, (
+            f"corroborated cycle should escape the Moderate cap; got {result.score}"
         )
 
 

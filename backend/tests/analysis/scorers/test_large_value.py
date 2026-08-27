@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorers.large_value import LargeValueScorer
 from tests.analysis.scorers.conftest import features_for_outputs as _features
 
@@ -46,12 +47,20 @@ class TestGate:
 
 
 class TestScore:
+    @pytest.mark.attack_must_fire
     def test_extreme_quantity_high_score(self, scorer):
-        """10^35 quantity should produce high quantity_digits sub-score."""
+        """A near-int64 quantity must stay at least High.
+
+        Measured 64.38, and that is the class ceiling for this shape rather than
+        a loose bound: ``quantity_digits`` is already saturated at 1.00 while
+        ``value_cbor_bytes`` stays 0.00, because a single-asset UTxO carries
+        little CBOR whatever the quantity. TMS_DETECTION_SPEC states that
+        intent, so High is exactly the floor the design promises.
+        """
         out = _out(SCRIPT, lovelace=1_500_000, policies={"p": {"t": 10**35}})
         result = scorer.score(_features([out]))
         assert result.sub_scores["quantity_digits"] > 0.5
-        assert result.score > 30
+        assert result.score >= BAND_HIGH_THRESHOLD
 
     def test_normal_quantity_low_score(self, scorer):
         out = _out(SCRIPT, lovelace=5_000_000, policies={"p": {"t": 1000}})

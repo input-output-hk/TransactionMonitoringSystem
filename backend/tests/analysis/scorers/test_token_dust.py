@@ -231,6 +231,7 @@ class TestDosAssetThresholdDiscriminator:
     overhead.
     """
 
+    @pytest.mark.attack_must_fire
     def test_high_asset_count_one_policy_fires_composite_reason(self, scorer):
         # CTF 06 shape: 80 names under a single one-shot policy, low ADA.
         # Use 1_200_000 (the bootstrap p50) so lovelace_inverted saturates.
@@ -374,6 +375,7 @@ class TestEstablishedCollectionCap:
         assert result.evidence["policy_ages_known"] is True
         assert result.evidence["min_policy_age_slots_observed"] == self._MIN_AGE + 1
 
+    @pytest.mark.attack_must_fire
     def test_fresh_policy_not_capped(self, scorer, monkeypatch):
         # ATTACK-MUST-FIRE twin of the CTF-06 pin: a policy first seen
         # minutes ago is exactly the mint-and-fire dust campaign.
@@ -383,6 +385,7 @@ class TestEstablishedCollectionCap:
         assert result.score >= BAND_HIGH_THRESHOLD
         assert "established_collection_cap" not in result.reasons
 
+    @pytest.mark.attack_must_fire
     def test_minted_in_tx_never_capped(self, scorer, monkeypatch):
         # ATTACK-MUST-FIRE: an old OPEN policy minting fresh junk names in
         # this very tx must stay uncapped regardless of policy age.
@@ -397,6 +400,7 @@ class TestEstablishedCollectionCap:
         assert result.score >= BAND_HIGH_THRESHOLD
         assert "established_collection_cap" not in result.reasons
 
+    @pytest.mark.attack_must_fire
     def test_partial_age_data_fails_open(self, scorer, monkeypatch):
         # Two policies in the bundle, only one has a first-seen row: age is
         # not proven for the whole bundle, so no cap.
@@ -411,6 +415,7 @@ class TestEstablishedCollectionCap:
         assert "established_collection_cap" not in result.reasons
         assert result.evidence["policy_ages_known"] is False
 
+    @pytest.mark.attack_must_fire
     def test_missing_slot_fails_open(self, scorer, monkeypatch):
         policy = "e" * 56
         self._patch_first_seen(monkeypatch, {policy: 1})
@@ -418,6 +423,7 @@ class TestEstablishedCollectionCap:
         assert result.score >= BAND_HIGH_THRESHOLD
         assert "established_collection_cap" not in result.reasons
 
+    @pytest.mark.attack_must_fire
     def test_lookup_exception_fails_open(self, scorer, monkeypatch):
         from app.db import clickhouse
 

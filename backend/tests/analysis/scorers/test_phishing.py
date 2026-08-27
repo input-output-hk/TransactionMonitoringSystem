@@ -399,6 +399,7 @@ class TestNetNewHolderTargeting:
             raw["mint"] = mint
         return _features(metadata=metadata, raw_data=raw, output_count=1)
 
+    @pytest.mark.attack_must_fire
     def test_url_airdrop_with_se_name_recall_pin_high(self, scorer):
         # ATTACK-MUST-FIRE band pin for the canonical in-the-wild scam: a
         # freshly minted token whose name carries both Tier-2 bait and a
@@ -421,6 +422,7 @@ class TestNetNewHolderTargeting:
         assert result.sub_scores["targeting"] == 0.0
         assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is True
 
+    @pytest.mark.attack_must_fire
     def test_missing_input_value_fails_open(self, scorer):
         # The two production silent-missing paths (originating tx absent,
         # ANALYSIS_MAX_REF_TXS cap) surface as inputs without a "value" key:
@@ -429,11 +431,13 @@ class TestNetNewHolderTargeting:
         assert result.score >= BAND_HIGH_THRESHOLD
         assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
 
+    @pytest.mark.attack_must_fire
     def test_absent_inputs_fails_open(self, scorer):
         result = scorer.score(self._self_change_features(inputs=[]))
         assert result.score >= BAND_HIGH_THRESHOLD
         assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
 
+    @pytest.mark.attack_must_fire
     def test_mint_overrides_prior_holding(self, scorer):
         # Pre-seed evasion: an attacker holding their own scam token cannot
         # neutralise the signal by minting more and "self-changing" it; a
@@ -454,6 +458,7 @@ class TestNetNewHolderTargeting:
         assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is True
         assert result.score < BAND_HIGH_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_metadata_carrier_never_gated(self, scorer):
         # A metadata-carried URL plus SE text is phishing regardless of any
         # token movement: the self-change proof must not touch the bonuses.
@@ -462,6 +467,7 @@ class TestNetNewHolderTargeting:
         )
         assert result.score >= BAND_HIGH_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_same_url_in_metadata_and_self_change_asset_name_not_gated(self, scorer):
         # Carrier-collision guard: the SAME URL string appears in a metadata
         # message (a real delivery to victims) AND as a self-change asset
@@ -475,6 +481,7 @@ class TestNetNewHolderTargeting:
         assert result.score >= BAND_HIGH_THRESHOLD
         assert result.evidence["url_token_delivery"]["bonuses_suppressed"] is False
 
+    @pytest.mark.attack_must_fire
     def test_require_delivery_kill_switch(self, scorer, monkeypatch):
         # Config kill switch restores the pre-gate behaviour wholesale.
         import app.analysis.scorers.phishing as phishing_module

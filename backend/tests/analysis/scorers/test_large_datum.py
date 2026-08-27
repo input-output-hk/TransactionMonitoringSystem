@@ -88,6 +88,7 @@ class TestGate:
         # and it is what removes the 156 false positives.
         assert scorer.gate(_features([_out(SCRIPT, datum=_high_entropy_datum(9000))])) is False
 
+    @pytest.mark.attack_must_fire
     def test_high_entropy_extreme_bloat_gates(self, scorer):
         # A high-entropy (random-padded) datum that approaches the tx-size limit
         # is flagged by the absolute size backstop REGARDLESS of entropy, since
@@ -153,6 +154,7 @@ class TestScore:
         result = scorer.score(_features([out]))
         assert result.score < BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_genuine_bloat_reaches_critical(self, scorer):
         # A datum at the bootstrap p99 (14000 bytes), genuinely threatening the
         # 16384-byte tx budget, still saturates the datum_bytes axis and reaches
@@ -161,6 +163,7 @@ class TestScore:
         result = scorer.score(_features([out]))
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_ctf04_sized_bloat_reaches_high(self, scorer):
         # Recall anchor: a ~7.3 KB low-entropy padding datum (CTF-04 shape) must
         # score High or above, not be suppressed. This is the regression the
@@ -208,6 +211,7 @@ class TestBackstopOnlyRecall:
     SCORE level (a ``gate()``-only assertion cannot see a band change).
     """
 
+    @pytest.mark.attack_must_fire
     def test_high_entropy_multi_leaf_padding_stays_critical(self, scorer):
         # 400 random 32-byte CBOR leaves: 13 KB of pure padding that reads as
         # legitimate registry state on BOTH content axes (entropy ~7.86 > 4.0,
@@ -223,6 +227,7 @@ class TestBackstopOnlyRecall:
         assert "size_backstop_only" in result.reasons
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_hash_delivered_padding_stays_critical(self, scorer):
         # The same padding attack delivered as datumHash + witness preimage.
         # The byte gates size it from the preimage, so the content
@@ -239,6 +244,7 @@ class TestBackstopOnlyRecall:
         assert result.evidence["bloat_trigger"] == "content"
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_hash_delivered_padding_below_the_backstop_is_found(self, scorer):
         # Coverage this scorer did not previously have, rather than a
         # restoration: a hash-delivered datum between min_datum_bytes and the
@@ -261,6 +267,7 @@ class TestBackstopOnlyRecall:
         inline = scorer.score(_features([_out(SCRIPT, lovelace=2_000_000, datum=datum)]))
         assert by_hash.score == inline.score
 
+    @pytest.mark.attack_must_fire
     def test_unwalkable_cbor_stays_critical_and_is_marked(self, scorer):
         # Nesting past cbor2's 400-container limit makes leaf concentration
         # unmeasurable (it returns 0.0, its "not concentrated" default). An
@@ -274,6 +281,7 @@ class TestBackstopOnlyRecall:
         assert "size_backstop_content_unreadable" in result.reasons
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_low_entropy_oversized_datum_stays_critical(self, scorer):
         # Oversized AND low-entropy is bloat twice over: content-triggered.
         out = _out(SCRIPT, lovelace=2_000_000, datum=_low_entropy_datum(13000))
@@ -281,6 +289,7 @@ class TestBackstopOnlyRecall:
         assert result.evidence["bloat_trigger"] == "content"
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_single_leaf_oversized_padding_stays_critical(self, scorer):
         # The entropy-gate evasion: one giant random ByteArray past the
         # backstop, caught structurally by leaf concentration.
@@ -313,6 +322,9 @@ class TestLargeStateAllowlistCap:
         cbor2 = pytest.importorskip("cbor2")
         return cbor2.dumps([os.urandom(32) for _ in range(400)]).hex()
 
+    # Deliberately NOT marked attack_must_fire: this is the precision half of
+    # the allowlist, asserting a score stays BELOW a band. The must-fire set is
+    # cases that have to reach one, and the four tests below carry that side.
     def test_allowlisted_backstop_only_finding_is_capped(self, scorer, allowlisted):
         out = _out(SCRIPT, lovelace=55_000_000, datum=self._structured_oversized())
         result = scorer.score(_features([out]))
@@ -332,6 +344,7 @@ class TestLargeStateAllowlistCap:
         assert result.evidence["datum_bytes_raw"] >= _SIZE_BACKSTOP
         assert result.evidence["datum_type"] == "inline"
 
+    @pytest.mark.attack_must_fire
     def test_allowlist_does_not_cap_a_content_triggered_finding(self, scorer, allowlisted):
         # An allowlisted contract that starts emitting padding still pages.
         out = _out(SCRIPT, lovelace=2_000_000, datum=_low_entropy_datum(13000))
@@ -339,6 +352,7 @@ class TestLargeStateAllowlistCap:
         assert "large_state_allowlisted" not in result.reasons
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_allowlist_does_not_cap_unreadable_content(self, scorer, allowlisted):
         # Nor does it cap a datum whose content could not be read: the
         # exemption is for a contract observed serving MEASURED benign state.
@@ -349,6 +363,7 @@ class TestLargeStateAllowlistCap:
         assert "large_state_allowlisted" not in result.reasons
         assert result.score >= BAND_CRITICAL_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_non_allowlisted_script_is_not_capped(self, scorer, monkeypatch):
         monkeypatch.setattr(ldm, "_LARGE_STATE_ALLOWLIST", {"preprod": ("addr_test1wOTHER",)})
         out = _out(SCRIPT, lovelace=55_000_000, datum=self._structured_oversized())
@@ -362,6 +377,7 @@ class TestLargeStateAllowlistCap:
         for network in ("mainnet", "preprod", "preview"):
             assert ldm._LARGE_STATE_ALLOWLIST.get(network, ()) == ()
 
+    @pytest.mark.attack_must_fire
     def test_allowlist_is_network_scoped(self, scorer, monkeypatch):
         # A preprod entry must never suppress a mainnet finding.
         monkeypatch.setattr(ldm, "_LARGE_STATE_ALLOWLIST", {"preprod": (SCRIPT,)})

@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.analysis.normalise import BAND_HIGH_THRESHOLD, BAND_MODERATE_THRESHOLD
 from app.analysis.scorers.fake_token import FakeTokenScorer
 
 
@@ -80,7 +81,27 @@ class TestScore:
         outputs = [{"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(5)]
         result = scorer.score(_features(mint=mint, outputs=outputs))
         assert result.sub_scores["tokenname_similarity"] > 0.5
-        assert result.score > 20
+        # Moderate, not High: a non-critical meme-token clone to five
+        # recipients measures 44.42, and it is the weakest shape this class
+        # recognises. The recall floor for a real attack is the wide
+        # critical-asset clone in the next test.
+        assert result.score >= BAND_MODERATE_THRESHOLD
+
+    @pytest.mark.attack_must_fire
+    def test_wide_critical_asset_clone_must_reach_high(self, scorer):
+        """A counterfeit of a critical asset, distributed widely, must stay High.
+
+        This is the shape that makes the class worth having: an exact-name clone
+        of a stablecoin minted under an attacker policy and pushed to many
+        recipients at once. Measured 72.73, against 44.42 for the same clone of
+        a non-critical token to five recipients, so the criticality
+        amplification and the recipient breadth are both load-bearing and a
+        regression in either drops this below the floor.
+        """
+        recipients = [{"address": f"addr{i}", "value": {"lovelace": 1_500_000}} for i in range(60)]
+        result = scorer.score(_features(mint={FAKE_POLICY: {"iUSD": 10_000}}, outputs=recipients))
+        assert result.evidence["matched_token_criticality"] == "critical"
+        assert result.score >= BAND_HIGH_THRESHOLD
 
     def test_unicode_homoglyph_boosts_score(self, scorer):
         """Token name with Cyrillic 'а' (U+0430) instead of Latin 'a'."""

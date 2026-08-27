@@ -376,6 +376,7 @@ class TestLazyValidatorBandFloor:
     minimal redeemer CPU.
     """
 
+    @pytest.mark.attack_must_fire
     def test_lazy_validator_floors_to_high_band(self, scorer):
         # 4 same-script inputs, minimal CPU per redeemer (< p50=100k).
         # Without the floor this would score ~32 (Moderate); with the floor
@@ -672,6 +673,7 @@ class TestLazyValidatorExtractionGate:
         assert result.sub_scores["value_returned_lovelace"] > 0
         assert result.score == -1.0
 
+    @pytest.mark.attack_must_fire
     def test_floor_still_fires_on_small_extraction(self, scorer):
         # The canonical low-value-drain case the floor exists for: the
         # validator was tricked into approving a small extraction with
@@ -790,6 +792,7 @@ class TestPerScriptExtractionBaseline:
     legitimate batchers and would silence detection on rare scripts.
     """
 
+    @pytest.mark.attack_must_fire
     def test_ctf01_rare_script_stays_on_bootstrap(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
 
@@ -801,6 +804,7 @@ class TestPerScriptExtractionBaseline:
         assert result.score >= BAND_MODERATE_THRESHOLD
         assert result.baseline_source == "bootstrap"
 
+    @pytest.mark.attack_must_fire
     def test_global_baseline_ignored_for_extraction(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
 
@@ -898,6 +902,7 @@ class TestPerScriptExtractionHeadroom:
         assert result.score < BAND_MODERATE_THRESHOLD  # Informational, not an alert
         assert result.baseline_source == "per_script"
 
+    @pytest.mark.attack_must_fire
     def test_per_script_anomaly_still_fires(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
 
@@ -907,6 +912,7 @@ class TestPerScriptExtractionHeadroom:
         assert result.sub_scores["s_extraction_assets"] == 1.0
         assert result.score >= BAND_MODERATE_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_bootstrap_unaffected_by_headroom(self, scorer, monkeypatch):
         from app.analysis.normalise import BAND_MODERATE_THRESHOLD
 
@@ -918,6 +924,7 @@ class TestPerScriptExtractionHeadroom:
         assert result.score >= BAND_MODERATE_THRESHOLD
         assert result.baseline_source == "bootstrap"
 
+    @pytest.mark.attack_must_fire
     def test_lazy_validator_floor_independent_of_headroom(self, scorer, monkeypatch):
         # Per-script baseline + near-zero CPU (lazy validator) + extraction: the
         # floor must still fire to High, because its gate uses the un-widened
@@ -1229,6 +1236,7 @@ class TestBaselinePoisoningResistance:
     saturation point at K x the bootstrap anchor, so the lazy-validator
     floor still fires."""
 
+    @pytest.mark.attack_must_fire
     def test_poisoned_wide_baseline_cannot_silence_drain(self, scorer, monkeypatch):
         poisoned = {
             # Wide spread (passes the min-spread usability guard), huge p99.
@@ -1284,6 +1292,7 @@ class TestBaselinePoisoningResistance:
         assert result.score >= BAND_HIGH_THRESHOLD
         assert "lazy_validator_band_floor" in result.reasons
 
+    @pytest.mark.attack_must_fire
     def test_median_poisoned_baseline_cannot_silence_drain(self, scorer, monkeypatch):
         # ATTACK-MUST-FIRE for the p50 vector: normalise() subtracts p50
         # first, so a poisoned MEDIAN (p50=500 assets, p99=1000) made every
@@ -1403,6 +1412,7 @@ class TestSaturationBandFloor:
     both saturate, the score must floor into High.
     """
 
+    @pytest.mark.attack_must_fire
     def test_saturated_heavy_cpu_double_sat_floors_to_high(self, scorer):
         # ATTACK-MUST-FIRE: the mainnet 58.0 cohort's exact corner. Without
         # the floor this shape's ceiling is the two live weights, which by
@@ -1454,6 +1464,7 @@ class TestSaturationBandFloor:
         assert "saturation_band_floor" not in result.reasons
         assert result.score < BAND_HIGH_THRESHOLD
 
+    @pytest.mark.attack_must_fire
     def test_one_lovelace_return_saturated_drain_promotes_to_high(self, scorer):
         # ATTACK-MUST-FIRE: 1 lovelace returned to the script forces the
         # state-continuation suppression arm; before the saturation floor the
@@ -1465,6 +1476,7 @@ class TestSaturationBandFloor:
         assert "saturation_band_floor" in result.reasons
         assert "extraction_escape_moderate_cap" not in result.reasons
 
+    @pytest.mark.attack_must_fire
     def test_saturation_floor_resists_poisoned_baseline(self, scorer, monkeypatch):
         # ATTACK-MUST-FIRE under baseline poisoning: a per-script n_assets
         # baseline widened to p99=1e6 resolves, after the anchor caps, to
