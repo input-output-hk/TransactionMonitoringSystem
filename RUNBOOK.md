@@ -783,7 +783,7 @@ The compose stack can bundle Mailpit as a catch-all SMTP sink for development, o
 
 For production deployments:
 
-1. Point `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (plus `SMTP_USE_TLS` or `SMTP_USE_STARTTLS`) at the customer's SMTP provider.
+1. Point `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (plus `SMTP_USE_TLS` or `SMTP_USE_STARTTLS`) at your organisation's SMTP provider.
 2. Set `APP_BASE_URL` to the public dashboard URL so emailed links resolve.
 3. Do not pass `--profile mail` in production: Mailpit is not started by the default `--profile app`, and the app has no dependency on it, so there is nothing to stop. (SMTP failures at runtime are tolerated anyway: logged, silent 200 to the caller.)
 
@@ -961,7 +961,7 @@ and they fail in opposite ways:
 3. Recreate the app container: `docker compose --profile app up -d app`.
    Databases keep running; only the app restarts. Startup applies any additive
    schema changes itself.
-4. If the app refuses to start and names `scripts/migrate_dedup_schema.py`, run
+4. If the app refuses to start and names `backend/scripts/migrate_dedup_schema.py`, run
    the one-shot migration below, then start again.
 5. Run any backfill this release needs (see "Post-upgrade backfills"). The app is
    already serving at this point: a backfill only fills history in, so it is safe

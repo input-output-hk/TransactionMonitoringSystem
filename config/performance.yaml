@@ -10,12 +10,12 @@
 # roughly 10x off the dev baseline, so only a genuine regression (an
 # accidental O(n^2), a query losing its index, I/O entering a compute path)
 # fails the tier, never runner weather. Once the scheduled CI job has
-# produced reference baselines, ratify tighter budgets with the customer
-# using two fixed rules against the REFERENCE environment:
+# produced reference baselines, these budgets can be tightened, using two
+# fixed rules against the REFERENCE environment:
 #   throughput floors  = 50% of the measured baseline
 #   latency ceilings   = 2x the measured p95
-# These are engineering guardrails, not contractual SLOs, and they are
-# updated here in one place.
+# They stay regression tripwires either way, and they are updated here in
+# one place. They carry no availability or support undertaking.
 #
 # Workload sizes (batch counts, seeded row volumes) are preprod-scale: large
 # enough that per-operation overhead does not dominate the measurement, small

@@ -76,10 +76,10 @@ Responsibilities:
 | Publish | [service/publish.py](../backend/app/service/publish.py) | Projects resolved per-tx verdicts to `tms_clustering.tx_contract_anomaly`, the table the host reads as the `contract_anomaly` attack class. |
 | Ingest | [ingest/ingester.py](../backend/app/ingest/ingester.py) | Resumable orchestration over a `ChainSource`. Under the default `host_ch` this never downloads (the host already ingested the chain, so the host-backed path reads existing data and the ingester's writes are no-ops); under `CHAIN_SOURCE=blockfrost` it drives the real download path, fetching each tx and persisting it to `tms_clustering`. |
 | Algorithms | [features/](../backend/app/features/), [clustering/](../backend/app/clustering/), [anomaly/](../backend/app/anomaly/) | Feature matrices, DBSCAN, parameter evaluation, anomaly ensemble. See [algorithms.md](algorithms.md). |
-| Identity | [contracts.py](../backend/app/contracts.py) | Classify a target as an address vs minting policy (pure, source‑neutral). |
+| Identity | [contracts.py](../backend/app/contracts.py) | Classify a target as an address vs minting policy (pure, source-neutral). |
 | Data source | [sources/](../backend/app/sources/) (`ChainSource` protocol + factory), [sources/host_ch/](../backend/app/sources/host_ch/) (`HostChainSource`), [blockfrost/](../backend/app/blockfrost/) (`BlockfrostSource`) | The seam the analysis cores read through. `CHAIN_SOURCE=host_ch` (default) selects `HostChainSource`, which reads contract metadata and discovers transaction hashes from the host's `tms_analytics` database, with nothing fetched externally; `CHAIN_SOURCE=blockfrost` selects `BlockfrostSource`, which downloads them over HTTP from blockfrost.io. See [online-classification-design.md](online-classification-design.md). |
-| Storage | [storage/clickhouse/](../backend/app/storage/clickhouse/) | All SQL. A thin repository (`ClickHouseRepo`) composed from per‑entity mixins over the HTTP client. The `HostBackedRepo` variant reads raw transaction / feature data cross-database from `tms_analytics` and writes module state to `tms_clustering`. |
-| Config | [config.py](../backend/app/config.py) | Pydantic‑settings; env‑driven configuration + logging setup. |
+| Storage | [storage/clickhouse/](../backend/app/storage/clickhouse/) | All SQL. A thin repository (`ClickHouseRepo`) composed from per-entity mixins over the HTTP client. The `HostBackedRepo` variant reads raw transaction / feature data cross-database from `tms_analytics` and writes module state to `tms_clustering`. |
+| Config | [config.py](../backend/app/config.py) | Pydantic-settings; env-driven configuration + logging setup. |
 
 ## The canonical pipeline
 
@@ -115,9 +115,9 @@ process_contract(target, target_type, max_txs, reprocess, job_id)
 - Each feature matrix is built **once** and reused across evaluate/cluster/anomaly
   for that target (a deliberate performance choice; see
   [algorithms.md](algorithms.md)).
-- On any failure the contract is marked `failed` (preserving previously‑saved
+- On any failure the contract is marked `failed` (preserving previously-saved
   metadata) and, if running under a job, the job records a **sanitized** error
-  message; the full exception is logged server‑side only.
+  message; the full exception is logged server-side only.
 
 Stage names map 1:1 onto the `jobs.status` enum so the SPA can render live progress.
 
@@ -182,19 +182,19 @@ path. The union read is the cheaper and cleaner seam.
 
 ## The background job system
 
-The API must never block on the long, sync‑ClickHouse‑heavy pipeline, so the work
+The API must never block on the long, sync-ClickHouse-heavy pipeline, so the work
 the scheduler enqueues runs off the request path in [jobs.py](../backend/app/jobs.py):
 
 - **One daemon worker thread** drains a `queue.Queue` of `job_id`s.
 - For each job it runs `asyncio.run(process_contract(...))` on its own event loop
-  and its own repo (the ClickHouse client is **not** thread‑safe, so each
+  and its own repo (the ClickHouse client is **not** thread-safe, so each
   job/request gets an independent client).
 - The worker is started/stopped by the FastAPI **lifespan** handler. On startup it
-  **re‑enqueues** any non‑terminal jobs.
+  **re-enqueues** any non-terminal jobs.
 - **Liveness:** the worker loop guards each iteration so one bad job can't kill it,
   and `enqueue()` respawns the thread if it ever died; jobs never pile up undrained.
-- **Single‑writer invariant:** only the worker writes a given job row, which is what
-  makes the read‑modify‑write `update_job` safe (see [data-model.md](data-model.md)).
+- **Single-writer invariant:** only the worker writes a given job row, which is what
+  makes the read-modify-write `update_job` safe (see [data-model.md](data-model.md)).
 
 This requires a **single backend process** (one uvicorn worker), which is the
 configured default.
@@ -210,12 +210,12 @@ same-origin and session-authenticated.
 1. The host API authenticates the request with the host's session
    (`verify_api_key`) and, gated by `CLUSTERING_ENABLED`, forwards it to the
    sidecar on the internal Docker network (`CLUSTERING_SIDECAR_URL`).
-2. The sidecar's FastAPI runs its own app‑level `verify_api_key` dependency (a
-   no‑op on the internal network; `/api/health` and `/api/ready` are always exempt).
-3. Each sync endpoint gets a fresh per‑request repo (closed when the request
+2. The sidecar's FastAPI runs its own app-level `verify_api_key` dependency (a
+   no-op on the internal network; `/api/health` and `/api/ready` are always exempt).
+3. Each sync endpoint gets a fresh per-request repo (closed when the request
    finishes) via the `get_request_repo` dependency.
 4. `POST /api/v1/contracts` validates + classifies the target, applies enqueue
-   guards (dedupe + in‑flight cap), writes a `pending` contract, and the automatic
+   guards (dedupe + in-flight cap), writes a `pending` contract, and the automatic
    feed picks it up from the next scheduler tick. The SPA polls
    `GET /api/v1/jobs/{id}` (through the proxy) for live progress.
 
@@ -243,9 +243,9 @@ chain/feature reads come from `tms_analytics`, module state lives in
   its `CLUSTERING_PORT` (default 8010) binds to **loopback only**, for debugging
   and observability.
 - The sidecar has a Docker **healthcheck** hitting `/api/health`.
-- The backend image is **multi‑stage**: `--target runtime` builds the slim,
-  **non‑root** production image (no dev deps or tests, the compose default); the
-  `dev` target adds `pytest`/`ruff`/`mypy` for the in‑container test loop.
+- The backend image is **multi-stage**: `--target runtime` builds the slim,
+  **non-root** production image (no dev deps or tests, the compose default); the
+  `dev` target adds `pytest`/`ruff`/`mypy` for the in-container test loop.
 - On boot the sidecar runs `app.cli migrate`, which creates/upgrades the
   `tms_clustering` schema idempotently (see [data-model.md](data-model.md#migrations));
   it does not touch `tms_analytics`, which the core TMS owns.
@@ -253,7 +253,7 @@ chain/feature reads come from `tms_analytics`, module state lives in
 ## Key design decisions
 
 - **One pipeline, no debt.** Centralizing onboarding in `process_contract` means
-  every contract is processed identically and there is no ad‑hoc second path.
+  every contract is processed identically and there is no ad-hoc second path.
 - **The data source is a seam.** The analysis cores depend on the
   `ChainSource` protocol ([sources/base.py](../backend/app/sources/base.py)) and a
   neutral `SourceError` taxonomy, never on a provider package. `get_source()`
@@ -273,13 +273,13 @@ chain/feature reads come from `tms_analytics`, module state lives in
   download path writes the fetched transactions into `tms_clustering`.) Either way,
   the module's own derived state lives in `tms_clustering`.
 - **Repository pattern over ClickHouse.** All SQL lives in `ClickHouseRepo`;
-  callers speak in dicts/dataclasses. Row mapping is name‑based via a single
-  `_row_to_dict` helper with per‑entity column specs.
+  callers speak in dicts/dataclasses. Row mapping is name-based via a single
+  `_row_to_dict` helper with per-entity column specs.
 - **Pure, testable cores.** Feature builders, normalization, metadata parsing,
-  DBSCAN/evaluation and the anomaly ensemble are side‑effect‑free and unit‑tested
+  DBSCAN/evaluation and the anomaly ensemble are side-effect-free and unit-tested
   against fakes, with no network or ClickHouse required.
-- **Off‑request background work** via a single in‑process worker thread instead of
-  an external broker: the right amount of machinery for a single‑process service.
+- **Off-request background work** via a single in-process worker thread instead of
+  an external broker: the right amount of machinery for a single-process service.
 - **Findings flow one way.** The module publishes flagged verdicts to
   `tms_clustering.tx_contract_anomaly`; the host reads them as the
   `contract_anomaly` attack class through `/api/analysis/results`, gated by

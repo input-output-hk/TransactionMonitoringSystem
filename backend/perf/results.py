@@ -3,7 +3,7 @@
 Every benchmark records one JSON file per run into the results directory
 (``TMS_PERF_RESULTS_DIR``, default ``<repo root>/perf-results``, gitignored).
 The report generator collates these files, plus the Locust CSV exports,
-into the customer-facing performance report; keeping the schema in one
+into the performance report; keeping the schema in one
 module means the writer and the reader cannot drift apart.
 
 Judgments travel WITH the artifact: each benchmark builds its budget

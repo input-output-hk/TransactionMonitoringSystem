@@ -163,7 +163,7 @@ Use **FastAPI** (on Uvicorn/ASGI) as the sole web framework, serving REST endpoi
 
 ### Context
 
-The Preprod scope targets the Preprod testnet with low transaction volume and a single operator. The specification explicitly marks the Event Stream as optional at this stage. Deploying multiple networked services before the core pipeline is validated would add operational complexity with no immediate benefit.
+The Preprod scope targets the Preprod testnet with low transaction volume and a single operator, and the Event Stream is optional at this stage. Deploying multiple networked services before the core pipeline is validated would add operational complexity with no immediate benefit.
 
 ### Decision
 
@@ -369,7 +369,7 @@ Adopting OpenTelemetry also has a real cost: the SDK and instrumentation package
 | Pipeline observability | `GET /health/detail`: `pipeline_state` (OK / DEGRADED / DOWN), `sync_lag_slots`, `last_processed_slot`, `last_ogmios_msg_at` |
 | Operator action traceability | PostgreSQL audit log, retained per `AUDIT_LOG_RETENTION_DAYS` (default: keep forever), the accountability record for alert suppression and administrative actions |
 | Alert delivery traceability | Notification ledger recording every send attempt and its outcome |
-| Detection traceability | Per-transaction `sub_scores` and evidence columns persisted alongside every score, so any band assignment can be reconstructed from stored data |
+| Detection traceability | Per-transaction `sub_scores` and `evidence` persisted alongside every score, plus `analysis_version`, `config_hash` and `code_version` naming the tuning and the build that produced it, and a per-axis record of the percentiles it was normalised against. See `docs/TMS_DETECTION_SPEC.md` ("Score Provenance") for the columns, the digest recipe, and what an empty value means |
 
 Revisit this decision when any of the following becomes true:
 

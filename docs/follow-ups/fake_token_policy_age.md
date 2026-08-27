@@ -80,7 +80,7 @@ if policy_ids:
 
 `insert_asset_policy_first_seen` is a thin wrapper; the
 ReplacingMergeTree handles dedupe. Same connection / transaction
-boundary as the existing tx writes — no new infra.
+boundary as the existing tx writes, so no new infra.
 
 ### 3. Scorer integration (5 lines)
 
@@ -126,12 +126,12 @@ pass at ~5-15 minutes for a few-million-row table.
 
 In `backend/tests/analysis/scorers/test_fake_token.py`:
 
-- `test_policy_age_uses_lookup_when_present` — patch the helper to
+- `test_policy_age_uses_lookup_when_present`: patch the helper to
   return a known slot, assert `s_policy_age` reflects the computed age
   rather than the hardcoded 1.
-- `test_policy_age_falls_back_when_missing` — patch to return None,
+- `test_policy_age_falls_back_when_missing`: patch to return None,
   assert behaviour matches the current hardcoded path.
-- `test_evidence_includes_policy_age_slots` — extend
+- `test_evidence_includes_policy_age_slots`: extend
   `test_evidence.py::test_fake_token_evidence`.
 
 ## Cost / risk summary

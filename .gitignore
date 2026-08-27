@@ -89,6 +89,26 @@ backend/data/raw/
 demo-dashboard/
 
 # Performance tier result artifacts (perf.results); collated into the
-# performance report, never committed raw.
-perf-results/
-coverage.json
+# performance report, never committed raw. CI uploads them as workflow
+# artifacts instead, which is where a published figure is reproduced from.
+/perf-results/
+
+# Coverage output, anchored to the two places pytest writes it. Every pattern
+# in this block is anchored deliberately: an unanchored `coverage.json` matches
+# at every depth, so a file a workflow means to capture and upload would be
+# ignored before it ever reached the artifact step.
+/coverage.json
+/backend/coverage.json
+/services/clustering/backend/coverage.json
+
+# JUnit XML from a local test run. CI uploads these as artifacts; a local copy
+# is scratch, and the vitest writer stamps the machine hostname into it.
+# Anchored for the same reason as coverage.json above.
+/junit-*.xml
+/backend/junit-*.xml
+/frontend/junit-*.xml
+/services/clustering/backend/junit-*.xml
+
+# A new coverage or report writer needs its own anchored line here. Do not add
+# an unanchored pattern: it would match at every depth and could swallow a file
+# a workflow is meant to upload.

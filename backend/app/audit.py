@@ -18,11 +18,17 @@ Two write modes:
   detection silently). The endpoint then patches the outcome in
   best-effort via ``append_outcome``.
 
-The actor string is client-supplied today (the UI is a demo without
-server-side accounts); the server-derived IP (validated in app.net, so a
-forged header cannot poison it or crash the ::inet cast) and timestamp
-make the trail tamper-evident enough for triage until real authentication
-lands.
+The actor is server-authoritative, never client-supplied. An operator
+action derives it server-side, either from the authenticated principal via
+``actor_from_principal`` or from the admin session itself; both write modes
+merge it into the details last, so it overrides any actor the request body
+carries. A system-generated row, such as the notification dispatch trail,
+passes no actor at all rather than attributing itself to a caller. A raw
+API key is fingerprinted rather than stored. The client IP is likewise
+server-derived (validated in app.net, so a forged header cannot poison it
+or crash the ``::inet`` cast), and the timestamp is set by the database. So
+the three fields an auditor reads back, actor, source and time, are all
+outside the caller's control.
 """
 
 import hashlib

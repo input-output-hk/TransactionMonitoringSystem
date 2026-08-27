@@ -8,7 +8,7 @@ Index of the project's documentation. For setup and day-to-day operations start 
 
 ## Architecture
 
-- [REPOSITORY-MAP.md](REPOSITORY-MAP.md): where each delivered component lives. Maps the backend, frontend and alerting deliverables onto trees in this repository, with file counts, CI gating, and the test inventory.
+- [REPOSITORY-MAP.md](REPOSITORY-MAP.md): where each subsystem lives. Maps the backend, frontend and alerting subsystems onto trees in this repository, with file counts, CI gating, and the test inventory.
 - [ARCHITECTURE.md](ARCHITECTURE.md): system architecture overview, the three async background tasks, and how the clustering module integrates.
 - [C4-ARCHITECTURE.md](C4-ARCHITECTURE.md): C4 model at the system-context and container levels, rendered from [c4-context.mmd](c4-context.mmd) and [c4-container.mmd](c4-container.mmd).
 - [TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md): Architecture Decision Records (ADRs) covering the main technology choices.
@@ -34,6 +34,15 @@ Index of the project's documentation. For setup and day-to-day operations start 
 ## Performance
 
 - [PERFORMANCE.md](PERFORMANCE.md): the performance methodology. What each benchmark tier measures and why, how to run each one, how the budgets in `config/performance.yaml` are derived, and where the result artifacts and the generated report land.
+
+## Verification
+
+- [TRACEABILITY.md](TRACEABILITY.md): capability to implementation to proving test, one
+  row each, with runnable test identifiers. A CI check fails the build if any of them
+  stops resolving.
+- [../AUDIT.md](../AUDIT.md): how to verify this repository independently. Where to
+  start, how to confirm the test inventory and the performance figures, and what is
+  not in the repository.
 
 ## Legal
 

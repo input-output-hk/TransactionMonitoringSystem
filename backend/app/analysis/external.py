@@ -425,8 +425,8 @@ def get_legitimate_tokens(network: str = "mainnet") -> dict[str, list[str]]:
 
     Override: setting ``FAKE_TOKEN_TESTNET_MODE=True`` (env var) forces the
     mainnet registry to be used on ALL networks. This is intended for
-    verifying fake_token detection with the ``internal/attacks.py`` harness
-    on preprod/preview. Must be disabled before production deploy.
+    exercising fake_token detection against a preprod or preview deployment.
+    Must be disabled before production deploy.
     """
     if network != "mainnet" and not settings.FAKE_TOKEN_TESTNET_MODE:
         return {}

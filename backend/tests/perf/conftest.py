@@ -15,8 +15,8 @@ network-scoped, never surface synthetic rows to operator dashboards.
 Shared plumbing (config loader, artifact recorder, PERF_NETWORK, workload
 constants) lives in the perf package; tests import it directly rather than
 through fixture indirection. Each benchmark records a JSON artifact via
-perf.results; the report generator turns those into the customer-facing
-performance report.
+perf.results; the report generator collates those into the performance
+report.
 """
 
 import os
