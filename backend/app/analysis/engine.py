@@ -32,7 +32,12 @@ from app.analysis.enrichment import (
     set_main_loop,
 )
 from app.analysis.normalise import score_to_band
-from app.analysis.scorer_config import composite_corroboration_config
+from app.analysis.scorer_config import (
+    BASELINE_EVIDENCE_KEY,
+    composite_corroboration_config,
+    config_hash,
+    record_baselines,
+)
 from app.analysis.scorers.base import BaseScorer
 from app.analysis.scorers.circular import CircularScorer
 from app.analysis.scorers.fake_token import FakeTokenScorer
@@ -145,7 +150,11 @@ def _score_transaction(
     evidence: dict[str, dict[str, Any]] = {}
     # Which baseline tier each scorer used (per_script / per_policy / global /
     # fixed / missing). Kept so the notification payload can report
-    # the winning class's baseline_source; not persisted to ClickHouse.
+    # the winning class's baseline_source; not persisted to ClickHouse. The
+    # per-axis detail, including the (p50, p99) each axis was actually measured
+    # against, is recorded into each class's evidence instead (see
+    # BASELINE_EVIDENCE_KEY): `baselines` is maintained in place, so those
+    # values are unrecoverable afterwards unless the score carries them.
     baseline_sources: dict[str, str] = {}
     if row.get("raw_data_unavailable"):
         # The raw payload could not be recovered after the fallback budget:
@@ -161,12 +170,19 @@ def _score_transaction(
     for scorer in scorers:
         try:
             if scorer.gate(features):
-                result = scorer.score(features)
+                with record_baselines() as baselines_used:
+                    result = scorer.score(features)
                 scores[scorer.name] = result.score
                 sub_scores[scorer.name] = result.sub_scores
                 baseline_sources[scorer.name] = result.baseline_source
-                if result.evidence:
-                    evidence[scorer.name] = result.evidence
+                if result.evidence or baselines_used:
+                    # Copied, not mutated: the ScorerResult belongs to the
+                    # scorer, and the resolved baselines are the engine's
+                    # addition to what the scorer chose to report.
+                    class_evidence = dict(result.evidence or {})
+                    if baselines_used:
+                        class_evidence[BASELINE_EVIDENCE_KEY] = baselines_used
+                    evidence[scorer.name] = class_evidence
         except Exception:
             logger.exception(f"Scorer {scorer.name} failed on tx {tx_hash}")
             failed_scorers.append(scorer.name)
@@ -205,6 +221,15 @@ def _score_transaction(
         "sub_scores": sub_scores,
         "evidence": evidence,
         "analysis_version": _VERSION,
+        # Provenance, so a stored verdict can be re-derived rather than only
+        # explained. `analysis_version` names the scoring generation and moves
+        # rarely; `config_hash` moves whenever any weight, threshold, band cut
+        # or allowlist in detection.yaml changes, and `code_version` names the
+        # build. Together they name the tuning and the build behind this number;
+        # the learned percentiles it was normalised against are recorded
+        # separately, in each class's evidence.
+        "config_hash": config_hash(),
+        "code_version": settings.CODE_VERSION,
         "analyzed_at": now,
         # Transient keys (popped by _handle_incomplete_scoring before insert):
         # which scorers raised and which enrichments failed for this tx, so an

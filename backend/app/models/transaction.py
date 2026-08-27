@@ -224,6 +224,20 @@ class ClassScoreResult(BaseModel):
         description="Per-class raw evidence (addresses, byte counts, lists) for UI drill-down",
     )
     analysis_version: str = ""
+    config_hash: str = Field(
+        "",
+        description=(
+            "SHA-256 of the detection configuration that produced this score. "
+            "Empty for rows scored before provenance was recorded."
+        ),
+    )
+    code_version: str = Field(
+        "",
+        description=(
+            "Commit the scoring build was produced from. Empty when the app ran "
+            "from a working tree rather than a built image."
+        ),
+    )
     analyzed_at: UtcDateTime = Field(default_factory=lambda: datetime.now(UTC))
     corroboration_count: int = Field(
         0,

@@ -110,6 +110,49 @@ class TestTransactionsRoundtrip:
         assert resolved.get((tx_hash, 0)) == ("addr_test1qqrefsource", 7_000_000)
 
 
+class TestScoreProvenance:
+    """The provenance columns are LowCardinality and were added by ALTER, which
+    is the pair of facts a mocked test cannot check: the hermetic suite asserts
+    the value reaches the insert tuple, not that ClickHouse accepts the type or
+    that the migration is replayable on a table that already has data."""
+
+    def test_provenance_round_trips(self, ch):
+        tx_hash = uuid.uuid4().hex * 2
+        digest = "b" * 64
+        scores.insert_class_scores(
+            [_score_row(tx_hash) | {"config_hash": digest, "code_version": "c0ffee1"}]
+        )
+        row = scores.get_class_scores(tx_hash, LIVE_NETWORK)
+        assert row is not None
+        assert row["config_hash"] == digest
+        assert row["code_version"] == "c0ffee1"
+
+    def test_row_without_provenance_reads_blank(self, ch):
+        """The pre-migration state: a row carrying no provenance must read as
+        "not recorded" rather than failing the insert or the read."""
+        tx_hash = uuid.uuid4().hex * 2
+        scores.insert_class_scores([_score_row(tx_hash)])
+        row = scores.get_class_scores(tx_hash, LIVE_NETWORK)
+        assert row is not None
+        assert row["config_hash"] == ""
+        assert row["code_version"] == ""
+
+    def test_columns_are_low_cardinality(self, ch):
+        """Chosen deliberately: the distinct count is the number of tunings and
+        builds ever deployed, so a 64-character digest per row must not be
+        stored per row. A silent revert to plain String would cost real bytes on
+        the highest-traffic table."""
+        rows = ch._get_client().execute(
+            "SELECT name, type FROM system.columns "
+            "WHERE database = currentDatabase() AND table = 'tx_class_scores' "
+            "  AND name IN ('config_hash', 'code_version')"
+        )
+        assert {name: type_ for name, type_ in rows} == {
+            "config_hash": "LowCardinality(String)",
+            "code_version": "LowCardinality(String)",
+        }
+
+
 class TestScoreReadPath:
     def test_write_read_list_count_stats(self, ch):
         tx_hash = uuid.uuid4().hex * 2

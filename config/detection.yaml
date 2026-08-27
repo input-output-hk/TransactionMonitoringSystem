@@ -166,6 +166,20 @@ baselines:
     global_days: 180
     per_script_days: 90
 
+  # Record, into each class's evidence, the baseline each axis was actually
+  # normalised against: the tier it came from, the scope asked for, and the
+  # (p50, p99) used after the caps above have been applied. The caps mean the
+  # values a score was measured against are NOT the values the baselines table
+  # holds, and `baselines` is maintained in place, so without this the
+  # normalisation basis of a past score is unrecoverable once the window moves.
+  #
+  # It is a switch because it writes bytes to every scored row on the
+  # highest-traffic table: one entry per distinct basis resolved, only for
+  # classes that engaged. Turn it off if that cost ever stops being worth the
+  # reviewability, accepting that scores written while it is off cannot be
+  # re-derived.
+  record_provenance: true
+
 scorers:
 
   # ------------------------------------------------------------------

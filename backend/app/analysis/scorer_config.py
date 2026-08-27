@@ -10,8 +10,13 @@ at load time so a missing or misnamed key fails with an error that names the
 file and the key path, not a deep ``KeyError`` from inside a scorer module.
 """
 
+import contextlib
+import contextvars
+import hashlib
+import json
 import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -353,6 +358,7 @@ _REQUIRED_BASELINES: tuple[str, ...] = (
     "drift.p50_threshold",
     "windows.global_days",
     "windows.per_script_days",
+    "record_provenance",
 )
 
 
@@ -650,6 +656,43 @@ def _load() -> dict[str, Any]:
 _CFG: dict[str, Any] = _load()
 
 
+def _digest(cfg: dict[str, Any]) -> str:
+    """SHA-256 over the resolved detection configuration.
+
+    The point of this value is that a reviewer holding a `detection.yaml` can
+    recompute it and prove which tuning produced a stored score, so the recipe
+    has to be reproducible outside this process and is documented in
+    docs/TMS_DETECTION_SPEC.md:
+
+        sha256( json.dumps(yaml.safe_load(detection.yaml),
+                           sort_keys=True, separators=(",", ":"), default=str) )
+
+    `sort_keys` makes the digest independent of key order in the YAML, so
+    reordering a block without changing a value does not read as a retune.
+    `default=str` covers the dates and other non-JSON scalars PyYAML can
+    produce; it never applies to the numeric tunables, which round-trip exactly.
+    The full digest is kept rather than a prefix: the column is
+    LowCardinality, so the extra bytes cost effectively nothing, and a
+    truncation length would be one more number to justify.
+    """
+    canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+_CFG_HASH: str = _digest(_CFG)
+
+
+def config_hash() -> str:
+    """Digest of the detection configuration this process loaded.
+
+    Written onto every score row so a stored verdict names the tuning that
+    produced it. `analysis_version` names the scoring generation and moves when
+    the engine's behaviour changes; this moves when any weight, threshold, band
+    cut or allowlist changes, which is far more often.
+    """
+    return _CFG_HASH
+
+
 def get(section: str) -> dict[str, Any]:
     """Return the config section for a given scorer (e.g. ``'multiple_sat'``)."""
     cfg = _CFG["scorers"].get(section)
@@ -686,6 +729,93 @@ _MIN_SPREAD_RATIO: float = float(_CFG["baselines"]["min_spread_ratio"])
 # room for an in-bound median-poisoned pair to zero a real drain below the
 # suppression-escape floor; see the derivation in config/detection.yaml.
 _P50_CAP_SPREAD_FRACTION: float = float(_CFG["baselines"]["per_script_p50_cap_spread_fraction"])
+_RECORD_PROVENANCE: bool = bool(_CFG["baselines"]["record_provenance"])
+
+# Key under which a class's resolved baselines are stored inside its evidence
+# dict. Leading underscore marks it engine-written rather than scorer-written,
+# matching the existing ``evidence["_meta"]`` convention; no scorer emits a key
+# in that namespace, so it cannot collide with a scorer's own field. The one
+# reader that iterates evidence instead of looking up named keys is the operator
+# UI's fallback panel, which skips underscore-prefixed keys for exactly this
+# reason (see AttackDetailPage's default arm).
+BASELINE_EVIDENCE_KEY = "_baselines"
+
+# Collector for the baselines resolved inside a ``record_baselines()`` block.
+# A ContextVar rather than a plain module list so a value can never leak
+# between transactions if scoring is ever moved onto a thread or a task.
+_BASELINE_RECORD: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "baseline_record", default=None
+)
+
+
+@contextlib.contextmanager
+def record_baselines() -> Iterator[list[dict[str, Any]]]:
+    """Collect the baselines resolved by scorers running inside this block.
+
+    :func:`resolved_or_bootstrap` is the single point every scorer resolves a
+    baseline through, so recording there captures every axis of every scorer,
+    including axes added later, without threading a parameter through nine
+    scorers and each of their sub-score builders. The caller gets the list and
+    decides what to do with it; nothing is persisted from here.
+
+    The list is empty when the scorer resolved no baseline, and also when
+    ``baselines.record_provenance`` is off, so a caller must treat empty as
+    "nothing to record" rather than "no baseline was used".
+    """
+    records: list[dict[str, Any]] = []
+    token = _BASELINE_RECORD.set(records)
+    try:
+        yield records
+    finally:
+        _BASELINE_RECORD.reset(token)
+
+
+def _record_baseline(
+    feature: str,
+    scope_type: str,
+    scope_id: str,
+    source: str,
+    p50: float,
+    p99: float,
+    learned: tuple[float, float] | None,
+) -> None:
+    """Note the basis one axis was normalised against, if anyone is recording.
+
+    ``learned`` is the pair as it came out of the baselines table, before the
+    p99/p50 caps; it is ``None`` when the resolution fell through to the
+    bootstrap anchor and so had nothing to cap.
+
+    ``scope`` is the scope that was ASKED for and ``source`` is the tier that
+    answered, which are not always the same: a per-script request that finds no
+    usable baseline falls through to the global tier or to the bootstrap anchor,
+    and then the pair belongs to ``source``, not to ``scope``. Recording both is
+    what makes the fallthrough visible.
+    """
+    records = _BASELINE_RECORD.get()
+    if records is None or not _RECORD_PROVENANCE:
+        return
+    entry: dict[str, Any] = {
+        "feature": feature,
+        "scope": f"{scope_type}:{scope_id}" if scope_id else scope_type,
+        "source": source,
+        "p50": p50,
+        "p99": p99,
+    }
+    # Only when a cap actually bit. The capped pair is what the score was
+    # measured against and the uncapped pair is what the table held, and the
+    # difference is the de-sensitisation guard doing its job, which is worth
+    # being able to see. Omitted otherwise so the common record stays small on
+    # a table that takes a row per scored transaction.
+    if learned is not None and (learned[0] != p50 or learned[1] != p99):
+        entry["uncapped"] = {"p50": learned[0], "p99": learned[1]}
+    # Recorded once per distinct basis, not once per resolution. A scorer that
+    # ranks candidate UTxOs resolves the same axis for each of them and keeps
+    # only the winner, so appending blindly would write one identical entry per
+    # candidate: linear in output count on the table that takes a row per scored
+    # transaction, for no added information. The scan is over a handful of
+    # entries, so it costs less than the bytes it saves.
+    if entry not in records:
+        records.append(entry)
 
 
 def composite_corroboration_config() -> dict[str, Any]:
@@ -843,6 +973,9 @@ def resolved_or_bootstrap(
         network,
         scope_types_allowed=scope_types_allowed,
     )
+    # The pair as the table held it, kept so a capped resolution can report
+    # both what it used and what it would have used.
+    learned: tuple[float, float] | None = None if source == "missing" else (p50, p99)
     if source == "missing":
         p50, p99 = anchor(bootstrap, bootstrap_key)
         source = "bootstrap"
@@ -862,4 +995,5 @@ def resolved_or_bootstrap(
                 cap / (1.0 + _MIN_SPREAD_RATIO),
             )
             p50 = min(p50, p50_bound)
+    _record_baseline(feature, scope_type, scope_id, source, p50, p99, learned)
     return p50, p99, source

@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     API_TITLE: str = "Cardano Transaction Monitoring System"
     API_VERSION: str = "0.1.0"
 
+    # Commit this build was produced from, injected at image build time (see
+    # backend/Dockerfile) and written onto every score row. Empty when the app
+    # runs from a working tree rather than an image, which is the honest answer
+    # for a developer run: a working tree has no single commit identity, and
+    # inventing one would make an unverifiable provenance claim.
+    CODE_VERSION: str = ""
+
     # Database Configuration - PostgreSQL
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
@@ -395,9 +402,8 @@ class Settings(BaseSettings):
     SCORER_CIRCULAR_ENABLED: bool = True
 
     # Fake-token testnet mode: enables the mainnet-curated legitimate-token
-    # registry on preprod / preview networks. Intended ONLY for running the
-    # internal/attacks.py harness against a test deployment; keep False in
-    # production. Rationale:
+    # registry on preprod / preview networks. Intended ONLY for exercising the
+    # scorer against a test deployment; keep False in production. Rationale:
     #   - The registry lists mainnet policy IDs for HOSKY, iUSD, DJED, etc.
     #   - Dev/test workflows on testnets mint tokens with the same names
     #     (e.g. for dApp integration tests). Under this flag every such mint

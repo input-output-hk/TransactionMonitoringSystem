@@ -730,6 +730,81 @@ GET /api/analysis/results?min_corroboration=2
 
 returns only transactions where at least that many distinct classes corroborated (`corroboration_count >= 2`); `0` (the default) disables the filter. The intent is to pull multi-signal transactions where several independent detectors agree, regardless of the band the single highest score placed them in. The filter is API-only; there is no UI control.
 
+## Score Provenance
+
+Every score row records what produced it, so a stored verdict can be re-derived
+rather than only explained:
+
+| Column | Names | Moves when |
+|---|---|---|
+| `analysis_version` | The scoring generation | The engine's behaviour changes |
+| `config_hash` | The tuning | Any weight, threshold, band cut or allowlist in `config/detection.yaml` changes |
+| `code_version` | The build | A new image is built, from the commit it was built at |
+
+`config_hash` is a SHA-256 over the resolved detection configuration, and the
+recipe is fixed so that a reader holding a `config/detection.yaml` can recompute
+it and confirm which tuning produced a given row:
+
+```python
+import hashlib, json, yaml
+cfg = yaml.safe_load(open("config/detection.yaml"))
+canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
+print(hashlib.sha256(canonical.encode()).hexdigest())
+```
+
+`sort_keys` makes the digest independent of key order, so reordering a block
+without changing a value does not read as a retune. `default=str` covers the
+dates and other non-JSON scalars PyYAML can produce; it never applies to the
+numeric tunables, which round-trip exactly.
+
+Two properties are worth knowing before relying on these columns. An empty value
+means "not recorded" and never "unknown tuning": rows scored before the columns
+existed read blank, and `code_version` is blank when the app runs from a working
+tree, which has no single commit identity to claim. And the columns identify the
+inputs; they are not a snapshot of them. Recovering the tuning behind a digest
+means finding that `detection.yaml` in git history, which the digest makes a
+lookup rather than a guess.
+
+### The normalisation basis
+
+The columns above name the configuration; they do not capture the learned
+percentiles a score was normalised against. Those live in `baselines`, which is
+maintained in place, so a recompute replaces the row and the `p50` and `p99` a
+past score used are gone once the window moves. The caps described under
+"Baseline Maintenance" widen the gap deliberately: a learned p99 is capped
+relative to the scorer's bootstrap anchor before use, so the pair a score was
+measured against is not the pair the table held.
+
+Each class's `evidence` therefore carries a `_baselines` list, one entry per
+distinct basis the scorer resolved:
+
+```json
+{"feature": "value_cbor_bytes", "scope": "per_script:<script hash>",
+ "source": "per_script", "p50": 1234.5, "p99": 7500.0,
+ "uncapped": {"p50": 1234.5, "p99": 99999.0}}
+```
+
+`p50` and `p99` are the values actually used, after capping. `uncapped` appears
+only when a cap bit, and then holds the pair the table held, so the guard is
+visible rather than merely documented. `source` is the tier the value came from
+(`per_script`, `per_policy`, `global`, or `bootstrap` when nothing was learned).
+
+`scope` is the scope that was asked for and `source` is the tier that answered,
+which are not always the same: a per-script request that finds no usable
+baseline falls through to the global tier, or to the bootstrap anchor, and then
+the pair belongs to `source`. Recording both is what makes the fallthrough
+visible.
+
+Three things follow from how it is recorded. The list is collected at the single
+point every scorer resolves a baseline through, so it covers axes added later
+without any scorer changing. Each distinct basis appears once: a scorer that
+ranks candidate outputs resolves the same axis for each of them and keeps only
+the winner, so identical entries are collapsed rather than written per candidate.
+And an absent or empty list means "nothing recorded", not "no baseline used": it
+is also empty for rows scored before this existed, and when
+`baselines.record_provenance` is off. That switch exists because the list is
+bytes on every scored row of the highest-traffic table, roughly 150 per entry.
+
 ## Implementation Notes
 
 ### Ogmios v6 Value Format

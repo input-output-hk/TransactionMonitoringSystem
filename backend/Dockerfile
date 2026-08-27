@@ -46,6 +46,18 @@ WORKDIR /app/backend
 # Create /data/raw directory with correct ownership for raw_store
 RUN mkdir -p /data/raw && chown -R appuser:appgroup /data/raw
 
+# Commit identity for score provenance. The name must be exactly CODE_VERSION:
+# Settings declares no env_prefix, so pydantic-settings maps the field from the
+# bare variable and a prefixed one would be silently ignored, leaving every
+# score row claiming no build. Unset builds leave it empty, which is the honest
+# answer rather than a commit the image cannot evidence.
+#
+# Declared last on purpose: the value changes on every deploy build, and an ENV
+# layer invalidates everything below it, so placing it above the hashed
+# `pip install` would reinstall every dependency for each new commit.
+ARG CODE_VERSION=
+ENV CODE_VERSION=${CODE_VERSION}
+
 USER appuser
 
 # Expose port

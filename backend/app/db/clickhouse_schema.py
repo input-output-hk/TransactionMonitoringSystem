@@ -230,6 +230,8 @@ SCHEMA_DDL: dict[str, str] = {
             corroborating_classes String DEFAULT '',
             contract_address String DEFAULT '',
             analysis_version String,
+            config_hash      LowCardinality(String) DEFAULT '',
+            code_version     LowCardinality(String) DEFAULT '',
             analyzed_at      DateTime,
             INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
             INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
@@ -675,6 +677,22 @@ def _create_detection_tables(client: Client) -> None:
         "ALTER TABLE tx_class_scores "
         "ADD INDEX IF NOT EXISTS idx_contract_address contract_address "
         "TYPE bloom_filter GRANULARITY 1"
+    )
+    # Score provenance (see analysis/engine.py). Additive and default-'' so
+    # historical rows read as "provenance not recorded", which is true: these
+    # values cannot be reconstructed for a row scored before the columns
+    # existed, and backfilling a guess would be worse than an honest blank.
+    #
+    # LowCardinality because the distinct count is the number of tunings and
+    # builds ever deployed, tens rather than millions, so the dictionary
+    # encoding makes a 64-character digest per row cost almost nothing.
+    client.execute(
+        "ALTER TABLE tx_class_scores "
+        "ADD COLUMN IF NOT EXISTS config_hash LowCardinality(String) DEFAULT ''"
+    )
+    client.execute(
+        "ALTER TABLE tx_class_scores "
+        "ADD COLUMN IF NOT EXISTS code_version LowCardinality(String) DEFAULT ''"
     )
 
     # Admin-curated archive of flagged transactions (see SCHEMA_DDL).
