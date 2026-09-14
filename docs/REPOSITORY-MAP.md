@@ -150,9 +150,9 @@ These belong to no single subsystem.
 
 ## Test inventory
 
-2,066 automated tests across six tiers. The recall gate is a subset of the
-backend suite rather than a seventh tier, so it is listed but not added into the
-total. A CI step re-collects every tier on each run and fails the build if these
+2,077 automated tests across seven tiers. The recall gate is a subset of the
+backend suite rather than a tier of its own, so it is listed but not added into
+the total. A CI step re-collects every tier on each run and fails the build if these
 figures drift, so a stale count here is a build failure rather than something a
 reader has to catch.
 
@@ -165,6 +165,7 @@ reader has to catch.
 | Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 8 |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 |
 | Performance | `backend/tests/perf/` | 3 |
+| End-to-end (full stack) | `frontend/e2e/` | 11 |
 
 See [TESTING.md](TESTING.md) for what each tier covers and how to run it.
 
@@ -212,4 +213,6 @@ git ls-files \
 (cd services/clustering/backend && ./.venv/bin/python -m pytest -q --co | tail -1)
 (cd services/clustering/backend && TMS_LIVE_DB_TESTS=1 ./.venv/bin/python -m pytest tests/live_db -q --co | tail -1)
 (cd frontend && pnpm vitest run)
+# The E2E tier needs the whole stack, so its count comes from a full run.
+(cd frontend && pnpm exec playwright test --list | tail -1)
 ```

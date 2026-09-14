@@ -34,6 +34,9 @@ ENV/
 !.env.mainnet.example
 !.env.preprod.example
 !.env.preview.example
+# Tracked on purpose: the E2E tier's complete, secret-free environment
+# (scripts/e2e.sh); a developer's own .env never reaches that stack.
+!.env.e2e
 
 # IDE
 .vscode/
@@ -107,6 +110,9 @@ demo-dashboard/
 /junit-*.xml
 /backend/junit-*.xml
 /frontend/junit-*.xml
+# E2E-tier artifacts: saved sessions and per-test traces (scripts/e2e.sh).
+/frontend/e2e/.auth/
+/frontend/e2e-results/
 /services/clustering/backend/junit-*.xml
 
 # A new coverage or report writer needs its own anchored line here. Do not add
