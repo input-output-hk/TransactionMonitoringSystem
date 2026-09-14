@@ -108,7 +108,11 @@ def main() -> int:
         client = clickhouse._get_client()
         client.execute(_TX_INSERT, tx_rows)
         clickhouse_scores.insert_class_scores(score_rows)
-        print(f"seeded {len(score_rows)} findings on {network} (analysis {_ANALYSIS_VERSION})")
+        # The network is deliberately not echoed: every attribute read off the
+        # settings object is treated as sensitive by the secret scanner (that
+        # object also holds the SMTP password and the signing keys), and the
+        # tier's network is already stated in .env.e2e.
+        print(f"seeded {len(score_rows)} findings (analysis {_ANALYSIS_VERSION})")
         for i, (attack_class, band, score) in enumerate(_FINDINGS):
             print(f"  {tx_hash_for(i)}  {attack_class:<12} {band:<8} {score}")
         return 0
