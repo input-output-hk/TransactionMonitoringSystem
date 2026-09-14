@@ -10,7 +10,9 @@ stored config and runs the real routing + dispatch the engine runs after scoring
 SAFETY: by default it delivers to the **webhook channel only**, even if the band
 also routes to email, so testing on the live server does NOT spam real email
 recipients with a fake attack. Pass --include-all-channels to exercise the full
-on_new_scores path (dedup included) and every routed channel (WILL email).
+on_new_scores path (dedup included) and every routed channel (WILL email). That
+mode runs even when the webhook is not in the resolved route, so it can exercise
+email-only rules and unrouted bands (where no delivery is the expected outcome).
 
 Routing is config-driven, so the destination is whatever the stored config says:
 enable the webhook channel and set its default_url (admin UI, or PUT
@@ -80,25 +82,32 @@ async def _run(network, band, attack_class, score, tx_hash, include_all_channels
     print(
         f"resolve_dispatch(band={band!r}, class={attack_class!r}) -> {dispatches or '[] (nothing routed)'}"
     )
-    if not any(d.channel == "webhook" for d in dispatches):
-        print(
-            "\nWebhook is NOT in the resolved dispatch. Fix one of:\n"
-            "  - channels.webhook.enabled = true\n"
-            "  - channels.webhook.default_url = <your receiver URL>\n"
-            f"  - triggers.defaults.{band} (or a matching rule) must include 'webhook'\n"
-            "    (a rule matching this class REPLACES the band default)\n"
-            "via the admin UI (/settings/notifications) or PUT /api/notifications/config, "
-            "then re-run.",
-            file=sys.stderr,
-        )
-        return 1
-    if not settings.WEBHOOK_NOTIFY_ENABLED:
-        print(
-            "\nWEBHOOK_NOTIFY_ENABLED is false in the server env: the dispatcher will "
-            "SKIP webhook even though it is routed. Set it true and restart.",
-            file=sys.stderr,
-        )
-        return 1
+    # The two webhook gates guard the DEFAULT (webhook-only) mode, where a run
+    # without a routed, enabled webhook could deliver nothing. In
+    # --include-all-channels mode they must not gate: the point of that mode is
+    # the full on_new_scores path, including email-only rules and unrouted
+    # bands (where delivering nothing IS the behaviour under test).
+    if not include_all_channels:
+        if not any(d.channel == "webhook" for d in dispatches):
+            print(
+                "\nWebhook is NOT in the resolved dispatch. Fix one of:\n"
+                "  - channels.webhook.enabled = true\n"
+                "  - channels.webhook.default_url = <your receiver URL>\n"
+                f"  - triggers.defaults.{band} (or a matching rule) must include 'webhook'\n"
+                "    (a rule matching this class REPLACES the band default)\n"
+                "via the admin UI (/settings/notifications) or PUT /api/notifications/config, "
+                "then re-run. (To exercise an email-only rule or an unrouted band "
+                "through the full pipeline, use --include-all-channels.)",
+                file=sys.stderr,
+            )
+            return 1
+        if not settings.WEBHOOK_NOTIFY_ENABLED:
+            print(
+                "\nWEBHOOK_NOTIFY_ENABLED is false in the server env: the dispatcher will "
+                "SKIP webhook even though it is routed. Set it true and restart.",
+                file=sys.stderr,
+            )
+            return 1
 
     result = _synthetic_result(tx_hash, network, band, attack_class, score)
     payload = build_immediate_alert(result, network)
@@ -123,7 +132,11 @@ async def _run(network, band, attack_class, score, tx_hash, include_all_channels
                 return 0
             await asyncio.sleep(_CLAIM_POLL_INTERVAL_SECONDS)
             waited += _CLAIM_POLL_INTERVAL_SECONDS
-        print(f"no dedup claim after {deadline:.0f}s: no channel delivered.", file=sys.stderr)
+        print(
+            f"no dedup claim after {deadline:.0f}s: no channel delivered"
+            + (" (expected: nothing is routed for this band/class)." if not dispatches else "."),
+            file=sys.stderr,
+        )
         return 2
 
     # Default: deliver through the real dispatcher but to the webhook channel only,
