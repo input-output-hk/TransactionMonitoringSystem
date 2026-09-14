@@ -112,3 +112,7 @@ demo-dashboard/
 # A new coverage or report writer needs its own anchored line here. Do not add
 # an unanchored pattern: it would match at every depth and could swallow a file
 # a workflow is meant to upload.
+
+# Node configuration sets fetched by scripts/fetch-cardano-config.sh: upstream
+# artifacts (genesis, topology, checkpoints), obtained on demand, never vendored.
+/cardano-config/
