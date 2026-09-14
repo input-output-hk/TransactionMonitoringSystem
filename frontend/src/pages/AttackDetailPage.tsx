@@ -1240,7 +1240,12 @@ function AttackTypeSection({ alert }: { alert: RiskAlert }) {
 			// Safety net, not a design: a class with no arm above renders its raw
 			// evidence rather than an empty card between two dividers. Guarantees a
 			// future backend class is never silently invisible here.
-			const entries = Object.entries(alert.evidence ?? {});
+			// Underscore-prefixed keys are engine-written bookkeeping (_meta, the
+			// resolved-baseline record), not analyst evidence, so they are skipped
+			// rather than rendered as findings.
+			const entries = Object.entries(alert.evidence ?? {}).filter(
+				([key]) => !key.startsWith("_"),
+			);
 			return (
 				<Section>
 					<Stack title="Evidence" dividers>

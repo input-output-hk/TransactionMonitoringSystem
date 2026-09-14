@@ -512,7 +512,7 @@ would degrade to untrusted-peer silently, disabling proxy trust and quietly corr
 rate-limit buckets and audit IPs.
 
 A seventh refusal lives elsewhere and only bites on an upgrade: the ClickHouse schema
-guard that demands `scripts/migrate_dedup_schema.py` by name when it finds a
+guard that demands `backend/scripts/migrate_dedup_schema.py` by name when it finds a
 pre-ReplacingMergeTree layout. See [Upgrade and rollback](#upgrade-and-rollback).
 
 ### A minimal working mainnet pair
@@ -1001,7 +1001,7 @@ chain and the saved point is still on it.
 |---|---|
 | Full configuration reference, troubleshooting, daily operations | [RUNBOOK.md](../RUNBOOK.md) |
 | Alert channels, routing matrix, periodic report | [docs/ALERTING.md](ALERTING.md) |
-| Which tree holds which deliverable | [docs/REPOSITORY-MAP.md](REPOSITORY-MAP.md) |
+| Which tree holds which subsystem | [docs/REPOSITORY-MAP.md](REPOSITORY-MAP.md) |
 | System architecture and the three async background tasks | [docs/ARCHITECTURE.md](ARCHITECTURE.md) |
 | Technology choices and the node/Ogmios version contract | [docs/TECHNOLOGY-DECISIONS.md](TECHNOLOGY-DECISIONS.md) |
 | The nine attack classes, features and thresholds | [docs/TMS_DETECTION_SPEC.md](TMS_DETECTION_SPEC.md) |

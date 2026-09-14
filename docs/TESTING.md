@@ -10,21 +10,23 @@ latest commit.
 
 | Tier | Location | Count | Services needed | CI job |
 |---|---|---|---|---|
-| Backend hermetic | `backend/tests/` | 1276 | none (all I/O mocked) | Backend (pytest + recall gate) |
-| Recall gate | `backend/tests/analysis/` | 554 (subset of the above) | none | Backend (run first, on its own) |
-| Live-DB tier | `backend/tests/live_db/` | 28 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Backend hermetic | `backend/tests/` | 1332 | none (all I/O mocked) | Backend (pytest + recall gate) |
+| Recall gate | `backend/tests/analysis/` | 578 (subset of the above) | none | Backend (run first, on its own) |
+| Live-DB tier | `backend/tests/live_db/` | 33 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 8 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
 | Clustering sidecar | `services/clustering/backend/tests/` | 497 | none | Clustering sidecar (pytest) |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 131 | none | Frontend (lint + build) |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 | none | Frontend (lint + build) |
 
-That is 1,943 tests across the six independent tiers (the recall gate is a
-subset of the backend suite, not an additional tier).
+That is 2,041 tests across the six independent tiers (the recall gate is a
+subset of the backend suite, not an additional tier, so it is not added into
+the total). A CI step re-collects every tier on each run and fails the build if
+this table drifts.
 
 The default developer command, `pytest tests/` from `backend/`, runs the
-1147 hermetic backend tests and nothing that needs a database: the live-DB
-and performance tiers are opt-in behind environment flags so a contributor
-without Docker still gets a green run.
+backend hermetic tier in the table above and nothing that needs a database: the
+live-DB and performance tiers are opt-in behind environment flags so a
+contributor without Docker still gets a green run.
 
 ## Unit and integration testing (backend)
 
@@ -50,16 +52,30 @@ the attack-must-fire tests that prove each detection scorer still fires on its
 real-attack case, alongside the must-not-fire precision cases and the engine,
 feature and baseline tests they depend on. CI runs it first
 and on its own so a recall regression is unambiguous, and the project's change
-rules require every detection-parameter change to keep it green. It is
-intended as a required status check on `main`; enabling that branch
-protection is a pending repository-admin step.
+rules require every detection-parameter change to keep it green.
+
+The must-fire cases are marked rather than merely named, so the guarantee is a
+set you can run instead of a convention you have to trust:
+
+```bash
+cd backend
+uv run pytest tests/analysis/scorers/ -m attack_must_fire -q
+```
+
+Each marked case asserts that a real attack scores at or above a band constant.
+`backend/scripts/check_recall_markers.py` runs in CI and fails the build if any
+scorer class stops having one, or if a case is marked without pinning a band.
+
+It is a CI job, so its result has to be read; configuring it as a required
+status check is a repository setting rather than something this suite can
+assert.
 
 ### Coverage
 
 CI measures line coverage on the full backend suite (`--cov=app`) and reports
 it in the job summary; there is no enforced threshold yet (report-only). At the
-commit this document ships in, backend coverage is 76% over 9,289 statements
-(`cd backend && ../.venv/bin/python -m pytest tests/ --cov=app`), and the
+commit this document ships in, backend line coverage is 76% over the `app`
+package (`cd backend && ../.venv/bin/python -m pytest tests/ --cov=app`), and the
 clustering sidecar is 85%. CI has reported a point lower than a local run on the
 same commit; the difference is environment-gated branches.
 
@@ -104,7 +120,7 @@ throughput, an ingestion parse-and-insert replay, and dashboard query latency
 at a seeded warehouse volume, each judged against budgets in
 `config/performance.yaml`. A Locust API and WebSocket load harness lives
 alongside it. See [PERFORMANCE.md](PERFORMANCE.md) for methodology, how to run
-each benchmark and the load harness, and how budgets are derived and ratified.
+each benchmark and the load harness, and how budgets are derived and tightened.
 
 ```bash
 cd backend
@@ -119,7 +135,7 @@ artifact.
 ## Clustering sidecar
 
 The optional clustering sidecar keeps its own suite under
-`services/clustering/backend/tests/` (497 tests), covering its chain sources,
+`services/clustering/backend/tests/` (counted in the table above), covering its chain sources,
 storage layer, scoring pipeline, and API. It runs in its own CI job. Its
 opt-in live tier (`tests/live_db/`, gated like the host's) is described in
 the Live-DB section above.
@@ -132,8 +148,8 @@ uv run pytest -q
 
 ## Frontend
 
-The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, 131
-tests) under jsdom, over the API client, the helper libraries, and rendered
+The dashboard has a Vitest suite (`frontend/src/**/*.test.{ts,tsx}`, counted in
+the table above) under jsdom, over the API client, the helper libraries, and rendered
 components and pages (the datum tree, the transaction-detail panels, the alerts
 page and the attack-detail page).
 
@@ -143,15 +159,17 @@ pnpm install
 pnpm test        # vitest run
 ```
 
-CI runs `pnpm lint`, `pnpm test`, and `pnpm build` in the Frontend job.
+CI runs `pnpm lint`, the Vitest suite, and `pnpm build` in the Frontend job. The
+test step writes JUnit XML, which the next step reads to check the count in the
+table above, so the suite runs once rather than twice.
 
 ## Continuous integration
 
 Every pull request, and every push to `main`, runs the `CI` workflow, with
 these jobs:
 
-- **Python lint (ruff + mypy)**: ruff format check, ruff lint, and mypy across both Python trees.
-- **Backend (pytest + recall gate)**: the recall gate, then the full hermetic suite with coverage.
+- **Python lint (ruff + mypy)**: ruff format check, ruff lint, and mypy across both Python trees, plus the two text-only checks (published totals, traceability matrix).
+- **Backend (pytest + recall gate)**: the recall-marker check, the recall gate, then the full hermetic suite with coverage.
 - **Live-DB tier (ClickHouse 26.x + Postgres)**: the host live-DB tests, then the sidecar's live tier (schema via `app.cli migrate`), against real database containers.
 - **Frontend (lint + build)**: lint, unit tests, and build.
 - **Clustering sidecar (pytest)**: the sidecar suite.

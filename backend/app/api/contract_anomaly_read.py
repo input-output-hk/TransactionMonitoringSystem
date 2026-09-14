@@ -425,6 +425,11 @@ def _row_to_class_score(row: dict[str, Any]) -> ClassScoreResult:
         sub_scores=sub_scores,
         evidence=evidence,
         analysis_version=row["analysis_version"],
+        # Blank for rows written before these columns existed, which is the
+        # documented "not recorded" value; reading them through means a caller
+        # can tell those rows apart from ones that carry provenance.
+        config_hash=row.get("config_hash", "") or "",
+        code_version=row.get("code_version", "") or "",
         analyzed_at=row["analyzed_at"],
         corroboration_count=int(row.get("corroboration_count", 0) or 0),
         corroborating_classes=row.get("corroborating_classes", "") or "",

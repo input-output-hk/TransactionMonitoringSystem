@@ -1,8 +1,8 @@
 # API Reference
 
 These endpoints are served by the clustering module (FastAPI app:
-[api/main.py](../backend/app/api/main.py)) and reached from the TMS single‑page app
-through the `/api/v1/clustering` reverse‑proxy: the host forwards `/api/v1/clustering/<x>`
+[api/main.py](../backend/app/api/main.py)) and reached from the TMS single-page app
+through the `/api/v1/clustering` reverse-proxy: the host forwards `/api/v1/clustering/<x>`
 to the module's `/api/v1/<x>`. The paths below are written without that proxy prefix,
 as the module sees them. `/api/v1` is the canonical, versioned prefix carried in the
 OpenAPI schema; a bare `/api` alias serves the same routes (kept for compatibility,
@@ -12,16 +12,16 @@ omitted from the schema). Interactive docs at `/docs` (OpenAPI at `/openapi.json
 
 - **Off by default.** Within the integrated deployment the module sits behind the
   TMS host on the compose network and is not published on its own, so it relies on
-  the host's reverse‑proxy for exposure.
+  the host's reverse-proxy for exposure.
 - When `API_KEY` is set, every endpoint **except** `/api/health` and `/api/ready`
   (and their `/api/v1` aliases) requires the header `X-API-Key: <key>` (else **401**).
 - The SPA does not hold the key: the `/api/v1/clustering` proxy injects `X-API-Key` into
-  the forwarded request **server‑side**, so the browser never sees it. See
+  the forwarded request **server-side**, so the browser never sees it. See
   [operations.md](operations.md#enabling-authentication).
 
 ## CORS
 
-`allow_origins` comes from `CORS_ORIGINS` (comma‑separated; empty = same‑origin
+`allow_origins` comes from `CORS_ORIGINS` (comma-separated; empty = same-origin
 only, no wildcard). Methods limited to `GET, POST, PATCH, DELETE`; headers to
 `Content-Type, X-API-Key`.
 
@@ -29,9 +29,9 @@ only, no wildcard). Methods limited to `GET, POST, PATCH, DELETE`; headers to
 
 JSON `{"detail": "..."}` with standard codes: **401** (auth), **404** (not found),
 **409** (a job for that target is already running), **422** (validation / bad
-target / `max_txs` over cap), **429** (too many in‑flight jobs), **503**
+target / `max_txs` over cap), **429** (too many in-flight jobs), **503**
 (ClickHouse unreachable, from `/api/ready`). Internal/source errors are
-**sanitized** in responses; full detail is logged server‑side.
+**sanitized** in responses; full detail is logged server-side.
 
 ## Pagination
 
@@ -61,24 +61,24 @@ Single-resource reads (`/api/contracts/{target}`, `/api/jobs/{job_id}`,
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/health` | Liveness. Always `{"status":"ok"}`; no DB access. Auth‑exempt. |
-| GET | `/api/ready` | Readiness. Pings ClickHouse → `{"status":"ready"}` or **503**. Auth‑exempt. |
-| GET | `/api/config` | Read‑only deployment facts the UI shapes its onboarding form with: `{host_backed, window_txs, history_source}`. `history_source` is `""` when no secondary pre‑deployment history source is configured; when set, the form re‑exposes "max txs" as the per‑contract history depth. Auth‑exempt. |
+| GET | `/api/health` | Liveness. Always `{"status":"ok"}`; no DB access. Auth-exempt. |
+| GET | `/api/ready` | Readiness. Pings ClickHouse → `{"status":"ready"}` or **503**. Auth-exempt. |
+| GET | `/api/config` | Read-only deployment facts the UI shapes its onboarding form with: `{host_backed, window_txs, history_source}`. `history_source` is `""` when no secondary pre-deployment history source is configured; when set, the form re-exposes "max txs" as the per-contract history depth. Auth-exempt. |
 
 ## Contracts & onboarding jobs
 
-A scheduler auto‑onboards and auto‑classifies watched contracts as the host ingests
+A scheduler auto-onboards and auto-classifies watched contracts as the host ingests
 their transactions (the automatic feed, `FEED_ENABLED`), so the endpoints below are
 the manual counterpart to that loop rather than the only way a contract gets scored.
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/contracts` | Add a contract to the watchlist / refresh it; enqueues the onboarding pipeline. |
-| POST | `/api/contracts/{target}/classify-new` | Incrementally pick up the contract's latest not‑yet‑classified transactions from the TMS's ingested chain data and score them against the contract's frozen model (no full re‑cluster). Enqueues a `classify` job. **404** if unknown, **409** if a job is already running. |
+| POST | `/api/contracts/{target}/classify-new` | Incrementally pick up the contract's latest not-yet-classified transactions from the TMS's ingested chain data and score them against the contract's frozen model (no full re-cluster). Enqueues a `classify` job. **404** if unknown, **409** if a job is already running. |
 | GET | `/api/contracts?limit=&offset=` | List watched contracts (UI dropdown source), newest update first, in the pagination envelope. |
 | GET | `/api/contracts/{target}` | One contract's metadata + status (**404** if unknown). |
-| PATCH | `/api/contracts/{target}` | Rename (set the display `label`) without re‑running the pipeline. Body: `{label}`. **404** if unknown. |
-| DELETE | `/api/contracts/{target}` | Hard‑delete the contract and **all** its data across every table. **404** if unknown; **409** if a job for it is in flight (stop/wait first). Returns `{"deleted": true, "target": "..."}`. |
+| PATCH | `/api/contracts/{target}` | Rename (set the display `label`) without re-running the pipeline. Body: `{label}`. **404** if unknown. |
+| DELETE | `/api/contracts/{target}` | Hard-delete the contract and **all** its data across every table. **404** if unknown; **409** if a job for it is in flight (stop/wait first). Returns `{"deleted": true, "target": "..."}`. |
 | GET | `/api/jobs?limit=&offset=` | List jobs (newest first) in the pagination envelope. Each carries `kind` (`onboard`\|`classify`). |
 | GET | `/api/jobs/{job_id}` | One job's live status (**404** if unknown). Poll this. |
 
@@ -88,23 +88,23 @@ the manual counterpart to that loop rather than the only way a contract gets sco
 { "target": "addr1...|<56-hex policy id>", "max_txs": 500, "reprocess": false }
 ```
 
-- `target` (required): classified server‑side; 56‑hex → `policy`, `addr…` (bech32)
-  → `address`; anything else → **422**. In the host‑backed deployment
-  (`CHAIN_SOURCE=host_ch`, the docker‑compose integration) the host indexes
+- `target` (required): classified server-side; 56-hex → `policy`, `addr…` (bech32)
+  → `address`; anything else → **422**. In the host-backed deployment
+  (`CHAIN_SOURCE=host_ch`, the docker-compose integration) the host indexes
   transactions by address only, so a `policy` target is rejected up front with
   **422**; use an `addr…` address there.
 - `max_txs` (optional): `1 .. 50000` (`MAX_TXS_CAP`); omitted = the full window the
   module is configured to fit over (`CLUSTERING_WINDOW_TXS`). A cap on an **address**
   target bounds the population to the most **recent** N of the contract's
-  already‑ingested transactions; policy targets are scoped from history.
-- `reprocess` (optional): re‑run the analysis over the contract's already‑ingested
-  transactions (used for an in‑place refit). In the integrated module the chain data
+  already-ingested transactions; policy targets are scoped from history.
+- `reprocess` (optional): re-run the analysis over the contract's already-ingested
+  transactions (used for an in-place refit). In the integrated module the chain data
   is always already in `tms_analytics`, so onboarding reads it in place rather than
   downloading.
 
 Response: `{ "job_id": "job-...", "target": "...", "target_type": "address|policy" }`.
-Guards: **409** if a non‑terminal job already exists for `target`; **429** if
-`MAX_INFLIGHT_JOBS` non‑terminal jobs already exist.
+Guards: **409** if a non-terminal job already exists for `target`; **429** if
+`MAX_INFLIGHT_JOBS` non-terminal jobs already exist.
 
 **Contract shape** (`GET /api/contracts/{target}` bare; the list returns these
 rows inside the pagination envelope's `data`):
@@ -155,32 +155,32 @@ an external provider.)
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/targets?limit=&offset=` | Distinct targets present in the ingested transactions with live tx counts, highest count first, in the pagination envelope. Pre‑dates `contracts`; kept for compatibility. |
+| GET | `/api/targets?limit=&offset=` | Distinct targets present in the ingested transactions with live tx counts, highest count first, in the pagination envelope. Pre-dates `contracts`; kept for compatibility. |
 
 ## Clustering
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/evaluation?target=&feature_set=` | k‑distance curve + scored grid + recommendation. `feature_set` ∈ `shape\|graph\|combined` (default `shape`). |
+| GET | `/api/evaluation?target=&feature_set=` | k-distance curve + scored grid + recommendation. `feature_set` ∈ `shape\|graph\|combined` (default `shape`). |
 | POST | `/api/cluster` | Run DBSCAN and persist a run. Body: `{target, feature_set, eps>0, min_samples>=2, notes?}`. |
 | GET | `/api/runs?target=&limit=&offset=` | List cluster runs (newest first; `target` optional) in the pagination envelope; `total` counts the filtered rows. |
 | GET | `/api/runs/{run_id}` | One run's metadata (**404** if unknown). |
-| GET | `/api/runs/{run_id}/clusters` | Per‑cluster summary stats + verdict fields (see below). |
+| GET | `/api/runs/{run_id}/clusters` | Per-cluster summary stats + verdict fields (see below). |
 | GET | `/api/runs/{run_id}/clusters/{cluster_id}/transactions?limit=&offset=` | Transactions in a cluster; each row carries an effective `verdict` + raw `votes`. |
-| GET | `/api/runs/{run_id}/graph?limit=&cluster=` | Node/edge payload for the network view (capped, clustered‑first); each node carries `verdict`. |
+| GET | `/api/runs/{run_id}/graph?limit=&cluster=` | Node/edge payload for the network view (capped, clustered-first); each node carries `verdict`. |
 | POST | `/api/runs/{run_id}/clusters/{cluster_id}/label` | Apply a manual verdict to a cluster's members. Body: `{verdict: "malicious"\|"benign", note?}`. **404** unknown run, **422** bad verdict or noise bucket (`-1`). |
 | POST | `/api/runs/{run_id}/clusters/{cluster_id}/clear-label` | Remove the manual verdict from a cluster's members. |
 | POST | `/api/contracts/{target}/transactions/{tx_hash}/label` | Apply a manual verdict to a single transaction. Body: `{verdict: "malicious"\|"benign", note?}`. Unlike a cluster label it does NOT propagate. **422** bad verdict. |
 | POST | `/api/contracts/{target}/transactions/{tx_hash}/clear-label` | Remove a single transaction's manual label. |
-| DELETE | `/api/runs/{run_id}` | Delete a user‑created (custom) cluster run and its per‑tx cluster labels. **404** if unknown; **403** if the run is system‑generated (canonical, drives scoring). The target‑scoped `tx_labels` verdicts are unaffected. Returns `{"deleted": true, "run_id": "..."}`. |
+| DELETE | `/api/runs/{run_id}` | Delete a user-created (custom) cluster run and its per-tx cluster labels. **404** if unknown; **403** if the run is system-generated (canonical, drives scoring). The target-scoped `tx_labels` verdicts are unaffected. Returns `{"deleted": true, "run_id": "..."}`. |
 
 ### Verdict fields
 
 A transaction's effective `verdict` ∈ `malicious | benign | anomaly | normal`,
-resolved (highest precedence first) from: explicit per‑tx label → cluster‑inherited
-label → auto‑anomaly (`votes >= 2`). Labels are stored per `tx_hash`, so they survive
+resolved (highest precedence first) from: explicit per-tx label → cluster-inherited
+label → auto-anomaly (`votes >= 2`). Labels are stored per `tx_hash`, so they survive
 reprocessing and propagate to future transactions that cluster alongside a labelled
-one. Cluster‑summary rows additionally carry `verdict` (the manual label, or `null`),
+one. Cluster-summary rows additionally carry `verdict` (the manual label, or `null`),
 `verdict_conflict` (cluster has both malicious + benign members; malicious wins),
 `labeled_count`, and `anomaly_count` (members with `votes >= 2`).
 
@@ -190,8 +190,8 @@ one. Cluster‑summary rows additionally carry `verdict` (the manual label, or `
 |---|---|---|
 | POST | `/api/anomaly` | Run the ensemble and persist a run. Body: `{target, feature_set, eps?, min_samples?, top_quantile?}`. |
 | GET | `/api/anomaly-runs?target=&limit=&offset=` | List anomaly runs (newest first; `target` optional) in the pagination envelope; `total` counts the filtered rows. |
-| GET | `/api/anomaly-runs/{run_id}/top?limit=&offset=` | Top‑ranked anomalous transactions for a run. |
-| DELETE | `/api/anomaly-runs/{run_id}` | Delete a user‑created (custom) anomaly run and its scores. **404** if unknown; **403** if system‑generated (canonical for scoring). Returns `{"deleted": true, "run_id": "..."}`. |
+| GET | `/api/anomaly-runs/{run_id}/top?limit=&offset=` | Top-ranked anomalous transactions for a run. |
+| DELETE | `/api/anomaly-runs/{run_id}` | Delete a user-created (custom) anomaly run and its scores. **404** if unknown; **403** if system-generated (canonical for scoring). Returns `{"deleted": true, "run_id": "..."}`. |
 
 See [algorithms.md](algorithms.md) for what the clustering/anomaly parameters and
 outputs mean. A fit's flagged verdicts are also published to

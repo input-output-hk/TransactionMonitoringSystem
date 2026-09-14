@@ -49,9 +49,10 @@ _CLASS_COLS = (
     "phishing",
 )
 
-# The full tx_class_scores column vector in table order. The SELECT projection
-# and the row-mapping key tuples are both derived from this single list, so the
-# writer and every reader stay column-aligned (a reordered or added column can no
+# The full tx_class_scores column vector in DDL order. Every query names these
+# columns explicitly and the row-mapping key tuples are derived from this single
+# list, so the writer and every reader stay aligned BY NAME; physical order on a
+# table upgraded through ADD COLUMN differs and does not matter (a new column can no
 # longer silently mis-map a row). The INSERT VALUES builder stays hand-ordered
 # because it applies per-column defaults / json.dumps, not a uniform projection.
 _SCORE_COLS = (
@@ -67,6 +68,8 @@ _SCORE_COLS = (
     "corroborating_classes",
     "contract_address",
     "analysis_version",
+    "config_hash",
+    "code_version",
     "analyzed_at",
 )
 _SCORE_SELECT = ", ".join(_SCORE_COLS)
@@ -139,6 +142,12 @@ def insert_class_scores(results: list[dict[str, Any]]):
                 r.get("corroborating_classes", ""),
                 r.get("contract_address", NO_CONTRACT),
                 r["analysis_version"],
+                # Defaulted rather than required: a caller building a score row
+                # by hand (an import, a test fixture) has no provenance to
+                # offer, and '' is the same "not recorded" the column default
+                # gives pre-migration rows.
+                r.get("config_hash", ""),
+                r.get("code_version", ""),
                 r["analyzed_at"],
             )
             for r in results

@@ -226,6 +226,12 @@ services:
         # SPA bundle. Browser auth is the session cookie set by the
         # magic-link flow — no key is shipped to the client.
         VITE_NETWORK: ${VITE_NETWORK:-preprod}
+        # Commit this image was built from, stamped onto every score row so a
+        # stored verdict names the code that produced it. Set it in CI or from
+        # the deploy shell: TMS_CODE_VERSION=$(git rev-parse HEAD). The build
+        # arg is the unprefixed CODE_VERSION because that is the name
+        # pydantic-settings binds Settings.CODE_VERSION from.
+        CODE_VERSION: ${TMS_CODE_VERSION:-}
     container_name: tms-app
     env_file:
       - .env

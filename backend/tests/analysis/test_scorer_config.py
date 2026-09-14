@@ -89,6 +89,7 @@ def _minimal_config():
                 "p50_threshold": 0.50,
             },
             "windows": {"global_days": 180, "per_script_days": 90},
+            "record_provenance": True,
         },
         "scorers": {},
     }

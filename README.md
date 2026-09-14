@@ -134,6 +134,7 @@ Under Docker Compose that layering reaches fewer settings than it looks: anythin
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background analysis engine |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | Analysis poll interval |
 | `ANALYSIS_ENABLED` | `true` | Enable 9-class detection engine |
+| `CODE_VERSION` | _(empty)_ | Commit stamped onto every score row as provenance. Normally set at image build time (`TMS_CODE_VERSION=$(git rev-parse HEAD) docker compose build app`), not in `.env`. Empty means "not recorded", which is the honest value for a working-tree run |
 | `LOG_LEVEL` | `INFO` | Log verbosity |
 | `APP_BASE_URL` | `http://localhost:8000` | Base URL embedded in magic-link emails |
 | `SESSION_TTL_DAYS` | `7` | Dashboard session lifetime |
@@ -254,7 +255,7 @@ Single-process FastAPI application. Three async background tasks run in the same
 | PostgreSQL | Lifecycle state, sync checkpoint, entity state, mempool collisions, audit logs, and the auth tables (`users`, `magic_link_tokens`, `user_sessions`) |
 | Filesystem | Data Lake: write-once gzip JSON blobs of raw Ogmios payloads |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs/C4-ARCHITECTURE.md), and [docs/TECHNOLOGY-DECISIONS.md](docs/TECHNOLOGY-DECISIONS.md) for details. The full documentation index is in [docs/README.md](docs/README.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/C4-ARCHITECTURE.md](docs/C4-ARCHITECTURE.md), and [docs/TECHNOLOGY-DECISIONS.md](docs/TECHNOLOGY-DECISIONS.md) for details. The full documentation index is in [docs/README.md](docs/README.md). To verify the system independently rather than read about it, start at [AUDIT.md](AUDIT.md).
 
 ## Detection
 

@@ -1,9 +1,22 @@
 name: CI
 
 # Runs the verification gates from CONTRIBUTING.md on every PR and on pushes to
-# main. The backend recall gate (tests/analysis/) is a REQUIRED status check:
-# the project's top rule is "never miss a real attack", and it was previously
-# enforced only by convention (contributors running pytest by hand).
+# main. The backend recall gate (tests/analysis/) runs first and on its own, so
+# that a recall regression is unambiguous: the project's top rule is "never miss
+# a real attack".
+#
+# These jobs report. Whether any of them is configured as a required status
+# check is a repository setting that this file cannot assert, so read the
+# results rather than assuming a red job stopped a merge. See docs/TESTING.md
+# ("The recall gate").
+#
+# Test result uploads: each test job uploads its JUnit XML so a run leaves a
+# machine-readable result rather than only a log. They use
+# `if-no-files-found: warn` because they run with `if: always()`, so a failure
+# before the tests leaves no XML and `error` would stack a spurious upload
+# failure on top of the real one; perf.yml keeps `error` because there the
+# artifact is the job's only product. Retention is 90 days, GitHub's ceiling
+# for a public repository.
 on:
   pull_request:
   push:
@@ -20,8 +33,8 @@ concurrency:
 
 jobs:
   lint:
-    # Formatting, lint, and type checks are enforced for both Python trees from
-    # one job so a drifted tree can never merge. Pre-existing ruff findings
+    # Formatting, lint, and type checks cover both Python trees from one job, so
+    # a drifted tree shows up as one red check. Pre-existing ruff findings
     # accepted at gate-introduction time are grandfathered via per-file-ignores
     # burn-down blocks in each pyproject; new code is held to the full rule set.
     # mypy runs at a lenient baseline with a growing strict-module cohort.
@@ -55,6 +68,16 @@ jobs:
       - name: Sidecar type check
         working-directory: services/clustering/backend
         run: uv run mypy app
+      - name: Published test counts (totals arithmetic)
+        # Text-only: asserts each inventory table's stated total matches its own
+        # rows and that the two documents agree. The per-tier counts are checked
+        # in the jobs that already have the matching environment.
+        run: uv run python backend/scripts/check_doc_counts.py --check-totals
+      - name: Traceability matrix resolves
+        # Static too: every test cited in docs/TRACEABILITY.md must still exist,
+        # so a renamed test breaks the build rather than quietly turning a row
+        # into a claim about something that is no longer there.
+        run: uv run python backend/scripts/check_traceability.py
 
   backend:
     name: Backend (pytest + recall gate)
@@ -69,24 +92,58 @@ jobs:
           python-version: "3.13"
       - name: Sync dependencies
         run: uv sync
+      - name: Recall guarantee is structurally intact
+        # Cheap and static, so it runs before the suite: it asserts every
+        # scorer class still has a test marked @pytest.mark.attack_must_fire
+        # that pins a real attack against a band constant, so the guarantee is
+        # a set a machine can check rather than a naming convention.
+        run: uv run python backend/scripts/check_recall_markers.py
       - name: Recall gate (attack-must-fire tests)
         # Run first and on its own so a recall regression is unambiguous.
         # Deliberately NOT under coverage: it is a subset run and its whole
         # value is being a fast, single-purpose gate.
         working-directory: backend
-        run: uv run pytest tests/analysis/ -q
+        run: uv run pytest tests/analysis/ -q --junitxml=junit-recall.xml
       - name: Full backend suite (with coverage)
         # Coverage is measured on the full suite only; --cov=app naturally
         # scopes to the application package (tests/ and perf/ are siblings).
-        # Report-only for now: the number feeds the milestone test report;
-        # a fail_under ratchet is a post-approval decision.
+        # Report-only: the number is published in docs/TESTING.md, and a
+        # fail_under ratchet is a separate decision from measuring it.
         working-directory: backend
-        run: uv run pytest tests/ -q --cov=app --cov-report=term-missing --cov-report=json:coverage.json
+        run: uv run pytest tests/ -q --junitxml=junit-backend.xml --cov=app --cov-report=term-missing --cov-report=json:coverage.json
       - name: Coverage summary
         working-directory: backend
         run: |
           pct=$(uv run python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
           echo "Backend line coverage: **${pct}%** (app package, full hermetic suite)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Published test counts (backend tiers)
+        # Collection only, so the perf tier is counted here without needing the
+        # ClickHouse two of its three benchmarks want at run time.
+        working-directory: backend
+        run: |
+          collected() { uv run pytest "$1" -q --co 2>/dev/null \
+            | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+'; }
+          hermetic=$(collected tests/)
+          recall=$(collected tests/analysis/)
+          perf=$(TMS_PERF_TESTS=1 uv run pytest tests/perf/ -q --co 2>/dev/null \
+            | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+')
+          uv run python scripts/check_doc_counts.py \
+            --observed "backend/tests/=$hermetic" \
+            --observed "backend/tests/analysis/=$recall" \
+            --observed "backend/tests/perf/=$perf"
+      - name: Upload test and coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-results
+          path: |
+            backend/junit-recall.xml
+            backend/junit-backend.xml
+            backend/coverage.json
+          # See "Test result uploads" in the header for why these two are
+          # `warn` and 90 days.
+          if-no-files-found: warn
+          retention-days: 90
 
   live-db:
     # The hermetic suite mocks every CH/PG call, which has let ClickHouse
@@ -149,7 +206,15 @@ jobs:
           POSTGRES_DB: tms_db
           CLICKHOUSE_HOST: localhost
           CLICKHOUSE_PORT: "9000"
-        run: uv run pytest tests/live_db/ -q
+        run: uv run pytest tests/live_db/ -q --junitxml=junit-live-db.xml
+      - name: Published test counts (backend live-DB tier)
+        working-directory: backend
+        env:
+          TMS_LIVE_DB_TESTS: "1"
+        run: |
+          n=$(uv run pytest tests/live_db/ -q --co 2>/dev/null \
+            | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+')
+          uv run python scripts/check_doc_counts.py --observed "backend/tests/live_db/=$n"
       - name: Sidecar sync
         working-directory: services/clustering/backend
         run: uv sync --extra dev
@@ -166,7 +231,23 @@ jobs:
           CLICKHOUSE_DB: tms_clustering
         run: |
           uv run python -m app.cli migrate --init-dir ../clickhouse/init
-          uv run pytest tests/live_db/ -q
+          uv run pytest tests/live_db/ -q --junitxml=junit-sidecar-live-db.xml
+          n=$(uv run pytest tests/live_db/ -q --co 2>/dev/null \
+            | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+')
+          uv run python ../../../backend/scripts/check_doc_counts.py \
+            --observed "services/clustering/backend/tests/live_db/=$n"
+      - name: Upload live-DB test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-db-results
+          path: |
+            backend/junit-live-db.xml
+            services/clustering/backend/junit-sidecar-live-db.xml
+          # See "Test result uploads" in the header for why these two are
+          # `warn` and 90 days.
+          if-no-files-found: warn
+          retention-days: 90
 
   frontend:
     name: Frontend (lint + build)
@@ -192,7 +273,27 @@ jobs:
         run: pnpm lint
       - name: Unit tests
         working-directory: frontend
-        run: pnpm test
+        run: pnpm vitest run --reporter=default --reporter=junit --outputFile.junit=junit-frontend.xml
+      - name: Published test counts (frontend tier)
+        # Read from the JUnit XML the previous step wrote, so the suite runs once.
+        # `tests` on the root element counts cases, so `it.each` expansions are
+        # included, which is what the inventory table publishes.
+        working-directory: frontend
+        run: |
+          n=$(python3 -c "import xml.etree.ElementTree as T; \
+            print(T.parse('junit-frontend.xml').getroot().get('tests'))")
+          python3 ../backend/scripts/check_doc_counts.py \
+            --observed "frontend/src/**/*.test.{ts,tsx}=$n"
+      - name: Upload frontend test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-results
+          path: frontend/junit-frontend.xml
+          # See "Test result uploads" in the header for why these two are
+          # `warn` and 90 days.
+          if-no-files-found: warn
+          retention-days: 90
       - name: Type-check + build
         working-directory: frontend
         run: pnpm build
@@ -213,9 +314,28 @@ jobs:
         # Report-only coverage, mirroring the backend job; the sidecar is an
         # installable package so --cov=app resolves without sys.path help.
         working-directory: services/clustering/backend
-        run: uv run pytest -q --cov=app --cov-report=term --cov-report=json:coverage.json
+        run: uv run pytest -q --junitxml=junit-sidecar.xml --cov=app --cov-report=term --cov-report=json:coverage.json
+      - name: Published test counts (sidecar tier)
+        working-directory: services/clustering/backend
+        run: |
+          n=$(uv run pytest -q --co 2>/dev/null \
+            | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+')
+          uv run python ../../../backend/scripts/check_doc_counts.py \
+            --observed "services/clustering/backend/tests/=$n"
       - name: Coverage summary
         working-directory: services/clustering/backend
         run: |
           pct=$(uv run python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
           echo "Clustering sidecar line coverage: **${pct}%**" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload sidecar test and coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-results
+          path: |
+            services/clustering/backend/junit-sidecar.xml
+            services/clustering/backend/coverage.json
+          # See "Test result uploads" in the header for why these two are
+          # `warn` and 90 days.
+          if-no-files-found: warn
+          retention-days: 90

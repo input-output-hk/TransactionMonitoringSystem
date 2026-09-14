@@ -1,9 +1,9 @@
 # Repository Map
 
-This project is delivered as a single repository containing three separately
-specified deliverables: the backend, the frontend, and the alerting subsystem.
-This document maps each of them onto the trees that hold it, so that a reader
-holding the delivery specification can locate what it names.
+This project is one repository containing three subsystems: the backend, the
+frontend, and alerting. This document maps each of them onto the trees that hold
+it, so a reader who knows one by name can locate its code, its configuration and
+its tests.
 
 Everything below was measured at the commit this document ships in, and every
 figure is reproducible with the commands in
@@ -13,16 +13,17 @@ commit and this document is only as fresh as its last edit.
 
 ## Why one repository
 
-The three deliverables are one deployable. `backend/Dockerfile` compiles the
+The three subsystems are one deployable. `backend/Dockerfile` compiles the
 frontend in its first stage and the FastAPI application serves the resulting
 bundle, so the frontend has no runtime service of its own. The alerting
 subsystem runs inside the backend process and reads the same configuration and
 database schema. Splitting them would introduce a version-compatibility surface
 between components that are always released together, and would fragment a
-single CI gate that currently runs the recall suite before anything else is
-allowed to merge.
+single CI pipeline that currently runs the recall suite before anything else
+runs. That ordering makes a recall regression unambiguous, though the job
+reports rather than gates (see [TESTING.md](TESTING.md#the-recall-gate)).
 
-The trade is that a deliverable boundary is a directory boundary rather than a
+The trade is that a subsystem boundary is a directory boundary rather than a
 repository boundary. This document is what makes those boundaries explicit.
 
 ## Backend
@@ -32,21 +33,21 @@ sidecar.
 
 | Tree | Files | Lines | Contents |
 |---|---|---|---|
-| `backend/` | 240 | 54,567 | FastAPI application, ingestion, detection scorers, API, tests |
-| `services/clustering/` | 169 | 30,123 | Clustering sidecar: its own deployable, own Python project, own CI job |
-| `config/` | 2 | 1,029 | `detection.yaml` (913 lines), `performance.yaml` (116 lines) |
+| `backend/` | 248 | 56,427 | FastAPI application, ingestion, detection scorers, API, tests |
+| `services/clustering/` | 170 | 30,502 | Clustering sidecar: its own deployable, own Python project, own CI job |
+| `config/` | 2 | 1,043 | `detection.yaml` (927 lines), `performance.yaml` (116 lines) |
 
 Counts exclude lockfiles (`services/clustering/backend/uv.lock`).
 
-Within `backend/`: `backend/app/` is 100 Python files and 28,368 lines of source;
-`backend/tests/` is 110 files and 21,500 lines. The largest application modules,
+Within `backend/`: `backend/app/` is 100 Python files and 28,638 lines of source;
+`backend/tests/` is 115 files and 22,508 lines. The largest application modules,
 counted in Python files, are `analysis/` (26, the nine detection scorers), `api/`
-(13), `notifications/` (12), `ingestion/` (10), and `db/` (8). The Alerting table
-below counts every tracked file rather than only Python, so `notifications/`
-appears there as 13: the thirteenth is `ADDING_A_CHANNEL.md`.
+(13), `notifications/` (12), `ingestion/` (10), and `db/` and `auth/` (8 each).
+The Alerting table below counts every tracked file rather than only Python, so
+`notifications/` appears there as 13: the thirteenth is `ADDING_A_CHANNEL.md`.
 
-Within `services/clustering/`: `app/` is 68 Python files and 11,990 lines,
-`tests/` is 42 files and 9,749 lines. Its ClickHouse schema is 12 SQL files
+Within `services/clustering/`: `app/` is 68 Python files and 12,076 lines,
+`tests/` is 43 files and 10,042 lines. Its ClickHouse schema is 12 SQL files
 under `services/clustering/clickhouse/init/`.
 
 `config/` belongs to the backend by ownership rather than by name:
@@ -74,15 +75,15 @@ The operator dashboard.
 
 | Tree | Files | Lines | Contents |
 |---|---|---|---|
-| `frontend/` | 146 | 19,372 | React SPA: pages, components, API client, tests. Excludes `pnpm-lock.yaml` |
+| `frontend/` | 146 | 20,480 | React SPA: pages, components, API client, tests. Excludes `pnpm-lock.yaml` |
 
-`frontend/src/` is 127 TypeScript and TSX files totalling 18,606 lines, of which
-115 files and 16,485 lines are non-test source. It carries 12 page components
-across 15 routes, 51 components, and 21 API-client modules.
+`frontend/src/` is 127 TypeScript and TSX files totalling 19,714 lines, of which
+115 files and 16,971 lines are non-test source. It carries 12 page components
+across 15 routes, 56 components, and 21 API-client modules.
 
 **Stack, as built:** React 19.2.6 on TypeScript 6.0.2, bundled by Vite 8.1.2,
 styled with Tailwind v4 through `@tailwindcss/vite`, routed by react-router-dom
-7.18.1, server state through TanStack Query 5. Charts are Plotly; the entity
+7.18.2, server state through TanStack Query 5. Charts are Plotly; the entity
 graph is Cytoscape with fcose layout; UI primitives are Radix. Tests run under
 Vitest 4.1.9 in jsdom. Package manager pnpm (CI pins 11.8.0) on Node 22.
 
@@ -109,7 +110,7 @@ levels let an escalation to a higher band through immediately, so neither can
 cost a detection. See
 [ALERTING.md](ALERTING.md#per-group-one-alert-per-script-per-window).
 
-This is the one deliverable that does not sit under a single prefix. It is 36
+This is the one subsystem that does not sit under a single prefix. It is 36
 files and 6,092 lines across the seven locations below.
 
 | Location | Files | Lines | Contents |
@@ -137,7 +138,7 @@ delivery channel.
 
 ## Shared
 
-These belong to no single deliverable.
+These belong to no single subsystem.
 
 | Path | Serves |
 |---|---|
@@ -149,17 +150,20 @@ These belong to no single deliverable.
 
 ## Test inventory
 
-1,943 automated tests across six tiers. Counts measured at this commit, not
-quoted from an earlier report.
+2,041 automated tests across six tiers. The recall gate is a subset of the
+backend suite rather than a seventh tier, so it is listed but not added into the
+total. A CI step re-collects every tier on each run and fails the build if these
+figures drift, so a stale count here is a build failure rather than something a
+reader has to catch.
 
 | Tier | Location | Tests |
 |---|---|---|
-| Backend hermetic | `backend/tests/` | 1,276 |
-| Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 554 |
-| Backend live-DB | `backend/tests/live_db/` | 28 |
+| Backend hermetic | `backend/tests/` | 1,332 |
+| Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 578 |
+| Backend live-DB | `backend/tests/live_db/` | 33 |
 | Clustering sidecar | `services/clustering/backend/tests/` | 497 |
 | Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 8 |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 131 |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 |
 | Performance | `backend/tests/perf/` | 3 |
 
 See [TESTING.md](TESTING.md) for what each tier covers and how to run it.
@@ -167,7 +171,7 @@ See [TESTING.md](TESTING.md) for what each tier covers and how to run it.
 ## Measuring this yourself
 
 ```sh
-# Tracked files and lines, per deliverable
+# Tracked files and lines, per subsystem
 git ls-files backend/ | wc -l
 git ls-files backend/ | xargs wc -l | tail -1
 git ls-files config/ | xargs wc -l | tail -1

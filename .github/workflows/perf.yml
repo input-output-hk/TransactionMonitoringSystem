@@ -108,6 +108,6 @@ jobs:
           name: performance-results
           path: perf-results/
           if-no-files-found: error
-          # The approval trail budgets are ratified against: 90 days keeps a
-          # quarter's worth of weekly baselines reviewable.
+          # 90 days keeps a quarter's worth of weekly baselines reviewable,
+          # which is the window a drift comparison actually needs.
           retention-days: 90

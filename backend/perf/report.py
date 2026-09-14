@@ -1,4 +1,4 @@
-"""Collate performance artifacts into the customer-facing markdown report.
+"""Collate performance artifacts into a markdown performance report.
 
 Reads every ``*.json`` artifact in the shared results directory (written by
 the benchmark tier and the Locust harness through ``perf.results``; schema in
@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from perf import results
+from perf import find_repo_root, results
 
 # Display-only precision for measured values: artifact writers already round
 # to their own meaningful precision, so two decimals only trims float noise.
@@ -310,12 +310,28 @@ def _provenance_section() -> list[str]:
         "Every budget above comes from `config/performance.yaml`, loaded through the validated "
         "`backend/perf/config.py` loader; the benchmarks and this report read the same file, so "
         "a budget cannot drift between the measurement and its write-up. The current values are "
-        "provisional engineering guardrails derived from the first measured baseline (throughput "
-        "floors at half the measured baseline, latency ceilings at twice the measured p95). "
-        "Production targets are ratified with the customer against this report, then updated in "
-        "that one file. Methodology: `docs/PERFORMANCE.md`.",
+        "provisional guardrails set roughly an order of magnitude below the first measured "
+        "baseline, wide enough that machine variance never fails the tier. Their job is to "
+        "fail a build when performance degrades. They carry no availability or support "
+        "undertaking. Methodology: `docs/PERFORMANCE.md`.",
         "",
     ]
+
+
+def _display_path(results_path: Path) -> str:
+    """Render the artifacts directory relative to the repository root.
+
+    The report is uploaded as a workflow artifact and read by people other than
+    whoever generated it, so an absolute path would bake one developer's home
+    directory into it. Falls back to the directory name when the path lies
+    outside the repository. Uses the package's single repo locator rather than a
+    second depth-count that could drift.
+    """
+    repo_root = find_repo_root()
+    try:
+        return str(results_path.resolve().relative_to(repo_root))
+    except ValueError:
+        return results_path.name
 
 
 def build_report(results_path: Path) -> str:
@@ -325,21 +341,20 @@ def build_report(results_path: Path) -> str:
         "# TMS Performance Report",
         "",
         f"Generated {generated} by `uv run python -m perf.report` from the artifacts in "
-        f"`{results_path}`.",
+        f"`{_display_path(results_path)}`.",
         "",
         "## Purpose",
         "",
         "This report collates the latest recorded run of each performance benchmark family "
         "into one document: measured values judged against the budgets in "
-        "`config/performance.yaml`. It is the evidence base for ratifying production "
-        "performance targets with the customer. Regenerate it after any benchmark run; see "
+        "`config/performance.yaml`. Regenerate it after any benchmark run; see "
         "`docs/PERFORMANCE.md` for how each number is produced.",
         "",
     ]
     artifacts = _ordered(_load_artifacts(results_path))
     if not artifacts:
         lines += [
-            f"No benchmark artifacts found in `{results_path}`. Run the performance tier "
+            f"No benchmark artifacts found in `{_display_path(results_path)}`. Run the performance tier "
             "first, for example `TMS_PERF_TESTS=1 uv run pytest tests/perf/ -q` from "
             "`backend/` (see `docs/PERFORMANCE.md`).",
             "",

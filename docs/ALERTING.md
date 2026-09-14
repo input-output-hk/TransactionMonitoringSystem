@@ -1,8 +1,8 @@
 # Alerting: Operator Guide
 
-This is the operator reference for the alerting deliverable: how a detection becomes an outbound notification, how to configure the routing, how to confirm that something was actually sent, and what the delivery path does and does not guarantee.
+This is the operator reference for the alerting subsystem: how a detection becomes an outbound notification, how to configure the routing, how to confirm that something was actually sent, and what the delivery path does and does not guarantee.
 
-It complements two documents rather than repeating them. The environment variables that gate and tune delivery are the "Notifications delivery" table in the [RUNBOOK configuration reference](../RUNBOOK.md#additional-configuration-reference), and the webhook wire contract, the payload example, and the Python HMAC verification recipe are in [Webhook notifications: payload and signature verification](../RUNBOOK.md#webhook-notifications-payload-and-signature-verification). Read those for the values and the receiver-side contract; read this for the behaviour. Cross-references here are by heading anchor rather than line number, deliberately: line citations in a document this size go stale on the next edit to the target. Developers adding a new delivery channel should read [`backend/app/notifications/ADDING_A_CHANNEL.md`](../backend/app/notifications/ADDING_A_CHANNEL.md) instead, and [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) locates every file in the deliverable.
+It complements two documents rather than repeating them. The environment variables that gate and tune delivery are the "Notifications delivery" table in the [RUNBOOK configuration reference](../RUNBOOK.md#additional-configuration-reference), and the webhook wire contract, the payload example, and the Python HMAC verification recipe are in [Webhook notifications: payload and signature verification](../RUNBOOK.md#webhook-notifications-payload-and-signature-verification). Read those for the values and the receiver-side contract; read this for the behaviour. Cross-references here are by heading anchor rather than line number, deliberately: line citations in a document this size go stale on the next edit to the target. Developers adding a new delivery channel should read [`backend/app/notifications/ADDING_A_CHANNEL.md`](../backend/app/notifications/ADDING_A_CHANNEL.md) instead, and [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) locates every file in the subsystem.
 
 ## How an Alert Happens: Two Independent Sources
 
@@ -561,7 +561,7 @@ cd backend
 
 **On signing.** Signing is off unless `WEBHOOK_SIGNING_SECRET` is set; the sender simply omits the header and delivery is otherwise identical. Set the secret on both sides or neither. A receiver holding a secret will flag every request from an unsigned sender.
 
-Automated coverage for this deliverable is 97 tests across `backend/tests/notifications/` (92) and `backend/tests/api/test_notifications_config.py` (5), plus the frontend linter and settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
+Automated coverage for this subsystem is 97 tests across `backend/tests/notifications/` (92) and `backend/tests/api/test_notifications_config.py` (5), plus the frontend linter and settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
 
 ## Common Misconfigurations
 

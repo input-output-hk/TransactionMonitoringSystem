@@ -96,6 +96,8 @@ Comments explain why a constant has its value (the threat model, the protocol li
 | Frontend | `cd frontend && pnpm lint && pnpm test && pnpm build` | Lint, unit tests, then the type-checked build. CI runs all three. |
 | Lint + types (backend) | `uv run ruff check backend && uv run mypy backend/app` | Also `ruff format --check backend`. CI runs all three. |
 | Lint + types (sidecar) | `cd services/clustering/backend && uv run ruff check . && uv run mypy app` | The sidecar runs `disallow_untyped_defs` globally. |
+| Published counts and matrix | `uv run python backend/scripts/check_doc_counts.py --check-totals && uv run python backend/scripts/check_traceability.py` | Text-only, no services. Fails if an inventory total disagrees with its own rows or a test cited in [docs/TRACEABILITY.md](docs/TRACEABILITY.md) no longer exists. |
+| Recall marker guard | `uv run python backend/scripts/check_recall_markers.py` | Fails if a detection class loses its `attack_must_fire` case, or a marked case does not pin a band. Run it after any change under `backend/tests/analysis/scorers/`. |
 
 mypy runs at a lenient baseline (untyped defs allowed) with a growing strict
 cohort: modules listed in the root `pyproject.toml` `[[tool.mypy.overrides]]`

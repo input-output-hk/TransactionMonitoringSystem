@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorers.sandwich import SandwichScorer
 
 
@@ -31,7 +32,14 @@ class TestGate:
 
 
 class TestScore:
+    @pytest.mark.attack_must_fire
     def test_linked_attacker_high_score(self, scorer):
+        """A linked attacker with prior sandwiches must stay at least High.
+
+        Measured 82.00, which clears Critical by two points. The floor is set at
+        High deliberately: two points is inside the noise of any weight retune,
+        and a floor that fails on noise gets weakened instead of respected.
+        """
         sw = {
             "tx_a": "a01",
             "tx_b": "b01",
@@ -46,7 +54,7 @@ class TestScore:
             "slot_span": 2,
         }
         result = scorer.score(_features(sandwich=sw))
-        assert result.score > 30
+        assert result.score >= BAND_HIGH_THRESHOLD
         assert result.sub_scores["attacker_link"] == 1.0
 
     def test_unlinked_attacker_lower(self, scorer):

@@ -6,7 +6,7 @@ scoring must keep pace with ingestion, and the operator dashboard must stay resp
 retention-scale volumes; a throughput regression anywhere in that pipeline eventually turns into
 a late alert. The tier measures each seam with a repeatable benchmark, judges the numbers against
 budgets kept in one file (`config/performance.yaml`), and records every run as a JSON artifact
-that a report generator collates into the customer-facing performance report.
+that a report generator collates into the performance report.
 
 The tier is opt-in and separate from the hermetic test suite: it measures, it does not test
 correctness. Without `TMS_PERF_TESTS=1` the whole `backend/tests/perf/` directory is skipped at
@@ -137,19 +137,19 @@ ignored knob, and benchmarks reference the config rather than duplicating values
 
 The current budgets are deliberately wide provisional guardrails, set roughly an order of
 magnitude below the first development baseline so the tier runs green on a laptop on battery
-and on a busy shared CI runner alike. They are not derived from the two ratification rules
+and on a busy shared CI runner alike. They are not derived from the two tightening rules
 below; they are placeholders chosen to catch a catastrophic regression without flaking.
 
-Ratification is the separate step that replaces them with real targets, using two fixed rules:
+Tightening is the separate step that narrows them once reference baselines exist, using two
+fixed rules:
 
 - Throughput floors are set at 50% of the measured baseline.
 - Latency ceilings are set at twice the measured p95.
 
 Those rules are chosen so normal machine variance does not flake the tier, while a real
-regression, halved throughput or doubled latency, still fails it. These remain engineering
-guardrails, not contractual SLOs: production targets are ratified with the customer against the
-performance report, then updated in that one file. Numbers used for ratification must come from
-the reference environment recorded in each artifact, not from a shared CI runner. Applying the
+regression, halved throughput or doubled latency, still fails it. A tightened budget is still a
+regression tripwire and carries no availability or support undertaking. Numbers used to tighten
+must come from the reference environment recorded in each artifact, not from a shared CI runner. Applying the
 rules to shared-runner medians would set floors the same runner intermittently fails.
 
 ## Artifacts and the Report: perf-results
@@ -176,7 +176,6 @@ uv run python -m perf.report --output ../docs/PERFORMANCE-REPORT.md
 weekly schedule (Mondays 03:43 UTC, off-peak). It provisions the same pinned ClickHouse and
 Postgres service containers as the CI `live-db` job, seeds the warehouse, runs the benchmark tier
 with budgets enforced, generates the report, and uploads `perf-results/` (JSON artifacts plus the
-generated report) as a build artifact retained for 90 days: the approval trail budget
-ratification points back to. A missed budget fails the workflow, and the report is generated and
-uploaded regardless so the failing numbers are preserved. The Locust load harness is deliberately
+generated report) as a build artifact retained for 90 days. A missed budget fails the workflow,
+and the report is generated and uploaded regardless so the failing numbers are preserved. The Locust load harness is deliberately
 excluded from CI because it needs a running app service to load.

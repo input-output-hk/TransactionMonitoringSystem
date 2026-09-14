@@ -75,8 +75,8 @@ line-length = 100
 target-version = "py313"
 src = ["backend"]
 # services/ carries its own pyproject (ruff resolves the nearest config per
-# file); internal/ is the red-team attack tooling, deliberately unlinted;
-# frontend/, data/, and docs/ hold no first-party Python.
+# file); frontend/, data/ and docs/ hold no first-party Python. `internal` is
+# listed so an untracked local scratch directory of that name is never linted.
 extend-exclude = ["services", "internal", "frontend", "data", "docs", "venv"]
 
 [tool.ruff.lint]
@@ -144,3 +144,14 @@ testpaths = ["backend/tests"]
 # marker, matching the sidecar. Existing module-level `pytestmark` lines are
 # now redundant but harmless.
 asyncio_mode = "auto"
+markers = [
+    # A real-attack case that must keep scoring at or above its risk band.
+    # `pytest tests/analysis/scorers/ -m attack_must_fire` is therefore the
+    # project's recall guarantee as a runnable set rather than a naming
+    # convention, and
+    # backend/scripts/check_recall_markers.py fails the build if any attack
+    # class stops having one. The project's first rule is that a missed attack
+    # costs more than a false positive, so a precision change may remove a
+    # false positive but must never silence one of these.
+    "attack_must_fire: a real-attack case that must not stop firing",
+]

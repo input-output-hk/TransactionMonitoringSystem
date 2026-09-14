@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.analysis.normalise import BAND_CRITICAL_THRESHOLD
 from app.analysis.scorers.front_running import FrontRunningScorer
 
 
@@ -32,7 +33,14 @@ class TestGate:
 
 
 class TestScore:
+    @pytest.mark.attack_must_fire
     def test_confirmed_collision_high_score(self, scorer):
+        """A confirmed UTxO collision with a repeat winner must stay Critical.
+
+        Measured 96.67 at the commit this assertion was written. The assertion
+        pins the band rather than the observed value, so it holds as the score
+        moves with tuning but fails if the class drops out of Critical.
+        """
         collision = {
             "counterpart_tx": "other01",
             "shared_inputs": 2,
@@ -44,7 +52,7 @@ class TestScore:
             "attacker_win_count": 5,
         }
         result = scorer.score(_features(collision=collision))
-        assert result.score > 40
+        assert result.score >= BAND_CRITICAL_THRESHOLD
         assert result.sub_scores["collision_outcome"] == 1.0
         assert "confirmed_utxo_collision" in result.reasons
 
