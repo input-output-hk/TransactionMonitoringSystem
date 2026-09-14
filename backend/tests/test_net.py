@@ -114,7 +114,10 @@ class TestClientIpRightmostRule:
 
 
 class TestTrustGates:
-    def test_disabled_flag_ignores_header(self):
+    def test_disabled_flag_ignores_header(self, monkeypatch):
+        # Pin the flag: the settings loader reads a deployment .env, where
+        # TRUSTED_PROXY_ENABLED=true would silently flip this test's premise.
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", False)
         req = _request([("X-Forwarded-For", "6.6.6.6")])
         assert net.client_ip(req) == "127.0.0.1"
 

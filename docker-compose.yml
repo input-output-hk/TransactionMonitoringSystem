@@ -438,8 +438,10 @@ services:
       # network-exposed deployment MUST set CLUSTERING_REQUIRE_AUTH=1 plus
       # CLUSTERING_API_KEY and MODEL_SIGNING_KEYS, or the sidecar refuses to
       # start (see app/api/main.lifespan). See .env.example.
+      # The fallback must be a literal boolean: an empty string fails the
+      # sidecar's REQUIRE_AUTH parsing and leaves it in a restart loop.
       - API_KEY=${CLUSTERING_API_KEY:-}
-      - REQUIRE_AUTH=${CLUSTERING_REQUIRE_AUTH:-}
+      - REQUIRE_AUTH=${CLUSTERING_REQUIRE_AUTH:-false}
       - CORS_ORIGINS=${CLUSTERING_CORS_ORIGINS:-}
       - LOG_FORMAT=${LOG_FORMAT:-json}
     # Re-fits hold the windowed feature matrix + IsolationForest(300) + the
