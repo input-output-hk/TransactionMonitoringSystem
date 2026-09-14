@@ -102,7 +102,11 @@ def test_validate_rejects_bad_docs(bad):
         "http://192.168.1.5/hook",
     ],
 )
-def test_validate_rejects_internal_webhook_url_by_default(url):
+def test_validate_rejects_internal_webhook_url_by_default(url, monkeypatch):
+    # Pin the flag: the settings loader reads a deployment .env, where
+    # WEBHOOK_ALLOW_INTERNAL=true (a local-receiver setup) would disable the
+    # SSRF rejection this test asserts.
+    monkeypatch.setattr(config.settings, "WEBHOOK_ALLOW_INTERNAL", False)
     doc = {
         "version": 1,
         "channels": {"webhook": {"enabled": True, "default_url": url}},
