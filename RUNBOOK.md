@@ -9,7 +9,7 @@ The TMS connects to a Cardano node through Ogmios, a WebSocket bridge. You must 
 Two options:
 
 - **External infrastructure (recommended for production/staging):** run node + Ogmios separately and point `OGMIOS_WS_URL` at the remote endpoint. The details below describe this path.
-- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json`, `topology.json`, `checkpoints.json`, `peer-snapshot.json`, and the four genesis files (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), all co-located. That is eight files, not six. Download the whole directory for your network from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html rather than picking files individually: `config.json` references the genesis files and `checkpoints.json` by filename **and hash**, and `topology.json` references `peer-snapshot.json`, so a missing or edited file fails the hash check at node startup. Also needs ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
+- **Bundled local stack (development only):** `docker-compose.yml` includes `cardano-node`, `ogmios`, and `kupo` (the address→tx index backing `POST /api/v1/backfill`, configured via `KUPO_URL` / `KUPO_SINCE` / `KUPO_MATCH`) services gated behind the `ingestion` profile. Start with `docker-compose --profile ingestion up`. Requires a populated config directory at `./cardano-config/preprod/` (override with `CARDANO_CONFIG_DIR`) containing `config.json`, `topology.json`, and the four genesis files (`byron-genesis.json`, `shelley-genesis.json`, `alonzo-genesis.json`, `conway-genesis.json`), plus `checkpoints.json` and `peer-snapshot.json` where the network's config and topology reference them, all co-located. Run `./scripts/fetch-cardano-config.sh preprod` to download the set in one pass from the Cardano environments listing at https://book.world.dev.cardano.org/environments.html rather than picking files individually: `config.json` references the genesis files (and `checkpoints.json`, where used) by filename **and hash**, and `topology.json` references `peer-snapshot.json`, so a missing or edited file fails the hash check at node startup. Also needs ~30 GB disk and a multi-hour initial chain sync. Leave `OGMIOS_WS_URL=ws://localhost:1337` (the default).
 
 | Component | Version | Notes |
 |---|---|---|
@@ -732,6 +732,10 @@ below.
 | `NOTIFY_REPORT_TOP_ALERTS` | `10` | Alerts included in a digest report |
 | `NOTIFY_CONTRACT_ANOMALY_POLL_SECONDS` | `60` | Poll cadence for the contract-anomaly alert path |
 | `NOTIFY_CONTRACT_ANOMALY_MAX_ALERTS_PER_TICK` | `50` | Cap on contract-anomaly alerts emitted per poll |
+| `NOTIFY_RETRY_CHECK_INTERVAL_SECONDS` | `60` | Failed-delivery retry sweep cadence (the scorer path's dead letter; see [docs/ALERTING.md](docs/ALERTING.md#the-scorer-path-retries-through-a-dead-letter)) |
+| `NOTIFY_RETRY_BACKOFF_SECONDS` | `60` | Base delay before a failed alert is retried; doubles per attempt, capped near an hour |
+| `NOTIFY_RETRY_MAX_ATTEMPTS` | `8` | Retries before a failed alert is retired (kept in `failed_notifications`, marked abandoned, logged at ERROR) |
+| `NOTIFY_RETRY_MAX_PER_TICK` | `20` | Cap on retries attempted per sweep, pacing a backlog drain |
 
 **Auth and SMTP (advanced).** The common auth variables are in the main
 table; these are the rest.

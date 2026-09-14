@@ -64,6 +64,17 @@ Everything about routing lives in a single JSON document held as one JSONB row i
 
 **On a fresh database** the safe default is seeded automatically: email enabled with the placeholder recipient `ops@example.com`, webhook disabled with an empty URL, one group alias (`soc-team`) holding the same placeholder, Critical and High routed to both channels, Moderate and Informational silent, and a `periodic_report` block that is present but disabled. That placeholder address is not a working destination. Changing it is the first thing to do on a new deployment.
 
+### Who Is Notified: Node Operators and Other Recipients
+
+The alert mechanism is recipient-agnostic by design: it routes to whatever addresses and URLs this document names, and nothing in the system discovers destinations on its own. Who is notified is therefore a deployment decision made by the Admin who edits this document, not a property of the software; there is no self-serve subscription path, which keeps this document the single control point for who the system may page.
+
+For the system's operating audience, node operators and the security contacts acting for them, onboarding a recipient is one of two moves:
+
+- **Email.** Add the operator's address to `channels.email.recipients`, directly or through a group alias. A dedicated group (for example `groups.node-operators`, referenced as `group:node-operators`) keeps the subscription list in one place: the channel, any per-rule `recipients` override, and the periodic report block can all reference it, so one edit adds or removes an operator everywhere.
+- **Webhook.** Point `channels.webhook.default_url`, or a rule-level webhook override, at an endpoint the operator runs. The payload is the versioned `immediate_alert` schema above and carries the HMAC signature described in the webhook channel section, so an operator can drive their own paging or ticketing from it without trusting transport alone.
+
+With the seeded defaults, Critical and High route to both channels, so a fresh deployment notifies its operators of the actionable bands as soon as the placeholder recipient is replaced with real addresses.
+
 ### version
 
 | Field | Type | Default | Meaning |
@@ -261,7 +272,7 @@ Because `band_rank` holds a high-water mark rather than a timestamp of the last 
 - **A re-score at the same or a lower band does not.** `tx_class_scores` is a `ReplacingMergeTree` and a transaction can legitimately surface as newly scored more than once, so this is what prevents the same finding paging repeatedly.
 - **De-escalation is silent.** A Critical that later re-scores as High produces no notification, which is correct: the operator was already told about the worse case.
 
-**The claim is written only after at least one channel actually delivered.** `_deliver_with_dedup` performs a read-only pre-check, then dispatches, and only calls `claim_notification` if the dispatcher reported at least one successful channel. A total delivery failure records nothing, leaving the transaction eligible to alert again. This ordering is recall-first: it prefers a possible duplicate over a silently dropped alert. The narrow TOCTOU window where two concurrent re-scores both deliver can produce a duplicate push, never a miss. It is also worth being clear that on the scorer path this "leave it eligible" property is largely theoretical, for the reason set out in the next section.
+**The claim is written only after at least one channel actually delivered.** `_deliver_with_dedup` performs a read-only pre-check, then dispatches, and only calls `claim_notification` if the dispatcher reported at least one successful channel. A total delivery failure records no claim, leaving the transaction eligible to alert again. This ordering is recall-first: it prefers a possible duplicate over a silently dropped alert. The narrow TOCTOU window where two concurrent re-scores both deliver can produce a duplicate push, never a miss. On the scorer path the eligibility alone would be theoretical (the engine never re-presents a scored transaction), which is why a total failure is additionally dead-lettered for the retry sweep; see the failure-behaviour section.
 
 If the dedup **check** itself fails (Postgres unreachable), the code logs the exception and delivers anyway, on the same principle.
 
@@ -333,31 +344,29 @@ All recipients for one dispatch go out in a single SMTP transaction with one `To
 
 An SMTP failure is logged (`SMTP send failed: ...`) and returns `ok=False`. The message is not queued anywhere and is not tried again.
 
-### The Scorer Path Does Not Retry, In Practice
+### The Scorer Path Retries Through a Dead Letter
 
-This is the most consequential fact in this document.
+The engine itself never retries an alert, because it never re-presents a scored transaction. Its poll query, `clickhouse_scores.get_unanalyzed_transactions`, is a `LEFT ANTI JOIN` of `transactions` against `tx_class_scores`: a transaction is "unanalyzed" precisely as long as it has no score row, and in `engine.run_once` the score rows are inserted **before** the alert hook runs. By the time the alert is attempted, the transaction has already stopped satisfying the poll's predicate, and the periodic full rescan uses the same anti-join, so it does not resurface it either.
 
-`_deliver_with_dedup` is written so that a total delivery failure records no dedup claim, "so the alert is retried on the next re-score". That comment is accurate about the ledger and misleading about the outcome, because in normal operation **there is no next re-score**.
+That is why a scorer alert whose **every** channel failed is dead-lettered instead: `_deliver_with_dedup` records it in the `failed_notifications` table (Postgres), and a retry sweep in the notification scheduler re-attempts it until it delivers or the attempt budget is spent. The sweep's behaviour:
 
-The engine's poll query, `clickhouse_scores.get_unanalyzed_transactions`, is a `LEFT ANTI JOIN` of `transactions` against `tx_class_scores` (`backend/app/db/clickhouse_scores.py:885`). A transaction is "unanalyzed" precisely as long as it has no row in `tx_class_scores`. And in `engine.run_once` the score rows are inserted **before** the alert hook runs:
+- It wakes every `NOTIFY_RETRY_CHECK_INTERVAL_SECONDS` (default 60) and takes at most `NOTIFY_RETRY_MAX_PER_TICK` due rows, oldest failure first, so a backlog drains at a bounded pace.
+- A row is due on an exponential backoff: `NOTIFY_RETRY_BACKOFF_SECONDS` (default 60) after the first failure, doubling per attempt up to a capped ceiling of about an hour.
+- Each retry re-routes against the **current** configuration. Fixing the stale URL or the empty recipient list therefore heals the whole backlog on the next sweep, with no restart. If the operator has since unrouted that band and class, the row is withdrawn rather than delivered against a stale route.
+- Delivery still goes through the same dedup: if a rollback-driven re-score delivered the alert in the meantime, the sweep sees the claim and drops the row instead of duplicating.
+- After `NOTIFY_RETRY_MAX_ATTEMPTS` (default 8, roughly two hours of receiver outage) the row is retired: kept in the table, marked `abandoned`, and logged at ERROR with the transaction hash. Abandoned rows age out with the same `NOTIFY_DEDUP_RETENTION_DAYS` knob as the dedup ledgers.
 
-```python
-clickhouse.insert_class_scores(results)      # engine.py:550
-notifications.on_new_scores(results, network)  # engine.py:553
-```
+A partial failure is not dead-lettered: if any channel delivered, the alert is claimed as sent, and the failed channel's miss is visible only in the dispatch audit row. The dead letter exists for the total failure, which previously lost the push outright.
 
-So by the time the alert is even attempted, the transaction has already stopped satisfying the poll's predicate. The periodic full rescan uses the same anti-join with the time bound removed, so it does not resurface it either. **The engine never presents an already-scored transaction to the scorer again**, and therefore a scorer alert that fails on every channel is not re-attempted. It is lost from the outbound path.
+The chain-rollback path is unchanged: `clickhouse.delete_score_rows` purges score rows for rolled-back transactions, a re-confirmed transaction is re-scored, and its surviving `notified_alerts` row means the re-alert fires only on escalation to a higher band.
 
-The one real exception is a chain rollback. `clickhouse.delete_score_rows` purges `tx_class_scores` rows for rolled-back transactions specifically so a re-confirmed transaction becomes unanalyzed again; that transaction will be re-scored and can alert again. Note that its `notified_alerts` row survives the rollback, so the re-alert only fires if the new band is higher than the old one.
-
-The offline re-score scripts under `backend/scripts/oneoff/` are not an exception. They rewrite `tx_class_scores` rows directly through `clickhouse.insert_class_scores`, never through the engine, so they neither make a transaction unanalyzed nor call the alert hook: a bulk re-score changes what the dashboard and the report show and emits nothing.
+The offline re-score scripts under `backend/scripts/oneoff/` remain outside all of this. They rewrite `tx_class_scores` rows directly, never through the engine, so they neither make a transaction unanalyzed nor call the alert hook: a bulk re-score changes what the dashboard and the report show and emits nothing.
 
 What this means operationally:
 
-- A failed alert is **not** lost from the system. The score row exists, the transaction appears in the dashboard with its band and class, and it is counted in the periodic report. Only the push was lost.
-- The compensating controls are the dashboard and the periodic report, not a retry.
-- If at-least-once paging matters to you, the receiver's availability is the thing to invest in, since the sender will not compensate for it. A receiver that answers 2xx quickly and queues internally is the recommended shape, and is what the RUNBOOK's webhook contract advises.
-- Watch for `notification via ... failed` and `notification channel ... errored` in the application log. Those lines are the only indication that an alert was produced and not delivered.
+- A failed alert was never lost from the system (the score row, dashboard entry and report count always existed); with the dead letter it is no longer lost from the outbound path either, up to the attempt budget.
+- A receiver that answers 2xx quickly and queues internally is still the recommended shape: the sweep compensates for an outage, not for a receiver that is permanently down. An abandoned row means roughly two hours of failed attempts, and someone should read the ERROR log line that retires it.
+- Watch for `notification via ... failed` / `notification channel ... errored` (each failed attempt), `notification retry: giving up` (an abandoned alert), and the `failed_notifications` table itself (`SELECT * FROM failed_notifications` shows every pending and abandoned push).
 
 ### The contract_anomaly Path Does Retry
 
@@ -561,7 +570,7 @@ cd backend
 
 **On signing.** Signing is off unless `WEBHOOK_SIGNING_SECRET` is set; the sender simply omits the header and delivery is otherwise identical. Set the secret on both sides or neither. A receiver holding a secret will flag every request from an unsigned sender.
 
-Automated coverage for this subsystem is 97 tests across `backend/tests/notifications/` (92) and `backend/tests/api/test_notifications_config.py` (5), plus the frontend linter and settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
+Automated coverage for this subsystem is 117 tests across `backend/tests/notifications/` (111) and `backend/tests/api/test_notifications_config.py` (6), plus the live-Postgres dead-letter tests in `backend/tests/live_db/test_failed_notifications_pg.py`, the frontend linter and the settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
 
 ## Common Misconfigurations
 

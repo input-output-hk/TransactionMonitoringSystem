@@ -33,14 +33,14 @@ sidecar.
 
 | Tree | Files | Lines | Contents |
 |---|---|---|---|
-| `backend/` | 248 | 56,427 | FastAPI application, ingestion, detection scorers, API, tests |
+| `backend/` | 251 | 57,478 | FastAPI application, ingestion, detection scorers, API, tests |
 | `services/clustering/` | 170 | 30,502 | Clustering sidecar: its own deployable, own Python project, own CI job |
 | `config/` | 2 | 1,043 | `detection.yaml` (927 lines), `performance.yaml` (116 lines) |
 
 Counts exclude lockfiles (`services/clustering/backend/uv.lock`).
 
 Within `backend/`: `backend/app/` is 100 Python files and 28,638 lines of source;
-`backend/tests/` is 115 files and 22,508 lines. The largest application modules,
+`backend/tests/` is 118 files and 23,097 lines. The largest application modules,
 counted in Python files, are `analysis/` (26, the nine detection scorers), `api/`
 (13), `notifications/` (12), `ingestion/` (10), and `db/` and `auth/` (8 each).
 The Alerting table below counts every tracked file rather than only Python, so
@@ -110,22 +110,22 @@ levels let an escalation to a higher band through immediately, so neither can
 cost a detection. See
 [ALERTING.md](ALERTING.md#per-group-one-alert-per-script-per-window).
 
-This is the one subsystem that does not sit under a single prefix. It is 36
-files and 6,092 lines across the seven locations below.
+This is the one subsystem that does not sit under a single prefix. It is 39
+files and 6,945 lines across the seven locations below.
 
 | Location | Files | Lines | Contents |
 |---|---|---|---|
-| `backend/app/notifications/` | 13 | 2,178 | Config schema and validator, dispatcher, trigger routing, payloads, report builder, channel registry, alert grouping, `channels/email.py`, `channels/webhook.py` |
-| `backend/app/tasks/notifications.py` | 1 | 233 | Periodic-report scheduler and the `contract_anomaly` poller |
-| `backend/app/api/notifications_config.py` | 1 | 108 | `GET`/`PUT /api/v1/notifications/config`, admin-gated |
-| `backend/tests/notifications/` + `backend/tests/api/test_notifications_config.py` | 9 | 1,429 | 97 tests |
-| `backend/scripts/webhook_testing/` | 6 | 555 | Three-tier delivery test harness and a reference receiver |
-| `backend/tests/live_db/test_alert_grouping_pg.py` | 1 | 201 | Live-Postgres tests for the group-dedup ledger's band-escalation and window-expiry guards |
+| `backend/app/notifications/` | 13 | 2,332 | Config schema and validator, dispatcher, trigger routing, payloads, report builder, channel registry, alert grouping, `channels/email.py`, `channels/webhook.py` |
+| `backend/app/tasks/notifications.py` | 1 | 325 | Periodic-report scheduler, the `contract_anomaly` poller, and the failed-delivery retry sweep |
+| `backend/app/api/notifications_config.py` | 1 | 116 | `GET`/`PUT /api/v1/notifications/config`, admin-gated |
+| `backend/tests/notifications/` + `backend/tests/api/test_notifications_config.py` | 11 | 1,830 | 117 tests |
+| `backend/scripts/webhook_testing/` | 6 | 568 | Three-tier delivery test harness and a reference receiver |
+| `backend/tests/live_db/test_alert_grouping_pg.py` + `test_failed_notifications_pg.py` | 2 | 386 | Live-Postgres tests for the group-dedup ledger's band-escalation and window-expiry guards, and the dead-letter backoff, escalation and retention SQL |
 | `frontend/src` (5 files) | 5 | 1,388 | `NotificationsSettingsPage.tsx` (851), its test, the API client, and the pre-save config linter |
 
 **Runtime configuration** is a single JSONB document in Postgres
 (`notification_config`), edited through the admin UI or the config API and
-hot-reloaded without a restart. The 16 `NOTIFY_*`, `WEBHOOK_*` and
+hot-reloaded without a restart. The 20 `NOTIFY_*`, `WEBHOOK_*` and
 `EMAIL_NOTIFY_*` environment settings are read at startup and need a restart;
 they are documented in the [RUNBOOK configuration reference](../RUNBOOK.md).
 
@@ -150,7 +150,7 @@ These belong to no single subsystem.
 
 ## Test inventory
 
-2,041 automated tests across six tiers. The recall gate is a subset of the
+2,066 automated tests across six tiers. The recall gate is a subset of the
 backend suite rather than a seventh tier, so it is listed but not added into the
 total. A CI step re-collects every tier on each run and fails the build if these
 figures drift, so a stale count here is a build failure rather than something a
@@ -158,9 +158,9 @@ reader has to catch.
 
 | Tier | Location | Tests |
 |---|---|---|
-| Backend hermetic | `backend/tests/` | 1,332 |
+| Backend hermetic | `backend/tests/` | 1,352 |
 | Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 578 |
-| Backend live-DB | `backend/tests/live_db/` | 33 |
+| Backend live-DB | `backend/tests/live_db/` | 38 |
 | Clustering sidecar | `services/clustering/backend/tests/` | 497 |
 | Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 8 |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 |
@@ -185,13 +185,14 @@ git ls-files backend/app | grep '\.py$' | xargs wc -l | tail -1
 git ls-files frontend/src | grep -E '\.tsx?$' | xargs wc -l | tail -1
 
 # The alerting tree, which spans seven locations. All seven must be listed or
-# the total falls short of the 36 files / 6,092 lines quoted above; the
+# the total falls short of the 39 files / 6,945 lines quoted above; the
 # live-Postgres grouping test is the one easily missed.
 git ls-files \
   backend/app/notifications backend/app/tasks/notifications.py \
   backend/app/api/notifications_config.py backend/tests/notifications \
   backend/tests/api/test_notifications_config.py backend/scripts/webhook_testing \
   backend/tests/live_db/test_alert_grouping_pg.py \
+  backend/tests/live_db/test_failed_notifications_pg.py \
   frontend/src/pages/NotificationsSettingsPage.tsx \
   frontend/src/pages/NotificationsSettingsPage.test.tsx \
   frontend/src/lib/api/notifications.ts frontend/src/lib/notification-warnings.ts \
@@ -201,12 +202,14 @@ git ls-files \
 # repository root: a bare `cd` chain would leave the shell in backend/ and the
 # next line would fail to find its directory.
 #
-# The two opt-in tiers are skipped at COLLECTION without their flag, so without
-# it they report zero rather than their row in the table above. That is also why
-# the hermetic count is unaffected by them.
+# The three opt-in tiers (backend live-DB, perf, sidecar live-DB) are skipped at
+# COLLECTION without their flag, so without it they report zero rather than
+# their row in the table above. That is also why the hermetic counts are
+# unaffected by them: the sidecar's bare collection excludes its live tier.
 (cd backend && ../.venv/bin/python -m pytest tests/ -q --co | tail -1)
 (cd backend && TMS_LIVE_DB_TESTS=1 ../.venv/bin/python -m pytest tests/live_db -q --co | tail -1)
 (cd backend && TMS_PERF_TESTS=1 ../.venv/bin/python -m pytest tests/perf -q --co | tail -1)
 (cd services/clustering/backend && ./.venv/bin/python -m pytest -q --co | tail -1)
+(cd services/clustering/backend && TMS_LIVE_DB_TESTS=1 ./.venv/bin/python -m pytest tests/live_db -q --co | tail -1)
 (cd frontend && pnpm vitest run)
 ```
