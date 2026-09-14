@@ -339,3 +339,50 @@ jobs:
           # `warn` and 90 days.
           if-no-files-found: warn
           retention-days: 90
+
+  e2e:
+    name: E2E (full stack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+      # The whole tier lives in one script so a local `./scripts/e2e.sh`
+      # reproduces this job exactly: build the app image from source, start
+      # postgres + clickhouse + mailpit + app on the isolated tms-e2e project,
+      # seed deterministic findings, bootstrap the admin, run the suite,
+      # tear down.
+      - name: Build, seed, and run the E2E suite
+        run: ./scripts/e2e.sh
+      - name: Published test counts (E2E tier)
+        if: always()
+        working-directory: frontend
+        run: |
+          if [ -f junit-e2e.xml ]; then
+            n=$(python3 -c "import xml.etree.ElementTree as T; \
+              print(T.parse('junit-e2e.xml').getroot().get('tests'))")
+            python3 ../backend/scripts/check_doc_counts.py \
+              --observed "frontend/e2e/=$n"
+          fi
+      - name: Upload E2E results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            frontend/junit-e2e.xml
+            frontend/e2e-results/
+          if-no-files-found: warn
+          retention-days: 90

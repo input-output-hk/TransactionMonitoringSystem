@@ -45,6 +45,7 @@ SIDECAR_LIVE_DB = "services/clustering/backend/tests/live_db/"
 PERF_TIER = "backend/tests/perf/"
 SIDECAR = "services/clustering/backend/tests/"
 FRONTEND = "frontend/src/**/*.test.{ts,tsx}"
+E2E = "frontend/e2e/"
 
 TIER_LOCATIONS = (
     BACKEND_HERMETIC,
@@ -54,6 +55,7 @@ TIER_LOCATIONS = (
     PERF_TIER,
     SIDECAR,
     FRONTEND,
+    E2E,
 )
 
 # The recall gate is a subset of the backend hermetic suite, not a seventh tier,

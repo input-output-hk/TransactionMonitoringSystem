@@ -375,6 +375,123 @@ def resolve_recipients(recipients: list[str]) -> list[str]:
     return out
 
 
+def deliverability_warnings(doc: dict[str, Any]) -> list[str]:
+    """Config problems that pass validation but silently prevent delivery.
+
+    Validation (``_validate``) checks the document's SHAPE; whether the routed
+    channels can actually deliver is only discovered at send time, where the
+    dispatcher drops an undeliverable channel with a log line (the "config
+    gap"). This lint closes the gap at write time: the PUT handler returns
+    these warnings with its 200 so an API caller learns immediately what the
+    dashboard's pre-save banner would have told them.
+
+    The rules mirror ``configWarnings`` in
+    ``frontend/src/lib/notification-warnings.ts`` (which lints the same
+    document before save in the UI); a rule added on either side belongs on
+    both. Warnings never reject the document: an admin may legitimately store
+    an incomplete config mid-edit, and the seeded default itself routes to a
+    placeholder address.
+    """
+    out: list[str] = []
+    channels: dict[str, Any] = doc.get("channels") or {}
+    groups: dict[str, Any] = doc.get("groups") or {}
+    triggers = doc.get("triggers") or {}
+    defaults: dict[str, Any] = triggers.get("defaults") or {}
+    rules: list[dict[str, Any]] = triggers.get("rules") or []
+
+    def is_on(name: str) -> bool:
+        return bool((channels.get(name) or {}).get("enabled"))
+
+    def routed_in_defaults(name: str) -> bool:
+        return any(name in (defaults.get(b) or []) for b in _VALID_BANDS)
+
+    def routed_in_rules(name: str) -> bool:
+        return any(name in (r.get("channels") or []) for r in rules)
+
+    def expanded_count(recipients: list[str] | None) -> int:
+        # Counted AFTER group expansion, matching resolve_recipients: a list of
+        # one alias whose group is empty resolves to zero addresses.
+        n = 0
+        for r in recipients or []:
+            if r.startswith(_GROUP_PREFIX):
+                n += len(groups.get(r[len(_GROUP_PREFIX) :]) or [])
+            else:
+                n += 1
+        return n
+
+    # Routed (defaults or rule) but the channel's master gate is off: the
+    # dispatcher drops it no matter what the matrix says.
+    off_but_routed = sorted(
+        name
+        for name in channels
+        if not is_on(name) and (routed_in_defaults(name) or routed_in_rules(name))
+    )
+    for name in off_but_routed:
+        out.append(
+            f"channel '{name}' is routed by the triggers but disabled under channels, "
+            "so those alerts are dropped at dispatch; enable the channel or unroute it."
+        )
+
+    # Webhook routed with nowhere to POST.
+    webhook_url = ((channels.get("webhook") or {}).get("default_url") or "").strip()
+    if is_on("webhook") and not webhook_url and routed_in_defaults("webhook"):
+        out.append(
+            "the webhook channel is routed in the band defaults but has no default_url, "
+            "so those alerts cannot be delivered."
+        )
+    if (
+        is_on("webhook")
+        and not webhook_url
+        and any(
+            "webhook" in (r.get("channels") or []) and not (r.get("webhook_url") or "").strip()
+            for r in rules
+        )
+    ):
+        out.append(
+            "a per-class rule routes to webhook but sets no webhook_url, and channels."
+            "webhook.default_url is empty, so it cannot be delivered."
+        )
+
+    # Recipient-bearing channel routed with nothing to deliver to (the case the
+    # audit's misconfiguration probe stored: email enabled, empty recipients,
+    # Critical routed to email only).
+    for name in channels:
+        if name == "webhook" or not is_on(name):
+            continue
+        default_count = expanded_count((channels.get(name) or {}).get("recipients"))
+        if default_count == 0 and routed_in_defaults(name):
+            out.append(
+                f"channel '{name}' is routed in the band defaults but resolves to no "
+                "recipients, so those alerts cannot be delivered."
+            )
+        # A per-rule override REPLACES the channel default rather than merging
+        # (triggers._resolve_recipients returns the override whenever the channel
+        # key is PRESENT, including an empty list), so key presence, not
+        # emptiness, decides which count applies.
+        for r in rules:
+            if name not in (r.get("channels") or []):
+                continue
+            override = (r.get("recipients") or {}).get(name)
+            dead = default_count == 0 if override is None else expanded_count(override) == 0
+            if dead:
+                out.append(
+                    f"a per-class rule routes to '{name}' but resolves to no recipients "
+                    "(a rule's recipient list replaces the channel default), so it "
+                    "cannot be delivered."
+                )
+                break
+
+    # Enabled but never routed anywhere: the inverse mistake.
+    for name in sorted(channels):
+        if is_on(name) and not routed_in_defaults(name) and not routed_in_rules(name):
+            out.append(
+                f"channel '{name}' is enabled but not selected in any band default or "
+                "rule, so it never fires."
+            )
+
+    return out
+
+
 def periodic_report_config() -> dict[str, Any]:
     """The periodic_report block with defaults applied.
 

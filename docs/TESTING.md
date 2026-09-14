@@ -10,15 +10,16 @@ latest commit.
 
 | Tier | Location | Count | Services needed | CI job |
 |---|---|---|---|---|
-| Backend hermetic | `backend/tests/` | 1332 | none (all I/O mocked) | Backend (pytest + recall gate) |
+| Backend hermetic | `backend/tests/` | 1352 | none (all I/O mocked) | Backend (pytest + recall gate) |
 | Recall gate | `backend/tests/analysis/` | 578 (subset of the above) | none | Backend (run first, on its own) |
-| Live-DB tier | `backend/tests/live_db/` | 33 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Live-DB tier | `backend/tests/live_db/` | 38 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 8 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
 | Clustering sidecar | `services/clustering/backend/tests/` | 497 | none | Clustering sidecar (pytest) |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 | none | Frontend (lint + build) |
+| End-to-end | `frontend/e2e/` | 11 | the whole stack (app + Postgres + ClickHouse + Mailpit), via `./scripts/e2e.sh` | E2E (full stack) |
 
-That is 2,041 tests across the six independent tiers (the recall gate is a
+That is 2,077 tests across the seven independent tiers (the recall gate is a
 subset of the backend suite, not an additional tier, so it is not added into
 the total). A CI step re-collects every tier on each run and fails the build if
 this table drifts.
@@ -163,6 +164,51 @@ CI runs `pnpm lint`, the Vitest suite, and `pnpm build` in the Frontend job. The
 test step writes JUnit XML, which the next step reads to check the count in the
 table above, so the suite runs once rather than twice.
 
+## End-to-end tier
+
+Every tier above stubs something: the hermetic suites mock their I/O, the
+live-DB tier drives the API through `TestClient` rather than a served
+application, and the Vitest suite renders components without a backend. So all
+of them can pass while the assembled stack does not come up, or comes up and
+cannot complete a workflow an operator actually performs. This tier closes that
+gap: it builds the production image from source, starts it with Postgres,
+ClickHouse and Mailpit, and drives the served dashboard in a real browser
+(Playwright, `frontend/e2e/`).
+
+```bash
+./scripts/e2e.sh                    # up, seed, test, tear down
+E2E_KEEP_STACK=1 ./scripts/e2e.sh   # leave the stack up to inspect it
+./scripts/e2e.sh --headed           # arguments pass through to Playwright
+```
+
+One script owns the whole tier, so a local run and the `E2E (full stack)` CI job
+are the same run. It builds the image, waits for `/health`, seeds deterministic
+findings (`backend/scripts/e2e/seed.py`: eight scored transactions, six of them
+in the dashboard's default High + Critical view), bootstraps an admin through
+`app.cli create-admin` and hands the magic link to Playwright, then tears the
+stack down. Isolation is deliberate: its own compose project, container names,
+volumes and host ports, with `.env.e2e` as the app's only environment source, so
+the tier neither collides with a running dev stack nor inherits a developer's
+`.env`.
+
+What the specs cover, chosen as the workflows an operator performs and the
+failure paths that matter:
+
+| Spec | Covers |
+|---|---|
+| `stack-readiness` | `/health`, the unauthenticated redirect to sign-in, and the dashboard shell rendering with no console errors |
+| `alert-review` | seeded detections in the default severity view, the filter widening the result set, and an alert's full risk score with its sub-scores |
+| `archive-restore` | archiving as a false positive (the reason is required), the audit trail in the Archive, and the restore round-trip |
+| `csv-import-export` | importing externally sourced attack data with per-row validation and an explicit confirm, then exporting the archive |
+| `reports-export` | the reporting window and its CSV export |
+| `roles` | inviting a Reviewer, redeeming the invite from Mailpit in a fresh browser, and the admin-only area denied both in the UI and with **403** at the API |
+
+The seed is a pure function of its row index and the score table dedups on
+`(network, tx_hash)`, so re-running the tier does not accumulate data. The
+specs leave the data as they found it (the archive spec restores what it
+archived), and the one row they genuinely create, the invited Reviewer, uses a
+per-run address.
+
 ## Continuous integration
 
 Every pull request, and every push to `main`, runs the `CI` workflow, with
@@ -173,6 +219,7 @@ these jobs:
 - **Live-DB tier (ClickHouse 26.x + Postgres)**: the host live-DB tests, then the sidecar's live tier (schema via `app.cli migrate`), against real database containers.
 - **Frontend (lint + build)**: lint, unit tests, and build.
 - **Clustering sidecar (pytest)**: the sidecar suite.
+- **E2E (full stack)**: `./scripts/e2e.sh`, which builds the image, brings the stack up, seeds, and drives the dashboard in a browser.
 
 CodeQL runs separately on pushes and pull requests. The `Performance` workflow
 is dispatch/schedule-only (it needs its own database containers and is not on

@@ -1,5 +1,5 @@
-"""Background notification tasks: the periodic report scheduler and the
-clustering-sidecar contract_anomaly poller.
+"""Background notification tasks: the periodic report scheduler, the
+clustering-sidecar contract_anomaly poller, and the failed-delivery retry sweep.
 
 The report scheduler wakes on a short interval, checks whether a report is due
 (the configured frequency vs the persisted ``last_sent_at``), and when due
@@ -10,6 +10,11 @@ The contract_anomaly poller (only started when ``CLUSTERING_ENABLED``) reads the
 clustering sidecar's verdicts and fires an immediate alert for each routed one.
 contract_anomaly is the sidecar's read-time-only class — it never reaches
 ``on_new_scores`` — so this poller is its only notification path.
+
+The retry sweep re-attempts scorer alerts whose every channel failed
+(dead-lettered in ``failed_notifications``), because the scorer path has no
+natural re-emit: without it, a receiver outage at the wrong moment silently
+loses the alert (recall-first: never drop a real alert).
 
 Mirrors :mod:`app.tasks.analysis`: module-level tasks, idempotent
 ``start()``/``stop()``, and ``_loop``s with per-tick error isolation.
@@ -24,6 +29,7 @@ from app.config import settings
 from app.db import postgres
 from app.notifications import (
     DELIVER_DUPLICATE,
+    DELIVER_FAILED,
     _deliver_with_dedup,
     config,
     dispatcher,
@@ -32,6 +38,7 @@ from app.notifications import (
 )
 from app.notifications.channels.base import Attachment
 from app.notifications.payloads import (
+    ImmediateAlert,
     build_contract_anomaly_alert,
     build_degraded_contract_anomaly_alert,
 )
@@ -45,6 +52,7 @@ _CSV_GZIP_THRESHOLD_BYTES = 1_000_000
 
 _task: "asyncio.Task | None" = None
 _ca_task: "asyncio.Task | None" = None
+_retry_task: "asyncio.Task | None" = None
 
 
 async def _tick() -> None:
@@ -192,6 +200,85 @@ async def _contract_anomaly_tick() -> None:
             logger.exception("contract_anomaly poll: skipping %s", tx_hash)
 
 
+async def _retry_tick() -> None:
+    """Re-attempt dead-lettered scorer alerts (failed_notifications).
+
+    A row lands there when a scorer alert's every channel failed
+    (``_deliver_with_dedup(record_failure=True)``). Each due row is re-routed
+    against the CURRENT config (the single source of truth, and a hot-reloaded
+    fix to a stale URL or an empty recipient list heals the backlog):
+
+      - no longer routed -> the operator silenced this (band, class); withdraw
+        the row rather than deliver against a stale route;
+      - delivered, or claimed meanwhile by a re-score's own delivery -> done;
+      - failed again -> back off exponentially, and after
+        ``NOTIFY_RETRY_MAX_ATTEMPTS`` retire the row (kept, marked abandoned,
+        logged at ERROR) so a dead endpoint is not hammered forever while the
+        failure stays visible.
+    """
+    rows = await postgres.due_failed_notifications(
+        settings.NOTIFY_RETRY_BACKOFF_SECONDS,
+        settings.NOTIFY_RETRY_MAX_PER_TICK,
+    )
+    for row in rows:
+        network, tx_hash, source = row["network"], row["tx_hash"], row["source"]
+        try:
+            payload = ImmediateAlert.model_validate(row["payload"])
+            dispatches = triggers.resolve_dispatch(row["band"], payload.attack_class)
+            if not dispatches:
+                await postgres.delete_failed_notification(network, tx_hash, source)
+                logger.info(
+                    "notification retry: %s/%s no longer routed at %s; withdrawn",
+                    network,
+                    tx_hash,
+                    row["band"],
+                )
+                continue
+            status = await _deliver_with_dedup(
+                network,
+                tx_hash,
+                row["band"],
+                payload,
+                dispatches,
+                source=source,
+                group=row["group_key"],
+            )
+            if status == DELIVER_FAILED:
+                give_up = row["attempts"] + 1 >= settings.NOTIFY_RETRY_MAX_ATTEMPTS
+                await postgres.mark_failed_attempt(network, tx_hash, source, abandoned=give_up)
+                if give_up:
+                    logger.error(
+                        "notification retry: giving up on %s/%s at %s after %d attempts; "
+                        "the alert was never delivered (row kept in failed_notifications, "
+                        "dispatch failures in audit_logs)",
+                        network,
+                        tx_hash,
+                        row["band"],
+                        row["attempts"] + 1,
+                    )
+            else:
+                # DELIVER_SENT, or DELIVER_DUPLICATE because a re-score's own
+                # delivery claimed it meanwhile: either way, done.
+                await postgres.delete_failed_notification(network, tx_hash, source)
+        except Exception:
+            logger.exception("notification retry: skipping %s", tx_hash)
+
+
+async def _retry_loop() -> None:
+    logger.info(
+        "Notification retry sweep started (interval=%ss)",
+        settings.NOTIFY_RETRY_CHECK_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            await _retry_tick()
+        except Exception:
+            # Same per-tick isolation as the report scheduler: one bad sweep is
+            # diagnosable and never kills the loop.
+            logger.exception("Notification retry sweep error")
+        await asyncio.sleep(settings.NOTIFY_RETRY_CHECK_INTERVAL_SECONDS)
+
+
 async def _contract_anomaly_loop() -> None:
     logger.info(
         "contract_anomaly poller started (interval=%ss)",
@@ -214,20 +301,25 @@ def start() -> None:
     INDEPENDENTLY so restarting one never skips or double-spawns the other (a
     single ``_task``-only guard could leave the poller unstarted, or orphan a
     still-running poller behind a new one)."""
-    global _task, _ca_task
+    global _task, _ca_task, _retry_task
     if _task is not None and not _task.done():
         logger.warning("Notification scheduler already running; start() ignored")
     else:
         _task = asyncio.create_task(_loop())
     if settings.CLUSTERING_ENABLED and (_ca_task is None or _ca_task.done()):
         _ca_task = asyncio.create_task(_contract_anomaly_loop())
+    if _retry_task is None or _retry_task.done():
+        _retry_task = asyncio.create_task(_retry_loop())
 
 
 def stop() -> None:
-    global _task, _ca_task
+    global _task, _ca_task, _retry_task
     if _task and not _task.done():
         _task.cancel()
     _task = None
     if _ca_task and not _ca_task.done():
         _ca_task.cancel()
     _ca_task = None
+    if _retry_task and not _retry_task.done():
+        _retry_task.cancel()
+    _retry_task = None

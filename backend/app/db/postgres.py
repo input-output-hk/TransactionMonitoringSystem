@@ -370,6 +370,40 @@ async def execute_schema():
                 ON notified_alert_groups (notified_at)
         """)
 
+        # Dead-letter ledger for scorer-path alerts whose EVERY channel failed.
+        # The scorer path has no natural re-emit (a tx is normally scored once,
+        # so "retried on the next re-score" rarely comes), which made a
+        # receiver outage at the wrong moment silently lose the alert: a missed
+        # real attack, the worst outcome under the recall-first order. The
+        # retry sweep (app.tasks.notifications) re-attempts these rows with
+        # exponential backoff until delivery or the attempt budget is spent;
+        # an exhausted row is kept, marked abandoned, so the failure stays
+        # visible instead of vanishing. The contract_anomaly poller writes
+        # nothing here: it re-reads its flagged set every tick, which IS its
+        # retry. band_rank mirrors notified_alerts: an escalation replaces a
+        # pending lower-band row.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS failed_notifications (
+                network         TEXT NOT NULL,
+                tx_hash         TEXT NOT NULL,
+                source          TEXT NOT NULL DEFAULT 'scorer',
+                band            TEXT NOT NULL,
+                band_rank       SMALLINT NOT NULL,
+                group_key       TEXT,
+                payload         JSONB NOT NULL,
+                attempts        SMALLINT NOT NULL DEFAULT 1,
+                abandoned       BOOLEAN NOT NULL DEFAULT FALSE,
+                first_failed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, tx_hash, source)
+            )
+        """)
+        # The sweep's scan: live rows ordered by when they last failed.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_failed_notifications_sweep
+                ON failed_notifications (abandoned, last_attempt_at)
+        """)
+
         # Periodic-report scheduling state. One row per
         # (network, report_kind); last_sent_at is the boundary the scheduler
         # checks so a restart neither double-sends nor skips a period.
@@ -610,6 +644,142 @@ async def prune_notified_alerts(older_than_days: int) -> int:
             DELETE FROM notified_alerts
             WHERE notified_at < NOW() - ($1 * INTERVAL '1 day')
               AND source = 'scorer'
+        """,
+            older_than_days,
+        )
+        return int(result.split()[1])
+
+
+# --- Failed-delivery dead letter (scorer path) ---
+
+# Retry backoff: a row is due when last_attempt_at + base * 2^(attempts - 1)
+# has passed. The exponent is capped so a long-lived row's delay stays bounded
+# (with the default 60 s base the ceiling is 64x, about an hour between
+# attempts) instead of doubling into a never-due future.
+_RETRY_BACKOFF_MAX_DOUBLINGS = 6
+
+
+async def record_failed_notification(
+    network: str,
+    tx_hash: str,
+    band: str,
+    payload: dict[str, Any],
+    source: str = "scorer",
+    group_key: str | None = None,
+) -> None:
+    """Dead-letter one alert whose every channel failed, for the retry sweep.
+
+    Keyed like the dedup ledger. A re-failure at a HIGHER band replaces the
+    pending row (escalation must not deliver the stale lower-band payload) and
+    clears ``abandoned`` so the escalation gets a fresh attempt budget; a
+    same-or-lower re-failure is a no-op, leaving the sweep's attempt counter
+    alone so a concurrent live-path failure cannot reset the budget.
+    """
+    rank = _BAND_RANK.get(band, -1)
+    if rank < 0:
+        return  # unknown band: nothing the sweep could route later
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO failed_notifications
+                (network, tx_hash, source, band, band_rank, group_key, payload)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            ON CONFLICT (network, tx_hash, source) DO UPDATE
+                SET band = EXCLUDED.band,
+                    band_rank = EXCLUDED.band_rank,
+                    group_key = EXCLUDED.group_key,
+                    payload = EXCLUDED.payload,
+                    abandoned = FALSE
+                WHERE failed_notifications.band_rank < EXCLUDED.band_rank
+        """,
+            network,
+            tx_hash,
+            source,
+            band,
+            rank,
+            group_key,
+            json.dumps(payload),
+        )
+
+
+async def due_failed_notifications(
+    base_backoff_seconds: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """The oldest live dead-letter rows whose backoff has elapsed."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT network, tx_hash, source, band, group_key, payload, attempts
+            FROM failed_notifications
+            WHERE NOT abandoned
+              AND last_attempt_at
+                  + make_interval(secs => $1 * pow(2, LEAST(attempts - 1, $2)))
+                  <= CURRENT_TIMESTAMP
+            ORDER BY first_failed_at
+            LIMIT $3
+        """,
+            base_backoff_seconds,
+            _RETRY_BACKOFF_MAX_DOUBLINGS,
+            limit,
+        )
+    out = []
+    for row in rows:
+        d = dict(row)
+        # asyncpg returns JSONB as text unless a codec is registered.
+        if isinstance(d["payload"], str):
+            d["payload"] = json.loads(d["payload"])
+        out.append(d)
+    return out
+
+
+async def mark_failed_attempt(
+    network: str,
+    tx_hash: str,
+    source: str,
+    abandoned: bool,
+) -> None:
+    """Record one more failed retry; ``abandoned`` retires the row (kept,
+    visible) once the sweep's attempt budget is spent."""
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            UPDATE failed_notifications
+            SET attempts = attempts + 1,
+                last_attempt_at = CURRENT_TIMESTAMP,
+                abandoned = $4
+            WHERE network = $1 AND tx_hash = $2 AND source = $3
+        """,
+            network,
+            tx_hash,
+            source,
+            abandoned,
+        )
+
+
+async def delete_failed_notification(network: str, tx_hash: str, source: str) -> None:
+    """Drop a dead-letter row: delivered, superseded, or no longer routed."""
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            DELETE FROM failed_notifications
+            WHERE network = $1 AND tx_hash = $2 AND source = $3
+        """,
+            network,
+            tx_hash,
+            source,
+        )
+
+
+async def prune_failed_notifications(older_than_days: int) -> int:
+    """Retention for ABANDONED dead-letter rows only: a live row is bounded by
+    the attempt budget, and deleting it early would lose the pending retry."""
+    async with get_connection() as conn:
+        result = await conn.execute(
+            """
+            DELETE FROM failed_notifications
+            WHERE abandoned
+              AND last_attempt_at < NOW() - ($1 * INTERVAL '1 day')
         """,
             older_than_days,
         )

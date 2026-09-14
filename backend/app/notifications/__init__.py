@@ -106,7 +106,17 @@ def on_new_scores(results: list[dict[str, Any]], network: str) -> None:
             # large_datum today.
             group = grouping.group_key(r["max_class"], r.get("evidence"))
             asyncio.run_coroutine_threadsafe(
-                _deliver_with_dedup(network, r["tx_hash"], band, payload, dispatches, group=group),
+                _deliver_with_dedup(
+                    network,
+                    r["tx_hash"],
+                    band,
+                    payload,
+                    dispatches,
+                    group=group,
+                    # Scorer alerts have no natural re-emit, so a total-channel
+                    # failure is dead-lettered for the retry sweep.
+                    record_failure=True,
+                ),
                 loop,
             )  # future intentionally discarded — fire-and-forget
         except Exception:
@@ -125,6 +135,7 @@ async def _deliver_with_dedup(
     dispatches,
     source: str = "scorer",
     group: str | None = None,
+    record_failure: bool = False,
 ) -> str:
     """On the main loop: skip duplicates, deliver, then record the claim.
 
@@ -134,10 +145,17 @@ async def _deliver_with_dedup(
 
     Deliver-then-claim ordering: the dedup is a READ pre-check and the claim is
     written only AFTER at least one channel actually delivered. So a transient
-    total-channel failure records nothing and the alert is retried on the next
-    re-score (recall-first: never silently drop a real alert). The small TOCTOU
+    total-channel failure records no claim and the alert stays eligible
+    (recall-first: never silently drop a real alert). The small TOCTOU
     window where two concurrent re-scores both deliver risks at most a duplicate
     push, never a miss, which is the trade this system prefers.
+
+    ``record_failure`` additionally dead-letters a total-channel failure to
+    ``failed_notifications`` for the retry sweep. The scorer path passes True
+    because it has no natural re-emit (a tx is normally scored once); the
+    contract_anomaly poller and the sweep itself pass the default False, the
+    poller because its every-tick re-read already retries, the sweep because it
+    owns the row's attempt counter.
 
     ``source`` selects the dedup stream: ``'scorer'`` for the per-tx immediate
     alerts (default) and ``'contract_anomaly'`` for the clustering poller, so
@@ -198,7 +216,26 @@ async def _deliver_with_dedup(
     async with _get_delivery_sema():
         delivered = await dispatcher.dispatch(payload, dispatches)
     if not delivered:
-        return DELIVER_FAILED  # nothing sent: leave unclaimed so a re-score retries
+        if record_failure:
+            try:
+                await postgres.record_failed_notification(
+                    network,
+                    tx_hash,
+                    band,
+                    payload.model_dump(),
+                    source=source,
+                    group_key=group,
+                )
+            except Exception:
+                # Best-effort: the dead letter is the retry vehicle, not the
+                # record of the finding (that is tx_class_scores + audit_logs),
+                # so a failure to write it must not raise out of delivery.
+                logger.exception(
+                    "notification dead-letter record failed for %s/%s",
+                    network,
+                    tx_hash,
+                )
+        return DELIVER_FAILED  # nothing sent: leave unclaimed; the sweep retries
     try:
         await postgres.claim_notification(network, tx_hash, band, source=source)
     except Exception:

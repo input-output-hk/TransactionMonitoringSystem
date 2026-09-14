@@ -657,6 +657,21 @@ class Settings(BaseSettings):
     # It bounds notifications only; every finding is still recorded and visible.
     # 0 disables grouping and restores pure per-transaction dedup.
     NOTIFY_GROUP_WINDOW_MINUTES: int = 60
+    # Failed-delivery retry: the scorer path's dead letter. An alert whose
+    # EVERY channel failed is recorded (failed_notifications) and re-attempted
+    # with exponential backoff until it delivers or the attempt budget is
+    # spent. The scorer path has no natural re-emit (a tx is normally scored
+    # once), so without this sweep a receiver outage at the wrong moment
+    # silently loses the alert: a missed real attack, the worst outcome under
+    # the recall-first order. The contract_anomaly poller is untouched; its
+    # every-tick re-read of the flagged set already retries.
+    NOTIFY_RETRY_CHECK_INTERVAL_SECONDS: int = 60  # sweep cadence
+    NOTIFY_RETRY_BACKOFF_SECONDS: float = 60.0  # base delay; doubles per attempt (capped)
+    # With the 60 s base and capped doubling, 8 attempts span roughly two
+    # hours of outage before the row is retired (kept, marked abandoned, and
+    # logged at ERROR) rather than retried forever against a dead endpoint.
+    NOTIFY_RETRY_MAX_ATTEMPTS: int = 8
+    NOTIFY_RETRY_MAX_PER_TICK: int = 20  # paces a backlog drain, like the poller cap
 
     # Logging
     LOG_LEVEL: str = "INFO"

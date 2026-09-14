@@ -128,6 +128,16 @@ async def _tick() -> None:
                     logger.info(f"Retention: pruned {n} group-alert dedup rows")
             except Exception as e:
                 logger.error(f"Group-alert retention sweep failed: {e}")
+            try:
+                # Only ABANDONED dead-letter rows: a live row still carries a
+                # pending retry the sweep owns.
+                n = await postgres.prune_failed_notifications(
+                    settings.NOTIFY_DEDUP_RETENTION_DAYS,
+                )
+                if n:
+                    logger.info(f"Retention: pruned {n} abandoned dead-letter rows")
+            except Exception as e:
+                logger.error(f"Dead-letter retention sweep failed: {e}")
 
 
 async def _loop():
