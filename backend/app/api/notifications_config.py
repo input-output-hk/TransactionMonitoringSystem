@@ -90,6 +90,14 @@ async def put_config(
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
+    # Deliverability lint (never a rejection: an admin may store an incomplete
+    # config mid-edit). Returned with the 200 so an API caller learns at write
+    # time what the dashboard's pre-save banner shows, instead of finding out
+    # from a send-time "config gap" log line.
+    warnings = notif_config.deliverability_warnings(doc)
+    for w in warnings:
+        logger.warning("notification config stored with a deliverability gap: %s", w)
+
     await postgres.set_notification_config(doc, admin.get("email") or "unknown")
     await notif_config.refresh_from_db()  # rebind the cache to the new doc
     notif_config.warn_if_webhook_egress_public()
@@ -105,4 +113,4 @@ async def put_config(
         actor=admin.get("email"),
         request=request,
     )
-    return {"status": "ok", "config": doc}
+    return {"status": "ok", "config": doc, "warnings": warnings}

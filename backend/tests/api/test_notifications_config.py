@@ -76,9 +76,29 @@ def test_put_valid_persists_and_refreshes(mocked):
     client = TestClient(app)
     r = client.put("/api/v1/notifications/config", json=VALID)
     assert r.status_code == 200
+    assert r.json()["warnings"] == []  # a deliverable doc carries no lint
     mocked["set"].assert_awaited_once()
     mocked["refresh"].assert_awaited_once()
     mocked["audit"].assert_awaited_once()
+
+
+def test_put_undeliverable_doc_is_stored_but_returns_warnings(mocked):
+    # The external review's misconfiguration probe: email enabled with an empty
+    # recipient list and Critical routed to email only. Valid in shape, so it
+    # persists (an admin may store an incomplete config mid-edit), but the 200
+    # now carries the deliverability lint instead of a bare acceptance.
+    _as_admin()
+    client = TestClient(app)
+    doc = {
+        "version": 1,
+        "channels": {"email": {"enabled": True, "recipients": []}},
+        "triggers": {"defaults": {"Critical": ["email"]}, "rules": []},
+    }
+    r = client.put("/api/v1/notifications/config", json=doc)
+    assert r.status_code == 200
+    warnings = r.json()["warnings"]
+    assert warnings and any("no recipients" in w for w in warnings)
+    mocked["set"].assert_awaited_once()
 
 
 def test_put_invalid_is_422_and_does_not_persist(mocked):
