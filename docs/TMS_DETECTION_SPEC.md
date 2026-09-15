@@ -1,6 +1,8 @@
 # TMS Detection Specification
 
-This document defines 9 attack classes that the TMS must detect on the Cardano blockchain. For each attack: what it is, what on-chain data to extract, how to score it, and what the TMS Forge test tool produces so you can validate your detection pipeline.
+This document defines the 9 per-transaction attack classes that the TMS must detect on the Cardano blockchain. For each attack: what it is, what on-chain data to extract, how to score it, and what the TMS Forge test tool produces so you can validate your detection pipeline.
+
+The engine emits one further class, `contract_anomaly`, which is not a per-transaction detector: it is the clustering sidecar's verdict on a watched contract's own transaction population, projected onto the same 0-100 scale and risk bands. It is specified in [Class 10: Contract Anomaly](#class-10-contract-anomaly-clustering-verdict) below, after the nine.
 
 All scoring uses the continuous 0-100 risk score framework from PolimiDocs (weighted averages of percentile-normalised sub-features, per-script/per-policy baselines, fallback to global baselines when < 200 historical samples).
 
@@ -657,6 +659,57 @@ Three tiers:
 - Look for: label 721 in `metadata_labels`, URL in `image` and `url` fields, social engineering in `name` and `description`
 
 
+## Class 10: Contract Anomaly (clustering verdict)
+
+### Definition
+The tenth class the engine can emit, and the only one that is not a per-transaction detector. `contract_anomaly` comes from the clustering sidecar (`services/clustering/`), which profiles a watched contract's own transaction population instead of examining a transaction in isolation. The nine classes above ask whether a transaction matches a known attack shape; this one asks whether a transaction is unlike the rest of what its contract does. The method is specified in [CLUSTERING.md](CLUSTERING.md) (operator guide) and `services/clustering/docs/algorithms.md` (algorithms and parameters); this section specifies only how the sidecar's verdict becomes a score, a band and an alert on the host side.
+
+### Scope
+Per watched contract. An operator onboards a script address or a minting policy, and the sidecar reads and fits that contract's transactions. Transactions outside a watched contract are ingested and scored by the nine classes above; nothing clusters them.
+
+### Gate Condition
+The transaction belongs to a watched contract that has a fitted model and a published verdict. There is no per-transaction gate, and no feature extraction happens on the host for this class.
+
+### Detection
+The sidecar clusters a contract's transactions with DBSCAN over one of three feature sets (shape, graph, combined) and ranks outliers with an ensemble of three detectors: Isolation Forest (global rarity, skipped on a graph run), Local Outlier Factor (local density), and DBSCAN noise. Detector scores are rank-normalised and averaged into a `consensus` in `[0, 1]`; separately each detector flags its most extreme rows, and `votes` counts the flags. Every transaction ends with one verdict, by this precedence:
+
+```
+explicit label > cluster-inherited label (malicious/benign) > auto-anomaly (votes >= flag_vote_threshold) > normal
+```
+
+`flag_vote_threshold` lives in the sidecar's tunables (validated into `[1, 3]`, default 2). Votes are already folded into the `anomaly` verdict upstream, so the host treats them as evidence only and never scores them again.
+
+### Scoring
+This class does not use the Score Composition formula. The sidecar stores only the raw `verdict` and `consensus`; the host projects them onto the 0-100 scale at READ time (`backend/app/analysis/contract_anomaly.py`). The projection is therefore the single source of truth, and changing it or the config floors applies to every historical row with no backfill. The host never trusts a precomputed score.
+
+```
+score = min(100, max(verdict_floor, consensus * scale))
+```
+
+| Verdict | Meaning | Floor | Scale | Resulting band |
+|---------|---------|-------|-------|----------------|
+| `malicious` | Human-labeled cluster: a confirmed attack | 80.0 | `consensus_scale` 100.0 | Critical, refined upward within Critical by consensus |
+| `anomaly` | Auto-detected outlier, no human label | 0.0 | `anomaly_consensus_scale` 59.0 | Informational or Moderate by strength, never higher |
+| `benign` | Human-labeled safe | Suppressed | n/a | 0, Informational |
+| `normal` | No finding | Suppressed | n/a | 0, Informational |
+
+All four values live in the `contract_anomaly` block of `config/detection.yaml`. Suppression keys on the verdict LABEL, not on the floor value: `anomaly` and `normal` both floor at 0, but the first is consensus-driven while the second suppresses outright, so a curated safe label is authoritative and consensus can never manufacture a finding from it. A missing consensus contributes nothing, so a `malicious` verdict still floors to Critical while an `anomaly` with no consensus projects to 0.
+
+### Why the auto-anomaly is capped at Moderate
+An unsupervised shape-outlier carries no exploit semantics. On a busy contract the consensus is bimodal, because DBSCAN noise saturates near 1.0 on benign top-quantile drift, so scaling it across the full range paged a wall of benign swaps as High and Critical on mainnet (Strike Finance and Djed v2, verified benign in July 2026: 64 of 68 alerts, including all 15 Critical). Capping the auto-anomaly inside Moderate removes those false positives without costing recall, which is what makes the cap admissible under the recall-first order: a real attack with an unusual shape is still banded independently by the nine detectors above, or promoted to Critical by a `malicious` label, and no flagged transaction is dropped. It stays scored, queryable and corroboration-eligible, banded by strength within Moderate. The band contract is enforced at config load by `scorer_config._BAND_INVARIANTS`, so it cannot drift into an alerting band unnoticed.
+
+### False Positive Mitigation
+- The Moderate cap on auto-anomalies, above.
+- `benign` and `normal` suppress by label, so a reviewed-and-cleared cluster cannot be re-raised by consensus.
+- Rows produced by a model that could not meaningfully cluster its own data are marked `unclusterable_fit`. The marker is evidence only: the read overlay de-prioritises them and the score and band are untouched.
+- A transaction touched by several watched contracts has one raw row per contract. The host keeps the highest-severity projection, so a `benign` verdict for one contract can never hide an `anomaly` verdict for another.
+
+### Corroboration and Freshness
+A `contract_anomaly` score at or above `contract_anomaly.corroboration_threshold` (40.0) counts as a corroborating signal for triage, surfaced as `contract_anomaly_corroborates`. It is deliberately kept out of the stored `corroboration_count` described under Cross-Class Corroboration, which counts only the nine classes above. A merged verdict older than `freshness_seconds` (3600) is treated as stale: the API still surfaces it, because a stale but real malicious verdict is worth keeping visible, and stamps `contract_anomaly_scored_at` so the interface can mark it.
+
+### Alerting
+`contract_anomaly` is read-time-only and never reaches `on_new_scores`, so the contract_anomaly poller in `app.tasks.notifications` is its sole notification path. It routes through the same band and class trigger matrix as the nine classes above, so an operator selects channels for it exactly as for any other class (see [ALERTING.md](ALERTING.md)).
+
 ## Fixed Anchor Reference Table
 
 All values are recommended starting points. Validate against production data.
@@ -715,11 +768,13 @@ RiskScore(tx, class) = clip(sum(w_i * norm(f_i)) / sum(w_i), 0, 1) * 100
 
 Each attack class produces an independent score. A single TX can score on multiple classes simultaneously. Output one score vector per TX, with top contributing features and normalised values for each non-zero score.
 
+This formula covers the nine classes above. `contract_anomaly` has no weighted features to compose: it is projected from the sidecar's stored verdict and consensus at read time, as Class 10 specifies.
+
 ## Cross-Class Corroboration
 
 The risk band is derived solely from the single highest class score (`max_score`), so a transaction that independently trips two different detectors is banded identically to one that trips only the strongest: the agreement between detectors is otherwise lost. To surface that agreement without changing alerting, each scored transaction also records two fields on `tx_class_scores`:
 
-- `corroboration_count`: the number of distinct attack classes scoring at or above `composite_corroboration.corroboration_threshold` (default 40.0, in `config/detection.yaml`).
+- `corroboration_count`: the number of distinct attack classes scoring at or above `composite_corroboration.corroboration_threshold` (default 40.0, in `config/detection.yaml`). It counts the nine classes above only; the clustering verdict has its own separate signal, described under Class 10.
 - `corroborating_classes`: the comma-separated names of those classes (e.g. `sandwich,token_dust`).
 
 This is a flag only: it deliberately does not feed `max_score` or `risk_band`, so alerting volume is unchanged. The list endpoint exposes a `min_corroboration` filter for analyst triage:
