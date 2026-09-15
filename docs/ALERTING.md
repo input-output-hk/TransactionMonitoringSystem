@@ -588,7 +588,7 @@ Three ways it arises, and the third is the least obvious:
 
 The dashboard's pre-save linter (`configWarnings`) catches all three, counting recipients after group expansion so case 3 cannot hide behind a non-empty-looking list, and distinguishing an absent per-rule key (falls back to the global) from a present-but-empty one (replaces it). It also catches the webhook-with-no-URL equivalents, the inverse mistake of a channel that is enabled but routed nowhere, and any channel routed while switched off.
 
-Warnings render at the top of the settings page under the heading "These settings won't deliver as-is". They are advisory: the linter warns, it does not block the save, because the backend deliberately accepts these documents. If you edit the configuration through the API rather than the dashboard you get no linting at all, so check `resolve_dispatch`'s behaviour with `engine_emit_test.py` afterwards.
+Warnings render at the top of the settings page under the heading "These settings won't deliver as-is". They are advisory: the linter warns, it does not block the save, because the backend deliberately accepts these documents. If you edit the configuration through the API rather than the dashboard, the `PUT` reply carries the same lint in a `warnings` array alongside the stored document, and each warning is also written to the server log at WARNING level.
 
 To detect it after the fact:
 

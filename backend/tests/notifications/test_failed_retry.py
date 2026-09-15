@@ -166,12 +166,39 @@ async def test_retry_delivers_and_deletes_the_row(spy, monkeypatch):
 async def test_retry_withdraws_a_row_no_longer_routed(spy, monkeypatch):
     # Current config is the single source of truth: the operator silencing the
     # (band, class) withdraws the pending retry rather than delivering against
-    # a stale route.
+    # a stale route. Silenced means the config selects NO channel, which is why
+    # selected_channels is empty here and not in the test below.
     spy["due_rows"] = [_row("tx1")]
     monkeypatch.setattr(triggers, "resolve_dispatch", lambda band, cls: [])
+    monkeypatch.setattr(triggers, "selected_channels", lambda band, cls: [])
     await tasks._retry_tick()
     assert spy["dispatch"] == []
     assert spy["deleted"] == ["tx1"]
+    assert spy["marked"] == []
+
+
+async def test_retry_holds_a_row_whose_selected_channel_cannot_deliver(spy, monkeypatch):
+    # The recall-first case the withdrawal must not swallow: the band IS routed
+    # to email, but email currently resolves to no recipients (the auditor's
+    # misconfiguration probe), so resolve_dispatch is empty for a reason a
+    # config fix heals. Dropping the row here would lose a Critical alert to a
+    # typo; it is held and backed off instead.
+    spy["due_rows"] = [_row("tx1", attempts=1)]
+    monkeypatch.setattr(triggers, "resolve_dispatch", lambda band, cls: [])
+    monkeypatch.setattr(triggers, "selected_channels", lambda band, cls: ["email"])
+    await tasks._retry_tick()
+    assert spy["deleted"] == []
+    assert spy["marked"] == [("tx1", False)]
+
+
+async def test_retry_abandons_an_undeliverable_route_at_the_budget(spy, monkeypatch):
+    # Held, not held forever: the same attempt budget retires it loudly.
+    spy["due_rows"] = [_row("tx1", attempts=settings.NOTIFY_RETRY_MAX_ATTEMPTS - 1)]
+    monkeypatch.setattr(triggers, "resolve_dispatch", lambda band, cls: [])
+    monkeypatch.setattr(triggers, "selected_channels", lambda band, cls: ["email"])
+    await tasks._retry_tick()
+    assert spy["deleted"] == []
+    assert spy["marked"] == [("tx1", True)]
 
 
 async def test_retry_failure_marks_attempt_without_abandoning(spy, monkeypatch):
@@ -229,3 +256,24 @@ async def test_one_bad_row_does_not_stop_the_sweep(spy, monkeypatch):
     await tasks._retry_tick()
     assert spy["dispatch"] == ["tx_good"]
     assert spy["deleted"] == ["tx_good"]
+    # The unprocessable row is COUNTED, not merely logged: an unmarked row keeps
+    # its old last_attempt_at, stays permanently due, and is re-read on every
+    # tick, which under ORDER BY first_failed_at LIMIT n starves newer alerts.
+    assert spy["marked"] == [("tx_bad", False)]
+
+
+async def test_an_unprocessable_row_is_eventually_abandoned(spy, monkeypatch):
+    spy["due_rows"] = [
+        {
+            **_row("tx_bad", attempts=settings.NOTIFY_RETRY_MAX_ATTEMPTS - 1),
+            "payload": {"not": "an alert"},
+        }
+    ]
+    monkeypatch.setattr(
+        triggers,
+        "resolve_dispatch",
+        lambda band, cls: [Dispatch(channel="webhook", webhook_url="http://x/")],
+    )
+    await tasks._retry_tick()
+    assert spy["marked"] == [("tx_bad", True)]
+    assert spy["deleted"] == []

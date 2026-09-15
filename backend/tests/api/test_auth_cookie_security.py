@@ -76,7 +76,11 @@ class TestForwardedProtoTrustGate:
         )
         assert _is_secure_request(req) is False
 
-    def test_forwarded_https_ignored_when_proxy_trust_disabled(self):
+    def test_forwarded_https_ignored_when_proxy_trust_disabled(self, monkeypatch):
+        # Pin the flag: the settings loader reads a deployment .env, where
+        # TRUSTED_PROXY_ENABLED=true would silently flip this test's premise
+        # (the peer below is inside the trusted CIDRs).
+        monkeypatch.setattr(settings, "TRUSTED_PROXY_ENABLED", False)
         req = _request(
             scheme="http",
             headers=[("X-Forwarded-Proto", "https")],

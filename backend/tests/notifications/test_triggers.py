@@ -212,3 +212,44 @@ def test_absent_email_override_falls_back_to_global(use_config):
     by = _by_channel(triggers.resolve_dispatch("Critical", "phishing"))
     assert set(by) == {"email"}
     assert by["email"].recipients == ["ops@x.com", "alice@x.com", "bob@x.com"]
+
+
+class TestSelectedChannels:
+    """selected_channels separates the two reasons resolve_dispatch can be
+    empty. A caller holding an undelivered alert (the dead-letter sweep) drops
+    it on one and holds it on the other, so the distinction is load-bearing."""
+
+    def test_silenced_band_selects_nothing(self, use_config):
+        # Moderate -> [] in BASE: the operator routes it nowhere.
+        use_config(BASE)
+        assert triggers.selected_channels("Moderate", "phishing") == []
+
+    def test_routed_band_selects_its_channels_even_when_undeliverable(self, use_config):
+        # Critical IS routed to email, but email resolves to no recipients, so
+        # resolve_dispatch is empty while the selection is not. This is the
+        # config gap the sweep must outlive rather than treat as a silencing.
+        cfg = {
+            **BASE,
+            "channels": {**BASE["channels"], "email": {"enabled": True, "recipients": []}},
+            "triggers": {"defaults": {"Critical": ["email"]}, "rules": []},
+        }
+        use_config(cfg)
+        assert triggers.resolve_dispatch("Critical", "phishing") == []
+        assert triggers.selected_channels("Critical", "phishing") == ["email"]
+
+    def test_disabled_channel_is_still_a_selection(self, use_config):
+        cfg = {
+            **BASE,
+            "channels": {**BASE["channels"], "email": {"enabled": False, "recipients": ["o@x"]}},
+            "triggers": {"defaults": {"Critical": ["email"]}, "rules": []},
+        }
+        use_config(cfg)
+        assert triggers.resolve_dispatch("Critical", "phishing") == []
+        assert triggers.selected_channels("Critical", "phishing") == ["email"]
+
+    def test_a_matching_rule_replaces_the_band_default(self, use_config):
+        # Same precedence as resolve_dispatch: High defaults to email, but the
+        # token_dust rule selects webhook only.
+        use_config(BASE)
+        assert triggers.selected_channels("High", "token_dust") == ["webhook"]
+        assert triggers.selected_channels("High", "phishing") == ["email"]

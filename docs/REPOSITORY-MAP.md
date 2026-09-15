@@ -150,7 +150,7 @@ These belong to no single subsystem.
 
 ## Test inventory
 
-2,077 automated tests across seven tiers. The recall gate is a subset of the
+2,084 automated tests across seven tiers. The recall gate is a subset of the
 backend suite rather than a tier of its own, so it is listed but not added into
 the total. A CI step re-collects every tier on each run and fails the build if these
 figures drift, so a stale count here is a build failure rather than something a
@@ -158,7 +158,7 @@ reader has to catch.
 
 | Tier | Location | Tests |
 |---|---|---|
-| Backend hermetic | `backend/tests/` | 1,352 |
+| Backend hermetic | `backend/tests/` | 1,359 |
 | Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 578 |
 | Backend live-DB | `backend/tests/live_db/` | 38 |
 | Clustering sidecar | `services/clustering/backend/tests/` | 497 |
