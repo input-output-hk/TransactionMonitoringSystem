@@ -25,6 +25,32 @@ from app.notifications.channels.base import Dispatch
 logger = logging.getLogger(__name__)
 
 
+def _selection(band: str, attack_class: str) -> tuple[dict[str, Any] | None, list[str]]:
+    """The matching rule and the channel names it selects, before any channel
+    is checked for enablement or resolved to a destination."""
+    triggers = config.triggers_config()
+    rule = _match_rule(triggers.get("rules") or [], band, attack_class)
+    if rule is not None:
+        channel_names = rule.get("channels") or []
+    else:
+        channel_names = (triggers.get("defaults") or {}).get(band) or []
+    return rule, list(channel_names)
+
+
+def selected_channels(band: str, attack_class: str) -> list[str]:
+    """The channels the config SELECTS for (band, attack_class), unresolved.
+
+    :func:`resolve_dispatch` returns nothing in two situations that look alike
+    and mean opposite things: the config selects no channel at all (the
+    operator silenced this band or class), or it selects channels that cannot
+    deliver right now (disabled, or with no resolved recipients or URL, the
+    "config gap" logged below). A caller holding an undelivered alert has to
+    tell those apart before deciding whether to drop it, so this reports the
+    selection without resolving it.
+    """
+    return _selection(band, attack_class)[1]
+
+
 def resolve_dispatch(band: str, attack_class: str) -> list[Dispatch]:
     """Return the delivery instructions for an alert of (band, attack_class).
 
@@ -32,12 +58,7 @@ def resolve_dispatch(band: str, attack_class: str) -> list[Dispatch]:
     operator enables it for diagnostics. A band with no configured channels
     resolves to an empty list.
     """
-    triggers = config.triggers_config()
-    rule = _match_rule(triggers.get("rules") or [], band, attack_class)
-    if rule is not None:
-        channel_names = rule.get("channels") or []
-    else:
-        channel_names = (triggers.get("defaults") or {}).get(band) or []
+    rule, channel_names = _selection(band, attack_class)
 
     out: list[Dispatch] = []
     for name in channel_names:

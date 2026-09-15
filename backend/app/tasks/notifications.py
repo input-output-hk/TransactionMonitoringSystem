@@ -24,6 +24,7 @@ import asyncio
 import gzip
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from app.config import settings
 from app.db import postgres
@@ -200,6 +201,33 @@ async def _contract_anomaly_tick() -> None:
             logger.exception("contract_anomaly poll: skipping %s", tx_hash)
 
 
+async def _count_failed_attempt(row: dict[str, Any], reason: str) -> None:
+    """Count one more failed attempt on a dead-letter row, retiring it once the
+    budget is spent.
+
+    EVERY path that leaves a row undelivered goes through here. A path that
+    returned without marking would leave ``last_attempt_at`` untouched, and
+    since dueness is measured from that column the row would stay permanently
+    due: re-selected on every tick, and, because the sweep takes the oldest
+    ``NOTIFY_RETRY_MAX_PER_TICK`` rows by ``first_failed_at``, able to crowd
+    newer alerts out of the sweep entirely.
+    """
+    network, tx_hash, source = row["network"], row["tx_hash"], row["source"]
+    give_up = row["attempts"] + 1 >= settings.NOTIFY_RETRY_MAX_ATTEMPTS
+    await postgres.mark_failed_attempt(network, tx_hash, source, abandoned=give_up)
+    if give_up:
+        logger.error(
+            "notification retry: giving up on %s/%s at %s after %d attempts (%s); "
+            "the alert was never delivered (row kept in failed_notifications, "
+            "dispatch failures in audit_logs)",
+            network,
+            tx_hash,
+            row["band"],
+            row["attempts"] + 1,
+            reason,
+        )
+
+
 async def _retry_tick() -> None:
     """Re-attempt dead-lettered scorer alerts (failed_notifications).
 
@@ -208,13 +236,18 @@ async def _retry_tick() -> None:
     against the CURRENT config (the single source of truth, and a hot-reloaded
     fix to a stale URL or an empty recipient list heals the backlog):
 
-      - no longer routed -> the operator silenced this (band, class); withdraw
-        the row rather than deliver against a stale route;
+      - the config selects no channel for this (band, class) -> the operator
+        silenced it; withdraw the row rather than deliver against a stale
+        route. Channels that ARE selected but cannot deliver right now are the
+        opposite case and must not withdraw it: an empty recipient list or a
+        disabled channel is the very config gap this sweep exists to outlive,
+        so the row waits for the fix (recall-first: never drop a real alert
+        because its destination is momentarily misconfigured);
       - delivered, or claimed meanwhile by a re-score's own delivery -> done;
-      - failed again -> back off exponentially, and after
-        ``NOTIFY_RETRY_MAX_ATTEMPTS`` retire the row (kept, marked abandoned,
-        logged at ERROR) so a dead endpoint is not hammered forever while the
-        failure stays visible.
+      - failed again, undeliverable, or unprocessable -> back off
+        exponentially, and after ``NOTIFY_RETRY_MAX_ATTEMPTS`` retire the row
+        (kept, marked abandoned, logged at ERROR) so a dead endpoint is not
+        hammered forever while the failure stays visible.
     """
     rows = await postgres.due_failed_notifications(
         settings.NOTIFY_RETRY_BACKOFF_SECONDS,
@@ -226,13 +259,24 @@ async def _retry_tick() -> None:
             payload = ImmediateAlert.model_validate(row["payload"])
             dispatches = triggers.resolve_dispatch(row["band"], payload.attack_class)
             if not dispatches:
-                await postgres.delete_failed_notification(network, tx_hash, source)
-                logger.info(
-                    "notification retry: %s/%s no longer routed at %s; withdrawn",
+                if not triggers.selected_channels(row["band"], payload.attack_class):
+                    await postgres.delete_failed_notification(network, tx_hash, source)
+                    logger.info(
+                        "notification retry: %s/%s no longer routed at %s; withdrawn",
+                        network,
+                        tx_hash,
+                        row["band"],
+                    )
+                    continue
+                logger.warning(
+                    "notification retry: %s/%s at %s routes to channels that cannot "
+                    "deliver (disabled, or no resolved recipients or URL); holding the "
+                    "row for the config fix",
                     network,
                     tx_hash,
                     row["band"],
                 )
+                await _count_failed_attempt(row, "route resolves to no deliverable channel")
                 continue
             status = await _deliver_with_dedup(
                 network,
@@ -244,24 +288,23 @@ async def _retry_tick() -> None:
                 group=row["group_key"],
             )
             if status == DELIVER_FAILED:
-                give_up = row["attempts"] + 1 >= settings.NOTIFY_RETRY_MAX_ATTEMPTS
-                await postgres.mark_failed_attempt(network, tx_hash, source, abandoned=give_up)
-                if give_up:
-                    logger.error(
-                        "notification retry: giving up on %s/%s at %s after %d attempts; "
-                        "the alert was never delivered (row kept in failed_notifications, "
-                        "dispatch failures in audit_logs)",
-                        network,
-                        tx_hash,
-                        row["band"],
-                        row["attempts"] + 1,
-                    )
+                await _count_failed_attempt(row, "every channel failed again")
             else:
                 # DELIVER_SENT, or DELIVER_DUPLICATE because a re-score's own
                 # delivery claimed it meanwhile: either way, done.
                 await postgres.delete_failed_notification(network, tx_hash, source)
         except Exception:
             logger.exception("notification retry: skipping %s", tx_hash)
+            try:
+                # Count it too: an unprocessable row (a payload that no longer
+                # validates, say) is otherwise permanently due and would be
+                # re-read on every tick forever.
+                await _count_failed_attempt(row, "row could not be processed")
+            except Exception:
+                logger.exception(
+                    "notification retry: could not record the failed attempt for %s",
+                    tx_hash,
+                )
 
 
 async def _retry_loop() -> None:
