@@ -66,14 +66,16 @@ Everything about routing lives in a single JSON document held as one JSONB row i
 
 ### Who Is Notified: Node Operators and Other Recipients
 
+Start from how the system is deployed, because it settles most of the question. This is not a hosted service with subscribers: the party that wants the alerts runs the software. A node operator stands up their own instance against their own node, which [MAINNET-DEPLOYMENT.md](MAINNET-DEPLOYMENT.md) walks through from an empty server, and whoever deploys it holds the Admin account that edits this document. In that arrangement there is no intermediary between a finding and the person who acts on it, and nothing needs to route an alert *to* a node operator in the first place: the operator names their own address or their own endpoint. The seeded configuration already routes the two actionable bands to the email channel, so replacing the placeholder address with a real one is the only step between a fresh deployment and a paged operator.
+
 The alert mechanism is recipient-agnostic by design: it routes to whatever addresses and URLs this document names, and nothing in the system discovers destinations on its own. Who is notified is therefore a deployment decision made by the Admin who edits this document, not a property of the software; there is no self-serve subscription path, which keeps this document the single control point for who the system may page.
 
-For the system's operating audience, node operators and the security contacts acting for them, onboarding a recipient is one of two moves:
+One instance can equally serve several operators, which is why the recipient model is richer than a single address: a security team running the system on behalf of a group of operators, or an operator who wants findings in their own tooling rather than in an inbox, is served by the same two moves. Adding any recipient, an operator or a security contact acting for them, is one of:
 
 - **Email.** Add the operator's address to `channels.email.recipients`, directly or through a group alias. A dedicated group (for example `groups.node-operators`, referenced as `group:node-operators`) keeps the subscription list in one place: the channel, any per-rule `recipients` override, and the periodic report block can all reference it, so one edit adds or removes an operator everywhere.
 - **Webhook.** Point `channels.webhook.default_url`, or a rule-level webhook override, at an endpoint the operator runs. The payload is the versioned `immediate_alert` schema above and carries the HMAC signature described in the webhook channel section, so an operator can drive their own paging or ticketing from it without trusting transport alone.
 
-With the seeded defaults, Critical and High route to both channels, so a fresh deployment notifies its operators of the actionable bands as soon as the placeholder recipient is replaced with real addresses.
+The seeded defaults route Critical and High to both channels, but the webhook ships disabled and with no URL, so it stays inert until an operator supplies an endpoint and enables it. Email is the channel a fresh deployment actually pages on.
 
 ### version
 
