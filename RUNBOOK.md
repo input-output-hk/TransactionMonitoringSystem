@@ -812,7 +812,7 @@ The webhook channel POSTs each notification as JSON. The body is the payload rec
 
 A `periodic_report` (scheduled digest) carries `report_window` (`{"from", "to"}` ISO timestamps), a `summary` block (`total_transactions_scored`, `alerts_by_band`, `alerts_by_class`, `false_positives_archived`), a `top_alerts` list, and `dashboard_url`.
 
-Delivery semantics: transient failures (5xx, network) are retried a bounded number of times; a 4xx is treated as permanent and not retried. Answer with any 2xx quickly, then process asynchronously.
+Delivery semantics: within one delivery, transient failures (5xx, network) are retried a bounded number of times and a 4xx is treated as a permanent client error and not retried in place. Separately, a scorer alert whose every channel failed is dead-lettered and re-attempted by a background sweep with exponential backoff for roughly two hours, so a receiver that was down, or that answered 4xx, may see the same alert again; deduplicate on `tx_hash` if that matters to you. Answer with any 2xx quickly, then process asynchronously.
 
 When a signing secret is configured (`WEBHOOK_SIGNING_SECRET`), every request carries an `X-TMS-Signature: sha256=<hexdigest>` header, the HMAC-SHA256 of the exact raw request body. Verify it before trusting the payload:
 
