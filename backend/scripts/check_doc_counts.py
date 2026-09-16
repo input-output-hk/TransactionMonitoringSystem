@@ -63,19 +63,32 @@ TIER_LOCATIONS = (
 # in prose; this is that statement made executable.
 SUBSET_LOCATIONS = frozenset({RECALL_GATE})
 
+# REPOSITORY-MAP.md carries a second inventory, of the alerting subsystem, whose
+# rows publish files and lines as well as a test count. That count is a subset of
+# the backend hermetic tier rather than a tier of its own, so it is not in
+# TIER_LOCATIONS and the totals arithmetic must not see it. It is checked all the
+# same: an external reviewer asked for the map's test counts to be refreshed, and
+# a figure that no job re-collects is the one that goes stale next.
+ALERTING_TESTS = "backend/tests/notifications/"
+
 # A backticked span inside a Markdown table cell.
 BACKTICKED = re.compile(r"`([^`]+)`")
 # A cell whose text begins with an integer, thousands separators allowed. The
 # recall-gate cell carries a trailing "(subset of the above)", hence the leading
 # anchor rather than a full-cell match.
 LEADING_INT = re.compile(r"^(\d[\d,]*)\b")
+# A cell that states a count in tests, as the alerting inventory's rows do. Its
+# sibling cells hold files and lines, so the count is found by its unit rather
+# than by position.
+TESTS_CELL = re.compile(r"(\d[\d,]*)\s+tests\b")
 # The stated total: "N automated tests across six tiers" in one document, "That
 # is N tests across the six independent tiers" in the other. The
 # "across" is load-bearing rather than decorative: without it the pattern also
-# matches the "97 tests" cell in REPOSITORY-MAP's alerting table, which appears
-# earlier in the file than the inventory section. Requiring a leading digit is
-# likewise deliberate, since a bare thousands separator would otherwise match
-# prose such as "API client, tests".
+# matches the alerting table's tests cell, which appears earlier in the file than
+# the inventory section. That cell is not skipped for being unimportant; it has
+# its own check below. Requiring a leading digit is likewise deliberate, since a
+# bare thousands separator would otherwise match prose such as "API client,
+# tests".
 STATED_TOTAL = re.compile(r"(\d[\d,]*)\s+(?:automated\s+)?tests\s+across\b")
 
 
@@ -118,14 +131,43 @@ def parse_stated_total(doc_text: str) -> int | None:
     return _to_int(match.group(1)) if match else None
 
 
+def parse_alerting_test_count(doc_text: str) -> int | None:
+    """Extract the test count from the alerting inventory's test row.
+
+    The row names two locations, a directory and a single file, so it cannot be
+    identified the way the tier rows are; it is found by its first location and
+    read by the cell that states a count in tests.
+    """
+    for line in doc_text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        if ALERTING_TESTS not in BACKTICKED.findall(line):
+            continue
+        for cell in line.split("|"):
+            match = TESTS_CELL.search(cell.strip())
+            if match:
+                return _to_int(match.group(1))
+    return None
+
+
 def check_observed(observed: dict[str, int], docs: dict[Path, str]) -> list[str]:
     """Compare measured tier counts against what each document publishes."""
     errors: list[str] = []
     for location, measured in observed.items():
+        if location == ALERTING_TESTS:
+            # Published in REPOSITORY-MAP only; TESTING.md has no alerting table.
+            published = parse_alerting_test_count(docs[REPO_MAP_DOC])
+            if published is None:
+                errors.append(f"{REPO_MAP_DOC}: no alerting inventory row found for `{location}`")
+            elif published != measured:
+                errors.append(
+                    f"{REPO_MAP_DOC}: the alerting inventory publishes {published} tests "
+                    f"but collection reports {measured}"
+                )
+            continue
         if location not in TIER_LOCATIONS:
-            errors.append(
-                f"unknown tier location {location!r}; expected one of {', '.join(TIER_LOCATIONS)}"
-            )
+            known = (*TIER_LOCATIONS, ALERTING_TESTS)
+            errors.append(f"unknown tier location {location!r}; expected one of {', '.join(known)}")
             continue
         for path, text in docs.items():
             published = parse_tier_counts(text).get(location)

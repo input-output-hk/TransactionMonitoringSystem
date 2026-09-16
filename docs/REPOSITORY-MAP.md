@@ -111,14 +111,14 @@ cost a detection. See
 [ALERTING.md](ALERTING.md#per-group-one-alert-per-script-per-window).
 
 This is the one subsystem that does not sit under a single prefix. It is 39
-files and 6,945 lines across the seven locations below.
+files and 7,094 lines across the seven locations below.
 
 | Location | Files | Lines | Contents |
 |---|---|---|---|
-| `backend/app/notifications/` | 13 | 2,332 | Config schema and validator, dispatcher, trigger routing, payloads, report builder, channel registry, alert grouping, `channels/email.py`, `channels/webhook.py` |
-| `backend/app/tasks/notifications.py` | 1 | 325 | Periodic-report scheduler, the `contract_anomaly` poller, and the failed-delivery retry sweep |
+| `backend/app/notifications/` | 13 | 2,353 | Config schema and validator, dispatcher, trigger routing, payloads, report builder, channel registry, alert grouping, `channels/email.py`, `channels/webhook.py` |
+| `backend/app/tasks/notifications.py` | 1 | 368 | Periodic-report scheduler, the `contract_anomaly` poller, and the failed-delivery retry sweep |
 | `backend/app/api/notifications_config.py` | 1 | 116 | `GET`/`PUT /api/v1/notifications/config`, admin-gated |
-| `backend/tests/notifications/` + `backend/tests/api/test_notifications_config.py` | 11 | 1,830 | 117 tests |
+| `backend/tests/notifications/` + `backend/tests/api/test_notifications_config.py` | 11 | 1,915 | 124 tests |
 | `backend/scripts/webhook_testing/` | 6 | 568 | Three-tier delivery test harness and a reference receiver |
 | `backend/tests/live_db/test_alert_grouping_pg.py` + `test_failed_notifications_pg.py` | 2 | 386 | Live-Postgres tests for the group-dedup ledger's band-escalation and window-expiry guards, and the dead-letter backoff, escalation and retention SQL |
 | `frontend/src` (5 files) | 5 | 1,388 | `NotificationsSettingsPage.tsx` (851), its test, the API client, and the pre-save config linter |
@@ -186,7 +186,7 @@ git ls-files backend/app | grep '\.py$' | xargs wc -l | tail -1
 git ls-files frontend/src | grep -E '\.tsx?$' | xargs wc -l | tail -1
 
 # The alerting tree, which spans seven locations. All seven must be listed or
-# the total falls short of the 39 files / 6,945 lines quoted above; the
+# the total falls short of the 39 files / 7,094 lines quoted above; the
 # live-Postgres grouping test is the one easily missed.
 git ls-files \
   backend/app/notifications backend/app/tasks/notifications.py \
