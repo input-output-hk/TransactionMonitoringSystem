@@ -7,3 +7,21 @@ overrides:
   # Force the patched brace-expansion (pulled in transitively via minimatch).
   # < 5.0.7 is vulnerable to GHSA-3jxr-9vmj-r5cp / CVE-2026-13149 (ReDoS).
   brace-expansion@<5.0.7: ">=5.0.7"
+
+  # maplibre-gl reaches this tree only through plotly.js, which is an UNUSED peer
+  # of react-plotly.js: the chart component is built from the prebuilt
+  # plotly.js-dist-min via the factory, so plotly's own source build is never
+  # imported. The vulnerable sanitizer is consequently absent from the shipped
+  # bundle (checked: `NamedNodeMap` appears in no built file; the only maplibre
+  # strings are its stylesheet). Pinned regardless, so the advisory does not
+  # stand against the published dependency graph of a security tool.
+  # <= 6.4.0 is GHSA-jrc7-96c5-q579 (XSS sanitiser bypass in DOM.sanitize()).
+  maplibre-gl@<=6.4.0: ">=6.4.1"
+
+  # Build-time only, reached via eslint-plugin-react-hooks -> @babel/core.
+  # <= 4.28.6 is GHSA-73wf-gq98-2v4g (crash / prototype write in normalizeStats).
+  browserslist@<=4.28.6: ">=4.28.7"
+
+  # Transitive of browserslist, build-time only.
+  # < 2.11.0 is GHSA-w5vr-8v7q-w6rv (process termination on invalid input).
+  baseline-browser-mapping@<2.11.0: ">=2.11.0"
