@@ -572,7 +572,7 @@ cd backend
 
 **On signing.** Signing is off unless `WEBHOOK_SIGNING_SECRET` is set; the sender simply omits the header and delivery is otherwise identical. Set the secret on both sides or neither. A receiver holding a secret will flag every request from an unsigned sender.
 
-Automated coverage for this subsystem is 117 tests across `backend/tests/notifications/` (111) and `backend/tests/api/test_notifications_config.py` (6), plus the live-Postgres dead-letter tests in `backend/tests/live_db/test_failed_notifications_pg.py`, the frontend linter and the settings-page tests; see [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting) and [TESTING.md](TESTING.md).
+Automated coverage for this subsystem is inventoried in [REPOSITORY-MAP.md](REPOSITORY-MAP.md#alerting), whose test count CI re-collects on every run; the figure is not repeated here, where nothing would catch it drifting. The coverage spans `backend/tests/notifications/` and `backend/tests/api/test_notifications_config.py`, the live-Postgres dead-letter tests in `backend/tests/live_db/test_failed_notifications_pg.py`, the frontend linter and the settings-page tests; see also [TESTING.md](TESTING.md).
 
 ## Common Misconfigurations
 
@@ -639,7 +639,7 @@ Stated plainly, because a monitoring system's alerting path should not be overso
 
 **There is no pager or escalation channel.** Two channels exist: email and webhook. There is no SMS, no PagerDuty or Opsgenie integration, no on-call rotation, and no escalation if nobody acknowledges an alert. The webhook is the intended integration point for all of those; the payload is designed to be forwarded. [`backend/app/notifications/ADDING_A_CHANNEL.md`](../backend/app/notifications/ADDING_A_CHANNEL.md) documents adding a native channel, which touches only the channel file, one line in the registry, and the settings block.
 
-**There is no dead-letter queue.** A failed delivery is logged and, for the scorer path, gone. Nothing is persisted for later replay, there is no outbox table, and there is no operator command to resend a specific alert.
+**The dead letter is a retry buffer, not a replay tool.** Only a scorer-path alert whose every channel failed is recorded in `failed_notifications`. A partial failure is claimed as sent, and the failed channel's miss is visible only in the dispatch audit row; the clustering poller is not dead-lettered at all, because its every-tick re-read is already its retry. There is no operator command to resend a specific alert or to replay an abandoned row: after the attempt budget the row is kept and logged at ERROR, and re-delivery is a human reading that log, not a button.
 
 **There is no per-recipient rate limit.** `NOTIFY_MAX_CONCURRENT_DELIVERIES` paces concurrent sends so a burst cannot open hundreds of simultaneous SMTP or webhook connections, and `NOTIFY_CONTRACT_ANOMALY_MAX_ALERTS_PER_TICK` bounds the poller's backlog drain. Neither is a rate limit: every routed alert is eventually attempted, just not all at once. A miscalibrated detector or a genuine attack wave will send as many alerts as it produces. This is a deliberate recall-first trade, and it means the receiver is responsible for its own throttling.
 
