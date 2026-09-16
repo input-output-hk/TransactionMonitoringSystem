@@ -127,10 +127,15 @@ jobs:
           recall=$(collected tests/analysis/)
           perf=$(TMS_PERF_TESTS=1 uv run pytest tests/perf/ -q --co 2>/dev/null \
             | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+')
+          # The alerting subsystem's own inventory, which spans two paths and so
+          # cannot go through the single-path helper above.
+          alerting=$(uv run pytest tests/notifications tests/api/test_notifications_config.py \
+            -q --co 2>/dev/null | grep -oE '[0-9]+ tests? collected' | tail -1 | grep -oE '^[0-9]+')
           uv run python scripts/check_doc_counts.py \
             --observed "backend/tests/=$hermetic" \
             --observed "backend/tests/analysis/=$recall" \
-            --observed "backend/tests/perf/=$perf"
+            --observed "backend/tests/perf/=$perf" \
+            --observed "backend/tests/notifications/=$alerting"
       - name: Upload test and coverage results
         if: always()
         uses: actions/upload-artifact@v4
