@@ -30,6 +30,7 @@ _BLOCK_KEY = '"block":'
 _TRANSACTIONS_KEY = '"transactions"'
 _BLOCK_ID_RE = re.compile(r'"id"\s*:\s*"([0-9a-f]{64})"')
 _BLOCK_SLOT_RE = re.compile(r'"slot"\s*:\s*(\d+)')
+_BLOCK_HEIGHT_RE = re.compile(r'"height"\s*:\s*(\d+)')
 
 
 class FrameUndecodableError(Exception):
@@ -66,29 +67,103 @@ class FrameUndecodableError(Exception):
         super().__init__(f"{method}: response frame could not be decoded ({cause!r})")
 
 
-def scan_block_point(raw: str) -> tuple[str | None, int | None]:
-    """Recover ``(block_id, slot)`` from an undecodable frame, without parsing.
+def scan_block_header(raw: str) -> dict[str, Any]:
+    """Recover a block's header fields from an undecodable frame, without parsing.
 
-    The point of this is to let a quarantined block still advance the sync
-    checkpoint: skipping it needs its own point, and by definition the frame it
-    came in cannot be parsed to read one. Scanning is confined to the header
-    segment between ``"block":`` and ``"transactions"``, so a transaction id or
-    a datum's ``slot`` field further down cannot be mistaken for the block's.
+    Two things depend on this. Skipping the block needs its own point to move
+    the sync checkpoint to, and by definition the frame it arrived in cannot be
+    parsed to read one. Rebuilding the block from its surviving transactions
+    then needs the same fields to hand to the normal roll-forward path.
 
-    Returns ``(None, None)`` when the segment is absent or malformed; the caller
-    must treat that as "cannot safely skip" rather than guessing a point.
+    Scanning is confined to the header segment between ``"block":`` and
+    ``"transactions"``, so a transaction id, or a ``slot`` or ``height`` field
+    inside a datum further down, cannot be mistaken for the block's own.
+
+    Missing keys are simply absent from the result; the caller must treat a
+    missing id or slot as "cannot safely skip" rather than guessing a point.
     """
     start = raw.find(_BLOCK_KEY)
     if start < 0:
-        return None, None
+        return {}
     end = raw.find(_TRANSACTIONS_KEY, start)
     header = raw[start:end] if end > start else raw[start:]
-    block_id = _BLOCK_ID_RE.search(header)
-    slot = _BLOCK_SLOT_RE.search(header)
-    return (
-        block_id.group(1) if block_id else None,
-        int(slot.group(1)) if slot else None,
-    )
+    found: dict[str, Any] = {}
+    if match := _BLOCK_ID_RE.search(header):
+        found["id"] = match.group(1)
+    if match := _BLOCK_SLOT_RE.search(header):
+        found["slot"] = int(match.group(1))
+    if match := _BLOCK_HEIGHT_RE.search(header):
+        found["height"] = int(match.group(1))
+    return found
+
+
+def split_array_elements(raw: str, key: str) -> list[str]:
+    """Slice the array at ``key`` into its top-level element substrings.
+
+    Bracket matching rather than parsing, for the same reason as everything
+    else on this path: the frame as a whole does not decode. Splitting first
+    means each element can be decoded on its own, so one undecodable element
+    costs only itself.
+    """
+    key_at = raw.find(key)
+    if key_at < 0:
+        return []
+    start = raw.find("[", key_at)
+    if start < 0:
+        return []
+    elements: list[str] = []
+    depth = 0
+    element_start = -1
+    in_string = escaped = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            # Depth 1 is the array itself, so an element opens at depth 2.
+            if depth == 2 and element_start < 0:
+                element_start = i
+        elif ch in "]}":
+            depth -= 1
+            if depth == 1 and element_start >= 0:
+                elements.append(raw[element_start : i + 1])
+                element_start = -1
+            elif depth == 0:
+                break
+    return elements
+
+
+def recover_transactions(raw: str) -> tuple[list[Any], int]:
+    """Decode a block's transactions individually, returning ``(decoded, lost)``.
+
+    One transaction with a pathologically nested script makes the WHOLE block
+    frame undecodable, and the block is the unit the sync loop moves in, so the
+    naive response loses every transaction that shared the block with it: 109 of
+    them in the preprod incident, 108 of which were ordinary. That is both a
+    large recall gap and an obvious way to hide an attack, by submitting it in
+    the same block as a poison transaction.
+
+    Decoding element by element removes that leverage: only the element that
+    cannot be decoded is lost. This runs solely after the whole-frame decode has
+    already failed, so it costs nothing on the normal path.
+    """
+    decoded: list[Any] = []
+    lost = 0
+    for element in split_array_elements(raw, _TRANSACTIONS_KEY):
+        try:
+            decoded.append(json.loads(element))
+        except (RecursionError, ValueError):
+            lost += 1
+    return decoded, lost
 
 
 def max_nesting_depth(raw: str) -> int:
