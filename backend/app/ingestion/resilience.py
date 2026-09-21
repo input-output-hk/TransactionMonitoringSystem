@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -11,6 +12,24 @@ from typing import Any
 import websockets
 
 logger = logging.getLogger(__name__)
+
+
+def _exponent_ceiling(base_delay: float, max_delay: float) -> int:
+    """Smallest exponent at which ``base_delay * 2**exponent`` reaches ``max_delay``.
+
+    Growing the exponent beyond this changes no wait, because the delay is
+    already pinned to ``max_delay``, but it does keep doubling an integer that
+    is then multiplied by a float: ``2**1024`` exceeds the float range, so the
+    multiplication raises ``OverflowError: int too large to convert to float``.
+    An unbounded attempt counter therefore turned the backoff itself into a
+    crash after roughly 20 h of continuous failure at a 60 s cap, which is how
+    a stalled preprod chain sync came to report ``OverflowError`` every 300 s
+    instead of retrying (observed 2026-09-21). Derived from the two delays
+    rather than fixed, so it stays correct if either is retuned.
+    """
+    if base_delay <= 0 or max_delay <= base_delay:
+        return 0
+    return math.ceil(math.log2(max_delay / base_delay))
 
 
 class ExponentialBackoff:
@@ -23,10 +42,11 @@ class ExponentialBackoff:
         self.max_delay = max_delay
         self.jitter_factor = jitter_factor
         self.attempt = 0
+        self._max_exponent = _exponent_ceiling(base_delay, max_delay)
 
     async def wait(self):
         """Wait with exponential backoff + jitter, then increment attempt"""
-        delay = min(self.base_delay * (2**self.attempt), self.max_delay)
+        delay = min(self.base_delay * (2 ** min(self.attempt, self._max_exponent)), self.max_delay)
         jitter = random.uniform(0, delay * self.jitter_factor)
         total = delay + jitter
         logger.info(f"Backoff: waiting {total:.1f}s (attempt {self.attempt + 1})")

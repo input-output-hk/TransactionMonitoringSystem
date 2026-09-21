@@ -287,7 +287,17 @@ class OgmiosClient:
             # long-lived session outgrew the horizon); refetch, throttled.
             if self._slot_time_refetch_needed and self._slot_time_refetch_due():
                 await self._fetch_slot_time_converter(ws)
-            resp = await self._send_recv(ws, "nextBlock")
+            try:
+                resp = await self._send_recv(ws, "nextBlock")
+            except ogmios_rpc.FrameUndecodableError as e:
+                # The one failure a replay cannot clear: the next attempt reads
+                # back the same undecodable frame. Quarantine the block and
+                # advance past it, because a permanently halted sync misses
+                # every later block, which is a far larger recall loss than the
+                # one block being skipped. The skip is recorded and alerted, not
+                # silent.
+                await self._quarantine_undecodable_block(e)
+                continue
             result = resp.get("result", {})
             direction = result.get("direction")
 
@@ -295,6 +305,60 @@ class OgmiosClient:
                 await self._handle_roll_forward(result)
             elif direction == "backward":
                 await self._handle_roll_backward(result)
+
+    async def _quarantine_undecodable_block(self, error: ogmios_rpc.FrameUndecodableError) -> None:
+        """Skip one undecodable block: record it, alert, then checkpoint past it.
+
+        Recovering the block's point lexically is what makes the skip safe to
+        checkpoint. If the point cannot be recovered we do NOT guess one:
+        advancing to a wrong slot would silently strand every block between
+        here and there, so that case re-raises and the block replays under the
+        existing fail-closed path instead.
+        """
+        block_id, slot = ogmios_rpc.scan_block_point(error.raw)
+        if not block_id or slot is None:
+            raise BlockPersistError(
+                f"Undecodable {error.method} frame ({len(error.raw)} bytes) whose block "
+                f"point could not be recovered; refusing to checkpoint past an "
+                f"unidentified block. Checkpoint NOT advanced, block will replay."
+            ) from error
+
+        depth = ogmios_rpc.max_nesting_depth(error.raw)
+        reason = f"undecodable frame: {error.cause!r}"
+        # Durable first, checkpoint second: a crash in between replays the block,
+        # whereas the reverse order could advance past a block with no record of it.
+        await postgres.record_quarantined_block(
+            self.network,
+            block_id,
+            slot,
+            reason,
+            frame_bytes=len(error.raw),
+            nesting_depth=depth,
+        )
+        logger.critical(
+            "Ogmios [chain]: QUARANTINED block %s at slot %s: %s "
+            "(%d bytes, JSON nesting depth %d). Its transactions were NOT "
+            "scored and will not be retried automatically; the checkpoint has "
+            "advanced past it so the rest of the chain stays monitored.",
+            block_id,
+            slot,
+            reason,
+            len(error.raw),
+            depth,
+        )
+        await self._emit(
+            {
+                "eventType": "BLOCK_QUARANTINED",
+                "network": self.network,
+                "observedAt": format_iso_utc(datetime.now(UTC)),
+                "block": {"id": block_id, "slot": slot},
+                "reason": reason,
+                "frameBytes": len(error.raw),
+                "nestingDepth": depth,
+            }
+        )
+        self._last_processed_slot = slot
+        await postgres.save_sync_point(self.network, slot, block_id)
 
     async def _fetch_slot_time_converter(self, ws) -> None:
         """Fetch systemStart and era summaries to build the slot-to-UTC
