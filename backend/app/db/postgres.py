@@ -229,6 +229,30 @@ async def execute_schema():
             )
         """)
 
+        # Quarantined blocks — the checkpoint advanced past a block the decoder
+        # could not read, so its transactions were never scored. This is a
+        # RECALL GAP and the only durable record that it exists: without the
+        # row, skipping the block would be indistinguishable from never having
+        # seen it. One row per (network, block_id); the sweep that re-ingests
+        # them once a non-recursive decode path exists reads it back.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS quarantined_blocks (
+                network       TEXT NOT NULL,
+                block_id      TEXT NOT NULL,
+                slot          BIGINT NOT NULL,
+                reason        TEXT NOT NULL,
+                frame_bytes   BIGINT,
+                nesting_depth INTEGER,
+                created_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (network, block_id)
+            )
+        """)
+        # Operators ask "what have we missed, most recent first", per network.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_quarantined_blocks_network_slot
+            ON quarantined_blocks(network, slot DESC)
+        """)
+
         # Entity state — arbitrary JSON blobs keyed by (network, entity_type, entity_id)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS entity_state (
@@ -1088,6 +1112,43 @@ async def save_sync_point(network: str, slot: int, block_id: str):
             network,
             slot,
             block_id,
+        )
+
+
+async def record_quarantined_block(
+    network: str,
+    block_id: str,
+    slot: int,
+    reason: str,
+    frame_bytes: int | None = None,
+    nesting_depth: int | None = None,
+) -> None:
+    """Record a block the pipeline skipped without ingesting.
+
+    Written BEFORE the checkpoint advances past the block, so a crash between
+    the two replays the block rather than losing the fact that it was skipped.
+    Idempotent on replay: a re-quarantine of the same block refreshes the
+    measurements instead of raising on the primary key.
+    """
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO quarantined_blocks
+                (network, block_id, slot, reason, frame_bytes, nesting_depth, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+            ON CONFLICT (network, block_id) DO UPDATE SET
+                slot          = $3,
+                reason        = $4,
+                frame_bytes   = $5,
+                nesting_depth = $6,
+                created_at    = CURRENT_TIMESTAMP
+        """,
+            network,
+            block_id,
+            slot,
+            reason,
+            frame_bytes,
+            nesting_depth,
         )
 
 
