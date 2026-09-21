@@ -307,15 +307,24 @@ class OgmiosClient:
                 await self._handle_roll_backward(result)
 
     async def _quarantine_undecodable_block(self, error: ogmios_rpc.FrameUndecodableError) -> None:
-        """Skip one undecodable block: record it, alert, then checkpoint past it.
+        """Salvage what decodes from an undecodable block, quarantine the rest.
 
-        Recovering the block's point lexically is what makes the skip safe to
-        checkpoint. If the point cannot be recovered we do NOT guess one:
-        advancing to a wrong slot would silently strand every block between
-        here and there, so that case re-raises and the block replays under the
-        existing fail-closed path instead.
+        The block is the unit the sync loop moves in, so an undecodable frame
+        would otherwise cost every transaction in it rather than the one that is
+        actually malformed. The transactions are therefore decoded individually
+        and the survivors handed to the normal roll-forward path, which persists
+        and scores them and advances the checkpoint exactly as it would for any
+        block. Only the elements that cannot be decoded are lost, and the count
+        of them is recorded.
+
+        Recovering the block's header lexically is what makes that safe. If the
+        id or slot cannot be recovered we do NOT guess: advancing to a wrong
+        slot would silently strand every block between here and there, so that
+        case re-raises and the block replays under the existing fail-closed
+        path instead.
         """
-        block_id, slot = ogmios_rpc.scan_block_point(error.raw)
+        header = ogmios_rpc.scan_block_header(error.raw)
+        block_id, slot = header.get("id"), header.get("slot")
         if not block_id or slot is None:
             raise BlockPersistError(
                 f"Undecodable {error.method} frame ({len(error.raw)} bytes) whose block "
@@ -323,10 +332,12 @@ class OgmiosClient:
                 f"unidentified block. Checkpoint NOT advanced, block will replay."
             ) from error
 
+        recovered, lost = ogmios_rpc.recover_transactions(error.raw)
         depth = ogmios_rpc.max_nesting_depth(error.raw)
         reason = f"undecodable frame: {error.cause!r}"
-        # Durable first, checkpoint second: a crash in between replays the block,
-        # whereas the reverse order could advance past a block with no record of it.
+        # Durable first, ingestion (which checkpoints) second: a crash in between
+        # replays the block, whereas the reverse order could advance past a block
+        # with no record that anything in it was dropped.
         await postgres.record_quarantined_block(
             self.network,
             block_id,
@@ -334,17 +345,22 @@ class OgmiosClient:
             reason,
             frame_bytes=len(error.raw),
             nesting_depth=depth,
+            txs_recovered=len(recovered),
+            txs_lost=lost,
         )
         logger.critical(
-            "Ogmios [chain]: QUARANTINED block %s at slot %s: %s "
-            "(%d bytes, JSON nesting depth %d). Its transactions were NOT "
-            "scored and will not be retried automatically; the checkpoint has "
-            "advanced past it so the rest of the chain stays monitored.",
+            "Ogmios [chain]: QUARANTINED %d of %d transactions in block %s at slot %s: "
+            "%s (%d bytes, JSON nesting depth %d). The other %d were ingested and "
+            "scored normally. The dropped ones are NOT retried automatically; the "
+            "checkpoint advances so the rest of the chain stays monitored.",
+            lost,
+            lost + len(recovered),
             block_id,
             slot,
             reason,
             len(error.raw),
             depth,
+            len(recovered),
         )
         await self._emit(
             {
@@ -355,10 +371,22 @@ class OgmiosClient:
                 "reason": reason,
                 "frameBytes": len(error.raw),
                 "nestingDepth": depth,
+                "txsRecovered": len(recovered),
+                "txsLost": lost,
             }
         )
-        self._last_processed_slot = slot
-        await postgres.save_sync_point(self.network, slot, block_id)
+        # Rebuilt rather than forwarded: the original result object does not
+        # exist, because the frame it would have come from never decoded.
+        await self._handle_roll_forward(
+            {
+                "block": {
+                    "id": block_id,
+                    "slot": slot,
+                    "height": header.get("height", 0),
+                    "transactions": recovered,
+                }
+            }
+        )
 
     async def _fetch_slot_time_converter(self, ws) -> None:
         """Fetch systemStart and era summaries to build the slot-to-UTC

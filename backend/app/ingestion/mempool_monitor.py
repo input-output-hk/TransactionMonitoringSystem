@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from app.analysis.features import extract_fee, extract_ttl
 from app.config import settings
 from app.db import postgres, raw_store
+from app.ingestion import ogmios_rpc
 from app.ingestion.input_enrichment import parse_resolved_utxo
 from app.ingestion.ogmios_parser import ogmios_input_ref
 from app.ingestion.resilience import CircuitBreaker, ExponentialBackoff, run_with_reconnect
@@ -140,6 +141,11 @@ class MempoolMonitor:
         # collision tracking threw before track()), which previously leaked
         # until restart.
         self._pending_input_cache: dict[str, tuple[dict[tuple, dict], datetime]] = {}
+
+        # Transactions skipped this session because their frame did not decode
+        # (see the handler in _mempool_loop). Per-session rather than per-run:
+        # the count is context for the log line, not a durable metric.
+        self._undecodable_txs = 0
 
         # Resilience — own breaker so mempool failures stay isolated from
         # the chain-sync connection's.
@@ -492,7 +498,38 @@ class MempoolMonitor:
             logger.debug(f"Ogmios [mempool]: acquired snapshot at slot {snapshot_slot}")
 
             while self._running:
-                resp = await self._send_recv(ws, "nextTransaction", {"fields": "all"})
+                try:
+                    resp = await self._send_recv(ws, "nextTransaction", {"fields": "all"})
+                except ogmios_rpc.FrameUndecodableError as e:
+                    # Skip this ONE transaction and keep walking the snapshot.
+                    # Letting it escape would tear down the session, and the
+                    # reconnect re-acquires and re-walks from the start, so the
+                    # same transaction blocks every transaction ordered after it
+                    # for as long as it sits in the mempool. That is an
+                    # attacker-controllable suppression of the pre-confirmation
+                    # signals (collision and front-running detection), which is
+                    # exactly what someone front-running would want silenced.
+                    #
+                    # Continuing is safe because the framing is stateless per
+                    # request: the frame was fully received and only the decode
+                    # failed, so the socket is still in step and the next
+                    # nextTransaction returns the next transaction.
+                    #
+                    # Logged at error rather than critical: unlike a block, the
+                    # transaction is not lost to detection, it is scored when it
+                    # confirms (and a block carrying it is salvaged per
+                    # ogmios_client._quarantine_undecodable_block). What is lost
+                    # is only the mempool-stage signal for it.
+                    self._undecodable_txs += 1
+                    logger.error(
+                        "Ogmios [mempool]: skipped an undecodable transaction "
+                        "(%d bytes, %s); its mempool-stage signals are lost, and it "
+                        "will still be scored when it confirms. %d skipped this session.",
+                        len(e.raw),
+                        e.cause,
+                        self._undecodable_txs,
+                    )
+                    continue
                 tx_data = resp.get("result", {}).get("transaction")
 
                 if tx_data is None:

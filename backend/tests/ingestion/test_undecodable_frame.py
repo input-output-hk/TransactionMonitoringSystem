@@ -8,11 +8,18 @@ the decode raised, the checkpoint never advanced, and the reconnect replayed
 the identical frame every time. Preprod ran blind for 4.8 days on one 205 KB
 block nested 10,774 deep.
 
-Recall-first makes the trade one-sided: skipping one block loses that block,
-while halting loses every block after it, so the skip wins as long as it is
-recorded and alerted rather than silent. These tests pin both halves: the
-quarantine happens, and it can never happen quietly or to an unidentified
-block.
+Recall-first drives the handling. Halting loses every block after the bad one,
+so the sync must continue; but dropping the whole block to achieve that would
+lose the 108 ordinary transactions that shared it with the malicious one, and
+would let an attacker hide a real attack by submitting it alongside a poison
+transaction. So the block's transactions are decoded individually, the
+survivors are ingested through the normal path, and only the element that
+cannot be decoded is lost, recorded and alerted.
+
+These tests pin each part: the quarantine happens, it can never happen quietly
+or to an unidentified block, the survivors reach the roll-forward path with the
+block's real header, and the mempool walk skips a single bad transaction rather
+than tearing down the snapshot.
 
 The second failure here was the retry path itself. ``ExponentialBackoff``
 doubled an unbounded integer and multiplied it by a float, so once the attempt
@@ -33,7 +40,9 @@ from app.ingestion.ogmios_client import BlockPersistError, OgmiosClient
 from app.ingestion.ogmios_rpc import (
     FrameUndecodableError,
     max_nesting_depth,
-    scan_block_point,
+    recover_transactions,
+    scan_block_header,
+    split_array_elements,
 )
 
 BLOCK_ID = "bac1" + "0" * 60
@@ -147,9 +156,10 @@ async def test_ordinary_frames_are_unaffected():
 
 
 def test_scan_recovers_the_block_point_from_an_unparseable_frame():
-    block_id, slot = scan_block_point(_poison_frame(slot=133883340))
-    assert block_id == BLOCK_ID
-    assert slot == 133883340
+    header = scan_block_header(_poison_frame(slot=133883340))
+    assert header["id"] == BLOCK_ID
+    assert header["slot"] == 133883340
+    assert header["height"] == 5183974
 
 
 def test_scan_reads_the_block_header_not_a_transaction_id():
@@ -158,15 +168,15 @@ def test_scan_reads_the_block_header_not_a_transaction_id():
     The scan is confined to the segment before "transactions" precisely so the
     first id in the frame cannot be a transaction's.
     """
-    block_id, _ = scan_block_point(_poison_frame())
-    assert block_id == BLOCK_ID
-    assert block_id != NEXT_TX_ID
+    header = scan_block_header(_poison_frame())
+    assert header["id"] == BLOCK_ID
+    assert header["id"] != NEXT_TX_ID
 
 
 def test_scan_reports_failure_rather_than_guessing():
     """No block segment means no point; the caller must fail closed."""
-    assert scan_block_point('{"jsonrpc":"2.0","result":{"direction":"backward"}}') == (None, None)
-    assert scan_block_point("") == (None, None)
+    assert scan_block_header('{"jsonrpc":"2.0","result":{"direction":"backward"}}') == {}
+    assert scan_block_header("") == {}
 
 
 def test_depth_ignores_brackets_inside_strings():
@@ -389,3 +399,191 @@ def test_exponent_ceiling_handles_degenerate_delays():
     assert resilience._exponent_ceiling(60.0, 60.0) == 0
     assert resilience._exponent_ceiling(100.0, 60.0) == 0
     assert resilience._exponent_ceiling(1.0, 60.0) == 6
+
+
+# --- salvaging the decodable transactions from a poison block --------------
+
+
+GOOD_TX_IDS = [f"{n:02x}" * 32 for n in (0xA1, 0xA2, 0xA3)]
+
+
+def _mixed_frame(levels: int = POISON_NESTING) -> str:
+    """A block of four transactions, exactly one of which cannot be decoded.
+
+    The shape that matters: the poison transaction sits in the MIDDLE, so a
+    splitter that stopped at the first failure would still lose the ones after
+    it. In the preprod incident 108 of the block's 109 were ordinary.
+    """
+    good = [
+        f'{{"id":"{tx_id}","spends":"inputs","fee":{{"ada":{{"lovelace":{150_000 + i}}}}}}}'
+        for i, tx_id in enumerate(GOOD_TX_IDS)
+    ]
+    poison = f'{{"id":"{NEXT_TX_ID}","scripts":{{"x":{_nested_script(levels)}}}}}'
+    txs = ",".join([good[0], good[1], poison, good[2]])
+    return (
+        '{"jsonrpc":"2.0","method":"nextBlock","result":{"direction":"forward",'
+        f'"tip":{{"slot":999999,"id":"{"ff" * 32}"}},'
+        f'"block":{{"type":"praos","era":"conway","id":"{BLOCK_ID}",'
+        f'"height":5183974,"slot":133883340,'
+        f'"transactions":[{txs}]}}}}}}'
+    )
+
+
+def test_split_finds_every_element_including_after_the_poison_one():
+    elements = split_array_elements(_mixed_frame(), '"transactions"')
+    assert len(elements) == 4
+    assert elements[0].startswith('{"id":"' + GOOD_TX_IDS[0])
+    assert elements[3].startswith('{"id":"' + GOOD_TX_IDS[2])
+
+
+def test_split_is_not_confused_by_brackets_inside_strings():
+    raw = '"transactions":[{"a":"]}["},{"b":"[[["}]'
+    assert split_array_elements(raw, '"transactions"') == ['{"a":"]}["}', '{"b":"[[["}']
+
+
+def test_split_handles_an_empty_or_absent_array():
+    assert split_array_elements('"transactions":[]', '"transactions"') == []
+    assert split_array_elements('{"block":{}}', '"transactions"') == []
+
+
+def test_recover_returns_the_good_transactions_and_counts_the_lost():
+    decoded, lost = recover_transactions(_mixed_frame())
+    assert lost == 1
+    assert [tx["id"] for tx in decoded] == GOOD_TX_IDS
+
+
+def test_recover_on_a_block_whose_only_tx_is_poison():
+    decoded, lost = recover_transactions(_poison_frame())
+    assert decoded == []
+    assert lost == 1
+
+
+@pytest.mark.asyncio
+async def test_quarantine_ingests_the_survivors_and_loses_only_the_poison_one():
+    """The whole point of the follow-up: lose 1, not the whole block.
+
+    The surviving transactions must reach the ordinary roll-forward path, so
+    they are persisted, scored and checkpointed exactly like any other block's.
+    """
+    client = _client()
+    events = []
+
+    async def _collect(event):
+        events.append(event)
+
+    client.on_lifecycle_event = _collect
+    frame = _mixed_frame()
+    forwarded = []
+
+    async def _roll_forward(result):
+        forwarded.append(result)
+
+    record = AsyncMock()
+    with (
+        patch("app.ingestion.ogmios_client.postgres.record_quarantined_block", record),
+        patch.object(client, "_handle_roll_forward", _roll_forward),
+    ):
+        await client._quarantine_undecodable_block(
+            FrameUndecodableError("nextBlock", frame, RecursionError())
+        )
+
+    assert len(forwarded) == 1
+    block = forwarded[0]["block"]
+    assert [tx["id"] for tx in block["transactions"]] == GOOD_TX_IDS
+    # The header the survivors are re-attached to must be the real one, since
+    # a wrong slot or height would corrupt every transaction's timestamp.
+    assert block["id"] == BLOCK_ID
+    assert block["slot"] == 133883340
+    assert block["height"] == 5183974
+
+    assert record.await_args.kwargs["txs_recovered"] == 3
+    assert record.await_args.kwargs["txs_lost"] == 1
+    assert events[0]["txsRecovered"] == 3
+    assert events[0]["txsLost"] == 1
+
+
+@pytest.mark.asyncio
+async def test_quarantine_still_records_before_it_ingests():
+    """Durable record first, so a crash during ingestion cannot hide the gap."""
+    client = _client()
+    order = []
+
+    async def _record(*a, **k):
+        order.append("record")
+
+    async def _roll_forward(_result):
+        order.append("ingest")
+
+    with (
+        patch("app.ingestion.ogmios_client.postgres.record_quarantined_block", _record),
+        patch.object(client, "_handle_roll_forward", _roll_forward),
+    ):
+        await client._quarantine_undecodable_block(
+            FrameUndecodableError("nextBlock", _mixed_frame(), RecursionError())
+        )
+
+    assert order == ["record", "ingest"]
+
+
+# --- the mempool walk ------------------------------------------------------
+
+
+def _mempool_monitor(send_recv):
+    from app.ingestion.mempool_monitor import MempoolMonitor
+
+    async def _noop(*_a, **_k):
+        return None
+
+    async def _query_utxo(_refs):
+        return []
+
+    return MempoolMonitor(
+        network="preprod",
+        emit=_noop,
+        query_utxo=_query_utxo,
+        connect_ws=_noop,
+        send_recv=send_recv,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mempool_skips_one_undecodable_tx_and_keeps_walking():
+    """An undecodable pending tx must not tear down the snapshot walk.
+
+    Letting it escape means the reconnect re-acquires and re-walks from the
+    start, so that transaction suppresses every transaction ordered after it
+    for as long as it sits in the mempool: an attacker-controllable blind spot
+    over exactly the pre-confirmation signals.
+    """
+    calls = []
+    good_tx = {"id": GOOD_TX_IDS[0], "inputs": [], "outputs": []}
+
+    monitor = None
+
+    async def _send_recv(_ws, method, _params=None):
+        calls.append(method)
+        if method == "acquireMempool":
+            return {"result": {"slot": 1}}
+        n = calls.count("nextTransaction")
+        if n == 1:
+            raise FrameUndecodableError("nextTransaction", _poison_frame(), RecursionError())
+        if n == 2:
+            return {"result": {"transaction": good_tx}}
+        monitor._running = False  # snapshot exhausted; stop the outer loop
+        return {"result": {"transaction": None}}
+
+    monitor = _mempool_monitor(_send_recv)
+
+    with (
+        patch.object(monitor, "_record_mempool_collisions", AsyncMock()),
+        patch.object(monitor, "_resolve_mempool_inputs", AsyncMock()),
+        patch("app.ingestion.mempool_monitor.postgres.upsert_lifecycle_pending", AsyncMock()),
+        patch.object(ogmios_rpc.settings, "RAW_STORE_ENABLED", False),
+    ):
+        await monitor._mempool_loop(object())
+
+    assert monitor._undecodable_txs == 1
+    # Four calls means the walk continued past the poison one and reached both
+    # the good transaction and the end of the snapshot.
+    assert calls == ["acquireMempool", "nextTransaction", "nextTransaction", "nextTransaction"]
+    assert GOOD_TX_IDS[0] in monitor._seen_mempool_txs

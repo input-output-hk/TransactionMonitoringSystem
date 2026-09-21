@@ -252,6 +252,20 @@ async def execute_schema():
             CREATE INDEX IF NOT EXISTS idx_quarantined_blocks_network_slot
             ON quarantined_blocks(network, slot DESC)
         """)
+        # Added after the table shipped: the first version dropped the whole
+        # block, so "how much did we lose" was answered by the block itself.
+        # Now that the decodable transactions are salvaged, the size of the gap
+        # is the lost count, and a row with txs_lost = 0 means nothing was
+        # missed at all. Separate ALTERs so an instance created before this
+        # change gains the columns without a rebuild.
+        await conn.execute("""
+            ALTER TABLE quarantined_blocks
+            ADD COLUMN IF NOT EXISTS txs_recovered INTEGER
+        """)
+        await conn.execute("""
+            ALTER TABLE quarantined_blocks
+            ADD COLUMN IF NOT EXISTS txs_lost INTEGER
+        """)
 
         # Entity state — arbitrary JSON blobs keyed by (network, entity_type, entity_id)
         await conn.execute("""
@@ -1122,6 +1136,8 @@ async def record_quarantined_block(
     reason: str,
     frame_bytes: int | None = None,
     nesting_depth: int | None = None,
+    txs_recovered: int | None = None,
+    txs_lost: int | None = None,
 ) -> None:
     """Record a block the pipeline skipped without ingesting.
 
@@ -1134,13 +1150,16 @@ async def record_quarantined_block(
         await conn.execute(
             """
             INSERT INTO quarantined_blocks
-                (network, block_id, slot, reason, frame_bytes, nesting_depth, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+                (network, block_id, slot, reason, frame_bytes, nesting_depth,
+                 txs_recovered, txs_lost, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
             ON CONFLICT (network, block_id) DO UPDATE SET
                 slot          = $3,
                 reason        = $4,
                 frame_bytes   = $5,
                 nesting_depth = $6,
+                txs_recovered = $7,
+                txs_lost      = $8,
                 created_at    = CURRENT_TIMESTAMP
         """,
             network,
@@ -1149,6 +1168,8 @@ async def record_quarantined_block(
             reason,
             frame_bytes,
             nesting_depth,
+            txs_recovered,
+            txs_lost,
         )
 
 
