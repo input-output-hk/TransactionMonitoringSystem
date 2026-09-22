@@ -53,7 +53,12 @@ _GATE_MAX_NET_LOSS = _estimate_fee_ratio(_CYCLE_LEGS) * FEE_TOLERANCE_MULTIPLIER
 
 
 def _tx(tx_hash, slot, from_addrs, outputs):
-    """One leg of a cycle: spends from `from_addrs`, pays `outputs` [(addr, amount)]."""
+    """One leg of a cycle: spends from `from_addrs`, pays `outputs` [(addr, amount)].
+
+    `addresses` lists the spent-from addresses as well as the paid ones, as
+    input enrichment does before every production insert. The hop query finds
+    spends through address_transactions, which is built from this list.
+    """
     total = sum(amount for _, amount in outputs)
     return NormalizedTransaction(
         tx_hash=tx_hash,
@@ -79,13 +84,14 @@ def _tx(tx_hash, slot, from_addrs, outputs):
     )
 
 
-def _plant(ch, closing_outputs, closing_slot=None, origin_count=1):
+def _plant(ch, closing_outputs, closing_slot=None, origin_count=1, decoys=None):
     """Plant origin -> B -> C -> origin and return (origin_tx_hash, origins).
 
     The origin transaction spends from `origin_count` addresses of one wallet,
     named so they sort in list order. `closing_outputs` is a factory taking that
     list and returning the final leg's outputs, so a test varies only how the
-    cycle closes.
+    cycle closes. `decoys`, if given, takes (origins, addr_b) and returns extra
+    transactions planted alongside the cycle.
     """
     run = uuid.uuid4().hex[:12]
     origins = [f"addr_test1qqo{i}_{run}" for i in range(origin_count)]
@@ -102,6 +108,7 @@ def _plant(ch, closing_outputs, closing_slot=None, origin_count=1):
                 [addr_c],
                 closing_outputs(origins),
             ),
+            *(decoys(origins, addr_b) if decoys else []),
         ]
     )
     return tx_ab, origins
@@ -178,6 +185,37 @@ class TestForwardBfsFindsAPlantedCycle:
         assert cycle["net_loss_ratio"] < _GATE_MAX_NET_LOSS, (
             f"half the repayment was dropped: net_loss_ratio={cycle['net_loss_ratio']}"
         )
+        assert CircularScorer().gate({"cycle": cycle})
+
+    def test_a_payment_into_the_frontier_is_not_a_spend_from_it(self, ch):
+        """Only a transaction SPENDING from a frontier address extends the BFS.
+
+        The hop query prefilters through address_transactions, which lists
+        every transaction touching an address, including ones that only pay
+        it. Here an unrelated wallet pays B and the origin in one transaction,
+        landing after the origin leg and before B's real spend. Taken as B's
+        spend, it would close a 2-leg "cycle" first; the BFS stops at the first
+        origin-paying row and the gate discards 2-leg cycles, so the real 3-leg
+        cycle would go unreported. Confirming each candidate against
+        transaction_inputs is what keeps it out.
+        """
+
+        def payer_into_b(origins, addr_b):
+            return [
+                _tx(
+                    uuid.uuid4().hex * 2,
+                    _ORIGIN_SLOT + _LEG_SLOT_GAP // 2,
+                    [f"addr_test1qqx_{uuid.uuid4().hex[:12]}"],
+                    [(addr_b, _DUST), (origins[0], _LEG_3)],
+                )
+            ]
+
+        tx_ab, origins = _plant(ch, lambda o: [(o[0], _LEG_3)], decoys=payer_into_b)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None, "a payment into B masked the real cycle"
+        assert cycle["cycle_length"] == _CYCLE_LEGS
         assert CircularScorer().gate({"cycle": cycle})
 
 

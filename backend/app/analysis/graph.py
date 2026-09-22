@@ -2,7 +2,7 @@
 
 Performs a bounded BFS forward from a transaction's sender addresses to detect
 value cycles (ADA returning to the origin within max_hops).  Queries
-transaction_inputs and transaction_outputs in ClickHouse.
+address_transactions, transaction_inputs and transaction_outputs in ClickHouse.
 """
 
 import logging
@@ -153,25 +153,32 @@ def detect_cycle(
         # Find txs where these addresses are inputs (they spent received funds).
         # The slot window is bounded: cycles spanning >24h are almost always
         # incidental reuses of an address, not deliberate layering.
-        # Shape matters as much as the filters here. Joining the full
-        # transaction_outputs and transactions tables makes ClickHouse build a
-        # hash table over both in their entirety on every hop (~5.4M rows read
-        # per call, ~950MB peak), because neither join side can inherit the
-        # address filter. Narrowing to the candidate tx_hashes first (the slot
-        # window is the selective predicate, ~24h of txs) and only then
-        # resolving outputs collapses peak memory ~30x and cuts CPU ~1.5x
-        # (40 real production hops replayed interleaved against one snapshot:
-        # 935MB -> 31MB peak, 52.1 -> 34.0 CPU-seconds). The memory figure is
-        # the robust one and the reason this matters: ~950MB allocations against
-        # a 4GB container cap were driving the CPU spikes. Treat the CPU ratio as
-        # cache-dependent; an uncontrolled cold-vs-warm comparison flatters it to
-        # ~4x. Note rows-read goes UP, not down, since a streamed filtered scan
-        # beats a giant hash build, so compare OSCPUVirtualTimeMicroseconds and
-        # memory_usage, never read_rows, when retuning this.
         #
-        # The matched row SET is unchanged: 35/40 replayed hops byte-identical to
-        # the old shape, the other 5 differing only where the LIMIT truncates
-        # (see the tiebreaker note below). The row ORDER is deliberately changed.
+        # Shape matters as much as the filters here. Filtering
+        # transaction_inputs by address cannot narrow it: the table is ordered
+        # by tx_hash, and its address bloom index passes nearly every granule
+        # for a multi-address frontier, so that filter read the whole table on
+        # every hop and grew with every day of history. address_transactions is
+        # ordered by (network, address, slot), so the frontier's transactions
+        # inside the window are a primary-key range read at any history size.
+        # That set is a superset (it also holds transactions that only PAY these
+        # addresses), so it is a prefilter and nothing more: each candidate is
+        # still confirmed as a spend against transaction_inputs, and windowed on
+        # transactions.slot, with the exact conditions this query always used,
+        # both now read by tx_hash through their primary keys. What remains
+        # scales with the number of candidates, not with the history. Replayed
+        # on 60 real mainnet hops interleaved on one snapshot: all 60 results
+        # byte-identical, CPU 49.7 -> 14.5 seconds.
+        #
+        # The prefilter is exactly as complete as address_transactions, which
+        # address_transactions_mv fills from transactions.addresses. That list
+        # holds every regular input address because input enrichment runs
+        # before the insert (input_enrichment._flow_addresses, pinned by
+        # test_input_enrichment.py). Measured on mainnet on 2026-09-22: all
+        # 2,556,830 spend pairs this query can match were present at their
+        # slot. Retention (CH_RETENTION_DAYS_IO) and the rollback purge treat
+        # the table like transaction_inputs. Outputs are joined only once the
+        # candidates are known, which is what keeps peak memory near 37MB (#107).
         #
         # The ORDER BY carries a full tiebreaker (tx_hash, address, amount)
         # rather than slot alone. Slot ties are common (many spends land in one
@@ -190,21 +197,29 @@ def detect_cycle(
         next_rows = client.execute(
             """
             WITH cand AS (
-                SELECT DISTINCT ti.tx_hash AS tx_hash, t.slot AS slot
-                FROM transaction_inputs ti
-                JOIN (
-                    SELECT tx_hash, slot
-                    FROM transactions
-                    WHERE network = %(network)s
-                      AND slot >= %(min_slot)s
-                      AND slot <= %(max_slot)s
-                ) t ON ti.tx_hash = t.tx_hash
-                WHERE ti.address IN %(addresses)s
-                  AND ti.network = %(network)s
-                  AND ti.is_collateral = 0
-                  AND ti.is_reference = 0
-                  AND ti.is_unspent_attempt = 0
-                  AND ti.tx_hash != %(origin_tx)s
+                SELECT DISTINCT tx_hash, slot
+                FROM transactions
+                WHERE network = %(network)s
+                  AND slot >= %(min_slot)s
+                  AND slot <= %(max_slot)s
+                  AND tx_hash IN (
+                      SELECT tx_hash
+                      FROM transaction_inputs
+                      WHERE network = %(network)s
+                        AND address IN %(addresses)s
+                        AND is_collateral = 0
+                        AND is_reference = 0
+                        AND is_unspent_attempt = 0
+                        AND tx_hash != %(origin_tx)s
+                        AND tx_hash IN (
+                            SELECT tx_hash
+                            FROM address_transactions
+                            WHERE network = %(network)s
+                              AND address IN %(addresses)s
+                              AND slot >= %(min_slot)s
+                              AND slot <= %(max_slot)s
+                        )
+                  )
             )
             SELECT DISTINCT c.tx_hash, to2.address, to2.amount, c.slot
             FROM cand c
