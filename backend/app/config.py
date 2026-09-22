@@ -391,6 +391,27 @@ class Settings(BaseSettings):
     BASELINE_BOOTSTRAP_ON_STARTUP: bool = True
     BASELINE_RECOMPUTE_INTERVAL_HOURS: int = 24  # recompute script baselines daily
     BASELINE_MAX_SCRIPTS: int = 500  # max script addresses to recompute per cycle
+    # Parallelism cap for the baseline percentile scans (bootstrap and the
+    # periodic recompute), sent to ClickHouse as max_threads. Uncapped, the
+    # recompute ran ~1,850 quantileExact scans at ~6.5 cores for ~17 minutes on
+    # the 8-vCPU mainnet host it shares with the Cardano node, which is what
+    # tripped the host's CPU limit. 2 holds it to a quarter of that host.
+    # Results do not depend on it (quantileExact merges exact partial states),
+    # so it trades peak cores for duration only. ge=1: ClickHouse reads
+    # max_threads=0 as "use every core", which would silently lift the cap.
+    BASELINE_QUERY_MAX_THREADS: int = Field(default=2, ge=1)
+    # A failed recompute waits this long before retrying, instead of retrying on
+    # the next engine tick: its global step is the heaviest scan in the app, and
+    # repeating it every tick against a struggling server keeps the server
+    # struggling. An hour still lets a transient failure recover the same day.
+    # ge=1: 0 would be exactly that per-tick loop.
+    BASELINE_RECOMPUTE_RETRY_SECONDS: int = Field(default=3600, ge=1)
+    # False: a restart resumes the schedule from the newest per-script baseline
+    # on record, so a routine deploy does not re-run a recompute that finished
+    # hours ago. True restores the unconditional recompute on every process
+    # start; set it for a deploy that changes how baselines are computed, so the
+    # new logic applies at once rather than at the next scheduled run.
+    BASELINE_RECOMPUTE_ON_STARTUP: bool = False
     SCORER_PHISHING_ENABLED: bool = True
     SCORER_TOKEN_DUST_ENABLED: bool = True
     SCORER_LARGE_VALUE_ENABLED: bool = True

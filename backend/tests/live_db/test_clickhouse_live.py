@@ -7,6 +7,7 @@ actually parses on the server. Rows are written under the LIVE_NETWORK
 namespace with UUID hashes. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -18,6 +19,9 @@ from .conftest import LIVE_NETWORK
 # tx_class_scores schema convention: -1 marks "scorer produced no finding",
 # so any inserted score must be >= 0 to read back as a real signal.
 _TEST_SCORE = 82.0
+# DateTime has one-second resolution and the test takes well under a second; a
+# time-zone slip would be off by whole hours, so a minute separates the two.
+_CLOCK_TOLERANCE_SECONDS = 60
 
 
 def _naive_utc_now() -> datetime:
@@ -292,6 +296,70 @@ class TestBaselines:
 
         rows = baselines.compute_global_baselines(LIVE_NETWORK)
         assert isinstance(rows, list)
+
+    def test_latest_full_recompute_reads_what_the_recompute_writes(self, ch):
+        """The schedule read sees per-script rows only, in true epoch seconds.
+
+        The recompute stamps computed_at with an aware UTC datetime; a driver
+        or server time-zone slip would move the reading by whole hours and
+        either re-run recomputes on every restart or postpone them. Global rows
+        are what bootstrap writes, and must not count as a full recompute.
+        """
+        network = f"{LIVE_NETWORK}-sched-{uuid.uuid4().hex[:8]}"  # the reading is per network
+        assert ch.latest_full_baseline_recompute(network) == 0.0
+
+        def row(scope_type):
+            return (
+                network,
+                scope_type,
+                "scope",
+                "output_count",
+                2.0,
+                9.0,
+                120,
+                datetime.now(UTC),
+                90,
+            )
+
+        ch.insert_baselines([row("global")])
+        assert ch.latest_full_baseline_recompute(network) == 0.0, (
+            "bootstrap rows read as a recompute"
+        )
+
+        ch.insert_baselines([row("per_script")])
+        drift = abs(ch.latest_full_baseline_recompute(network) - time.time())
+        assert drift < _CLOCK_TOLERANCE_SECONDS, f"schedule read is off by {drift:.0f}s"
+
+    def test_baseline_scans_reach_the_server_thread_capped(self, ch):
+        """The server runs the percentile scans with the configured cap.
+
+        Read back from system.query_log rather than inferred from the call
+        succeeding: the driver sends settings as not-important, so the server
+        silently ignores a name it does not know, and a misspelled cap would run
+        uncapped without any error.
+        """
+        from app.analysis import baselines
+        from app.config import settings
+
+        marker = f"cap-{uuid.uuid4().hex[:12]}"  # lands in the logged query text
+        baselines._query_percentiles_scoped(
+            "utxo_features",
+            "ada_amount",
+            LIVE_NETWORK,
+            "address",
+            marker,
+            baselines._PER_SCRIPT_WINDOW_DAYS,
+        )
+        ch._execute_query("SYSTEM FLUSH LOGS")
+        rows = ch._execute_query(
+            """
+            SELECT Settings['max_threads'] FROM system.query_log
+            WHERE type = 'QueryFinish' AND query LIKE %(pattern)s
+              AND query NOT LIKE '%%system.query_log%%'
+            """,
+            {"pattern": f"%{marker}%"},
+        )
+        assert rows == [(str(settings.BASELINE_QUERY_MAX_THREADS),)], rows
 
 
 class TestArchiveTimeWindow:

@@ -256,6 +256,7 @@ def query_multiple_sat_extraction_percentiles(
     network: str,
     window_days: int,
     min_samples: int,
+    query_settings: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-script p50/p99 of the multiple_sat extraction features.
 
@@ -298,6 +299,7 @@ def query_multiple_sat_extraction_percentiles(
         HAVING cnt >= %(min_samples)s
         """,
         {"network": network, "days": window_days, "min_samples": min_samples},
+        settings=query_settings,
     )
 
     results: list[dict[str, Any]] = []
