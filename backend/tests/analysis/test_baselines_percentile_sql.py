@@ -12,17 +12,23 @@ from __future__ import annotations
 import pytest
 
 from app.analysis import baselines
+from app.config import settings
 from app.db import clickhouse
 
 
 class _RecordingClient:
+    # Mirrors clickhouse_driver's Client.execute signature for the arguments the
+    # baseline queries pass, so an unexpected keyword fails here instead of being
+    # swallowed by _query_percentiles's own error handling.
     def __init__(self):
         self.sql = None
         self.params = None
+        self.settings = None
 
-    def execute(self, sql, params=None):
+    def execute(self, sql, params=None, settings=None):
         self.sql = sql
         self.params = params
+        self.settings = settings
         return [(1.0, 9.0, 5)]
 
 
@@ -62,3 +68,27 @@ def test_disallowed_inputs_rejected(rec):
         baselines._query_percentiles_scoped(
             "utxo_features", "ada_amount", "preprod", "bad_col", "x", 90
         )
+
+
+def test_percentile_scans_carry_the_thread_cap(rec):
+    """Every percentile scan runs thread-capped.
+
+    Uncapped, the ~1,850 scans of one recompute held ~6.5 cores of the mainnet
+    host for ~17 minutes. The cap is read from settings at call time, so the
+    assertion follows the configured value rather than restating it.
+    """
+    baselines._query_percentiles("utxo_features", "ada_amount", "preprod", 90)
+    assert rec.settings == {"max_threads": settings.BASELINE_QUERY_MAX_THREADS}
+    baselines._query_percentiles_scoped(
+        "utxo_features", "ada_amount", "preprod", "address", "addr1xyz", 90
+    )
+    assert rec.settings == {"max_threads": settings.BASELINE_QUERY_MAX_THREADS}
+
+
+def test_thread_cap_follows_the_live_setting(rec, monkeypatch):
+    """A retuned cap applies without a restart of the module."""
+    monkeypatch.setattr(
+        settings, "BASELINE_QUERY_MAX_THREADS", settings.BASELINE_QUERY_MAX_THREADS + 1
+    )
+    baselines._query_percentiles("utxo_features", "ada_amount", "preprod", 90)
+    assert rec.settings == {"max_threads": settings.BASELINE_QUERY_MAX_THREADS}

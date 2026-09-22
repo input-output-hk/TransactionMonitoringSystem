@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 _thread_local = threading.local()
 _ch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="clickhouse")
 
+# A separate single worker for maintenance scans (the periodic baseline
+# recompute). With its parallelism capped that job runs for up to an hour, so it
+# must not hold one of the three role workers above: that would starve
+# ingestion, API reads or scoring for the duration. One worker also serialises
+# maintenance jobs, so two recomputes can never run at once. Its Client is
+# thread-local like theirs.
+_ch_maintenance_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="clickhouse-maintenance"
+)
+
 
 async def _in_executor(fn, *args):
     """Run a blocking ClickHouse call on the dedicated executor.
@@ -117,6 +127,9 @@ def close_client():
     # At shutdown no new tasks are submitted, so three tasks distribute one
     # per worker reliably.
     futures = [_ch_executor.submit(_close_thread) for _ in range(3)]
+    # The maintenance worker may be mid-scan; its close then queues behind the
+    # scan and the timeout below gives up on it rather than holding shutdown.
+    futures.append(_ch_maintenance_executor.submit(_close_thread))
     for f in futures:
         try:
             f.result(timeout=5)
@@ -128,9 +141,13 @@ def close_client():
 
 
 def shutdown_executor():
-    """Drain pending ClickHouse work and shut down the executor.
+    """Drain pending ClickHouse work and shut down the executors.
     Called once at application shutdown, after background tasks are cancelled."""
     _ch_executor.shutdown(wait=True)
+    # Not waited on here. Python still joins the worker at exit, so an in-flight
+    # recompute finishes the scope it is on, which the analysis task's stop()
+    # keeps to one scope; anything queued behind it is dropped.
+    _ch_maintenance_executor.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +770,25 @@ def insert_baselines(rows: list[tuple]):
     # scopes in a handful of batches; a full clear is the simple, correct
     # granularity).
     _baseline_cache_clear()
+
+
+def latest_full_baseline_recompute(network: str) -> float:
+    """Epoch seconds of the newest per-script baseline for ``network``; 0.0 if none.
+
+    Only the full recompute writes ``per_script`` rows (bootstrap writes
+    ``global`` ones alone), so this is when the last full recompute landed, and a
+    fresh deployment reads 0.0. toUnixTimestamp keeps the reading independent of
+    the server's time zone.
+    """
+    rows = _get_client().execute(
+        """
+        SELECT toUnixTimestamp(max(computed_at))
+        FROM baselines
+        WHERE network = %(network)s AND scope_type = 'per_script'
+        """,
+        {"network": network},
+    )
+    return float(rows[0][0]) if rows and rows[0][0] else 0.0
 
 
 def insert_baseline_drift_event(
