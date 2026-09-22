@@ -106,7 +106,11 @@ def detect_cycle(
     if not out_rows:
         return None
 
-    origin_slot = out_rows[0][2] if out_rows else 0
+    # transactions.slot is Nullable(UInt64), so this can come back as None.
+    # Coerce once, here: the hop query binds it to both ends of the slot window,
+    # and `slot >= NULL` matches nothing, which silently skipped the entire
+    # cycle search for any tx ingested without a slot.
+    origin_slot = out_rows[0][2] or 0
 
     # origin_amount excludes change (outputs returning to sender)
     origin_amount = sum(r[1] for r in out_rows if r[0] not in origin_addresses)
@@ -149,31 +153,77 @@ def detect_cycle(
         # Find txs where these addresses are inputs (they spent received funds).
         # The slot window is bounded: cycles spanning >24h are almost always
         # incidental reuses of an address, not deliberate layering.
+        # Shape matters as much as the filters here. Joining the full
+        # transaction_outputs and transactions tables makes ClickHouse build a
+        # hash table over both in their entirety on every hop (~5.4M rows read
+        # per call, ~950MB peak), because neither join side can inherit the
+        # address filter. Narrowing to the candidate tx_hashes first (the slot
+        # window is the selective predicate, ~24h of txs) and only then
+        # resolving outputs collapses peak memory ~30x and cuts CPU ~1.5x
+        # (40 real production hops replayed interleaved against one snapshot:
+        # 935MB -> 31MB peak, 52.1 -> 34.0 CPU-seconds). The memory figure is
+        # the robust one and the reason this matters: ~950MB allocations against
+        # a 4GB container cap were driving the CPU spikes. Treat the CPU ratio as
+        # cache-dependent; an uncontrolled cold-vs-warm comparison flatters it to
+        # ~4x. Note rows-read goes UP, not down, since a streamed filtered scan
+        # beats a giant hash build, so compare OSCPUVirtualTimeMicroseconds and
+        # memory_usage, never read_rows, when retuning this.
+        #
+        # The matched row SET is unchanged: 35/40 replayed hops byte-identical to
+        # the old shape, the other 5 differing only where the LIMIT truncates
+        # (see the tiebreaker note below). The row ORDER is deliberately changed.
+        #
+        # The ORDER BY carries a full tiebreaker (tx_hash, address, amount)
+        # rather than slot alone. Slot ties are common (many spends land in one
+        # block), so ordering by slot alone left the LIMIT truncation picking an
+        # arbitrary subset of equally-ranked rows: the same hop could explore a
+        # different frontier run-to-run and miss a cycle through the dropped
+        # legs. Same reproducibility rationale as _first_sorted above.
+        #
+        # amount is DESC, and that direction is load-bearing for recall. The
+        # caller returns on the FIRST row paying an origin address and uses that
+        # row's amount as final_amount, which drives net_loss_ratio and the
+        # CircularScorer's hard gate. A closing leg that pays the origin twice
+        # (real payment plus a min-UTxO/token dust output, routine on Cardano)
+        # would under ASC surface the dust first, inflate net_loss_ratio toward
+        # 1.0 and make the gate reject a genuine cycle. DESC takes the largest
+        # return leg, which is the recall-safe side of the trade.
         next_rows = client.execute(
             """
-            SELECT DISTINCT ti.tx_hash, to2.address, to2.amount, t.slot
-            FROM transaction_inputs ti
-            JOIN transaction_outputs to2
-                ON ti.tx_hash = to2.tx_hash AND ti.network = to2.network
-            JOIN transactions t
-                ON ti.tx_hash = t.tx_hash AND ti.network = t.network
-            WHERE ti.address IN %(addresses)s
-              AND ti.network = %(network)s
-              AND ti.is_collateral = 0
-              AND ti.is_reference = 0
-              AND ti.is_unspent_attempt = 0
-              AND to2.is_collateral = 0
-              AND t.slot >= %(min_slot)s
-              AND t.slot <= %(max_slot)s
-              AND ti.tx_hash != %(origin_tx)s
-            ORDER BY t.slot ASC
+            WITH cand AS (
+                SELECT DISTINCT ti.tx_hash AS tx_hash, t.slot AS slot
+                FROM transaction_inputs ti
+                JOIN (
+                    SELECT tx_hash, slot
+                    FROM transactions
+                    WHERE network = %(network)s
+                      AND slot >= %(min_slot)s
+                      AND slot <= %(max_slot)s
+                ) t ON ti.tx_hash = t.tx_hash
+                WHERE ti.address IN %(addresses)s
+                  AND ti.network = %(network)s
+                  AND ti.is_collateral = 0
+                  AND ti.is_reference = 0
+                  AND ti.is_unspent_attempt = 0
+                  AND ti.tx_hash != %(origin_tx)s
+            )
+            SELECT DISTINCT c.tx_hash, to2.address, to2.amount, c.slot
+            FROM cand c
+            JOIN (
+                SELECT tx_hash, address, amount
+                FROM transaction_outputs
+                WHERE network = %(network)s
+                  AND is_collateral = 0
+                  AND tx_hash IN (SELECT tx_hash FROM cand)
+            ) to2 ON c.tx_hash = to2.tx_hash
+            ORDER BY c.slot ASC, c.tx_hash ASC, to2.address ASC, to2.amount DESC
             LIMIT %(hop_row_limit)s
             """,
             {
                 "addresses": addr_list,
                 "network": network,
                 "min_slot": origin_slot,
-                "max_slot": (origin_slot or 0) + _MAX_AGE_SLOTS,
+                "max_slot": origin_slot + _MAX_AGE_SLOTS,
                 "origin_tx": tx_hash,
                 "hop_row_limit": _BFS_HOP_ROW_LIMIT,
             },
