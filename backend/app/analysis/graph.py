@@ -180,14 +180,13 @@ def detect_cycle(
         # different frontier run-to-run and miss a cycle through the dropped
         # legs. Same reproducibility rationale as _first_sorted above.
         #
-        # amount is DESC, and that direction is load-bearing for recall. The
-        # caller returns on the FIRST row paying an origin address and uses that
-        # row's amount as final_amount, which drives net_loss_ratio and the
-        # CircularScorer's hard gate. A closing leg that pays the origin twice
-        # (real payment plus a min-UTxO/token dust output, routine on Cardano)
-        # would under ASC surface the dust first, inflate net_loss_ratio toward
-        # 1.0 and make the gate reject a genuine cycle. DESC takes the largest
-        # return leg, which is the recall-safe side of the trade.
+        # Which origin-paying row sorts first no longer decides how much came
+        # back. The loop stops at that row only to learn WHICH transaction
+        # closes the cycle; _returned_to_origin then totals that transaction's
+        # outputs to the whole origin set. No row order could have done this:
+        # amount DESC still let dust to a second origin address, sorted ahead
+        # by address, stand in for the repayment. amount keeps its DESC
+        # tiebreak only for a total, reproducible order.
         next_rows = client.execute(
             """
             WITH cand AS (
@@ -241,16 +240,19 @@ def detect_cycle(
 
             # Check if cycle detected (output goes back to origin)
             if out_addr in origin_addresses:
-                # Cycle found
+                # Cycle found. This row identifies the closing transaction; the
+                # amount it returned is that transaction's total to the origin
+                # set, not this one output (see _returned_to_origin).
+                returned = _returned_to_origin(client, network, r[0], origin_addresses, out_amt)
                 all_cycle_addresses.extend(list(current_addresses))
                 all_cycle_addresses.append(out_addr)
-                hops.append({"address": out_addr, "amount_lovelace": out_amt, "slot": slot})
+                hops.append({"address": out_addr, "amount_lovelace": returned, "slot": slot})
 
                 return _build_cycle_result(
                     cycle_length=hop + 1,
                     addresses=all_cycle_addresses,
                     origin_amount=origin_amount,
-                    final_amount=out_amt,
+                    final_amount=returned,
                     hops=hops,
                     origin_addresses=origin_addresses,
                     tx_hash=tx_hash,
@@ -268,6 +270,56 @@ def detect_cycle(
         current_addresses = next_addresses
 
     return None
+
+
+def _returned_to_origin(
+    client: Any,
+    network: str,
+    closing_tx: str,
+    origin_addresses: set[str],
+    seen_amount: int,
+) -> int:
+    """Total lovelace the closing transaction pays back to ANY origin address.
+
+    The hop query answers whether a cycle closes, not how much came back. Its
+    rows are DISTINCT on (tx_hash, address, amount, slot) and the loop stops at
+    the first origin-paying row, so using that row's amount let a closing leg
+    hide its repayment two ways: a dust output to one origin address sorted
+    ahead of the real repayment to another, or the repayment split into equal
+    outputs that DISTINCT collapses into one. Either pushed net_loss_ratio
+    toward 1.0 and CircularScorer's hard gate discarded a genuine cycle.
+    Totalling every non-collateral output of the closing transaction that pays
+    the origin set closes both, and extra outputs can only lower the measured
+    loss, never raise it.
+
+    FINAL for the same reason origin_amount uses it: a not-yet-merged duplicate
+    row would otherwise double the total. If the lookup fails, the amount
+    already matched is kept, which is what the cycle was measured with before,
+    so a transient error cannot cost the finding.
+    """
+    try:
+        rows = client.execute(
+            """
+            SELECT sum(amount)
+            FROM transaction_outputs FINAL
+            WHERE network = %(network)s
+              AND tx_hash = %(tx_hash)s
+              AND address IN %(origin)s
+              AND is_collateral = 0
+            """,
+            {"network": network, "tx_hash": closing_tx, "origin": sorted(origin_addresses)},
+        )
+    except Exception:
+        logger.warning(
+            "Closing-leg total failed for %s; keeping the matched output",
+            closing_tx[:16],
+            exc_info=True,
+        )
+        return seen_amount
+    total = rows[0][0] if rows and rows[0][0] is not None else 0
+    # The matched output is one of the summed rows, so the total cannot be
+    # smaller unless the two reads disagree; never report less than was seen.
+    return max(int(total), seen_amount)
 
 
 def _count_origin_recurrence(
