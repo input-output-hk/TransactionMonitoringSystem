@@ -14,6 +14,7 @@ back to the next broader tier (per_script -> global -> missing).
 """
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from app.analysis.scorer_config import baselines_config
@@ -113,6 +114,15 @@ INVERTED_CONSUMER_FEATURES = frozenset({"ada_amount", "value_cbor_bytes"})
 # baselined feature's scale (bytes, counts, lovelace), so it cannot perturb
 # a comparison against the ~0.50 drift thresholds.
 _DRIFT_RATIO_EPSILON = 1e-9
+
+
+def _scan_settings() -> dict[str, int]:
+    """ClickHouse settings for every scan the baseline jobs issue.
+
+    Caps parallelism (see BASELINE_QUERY_MAX_THREADS). Built per call rather than
+    at import so the value follows the live settings object.
+    """
+    return {"max_threads": settings.BASELINE_QUERY_MAX_THREADS}
 
 
 def compute_global_baselines(network: str) -> list[tuple]:
@@ -245,6 +255,7 @@ def compute_multiple_sat_per_script_baselines(network: str) -> list[tuple]:
         network,
         _PER_SCRIPT_WINDOW_DAYS,
         settings.BASELINE_MIN_SAMPLES,
+        query_settings=_scan_settings(),
     )
     rows = []
     for rec in per_script:
@@ -330,6 +341,7 @@ def get_active_script_addresses(network: str, limit: int = 500) -> list[str]:
                 "min_samples": settings.BASELINE_MIN_SAMPLES,
                 "limit": limit,
             },
+            settings=_scan_settings(),
         )
         return [r[0] for r in rows]
     except Exception:
@@ -337,8 +349,17 @@ def get_active_script_addresses(network: str, limit: int = 500) -> list[str]:
         return []
 
 
-def recompute_all_baselines(network: str, max_scripts: int = 500) -> int:
+def recompute_all_baselines(
+    network: str,
+    max_scripts: int = 500,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Recompute global + per-script baselines. Returns total rows written.
+
+    ``should_stop`` is polled between scopes, so a caller shutting down can end a
+    run that otherwise takes up to an hour once its scans are thread-capped. A
+    stopped run keeps every scope it finished; the rest keep their previous
+    baselines until the next run.
 
     Note: the ``per_policy`` baseline tier (per minting-policy percentiles for
     large_value.quantity_digits, fake_token.recipient_count /
@@ -357,6 +378,9 @@ def recompute_all_baselines(network: str, max_scripts: int = 500) -> int:
     # Per-script baselines for active scripts
     scripts = get_active_script_addresses(network, limit=max_scripts)
     for addr in scripts:
+        if should_stop is not None and should_stop():
+            logger.info("Baseline recomputation stopped early: %s rows written", total)
+            return total
         try:
             rows = compute_script_baselines(network, addr)
             total += len(rows)
@@ -366,6 +390,9 @@ def recompute_all_baselines(network: str, max_scripts: int = 500) -> int:
     # Per-script extraction baselines for multiple_sat (sourced from evidence,
     # per_script-only). One grouped query rather than per-script, so it is not
     # bounded by max_scripts.
+    if should_stop is not None and should_stop():
+        logger.info("Baseline recomputation stopped early: %s rows written", total)
+        return total
     try:
         total += len(compute_multiple_sat_per_script_baselines(network))
     except Exception:
@@ -569,6 +596,7 @@ def _query_percentiles(
             WHERE t.timestamp >= now() - INTERVAL %(days)s DAY
             """,
             params,
+            settings=_scan_settings(),
         )
         if rows and rows[0][2] > 0:
             return float(rows[0][0]), float(rows[0][1]), int(rows[0][2])
