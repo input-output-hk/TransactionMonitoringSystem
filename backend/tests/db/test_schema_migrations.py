@@ -76,6 +76,10 @@ class TestCreateAllMigrationOrder:
                 return []  # assert_no_legacy_schema: nothing legacy
             if "system.columns" in q:
                 return []  # baselines table absent
+            if "system.mutations" in q:
+                return []  # circular history columns: nothing queued
+            if "system.parts" in q:
+                return [(0,)]  # circular history columns: nothing left to materialize
             return None
 
         client.execute.side_effect = execute
@@ -97,6 +101,99 @@ class TestCreateAllMigrationOrder:
                 if s.startswith("ALTER TABLE transactions ") and needle in s
             )
             assert idx_col < idx_projection, f"'{needle}' must run before the projection migration"
+
+
+class _CircularHistoryClient:
+    """Answers the circular history migration's reads; records every statement."""
+
+    def __init__(self, lacking=0, queued=(), legacy_ddl=None):
+        self.statements: list[str] = []
+        self._lacking = lacking
+        self._queued = list(queued)
+        self._legacy_ddl = legacy_ddl
+
+    def execute(self, q, *a, **k):
+        self.statements.append(q)
+        if "system.mutations" in q:
+            return self._queued
+        if "system.parts" in q:
+            return [(self._lacking,)]
+        if "create_table_query" in q and self._legacy_ddl:
+            return [(self._legacy_ddl,)]
+        if "engine_full" in q or "system.columns" in q:
+            return []
+        return None
+
+    def materializes(self) -> list[str]:
+        return [s for s in self.statements if "MATERIALIZE COLUMN" in s]
+
+
+class TestCircularHistoryMigration:
+    """The circular history columns reach existing parts through one
+    part-rewriting mutation. Every database a live test sees already has the
+    columns from CREATE TABLE, so these branches exist only here."""
+
+    def test_parts_lacking_the_columns_get_one_materialize_for_all_three(self):
+        from app.db.clickhouse_schema import (
+            _CIRCULAR_HISTORY_COLUMNS,
+            _materialize_circular_history,
+        )
+
+        client = _CircularHistoryClient(lacking=3)
+        _materialize_circular_history(client)
+        (statement,) = client.materializes()
+        for name in _CIRCULAR_HISTORY_COLUMNS:
+            assert f"MATERIALIZE COLUMN {name}" in statement
+
+    def test_nothing_left_to_rewrite_issues_nothing(self):
+        from app.db.clickhouse_schema import _materialize_circular_history
+
+        client = _CircularHistoryClient(lacking=0)
+        _materialize_circular_history(client)
+        assert client.materializes() == []
+
+    def test_a_queued_materialize_is_not_issued_again(self):
+        """A boot while the rewrite runs must not queue a second one."""
+        from app.db.clickhouse_schema import _materialize_circular_history
+
+        client = _CircularHistoryClient(lacking=3, queued=[("mutation_7.txt", "")])
+        _materialize_circular_history(client)
+        assert client.materializes() == []
+
+    def test_a_failing_materialize_is_reported_not_reissued(self, caplog):
+        """Rollback-purge DELETEs wait behind it, so the operator must hear."""
+        from app.db.clickhouse_schema import _materialize_circular_history
+
+        client = _CircularHistoryClient(lacking=3, queued=[("mutation_7.txt", "Code: 241")])
+        with caplog.at_level("ERROR", logger="app.db.clickhouse_schema"):
+            _materialize_circular_history(client)
+        assert client.materializes() == []
+        assert "mutation_7.txt" in caplog.text and "Code: 241" in caplog.text
+
+    def test_the_setting_skips_the_rewrite(self, monkeypatch):
+        from app.db import clickhouse_schema
+
+        monkeypatch.setattr(clickhouse_schema.settings, "CIRCULAR_HISTORY_MATERIALIZE", False)
+        client = _CircularHistoryClient(lacking=3)
+        clickhouse_schema._materialize_circular_history(client)
+        assert client.materializes() == []
+
+    def test_create_all_adds_the_columns_and_rewrites_after_the_layout_guard(self):
+        """MATERIALIZE before ADD COLUMN fails boot on every existing deployment,
+        and on a legacy table the guard is about to refuse it is wasted."""
+        from app.db.clickhouse_schema import _CIRCULAR_HISTORY_COLUMNS, create_all
+
+        client = _CircularHistoryClient(lacking=3, legacy_ddl="CREATE TABLE ... p_by_time_v2 ...")
+        create_all(client)
+        statements = client.statements
+        (materialize,) = [i for i, s in enumerate(statements) if "MATERIALIZE COLUMN" in s]
+        for name in _CIRCULAR_HISTORY_COLUMNS:
+            add = next(
+                i for i, s in enumerate(statements) if f"ADD COLUMN IF NOT EXISTS {name}" in s
+            )
+            assert add < materialize
+        guard = max(i for i, s in enumerate(statements) if "engine_full" in s)
+        assert guard < materialize
 
 
 class TestRetentionTtlRemoval:

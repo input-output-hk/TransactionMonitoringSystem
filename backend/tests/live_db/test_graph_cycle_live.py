@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime
 
 from app.analysis import graph
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorers.circular import (
     FEE_TOLERANCE_MULTIPLIER,
     CircularScorer,
@@ -79,26 +80,44 @@ def _tx(tx_hash, slot, from_addrs, outputs):
     )
 
 
-def _plant(ch, closing_outputs, closing_slot=None, origin_count=1):
+def _ring(origin_count=1):
+    """Fresh (origins, B, C) addresses for one planted ring, unique per call."""
+    run = uuid.uuid4().hex[:12]
+    origins = [f"addr_test1qqo{i}_{run}" for i in range(origin_count)]
+    addr_b, addr_c = (f"addr_test1qq{leg}_{run}" for leg in ("b", "c"))
+    return origins, addr_b, addr_c
+
+
+def _plant(
+    ch,
+    closing_outputs,
+    closing_slot=None,
+    origin_count=1,
+    ring=None,
+    origin_slot=_ORIGIN_SLOT,
+    leg_gap=_LEG_SLOT_GAP,
+    leg_amounts=(_LEG_1, _LEG_2),
+    extra_origin_outputs=(),
+):
     """Plant origin -> B -> C -> origin and return (origin_tx_hash, origins).
 
     The origin transaction spends from `origin_count` addresses of one wallet,
     named so they sort in list order. `closing_outputs` is a factory taking that
     list and returning the final leg's outputs, so a test varies only how the
-    cycle closes.
+    cycle closes. Passing the same `ring` (from _ring) twice replays the cycle
+    through the same addresses, from `origin_slot` on.
     """
-    run = uuid.uuid4().hex[:12]
-    origins = [f"addr_test1qqo{i}_{run}" for i in range(origin_count)]
-    addr_b, addr_c = (f"addr_test1qq{leg}_{run}" for leg in ("b", "c"))
+    origins, addr_b, addr_c = ring or _ring(origin_count)
     tx_ab, tx_bc, tx_ca = (uuid.uuid4().hex * 2 for _ in range(3))
+    leg_1, leg_2 = leg_amounts
 
     ch.insert_transactions_batch(
         [
-            _tx(tx_ab, _ORIGIN_SLOT, origins, [(addr_b, _LEG_1)]),
-            _tx(tx_bc, _ORIGIN_SLOT + _LEG_SLOT_GAP, [addr_b], [(addr_c, _LEG_2)]),
+            _tx(tx_ab, origin_slot, origins, [(addr_b, leg_1), *extra_origin_outputs]),
+            _tx(tx_bc, origin_slot + leg_gap, [addr_b], [(addr_c, leg_2)]),
             _tx(
                 tx_ca,
-                closing_slot if closing_slot is not None else _ORIGIN_SLOT + 2 * _LEG_SLOT_GAP,
+                closing_slot if closing_slot is not None else origin_slot + 2 * leg_gap,
                 [addr_c],
                 closing_outputs(origins),
             ),
@@ -204,3 +223,230 @@ class TestForwardBfsHorizon:
         tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], closing_slot=beyond)
 
         assert graph.detect_cycle(tx_ab, LIVE_NETWORK) is None
+
+
+# A second pass of a ring starts well after the first has closed, so the hop
+# query's forward window from the second origin transaction cannot pick up the
+# first ring's legs, yet stays inside circular.recurrence_window_days.
+_REPLAY_OFFSET_SLOTS = 1_000
+# How far inside or outside the history window's edge a planted prior sits: a
+# minute of chain time, far above the one-slot resolution of the bound.
+_WINDOW_EDGE_SLOTS = 60
+# A prior circular score just below the High band: pooled for the recycled
+# share, never counted as recurrence.
+_BELOW_HIGH = BAND_HIGH_THRESHOLD - 1
+# Legs a block or more apart: the speed and timing axes read 0 at this gap.
+_SLOW_LEG_SLOT_GAP = 25
+# Added to every leg so no amount is a whole number of ADA.
+_ODD_LOVELACE = 170_001
+# The schema convention for "the scorer produced no finding".
+_NO_FINDING = -1.0
+
+
+def _naive_utc_now() -> datetime:
+    # The ClickHouse driver expects naive UTC datetimes for DateTime columns.
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _store_score(ch, tx_hash, circular, evidence, network=LIVE_NETWORK):
+    """Persist a circular score the way the engine does: the class's evidence
+    under its name in the evidence blob, which the circular_* columns derive from."""
+    ch.insert_class_scores(
+        [
+            {
+                "tx_hash": tx_hash,
+                "network": network,
+                "circular": circular,
+                "max_score": max(circular, 0.0),
+                "max_class": "circular",
+                "risk_band": "Moderate",
+                "evidence": {"circular": evidence},
+                "analysis_version": "live-db-test",
+                "analyzed_at": _naive_utc_now(),
+            }
+        ]
+    )
+
+
+def _score_and_store(ch, tx_hash):
+    """Detect, score and store one cycle as the engine would, suppressed or not."""
+    cycle = graph.detect_cycle(tx_hash, LIVE_NETWORK)
+    assert cycle is not None
+    result = CircularScorer().score({"cycle": cycle, "network": LIVE_NETWORK})
+    _store_score(ch, tx_hash, result.score, result.evidence)
+    return cycle, result
+
+
+def _prior(first_slot, intermediaries, origins):
+    """Evidence of an earlier cycle as the scorer stores it, reduced to what the
+    history read uses."""
+    return {"first_slot": first_slot, "intermediaries": intermediaries, "origin_keys": origins}
+
+
+class TestCycleHistoryFromStoredScores:
+    """The window axes read earlier cycles back from tx_class_scores through
+    the circular_* columns materialized from the stored evidence. A mocked
+    client proves neither the column expressions nor the read's filters."""
+
+    def test_a_replayed_ring_reads_the_first_pass_from_its_stored_score(self, ch):
+        """The second pass through the same intermediaries must see the first.
+
+        The first ring is scored for real and stored the way the engine stores
+        it, so this covers the evidence the scorer writes, the columns
+        ClickHouse derives from it, and the read that pools it.
+        """
+        ring = _ring()
+        first_tx, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], ring=ring)
+        first, _ = _score_and_store(ch, first_tx)
+        assert first["prior_cycles_in_window"] == 0
+
+        again_tx, _ = _plant(
+            ch,
+            lambda o: [(o[0], _LEG_3)],
+            ring=ring,
+            origin_slot=_ORIGIN_SLOT + _REPLAY_OFFSET_SLOTS,
+        )
+        again = graph.detect_cycle(again_tx, LIVE_NETWORK)
+
+        assert again is not None
+        assert again["intermediaries"] == [ring[1], ring[2]]
+        assert again["prior_cycles_in_window"] == 1
+        assert again["recycled_share"] == 1.0
+
+    def test_a_rescore_does_not_read_its_own_row(self, ch):
+        """Re-detecting a stored cycle must not count it as its own history."""
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)])
+        first, _ = _score_and_store(ch, tx_ab)
+
+        again = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert again["prior_cycles_in_window"] == 0
+        assert again["recipient_entropy"] == first["recipient_entropy"]
+
+    def test_the_window_is_the_chain_time_before_the_cycle(self, ch):
+        """Only a cycle that started within recurrence_window_days before this
+        one counts: not an older one, and not a later one a re-score would see."""
+        ring = _ring()
+        origins, addr_b, addr_c = ring
+        window = graph._RECURRENCE_WINDOW_SLOTS
+        # Past a full window from slot 0, so the older prior has a slot to sit at.
+        origin_slot = _ORIGIN_SLOT + window
+        for first_slot in (
+            origin_slot - window + _WINDOW_EDGE_SLOTS,
+            origin_slot - window - _WINDOW_EDGE_SLOTS,
+            origin_slot + _WINDOW_EDGE_SLOTS,
+        ):
+            evidence = _prior(first_slot, [addr_b, addr_c], origins)
+            _store_score(ch, uuid.uuid4().hex * 2, BAND_HIGH_THRESHOLD, evidence)
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], ring=ring, origin_slot=origin_slot)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle["prior_cycles_in_window"] == 1, "only the one inside the window"
+        assert cycle["recurrence_count"] == 1
+
+    def test_only_this_origin_s_scored_or_suppressed_cycles_are_history(self, ch):
+        """Of the stored rows, history is this origin's cycles on this network,
+        scored or suppressed; recurrence is the High ones of this same ring."""
+        ring = _ring()
+        origins, addr_b, addr_c = ring
+        inside = _ORIGIN_SLOT - _WINDOW_EDGE_SLOTS
+        same_ring = [addr_b, addr_c]
+        other_ring = [f"addr_test1qq_other_{uuid.uuid4().hex[:8]}"]
+        stranger = [f"addr_test1qq_stranger_{uuid.uuid4().hex[:8]}"]
+        rows = [
+            # Counted: suppressed, below High, and a High of another ring.
+            (_NO_FINDING, _prior(inside, same_ring, origins), LIVE_NETWORK),
+            (_BELOW_HIGH, _prior(inside, same_ring, origins), LIVE_NETWORK),
+            (BAND_HIGH_THRESHOLD, _prior(inside, other_ring, origins), LIVE_NETWORK),
+            # Not counted: another network, another origin, no finding and no path.
+            (BAND_HIGH_THRESHOLD, _prior(inside, same_ring, origins), f"{LIVE_NETWORK}_other"),
+            (BAND_HIGH_THRESHOLD, _prior(inside, same_ring, stranger), LIVE_NETWORK),
+            (_NO_FINDING, _prior(inside, [], origins), LIVE_NETWORK),
+        ]
+        for score, evidence, network in rows:
+            _store_score(ch, uuid.uuid4().hex * 2, score, evidence, network=network)
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], ring=ring)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle["prior_cycles_in_window"] == 3
+        assert cycle["recurrence_count"] == 0, "the only High shares no intermediary"
+        assert cycle["recycled_share"] == 1.0
+
+    def test_an_earlier_cycle_from_another_address_of_the_wallet_is_history(self, ch):
+        """The origin is every address the wallet spent from, not only the one
+        that sorts first."""
+        ring = _ring(origin_count=2)
+        origins, addr_b, addr_c = ring
+        evidence = _prior(_ORIGIN_SLOT - _WINDOW_EDGE_SLOTS, [addr_b, addr_c], [origins[1]])
+        _store_score(ch, uuid.uuid4().hex * 2, BAND_HIGH_THRESHOLD, evidence)
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], ring=ring)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle["prior_cycles_in_window"] == 1
+        assert cycle["recurrence_count"] == 1
+
+    def test_a_suppressed_pass_counts_for_the_next(self, ch):
+        """A slow ring with non-round amounts is suppressed as structural-only on
+        its own. The suppressed pass is still stored with its path, so the
+        repeat reads it and is surfaced."""
+        ring = _ring()
+        legs = (_LEG_1 + _ODD_LOVELACE, _LEG_2 + _ODD_LOVELACE)
+        repay = _LEG_3 + _ODD_LOVELACE
+        first_tx, _ = _plant(
+            ch,
+            lambda o: [(o[0], repay)],
+            ring=ring,
+            leg_gap=_SLOW_LEG_SLOT_GAP,
+            leg_amounts=legs,
+        )
+        _, first_result = _score_and_store(ch, first_tx)
+        assert first_result.score == _NO_FINDING
+
+        again_tx, _ = _plant(
+            ch,
+            lambda o: [(o[0], repay)],
+            ring=ring,
+            origin_slot=_ORIGIN_SLOT + _REPLAY_OFFSET_SLOTS,
+            leg_gap=_SLOW_LEG_SLOT_GAP,
+            leg_amounts=legs,
+        )
+        again = graph.detect_cycle(again_tx, LIVE_NETWORK)
+
+        assert again["prior_cycles_in_window"] == 1
+        assert CircularScorer().score({"cycle": again, "network": LIVE_NETWORK}).score >= 0
+
+    def test_the_path_leaves_out_a_decoy_and_keeps_the_closer(self, ch):
+        """The intermediaries are the addresses that carried the value back: an
+        output to an address that sorts first and never pays back is not one,
+        and the address that pays the origin back is."""
+        ring = _ring()
+        decoy = f"addr_test1qqa_decoy_{uuid.uuid4().hex[:8]}"
+        tx_ab, _ = _plant(
+            ch, lambda o: [(o[0], _LEG_3)], ring=ring, extra_origin_outputs=[(decoy, _DUST)]
+        )
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle["intermediaries"] == [ring[1], ring[2]]
+        assert cycle["hops"][1]["address"] == decoy, "the decoy is the step's representative"
+
+    def test_a_four_leg_ring_records_every_intermediary(self, ch):
+        run = uuid.uuid4().hex[:12]
+        origin, b, c, d = (f"addr_test1qq{leg}_{run}" for leg in ("o", "b", "c", "d"))
+        tx_ab, tx_bc, tx_cd, tx_da = (uuid.uuid4().hex * 2 for _ in range(4))
+        ch.insert_transactions_batch(
+            [
+                _tx(tx_ab, _ORIGIN_SLOT, [origin], [(b, _LEG_1)]),
+                _tx(tx_bc, _ORIGIN_SLOT + _LEG_SLOT_GAP, [b], [(c, _LEG_2)]),
+                _tx(tx_cd, _ORIGIN_SLOT + 2 * _LEG_SLOT_GAP, [c], [(d, _LEG_3)]),
+                _tx(tx_da, _ORIGIN_SLOT + 3 * _LEG_SLOT_GAP, [d], [(origin, _LEG_3)]),
+            ]
+        )
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle["cycle_length"] == 4
+        assert cycle["intermediaries"] == [b, c, d]

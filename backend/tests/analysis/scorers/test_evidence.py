@@ -228,6 +228,12 @@ def test_circular_evidence():
         "hops",
         "first_slot",
         "origin_cluster",
+        # Read back by the origin's later cycles (the circular_* columns).
+        "intermediaries",
+        "origin_keys",
+        "recipient_entropy",
+        "recycled_share",
+        "prior_cycles_in_window",
     )
     # The per-hop entries the UI iterates must keep address/amount aligned.
     hops = result.evidence["hops"]
