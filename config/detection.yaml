@@ -755,7 +755,8 @@ scorers:
       max_output_fanout: 20             # skip cycle scoring for txs with > N distinct
                                         # output addresses (very unlikely to be circular)
       # Fallback inter-hop delta (slots) when a cycle's hop timing cannot be
-      # measured (single hop, or non-increasing slots). A moderate gap so an
+      # measured (single hop, or every later hop at an earlier slot; hops in one
+      # block share a slot and count as one slot apart). A moderate gap so an
       # unmeasurable cadence does not spike the inverse-speed sub-score. Shared
       # by the graph builder (feature) and the circular scorer (read) so the two
       # cannot drift; was a bare 100 duplicated in both.
@@ -775,7 +776,8 @@ scorers:
     # from the corroborating axes; otherwise cap at Moderate. Loosen if real
     # layering attacks with very thin temporal/entropy signals are missed.
     structural_corroboration_floor: 0.1
-    recurrence_window_days: 30          # lookback for origin-recurrence count
+    recurrence_window_days: 30          # lookback for the origin's prior cycles:
+                                        # recurrence count and recipient entropy
 
   # ------------------------------------------------------------------
   fake_token:

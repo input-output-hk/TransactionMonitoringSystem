@@ -7,10 +7,12 @@ actually parses on the server. Rows are written under the LIVE_NETWORK
 namespace with UUID hashes. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import json
 import time
 import uuid
 from datetime import UTC, datetime
 
+from app.db import clickhouse_schema
 from app.db import clickhouse_scores as scores
 from app.ingestion.ogmios_parser import parse_ogmios_transaction
 
@@ -155,6 +157,158 @@ class TestScoreProvenance:
             "config_hash": "LowCardinality(String)",
             "code_version": "LowCardinality(String)",
         }
+
+
+class _Recording:
+    """A client that records every statement it sends."""
+
+    def __init__(self, client):
+        self._client = client
+        self.statements: list[str] = []
+
+    def execute(self, query, *args, **kwargs):
+        self.statements.append(query)
+        return self._client.execute(query, *args, **kwargs)
+
+    def materializes(self) -> int:
+        return sum(1 for q in self.statements if "MATERIALIZE COLUMN" in q)
+
+
+# How long the upgrade test waits for the rewrite of a few rows to finish.
+_MUTATION_WAIT_SECONDS = 30
+_MUTATION_POLL_SECONDS = 0.1
+# A stored cycle as the scorer stored it before the origin set and the path were
+# recorded: hops and the representative origin only.
+_OLD_SHAPE_EVIDENCE = {
+    "circular": {
+        "hops": [{"address": a, "slot": 5} for a in ("addr_o", "addr_b", "addr_o")],
+        "origin_cluster": "addr_o",
+        "first_slot": 5,
+    }
+}
+
+
+class TestCircularHistoryColumns:
+    """The circular_* columns are MATERIALIZED from the evidence blob, so the
+    expressions and the one-time rewrite of existing parts only exist on a
+    real server."""
+
+    def test_columns_are_derived_from_the_stored_evidence(self, ch):
+        new_shape, old_shape, other_class = (uuid.uuid4().hex * 2 for _ in range(3))
+        evidence = {
+            "circular": {
+                "hops": [{"address": "addr_o", "slot": 7}],
+                "origin_keys": ["key_o1", "key_o2"],
+                "intermediaries": ["addr_b", "addr_c"],
+                "first_slot": 7,
+            }
+        }
+        scores.insert_class_scores(
+            [
+                _score_row(new_shape) | {"evidence": evidence},
+                _score_row(old_shape) | {"evidence": _OLD_SHAPE_EVIDENCE},
+                _score_row(other_class),
+            ]
+        )
+        rows = ch._get_client().execute(
+            "SELECT tx_hash, circular_origins, circular_intermediaries, circular_first_slot "
+            "FROM tx_class_scores FINAL WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+            {"network": LIVE_NETWORK, "hashes": [new_shape, old_shape, other_class]},
+        )
+        assert {r[0]: r[1:] for r in rows} == {
+            new_shape: (["key_o1", "key_o2"], ["addr_b", "addr_c"], 7),
+            old_shape: (["addr_o"], ["addr_b"], 5),
+            other_class: ([], [], 0),
+        }
+
+    def test_an_existing_table_gets_the_columns_and_one_rewrite(self, ch):
+        """The upgrade path, on a table built without the columns: they read
+        right before any rewrite, one rewrite is queued for every part lacking
+        them, a boot while it runs queues nothing, and nothing after it ends."""
+        from clickhouse_driver import Client
+
+        from app.config import settings
+
+        db = f"livedb_upgrade_{uuid.uuid4().hex[:12]}"
+        admin = ch._get_client()
+        admin.execute(f"CREATE DATABASE {db}")
+        try:
+            client = Client(
+                host=settings.CLICKHOUSE_HOST,
+                port=settings.CLICKHOUSE_PORT,
+                user=settings.CLICKHOUSE_USER,
+                password=settings.CLICKHOUSE_PASSWORD,
+                database=db,
+            )
+            client.execute(
+                clickhouse_schema.SCHEMA_DDL["tx_class_scores"].format(table="tx_class_scores")
+            )
+            columns = list(clickhouse_schema._CIRCULAR_HISTORY_COLUMNS)
+            client.execute(
+                "ALTER TABLE tx_class_scores " + ", ".join(f"DROP COLUMN {c}" for c in columns)
+            )
+            client.execute(
+                "INSERT INTO tx_class_scores (tx_hash, network, circular, max_score, max_class, "
+                "risk_band, sub_scores, evidence, analysis_version, analyzed_at) VALUES",
+                [
+                    (
+                        uuid.uuid4().hex * 2,
+                        LIVE_NETWORK,
+                        _TEST_SCORE,
+                        _TEST_SCORE,
+                        "circular",
+                        "Critical",
+                        "{}",
+                        json.dumps(_OLD_SHAPE_EVIDENCE),
+                        "live-db-test",
+                        _naive_utc_now(),
+                    )
+                ],
+            )
+
+            clickhouse_schema._add_circular_history_columns(client)
+
+            assert client.execute(
+                "SELECT circular_origins, circular_intermediaries, circular_first_slot "
+                "FROM tx_class_scores FINAL"
+            ) == [(["addr_o"], ["addr_b"], 5)], "computed on read before any rewrite"
+
+            client.execute("SYSTEM STOP MERGES tx_class_scores")
+            boots = _Recording(client)
+            clickhouse_schema._materialize_circular_history(boots)
+            clickhouse_schema._materialize_circular_history(boots)
+            assert boots.materializes() == 1, "the second boot found it queued"
+
+            client.execute("SYSTEM START MERGES tx_class_scores")
+            deadline = time.monotonic() + _MUTATION_WAIT_SECONDS
+            while client.execute(
+                "SELECT count() FROM system.mutations WHERE database = currentDatabase() "
+                "AND table = 'tx_class_scores' AND NOT is_done"
+            )[0][0]:
+                assert time.monotonic() < deadline, "the rewrite did not finish"
+                time.sleep(_MUTATION_POLL_SECONDS)
+
+            after = _Recording(client)
+            clickhouse_schema._materialize_circular_history(after)
+            assert after.materializes() == 0
+        finally:
+            admin.execute(f"DROP DATABASE IF EXISTS {db} SYNC")
+
+    def test_the_dedup_migration_copies_only_insertable_columns(self, ch):
+        """ClickHouse refuses a MATERIALIZED column in an INSERT column list, so
+        a legacy table that already gained these columns must still migrate."""
+        import importlib.util
+        import pathlib
+
+        script = pathlib.Path(__file__).parents[2] / "scripts" / "migrate_dedup_schema.py"
+        spec = importlib.util.spec_from_file_location("migrate_dedup_schema", script)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+
+        columns = migration._columns(ch._get_client(), "tx_class_scores")
+
+        assert "evidence" in columns
+        assert not set(clickhouse_schema._CIRCULAR_HISTORY_COLUMNS) & set(columns)
 
 
 class TestScoreReadPath:

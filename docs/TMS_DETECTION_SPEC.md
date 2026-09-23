@@ -481,15 +481,18 @@ Value (ADA or native assets) travels through a sequence of addresses and returns
 | Feature | Role | Weight |
 |---------|------|--------|
 | `amount_similarity` | Primary: `1 - (std_dev(hop_amounts) / mean(hop_amounts))`. Near 1.0 = same amount at every hop. **Fixed anchors: p50=0.70, p99=0.97.** | 0.30 |
-| `cycle_recurrence` | Primary: how many times this cycle (or near-identical) appears in the time window. Per-cluster baseline. | 0.30 |
-| `recipient_entropy` | Corroborating (inverted): Shannon entropy of destination addresses. Low = same nodes recycled. **Fixed anchors: p50=0.80, p99=0.30 (inverted).** | 0.20 |
+| `cycle_recurrence` | Primary: how many earlier cycles of the same ring from the same origin reached High (`circular >= 60`) within the recurrence window. An earlier cycle is of the same ring when it went through at least one of this cycle's intermediaries. Per-cluster baseline. | 0.30 |
+| `recipient_entropy` | Corroborating (inverted): `1 - recycled_share`, the part of this cycle's path its origin's earlier cycles in the recurrence window did not already use, or the cycle's own address entropy when that is lower. Low = same nodes recycled. **Fixed anchors: p50=0.80, p99=0.30 (inverted).** | 0.20 |
 | `round_amount_flag` + `temporal_concentration` | Auxiliary: round numbers + time clustering. | 0.10 |
-| `inter_hop_delta_slots` | Contextual (reciprocal): very small delta = automation. **Anchors: p50=1/20, p99=1/2.** | 0.10 |
+| `inter_hop_delta_slots` | Contextual (reciprocal): very small delta = automation. Hops in one block share a slot and count as one slot apart. **Anchors: p50=1/20, p99=1/2.** | 0.10 |
 
 ### Key Derived Features
 - `net_loss_ratio = (amount_in - amount_out) / amount_in`: near fee-only ratio confirms circular intent
 - `amount_similarity = 1 - CV(hop_amounts)`: near 1.0 = same value passed through each hop
 - `cluster_self_return`: terminal address belongs to same cluster as origin
+- `recycled_share = |intermediaries the origin's earlier cycles used| / |intermediaries|`. A cycle's intermediaries are the addresses its value passed through between the origin and the close, recovered backwards from the transaction that closes it, so an output that never pays back is not one and the address that pays the origin back is. Addresses are compared by payment credential when it is a key hash, and whole when it is a script, which one hash can serve for every user of a DEX. Earlier cycles are read from `recurrence_window_days` of chain time before this cycle's first slot, whether they were scored or suppressed as structural-only, and belong to the same origin when they share one of its input addresses. The lower of `1 - recycled_share` and the cycle's own entropy is used, so the window can only raise the sub-score, and only for a cycle that passes value along (`amount_similarity` above its p50 anchor): automated flows that route unrelated amounts through the same hubs would otherwise read as recycled rings.
+
+Both window axes read the origin's earlier cycles, because one cycle cannot show recycling on its own: the forward search never revisits an address. Both credit a cycle only for what it shares with them, the recycled share for its own reused intermediaries and recurrence for the earlier Highs of the same ring, so earlier cycles through other addresses neither dilute a ring that reuses its intermediaries nor lend their concentration or their Highs to a cycle that reuses none. This departs from the Polimi text, which defines the feature as the Shannon entropy of the window's destination addresses: pooled across the window, that entropy reads an unrelated cycle as concentrated whenever its origin's history is, and drifts back toward diverse as unrelated cycles are added. Recurrence follows the Polimi feature table ("the same cycle or near-identical cycle") and counts only earlier cycles that reached High, so that a low score cannot boost every later cycle from the origin (Section 4.7.3).
 
 ### Two Detection Levels
 1. **Graph-level pipeline**: detect explicit cycles of length k in [3..6] in the transfer graph (rolling window). Score each cycle as a unit.
@@ -722,7 +725,7 @@ All values are recommended starting points. Validate against production data.
 | Front-Running | `ttl_delta` | 10 | 100 | Slots |
 | Sandwich | `swap_rate_delta` | 0.00 | 0.15 | Fractional deterioration |
 | Circular | `amount_similarity` | 0.70 | 0.97 | 1 - CV of hop amounts |
-| Circular | `recipient_entropy` (inv) | 0.80 | 0.30 | Shannon entropy, inverted |
+| Circular | `recipient_entropy` (inv) | 0.80 | 0.30 | `1 - recycled_share` or the cycle's own entropy, inverted |
 | Circular | `1 / inter_hop_delta_slots` | 1/20 | 1/2 | Reciprocal of mean slot delta |
 | Fake Token | `tokenname_similarity` | 0.80 | 0.97 | Post-normalisation Levenshtein |
 | Fake Token | `unicode_suspicion` | 0.00 | 0.60 | Composite score |
@@ -882,7 +885,7 @@ Collisions are recorded in PostgreSQL `mempool_collisions` with `TX_A` (pending/
 The Front-Running scorer maps `TX_B_CONFIRMED=1.0` (front-run signal) and `TX_A_CONFIRMED=0.0` (no front-run).
 
 ### Active Cross-Transaction Sub-Scores
-- `cycle_recurrence` (Circular): counts prior circular-scored txs from the same origin address within a 30-day rolling window. Queries `tx_class_scores JOIN transaction_inputs` filtered by `circular > 0` and `analyzed_at >= now() - 30 days`. Uses first input address as cluster proxy.
+- `cycle_recurrence` and `recipient_entropy` (Circular): one read of the origin's earlier cycles. It selects `tx_class_scores FINAL` rows on the network whose `circular_origins` shares an address key with this cycle's input addresses, that were scored (`circular >= 0`) or suppressed with a stored path, and whose `circular_first_slot` lies within `recurrence_window_days` (30) of chain time before this cycle's first slot, excluding the transaction itself. Recurrence counts the rows with `circular >= 60` whose `circular_intermediaries` share an intermediary with this cycle; the recycled share is measured against all of them. `circular_origins`, `circular_intermediaries` and `circular_first_slot` are columns ClickHouse materializes from the stored circular evidence; rows stored before the origin set and the path were recorded fall back to the representative origin address and the per-step hop representatives.
 - `attacker_sandwich_count` (Sandwich): queries historical tx count from same attacker address cluster at script addresses
 
 ### Placeholder Sub-Scores

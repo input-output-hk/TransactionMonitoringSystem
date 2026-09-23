@@ -11,8 +11,11 @@ returns False.
 
 Sub-scores (Polimi Section 4.7.3):
   amount_similarity    (0.30): preservation of value across hops, fixed anchors
-  cycle_recurrence     (0.30): per-cluster baseline
-  recipient_entropy    (0.20): inverted, fixed anchors
+  cycle_recurrence     (0.30): per-cluster baseline; earlier High cycles of
+                               the same ring (a shared intermediary)
+  recipient_entropy    (0.20): inverted, fixed anchors; share of this cycle's
+                               intermediaries the origin's earlier cycles reused,
+                               for a cycle that passes value along
   auxiliary            (0.10): round amounts + temporal concentration
   speed                (0.10): inter-hop slot delta reciprocal, fixed anchors
 
@@ -70,11 +73,16 @@ def _get_cycle_data(features: dict[str, Any]) -> dict | None:
         "amount_similarity": float,
         "net_loss_ratio": float,
         "recurrence_count": int,
+        "prior_cycles_in_window": int,
+        "recycled_share": float,
         "recipient_entropy": float,
         "round_amount_flag": bool,
         "temporal_concentration": float,
         "mean_inter_hop_delta_slots": float,
         "origin_cluster": str,
+        "intermediaries": list[str],
+        "origin_keys": list[str],
+        "history_unavailable": bool,
       }
     """
     return features.get("cycle")
@@ -160,6 +168,27 @@ class CircularScorer(BaseScorer):
 
         bl_source = bl1
 
+        hops = cycle.get("hops") or []
+        # Stored whether or not the cycle is suppressed below: the origin's later
+        # cycles read it back through the tx_class_scores circular_* columns
+        # (clickhouse_schema._CIRCULAR_HISTORY_COLUMNS), so a structural-only
+        # pass still counts as history for the next one.
+        evidence = {
+            "cycle_length": int(cycle.get("cycle_length", 0)),
+            "net_loss_ratio": round(cycle.get("net_loss_ratio", 0), 4),
+            "amount_similarity_raw": round(amt_sim, 4),
+            "hops": hops,
+            "mean_inter_hop_slots": float(cycle.get("mean_inter_hop_delta_slots", 0)),
+            "origin_cluster": cycle.get("origin_cluster", ""),
+            "first_slot": int(hops[0].get("slot", 0)) if hops else 0,
+            "round_amount_flag": bool(cycle.get("round_amount_flag")),
+            "recipient_entropy": round(float(entropy), 4),
+            "recycled_share": round(float(cycle.get("recycled_share", 0.0)), 4),
+            "prior_cycles_in_window": int(cycle.get("prior_cycles_in_window", 0)),
+            "intermediaries": list(cycle.get("intermediaries") or []),
+            "origin_keys": list(cycle.get("origin_keys") or []),
+        }
+
         raw = (
             float(_W["amount"]) * s_amount
             + float(_W["recurrence"]) * s_recurrence
@@ -218,6 +247,7 @@ class CircularScorer(BaseScorer):
                         "cycle_length": cycle.get("cycle_length", 0),
                     },
                     baseline_source=bl_source,
+                    evidence=evidence,
                 )
             final = min(final, _MODERATE_CAP)
 
@@ -237,9 +267,6 @@ class CircularScorer(BaseScorer):
         if s_speed > _REASON_T:
             reasons.append("rapid_inter_hop_timing")
 
-        hops = cycle.get("hops") or []
-        first_slot = int(hops[0].get("slot", 0)) if hops else 0
-
         return ScorerResult(
             score=final,
             sub_scores={
@@ -253,14 +280,5 @@ class CircularScorer(BaseScorer):
             },
             reasons=reasons,
             baseline_source=bl_source,
-            evidence={
-                "cycle_length": int(cycle.get("cycle_length", 0)),
-                "net_loss_ratio": round(cycle.get("net_loss_ratio", 0), 4),
-                "amount_similarity_raw": round(amt_sim, 4),
-                "hops": hops,
-                "mean_inter_hop_slots": float(cycle.get("mean_inter_hop_delta_slots", 0)),
-                "origin_cluster": cycle.get("origin_cluster", ""),
-                "first_slot": first_slot,
-                "round_amount_flag": bool(cycle.get("round_amount_flag")),
-            },
+            evidence=evidence,
         )

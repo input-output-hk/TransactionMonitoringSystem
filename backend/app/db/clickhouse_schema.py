@@ -49,6 +49,49 @@ _TX_PROJECTION_SELECT = (
     "ORDER BY network, timestamp"
 )
 
+# The circular history read (analysis/graph._prior_origin_cycles) selects an
+# origin's earlier cycles by these columns, derived by ClickHouse from the stored
+# evidence, so the write path is unchanged. That read is FINAL, and ClickHouse
+# does not move filters to PREWHERE under FINAL (optimize_move_to_prewhere_if_final
+# is off), so every column it names is read for every granule it scans. Naming
+# evidence there parsed every blob on every cycle: on a mainnet-shaped synthetic
+# table (1.53M scores in 7 parts), 1.7-2.0 CPU-s, about 590 MiB and 1.2 GiB read
+# per call, against 0.26-0.30 CPU-s, 150-180 MiB and 0.2 GiB with these columns,
+# which are empty for all but the circular rows. A row stored before the origin
+# set and the path were
+# recorded falls back to its representative origin address and its per-step
+# representatives. ADD COLUMN IF NOT EXISTS never changes an existing column: a
+# changed expression needs MODIFY COLUMN and a fresh MATERIALIZE. Shared between
+# the CREATE TABLE DDL and the migration.
+_CIRCULAR_HISTORY_COLUMNS: dict[str, str] = {
+    "circular_origins": (
+        "Array(String) MATERIALIZED if("
+        "JSONHas(evidence, 'circular', 'origin_keys'), "
+        "JSONExtract(evidence, 'circular', 'origin_keys', 'Array(String)'), "
+        "if(JSONHas(evidence, 'circular', 'origin_cluster'), "
+        "[JSONExtractString(evidence, 'circular', 'origin_cluster')], []))"
+    ),
+    "circular_intermediaries": (
+        "Array(String) MATERIALIZED if("
+        "JSONHas(evidence, 'circular', 'intermediaries'), "
+        "JSONExtract(evidence, 'circular', 'intermediaries', 'Array(String)'), "
+        "arrayPopBack(arrayPopFront(arrayMap("
+        "h -> JSONExtractString(h, 'address'), "
+        "JSONExtractArrayRaw(evidence, 'circular', 'hops')))))"
+    ),
+    "circular_first_slot": (
+        "UInt64 MATERIALIZED JSONExtractUInt(evidence, 'circular', 'first_slot')"
+    ),
+}
+_CIRCULAR_HISTORY_DDL = "".join(
+    f"            {name} {definition},\n" for name, definition in _CIRCULAR_HISTORY_COLUMNS.items()
+)
+# Matches the MATERIALIZE commands for exactly these columns in system.mutations
+# (26.1 stores each as "(MATERIALIZE COLUMN <name>)").
+_CIRCULAR_HISTORY_MUTATION = (
+    r"\bMATERIALIZE COLUMN (" + "|".join(_CIRCULAR_HISTORY_COLUMNS) + r")\b"
+)
+
 SCHEMA_DDL: dict[str, str] = {
     # Main transactions table. ORDER BY (network, tx_hash) is the dedup key;
     # the p_by_time_v2 projection re-sorts by (network, timestamp) so the list
@@ -233,7 +276,9 @@ SCHEMA_DDL: dict[str, str] = {
             config_hash      LowCardinality(String) DEFAULT '',
             code_version     LowCardinality(String) DEFAULT '',
             analyzed_at      DateTime,
-            INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
+"""
+    + _CIRCULAR_HISTORY_DDL
+    + """            INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
             INDEX idx_max_class  max_class TYPE bloom_filter GRANULARITY 1,
             INDEX idx_analyzed   analyzed_at TYPE minmax GRANULARITY 1,
             INDEX idx_contract_address contract_address TYPE bloom_filter GRANULARITY 1
@@ -634,6 +679,86 @@ def _create_address_lookup(client: Client) -> None:
         logger.debug(f"address_transactions backfill skipped: {e}")
 
 
+def _add_circular_history_columns(client: Client) -> None:
+    """Add the circular history columns to an existing tx_class_scores.
+
+    Metadata only: the parts that predate them are rewritten by
+    _materialize_circular_history, after the layout guard in create_all.
+    """
+    for name, definition in _CIRCULAR_HISTORY_COLUMNS.items():
+        client.execute(f"ALTER TABLE tx_class_scores ADD COLUMN IF NOT EXISTS {name} {definition}")
+
+
+def _materialize_circular_history(client: Client) -> None:
+    """Write the circular history columns into the parts that predate them, once.
+
+    Until then ClickHouse computes them from evidence whenever a part lacking
+    them is read, so the values are right from the ADD COLUMN on and only the
+    cost waits for this. MATERIALIZE rewrites parts, so it is issued only while
+    a part still lacks a column and none is queued: a boot while it runs, or
+    after it finished, issues nothing. Two instances booting at the same moment
+    can both issue it; the second rewrite is redundant and takes seconds.
+
+    Mutations on a table run in order, so tx_class_scores DELETEs (the rollback
+    purge) wait behind this one and fail while it fails. A failing one is
+    logged at ERROR with its reason, and RUNBOOK "Circular history columns" has
+    the check and the way out. CIRCULAR_HISTORY_MATERIALIZE=false skips it:
+    merges and the on-read computation keep the values right meanwhile.
+    """
+    queued = client.execute(
+        """
+        SELECT mutation_id, latest_fail_reason
+        FROM system.mutations
+        WHERE database = currentDatabase() AND table = 'tx_class_scores'
+          AND NOT is_done AND match(command, %(pattern)s)
+        """,
+        {"pattern": _CIRCULAR_HISTORY_MUTATION},
+    )
+    for mutation_id, reason in queued:
+        if reason:
+            logger.error(
+                "tx_class_scores %s (circular history columns) is failing: %s. "
+                "Rollback-purge DELETEs on tx_class_scores wait behind it; see "
+                "RUNBOOK 'Circular history columns'.",
+                mutation_id,
+                reason,
+            )
+    if queued:
+        return
+    lacking = client.execute(
+        """
+        SELECT count()
+        FROM system.parts
+        WHERE database = currentDatabase() AND table = 'tx_class_scores' AND active
+          AND name NOT IN (
+              SELECT name
+              FROM system.parts_columns
+              WHERE database = currentDatabase() AND table = 'tx_class_scores'
+                AND active AND column IN %(columns)s
+              GROUP BY name
+              HAVING count() = %(n)s
+          )
+        """,
+        {"columns": list(_CIRCULAR_HISTORY_COLUMNS), "n": len(_CIRCULAR_HISTORY_COLUMNS)},
+    )[0][0]
+    if lacking == 0:
+        return
+    if not settings.CIRCULAR_HISTORY_MATERIALIZE:
+        logger.warning(
+            "tx_class_scores: %d parts lack the circular history columns and "
+            "CIRCULAR_HISTORY_MATERIALIZE is off; they are computed on read "
+            "until those parts merge",
+            lacking,
+        )
+        return
+    # Async: parts gain the columns as it runs, new inserts write them.
+    client.execute(
+        "ALTER TABLE tx_class_scores "
+        + ", ".join(f"MATERIALIZE COLUMN {name}" for name in _CIRCULAR_HISTORY_COLUMNS)
+    )
+    logger.info("tx_class_scores: materializing the circular history columns in %d parts", lacking)
+
+
 def _create_detection_tables(client: Client) -> None:
     """Multi-class detection tables: UTxO/script features, the scoring output
     (+ its column migrations), and the admin archive."""
@@ -694,6 +819,7 @@ def _create_detection_tables(client: Client) -> None:
         "ALTER TABLE tx_class_scores "
         "ADD COLUMN IF NOT EXISTS code_version LowCardinality(String) DEFAULT ''"
     )
+    _add_circular_history_columns(client)
 
     # Admin-curated archive of flagged transactions (see SCHEMA_DDL).
     client.execute(SCHEMA_DDL["archived_alerts"].format(table="archived_alerts"))
@@ -797,6 +923,10 @@ def create_all(client: Client) -> None:
     # refuse to run half-migrated (raises RuntimeError naming the
     # migration script).
     assert_no_legacy_schema(client)
+
+    # After the guard: a part-rewriting mutation on a legacy table the guard
+    # is about to refuse would be wasted, and blocks its DELETEs meanwhile.
+    _materialize_circular_history(client)
 
     # Opt-in retention TTLs (CH_RETENTION_DAYS_*, default 0 = forever).
     apply_retention_ttls(client)

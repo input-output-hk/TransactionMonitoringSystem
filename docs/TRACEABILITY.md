@@ -58,7 +58,7 @@ Each class's row cites the case that must keep firing. The whole set runs as
 | Detect double satisfaction | `backend/app/analysis/scorers/multiple_sat.py` | `backend/tests/analysis/scorers/test_multiple_sat.py::TestLazyValidatorBandFloor::test_lazy_validator_floors_to_high_band` |
 | Detect front-running via mempool collision | `backend/app/analysis/scorers/front_running.py` | `backend/tests/analysis/scorers/test_front_running.py::TestScore::test_confirmed_collision_high_score` |
 | Detect sandwich attacks | `backend/app/analysis/scorers/sandwich.py` | `backend/tests/analysis/scorers/test_sandwich.py::TestScore::test_linked_attacker_high_score` |
-| Detect circular transfer layering | `backend/app/analysis/scorers/circular.py` | `backend/tests/analysis/scorers/test_circular.py::TestScore::test_high_similarity_scores_well` |
+| Detect circular transfer layering | `backend/app/analysis/scorers/circular.py` | `backend/tests/analysis/scorers/test_circular.py::TestRecyclingOverTheWindow::test_a_ring_repeated_through_the_same_intermediaries_reaches_high` |
 | Detect counterfeit token distribution | `backend/app/analysis/scorers/fake_token.py` | `backend/tests/analysis/scorers/test_fake_token.py::TestScore::test_wide_critical_asset_clone_must_reach_high` |
 | Detect phishing via metadata and asset names | `backend/app/analysis/scorers/phishing.py` | `backend/tests/analysis/scorers/test_phishing.py::TestNetNewHolderTargeting::test_url_airdrop_with_se_name_recall_pin_high` |
 
@@ -74,6 +74,9 @@ Each class's row cites the case that must keep firing. The whole set runs as
 | Publish a digest recipe a reader can recompute from the config file | `backend/app/analysis/scorer_config.py` | `backend/tests/analysis/test_score_provenance.py::TestConfigHash::test_reproducible_from_the_shipped_file` |
 | Record the baseline each axis was measured against | `backend/app/analysis/scorer_config.py` | `backend/tests/analysis/test_baseline_provenance.py::TestRecording::test_uncapped_pair_is_kept_when_a_cap_bites` |
 | Measure a transfer cycle: length, amount similarity, round-amount shape | `backend/app/analysis/graph.py` | `backend/tests/analysis/test_graph.py::TestBuildCycleResult::test_basic_cycle_metrics` |
+| Recover the addresses a cycle's value passed through | `backend/app/analysis/graph.py` | `backend/tests/analysis/test_graph.py::TestRingPath::test_the_path_is_the_addresses_that_carried_the_value_back` |
+| Read an origin's earlier cycles back from stored scores | `backend/app/analysis/graph.py` | `backend/tests/live_db/test_graph_cycle_live.py::TestCycleHistoryFromStoredScores::test_a_replayed_ring_reads_the_first_pass_from_its_stored_score` |
+| Rewrite the circular history columns into existing parts once | `backend/app/db/clickhouse_schema.py` | `backend/tests/db/test_schema_migrations.py::TestCircularHistoryMigration::test_parts_lacking_the_columns_get_one_materialize_for_all_three` |
 | Extract script-level features from a payload | `backend/app/analysis/features.py` | `backend/tests/analysis/test_features.py::TestDatumWitnessAndObjectDatum::test_datum_hash_sized_from_witness_preimage_hex` |
 | Keep every enrichment query scoped to one network | `backend/app/analysis/engine.py` | `backend/tests/analysis/test_engine_network_scoping.py::TestEnrichmentQueriesAreNetworkScoped::test_network_is_never_cross_bound` |
 | Resolve the contract an alert implicates | `backend/app/analysis/contract_identity.py` | `backend/tests/analysis/test_contract_identity.py::TestContractAnomaly::test_resolves_the_watched_target` |
