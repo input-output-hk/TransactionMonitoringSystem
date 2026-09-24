@@ -768,21 +768,36 @@ scorers:
       # never lower it as a precision knob.
       bfs_hop_row_limit: 500
       # How many outputs to the origin a closing leg may have for its similarity
-      # reading to try every subset of them: the repayment can be split across
-      # outputs and sit beside change or a re-lock, and only a subset sum finds
-      # it then. The cost doubles per output (2^16 sums take ~5 ms, once per
-      # cycle found). Past it, single outputs, address totals and the total are
-      # tried. Raise it if closing legs with more outputs to the origin appear.
-      closing_subset_max_outputs: 16
+      # reading to search every subset of them: the repayment can be split
+      # across outputs and sit beside change or a re-lock, and only a subset
+      # sum finds it then. The search costs about 2 * 2^(N/2) sums, once per
+      # cycle found (measured: 24 outputs ~2 ms, 32 ~70 ms, 40 ~1.5 s), and the
+      # loader rejects more than 32. Past it, a subset that fits is assumed to
+      # be there, which can only raise the similarity: raising this buys
+      # precision on legs with many outputs to the origin, never recall.
+      closing_subset_max_outputs: 24
     reason_threshold: 0.5
     moderate_cap: 59.0                  # top of Moderate band
     # Floor on the sum of corroborating signals (entropy + auxiliary + speed).
     # Structural-only matches (just amount_similarity + recurrence) score ~60
     # under the weighted average alone, which would tip a plain
     # A→script→A interaction into High. Require at least this much signal
-    # from the corroborating axes; otherwise cap at Moderate. Loosen if real
-    # layering attacks with very thin temporal/entropy signals are missed.
+    # from the corroborating axes; otherwise the cycle is suppressed, or kept
+    # at a capped Moderate when it preserves its amount and recurs. The same
+    # floor, over entropy + speed + recurrence, also marks a slow one-off
+    # cycle (see slow_one_off_min_hop_slots). Loosen if real layering attacks
+    # with very thin temporal/entropy signals are missed.
     structural_corroboration_floor: 0.1
+    # Mean slots between hops from which a cycle with no speed, no reused path
+    # and no recurrence (together under structural_corroboration_floor) is
+    # capped at the top of Informational: the shape of an exchange deposit and
+    # the withdrawal back, whose hops were 3,483 to 37,065 slots apart on
+    # mainnet. An automated ring moves a hop per block (~20 s, the pace the
+    # detection spec gives for TMS Forge) or, waiting on more confirmations or
+    # TMS Forge's longest delay (300 s), within minutes, and must stay
+    # Moderate. 1,800 (30 min) sits between the two, nearer the exchanges,
+    # because a lower value caps more rings: never lower it toward block pace.
+    slow_one_off_min_hop_slots: 1800
     recurrence_window_days: 30          # lookback for the origin's prior cycles:
                                         # recurrence count and recipient entropy
     # Amount similarity a cycle must exceed for the recycling credit (its path

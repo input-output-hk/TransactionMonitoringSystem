@@ -5,6 +5,7 @@ value cycles (ADA returning to the origin within max_hops).  Queries
 transaction_inputs and transaction_outputs in ClickHouse.
 """
 
+import bisect
 import logging
 import math
 import statistics
@@ -41,7 +42,8 @@ MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
 _MIN_CYCLE_LENGTH = int(_CYCLE_CFG["min_length"])
 _MAX_CYCLE_LENGTH = int(_CYCLE_CFG["max_length"])
 # Outputs to the origin set up to which the closing leg's similarity reading
-# tries every subset of them (2^N sums); beyond it, see _closing_reading.
+# searches every subset of them (see _nearest_subset_sums); past it, see
+# _closing_reading.
 _CLOSING_SUBSET_MAX_OUTPUTS = int(_CYCLE_CFG["closing_subset_max_outputs"])
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
 # Every Shelley-era Cardano network has a one-second slot (genesis
@@ -398,15 +400,15 @@ def _closing_leg_amounts(
             exc_info=True,
         )
         return matched_amount, matched_amount, True
-    paid = [(address, int(amount)) for address, amount in rows]
+    amounts = [int(amount) for _, amount in rows]
     # The matched output is one of the summed rows, so the total cannot be
     # smaller unless the two reads disagree; never report less than was seen.
-    total = max(sum(amount for _, amount in paid), matched_amount)
-    return total, _closing_reading(paid, matched_amount, total, prior_hop_amounts), False
+    total = max(sum(amounts), matched_amount)
+    return total, _closing_reading(amounts, matched_amount, total, prior_hop_amounts), False
 
 
 def _closing_reading(
-    paid: list[tuple[str, int]],
+    amounts: list[int],
     matched_amount: int,
     total: int,
     prior_hop_amounts: list[int],
@@ -415,38 +417,60 @@ def _closing_reading(
 
     Change or a re-lock can sit beside the repayment on the same address or
     another, and the repayment itself can be split across outputs, so the
-    candidates are the sums of every subset of the outputs. Past
-    circular.cycle.closing_subset_max_outputs outputs that is too many sums,
-    and the candidates are each output, each address's total and the total. The
-    matched row and the total are always candidates, and ties go to the total.
+    candidates are the sums of every subset of the outputs. The matched row and
+    the total are always candidates, and ties go to the total.
 
     amount_similarity is unimodal in the closing amount x: 1 - CV falls on
     either side of x = sum(h^2) / sum(h) over the other hops h, so only the
-    candidate nearest that point from below and from above can score highest.
+    subset sum nearest that point from below and from above can score highest,
+    and _nearest_subset_sums finds both without listing every sum. Past
+    circular.cycle.closing_subset_max_outputs outputs even that search costs
+    too much, and the reading is that point itself, within what the leg paid:
+    a subset that fits is assumed to be there, because splitting a repayment
+    across more outputs than any search takes apart costs an attacker only fees.
     """
-    amounts = [amount for _, amount in paid]
-    if len(amounts) <= _CLOSING_SUBSET_MAX_OUTPUTS:
-        sums = {0}
-        for amount in amounts:
-            sums |= {s + amount for s in sums}
-        sums.discard(0)
-    else:
-        per_address: Counter[str] = Counter()
-        for address, amount in paid:
-            per_address[address] += amount
-        sums = {*amounts, *per_address.values()}
-    sums |= {matched_amount, total}
     # Total first, so max() keeps it on a tie.
-    finalists = [total]
+    finalists = [total, matched_amount]
     weight = sum(prior_hop_amounts)
-    if weight > 0:
+    if weight > 0 and amounts:
         peak = sum(h * h for h in prior_hop_amounts) / weight
-        below = max((c for c in sums if c <= peak), default=None)
-        above = min((c for c in sums if c >= peak), default=None)
-        finalists += [c for c in (below, above) if c is not None]
-    else:
-        finalists += sorted(sums)
+        if len(amounts) <= _CLOSING_SUBSET_MAX_OUTPUTS:
+            finalists += [c for c in _nearest_subset_sums(amounts, peak) if c is not None]
+        else:
+            finalists.append(min(max(round(peak), min(amounts)), total))
     return max(finalists, key=lambda c: _amount_similarity([*prior_hop_amounts, c]))
+
+
+def _subset_sums(amounts: list[int]) -> set[int]:
+    """Every subset sum of amounts, the empty subset's 0 included."""
+    sums = {0}
+    for amount in amounts:
+        sums |= {s + amount for s in sums}
+    return sums
+
+
+def _nearest_subset_sums(amounts: list[int], target: float) -> tuple[int | None, int | None]:
+    """The largest non-empty subset sum at or below target, and the smallest at or above.
+
+    Meet in the middle: every subset sum of each half of the outputs, one half
+    sorted and searched for each sum of the other, so N outputs cost about
+    2 * 2^(N/2) sums instead of 2^N.
+    """
+    half = len(amounts) // 2
+    left = _subset_sums(amounts[:half])
+    right = sorted(_subset_sums(amounts[half:]))
+    below: int | None = None
+    above: int | None = None
+    for a in left:
+        # right[i - 1] <= target - a < right[i]. Both halves empty (a and the
+        # right sum both 0) is the empty subset, never a reading.
+        i = bisect.bisect_right(right, target - a)
+        if i and (a or right[i - 1]) and (below is None or a + right[i - 1] > below):
+            below = a + right[i - 1]
+        j = bisect.bisect_left(right, target - a)
+        if j < len(right) and (a or right[j]) and (above is None or a + right[j] < above):
+            above = a + right[j]
+    return below, above
 
 
 def _cycle_history(

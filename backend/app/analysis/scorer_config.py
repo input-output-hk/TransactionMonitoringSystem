@@ -97,6 +97,9 @@ _REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
         "min_profit_lovelace",
         "reason_thresholds",
     ),
+    # Every circular key is read unconditionally, and graph.py only on the
+    # first cycle enrichment (a lazy import), so a missing one must fail here,
+    # at load, not inside the scoring loop.
     "circular": (
         "weights",
         "fixed_anchors",
@@ -104,6 +107,20 @@ _REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
         "cycle",
         "reason_threshold",
         "moderate_cap",
+        "structural_corroboration_floor",
+        "slow_one_off_min_hop_slots",
+        "recurrence_window_days",
+        "recycling_min_amount_similarity",
+        "cycle.min_length",
+        "cycle.max_length",
+        "cycle.fee_tolerance_multiplier",
+        "cycle.fee_tolerance_strict",
+        "cycle.per_hop_fee_estimate",
+        "cycle.max_age_slots",
+        "cycle.max_output_fanout",
+        "cycle.bfs_hop_row_limit",
+        "cycle.default_inter_hop_delta_slots",
+        "cycle.closing_subset_max_outputs",
     ),
     "fake_token": (
         "weights",
@@ -243,21 +260,7 @@ _KNOWN_OPTIONAL_KEYS: dict[str, tuple[str, ...]] = {
         "reason_thresholds.rate",
         "reason_thresholds.impact",
     ),
-    "circular": (
-        "structural_corroboration_floor",
-        "recurrence_window_days",
-        "recycling_min_amount_similarity",
-        "cycle.min_length",
-        "cycle.max_length",
-        "cycle.fee_tolerance_multiplier",
-        "cycle.fee_tolerance_strict",
-        "cycle.per_hop_fee_estimate",
-        "cycle.max_age_slots",
-        "cycle.max_output_fanout",
-        "cycle.bfs_hop_row_limit",
-        "cycle.default_inter_hop_delta_slots",
-        "cycle.closing_subset_max_outputs",
-    ),
+    "circular": (),
     "fake_token": (
         "unicode_scores.zero_width",
         "unicode_scores.mixed_scripts",
@@ -565,6 +568,7 @@ def _validate(path: Path, data: dict[str, Any]) -> None:
             f"known optional): {joined}"
         )
     _check_band_invariants(path, data)
+    _check_ranges(path, data)
 
 
 # Band-boundary contracts for config values that cap or floor a score into a
@@ -614,6 +618,44 @@ _BAND_INVARIANTS: tuple[tuple[str, float, float | None, str], ...] = (
         "page on its own (only a malicious LABEL or a stored detector alerts)",
     ),
 )
+
+
+# Outputs to the origin past which the closing leg's subset search would cost a
+# single cycle 70 ms and more, fourfold every four outputs (1.5 s at 40,
+# measured), inside the scoring loop; past the knob the reading needs no search.
+_CLOSING_SUBSET_OUTPUTS_LIMIT = 32
+
+# Ranges outside which a value stops tuning a detector and breaks it, checked
+# at load like the band contracts. Entries: (dotted path from the document
+# root, inclusive lower bound, exclusive upper bound, why).
+_RANGE_INVARIANTS: tuple[tuple[str, float, float, str], ...] = (
+    (
+        "scorers.circular.recycling_min_amount_similarity",
+        0.0,
+        1.0,
+        "amount similarity tops out at 1.0, so a bar at or above it denies every "
+        "cycle the recycling credit and a repeated ring could no longer page",
+    ),
+    (
+        "scorers.circular.cycle.closing_subset_max_outputs",
+        0,
+        _CLOSING_SUBSET_OUTPUTS_LIMIT + 1,
+        "the closing leg's subset search doubles in cost every two outputs",
+    ),
+)
+
+
+def _check_ranges(path: Path, data: dict[str, Any]) -> None:
+    for dotted, lower, upper, why in _RANGE_INVARIANTS:
+        raw = _dotted_get(data, dotted)
+        if raw is None:
+            # Presence is enforced by the required-key checks above.
+            continue
+        value = float(raw)
+        if not lower <= value < upper:
+            raise RuntimeError(
+                f"Detection config {path}: {dotted}={value} is outside [{lower}, {upper}): {why}."
+            )
 
 
 def _dotted_get(data: dict[str, Any], dotted: str) -> Any:

@@ -562,6 +562,31 @@ class TestRecyclingOverTheWindow:
         assert result.score >= BAND_HIGH_THRESHOLD
 
     @pytest.mark.attack_must_fire
+    @pytest.mark.parametrize(
+        "outputs",
+        [graph._CLOSING_SUBSET_MAX_OUTPUTS, graph._CLOSING_SUBSET_MAX_OUTPUTS + 1],
+        ids=["searched", "past-the-search"],
+    )
+    def test_a_repeated_ring_splitting_its_repayment_across_many_outputs_reaches_high(
+        self, scorer, outputs
+    ):
+        """More outputs to the origin than a search takes apart must not keep a
+        repeated ring below High.
+
+        The repayment split in two beside change and dust, all on one address,
+        so no single output or address total is the repayment. Past the old
+        16-output search the reading fell back to those and the total, and the
+        second pass stopped at 54.45 with 17 outputs. Measured 43.11 then 63.11
+        at and past the search, so the floor sits at High.
+        """
+        half = _REPAID // 2
+        dust = [(_ORIGIN_A, _DUST + i) for i in range(outputs - 3)]
+        closing = [(_ORIGIN_A, half), (_ORIGIN_A, _REPAID - half), (_ORIGIN_A, _CHANGE), *dust]
+        _, again, result = self._second_pass(scorer, closing=closing)
+        assert again["recycled_share"] == 1.0
+        assert result.score >= BAND_HIGH_THRESHOLD
+
+    @pytest.mark.attack_must_fire
     def test_a_slow_ring_suppressed_once_surfaces_when_it_repeats(self, scorer):
         """Legs a block or more apart and a non-round amount leave only the two
         structural axes, so each pass alone is suppressed as structural-only.
@@ -693,6 +718,30 @@ class TestOneOffSlowCycles:
         Moderate finding. Measured 41.3."""
         result = scorer.score(_features(cycle=self._cycle(_LEG_GAP_SLOTS)))
         assert result.score >= BAND_MODERATE_THRESHOLD
+
+    @pytest.mark.attack_must_fire
+    def test_a_one_off_ring_a_block_apart_is_not_capped(self, scorer):
+        """A hop per block is the pace the detection spec gives for the modeled
+        attack, and the speed axis already reads zero there: the ring keeps its
+        Moderate. Measured 35.0."""
+        result = scorer.score(_features(cycle=self._cycle(_SLOW_LEG_GAP_SLOTS)))
+        assert result.score >= BAND_MODERATE_THRESHOLD
+
+    @pytest.mark.attack_must_fire
+    def test_a_one_off_whole_ada_ring_a_block_apart_keeps_its_moderate(self, scorer):
+        """The same through the graph builder: a first pass, legs a block
+        apart, the amount passed along in whole ADA. Measured 35.0."""
+        cycle = _detect([(_ORIGIN_A, _REPAID)], prior_cycles=[], gap=_SLOW_LEG_GAP_SLOTS)
+        features = _features(cycle=cycle)
+        assert scorer.gate(features)
+        assert scorer.score(features).score >= BAND_MODERATE_THRESHOLD
+
+    def test_the_cap_starts_at_the_configured_hop_gap(self, scorer):
+        threshold = circular_mod._SLOW_ONE_OFF_MIN_HOP_SLOTS
+        below = scorer.score(_features(cycle=self._cycle(threshold - 1)))
+        at = scorer.score(_features(cycle=self._cycle(threshold)))
+        assert below.score > BAND_INFORMATIONAL_MAX
+        assert at.score == BAND_INFORMATIONAL_MAX
 
 
 class TestRecycledAddressesWithoutValuePreservation:

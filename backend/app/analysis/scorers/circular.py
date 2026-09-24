@@ -20,9 +20,10 @@ Sub-scores (Polimi Section 4.7.3):
   auxiliary            (0.10): round amounts + temporal concentration
   speed                (0.10): inter-hop slot delta reciprocal, fixed anchors
 
-A cycle with no speed, no reused path and no recurrence is capped at the top of
-Informational: its preserved amount and round amounts alone are what a deposit
-to an exchange and the withdrawal back look like.
+A cycle with no speed, no reused path and no recurrence whose hops are further
+apart than an automated ring moves (circular.slow_one_off_min_hop_slots) is
+capped at the top of Informational: its preserved amount and round amounts
+alone are what a deposit to an exchange and the withdrawal back look like.
 
 Infrastructure dependency: transfer graph construction and cycle detection
 (bounded 6-hop BFS from tx sender) must be run by a background analysis
@@ -56,6 +57,9 @@ _REASON_T = float(_CFG["reason_threshold"])
 # config load: scorer_config._BAND_INVARIANTS.
 _MODERATE_CAP = float(_CFG["moderate_cap"])
 _STRUCTURAL_CORROBORATION_FLOOR = float(_CFG["structural_corroboration_floor"])
+# Mean slots between hops from which a cycle with no behavioural signal is a
+# slow one-off round trip rather than an automated ring (the config says why).
+_SLOW_ONE_OFF_MIN_HOP_SLOTS = int(_CFG["slow_one_off_min_hop_slots"])
 
 FEE_TOLERANCE_MULTIPLIER = float(_CYCLE["fee_tolerance_multiplier"])
 FEE_TOLERANCE_STRICT = float(_CYCLE["fee_tolerance_strict"])
@@ -265,12 +269,18 @@ class CircularScorer(BaseScorer):
 
         # One-off, slow and never recycled: with no speed, no reused path and no
         # earlier High of the ring, a cycle carries only its preserved amount and
-        # the auxiliary axis (round amounts, timing), which is what a deposit to
-        # an exchange and the withdrawal back look like; every such Moderate in
-        # the stored mainnet history was one. It stays visible, at the top of
-        # Informational. Judged on the structural floor without the auxiliary
+        # the auxiliary axis (round amounts, timing). When its hops are also
+        # further apart than an automated ring moves, that is what a deposit to
+        # an exchange and the withdrawal back look like, as five of the six such
+        # Moderates in the stored mainnet history were. It stays visible, at the
+        # top of Informational. A ring at block pace keeps its Moderate: the
+        # speed axis reads zero from one hop per block, the pace the modeled
+        # attack moves at. Judged on the structural floor without the auxiliary
         # axis, so any behavioural signal lifts the cap.
-        if (s_entropy + s_speed + s_recurrence) < _STRUCTURAL_CORROBORATION_FLOOR:
+        if (
+            hop_delta >= _SLOW_ONE_OFF_MIN_HOP_SLOTS
+            and (s_entropy + s_speed + s_recurrence) < _STRUCTURAL_CORROBORATION_FLOOR
+        ):
             final = min(final, BAND_INFORMATIONAL_MAX)
 
         reasons = []
