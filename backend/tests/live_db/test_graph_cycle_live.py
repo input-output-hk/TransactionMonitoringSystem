@@ -14,8 +14,9 @@ test asserts through ``CircularScorer.gate`` for that reason.
 Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import math
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -26,6 +27,7 @@ from app.analysis.scorers.circular import (
     CircularScorer,
     _estimate_fee_ratio,
 )
+from app.config import settings
 from app.models.transaction import (
     NormalizedTransaction,
     TransactionInput,
@@ -45,10 +47,14 @@ _ORIGIN_SLOT = 2_000_000
 _LEG_1 = 10_000_000
 _LEG_2 = 9_900_000
 _LEG_3 = 9_800_000
-# A min-UTxO-sized second output back to the origin on the closing leg. Routine
-# on Cardano (token dust, change) and the reason the hop query orders amount
-# DESC: see test_dust_output_on_the_closing_leg_does_not_mask_the_cycle.
+# A min-UTxO-sized second output back to the origin on the closing leg, routine
+# on Cardano (token dust, change): see
+# test_dust_output_on_the_closing_leg_does_not_mask_the_cycle.
 _DUST = 1_000_000
+# A wallet splitting what it holds into equal outputs does it in batches, since
+# one transaction holds a few hundred outputs at most; this many batches
+# together fill a hop's row limit when each output takes a row.
+_SPLIT_TXS = 2
 # Change the closing leg sends back to the wallet beside the repayment, 20% of
 # the cycled amount (routine when one wallet controls every leg).
 _CHANGE = 2_000_000
@@ -59,7 +65,12 @@ _GATE_MAX_NET_LOSS = _estimate_fee_ratio(_CYCLE_LEGS) * FEE_TOLERANCE_MULTIPLIER
 
 
 def _tx(tx_hash, slot, from_addrs, outputs):
-    """One leg of a cycle: spends from `from_addrs`, pays `outputs` [(addr, amount)]."""
+    """One leg of a cycle: spends from `from_addrs`, pays `outputs` [(addr, amount)].
+
+    `addresses` lists the spent-from addresses as well as the paid ones, as
+    input enrichment does before every production insert. The hop query finds
+    spends through address_transactions, which is built from this list.
+    """
     total = sum(amount for _, amount in outputs)
     return NormalizedTransaction(
         tx_hash=tx_hash,
@@ -104,6 +115,9 @@ def _plant(
     leg_amounts=(_LEG_1, _LEG_2),
     extra_origin_outputs=(),
     replay_closing=False,
+    decoys=None,
+    leg_2_outputs=1,
+    replay_middle_leg=False,
 ):
     """Plant origin -> B -> C -> origin and return (origin_tx_hash, origins).
 
@@ -111,20 +125,32 @@ def _plant(
     named so they sort in list order. `closing_outputs` is a factory taking that
     list and returning the final leg's outputs, so a test varies only how the
     cycle closes. Passing the same `ring` (from _ring) twice replays the cycle
-    through the same addresses, from `origin_slot` on. `replay_closing` inserts
-    the closing transaction a second time, as a replayed block does, leaving
-    duplicate rows until a merge.
+    through the same addresses, from `origin_slot` on. `replay_closing` and
+    `replay_middle_leg` insert that leg's transaction a second time, as a
+    replayed block does, leaving duplicate rows until a merge. `decoys`, if
+    given, takes (origins, addr_b) and returns extra transactions planted
+    alongside the cycle. `leg_2_outputs` pays the middle leg as that many equal
+    outputs to C.
     """
     origins, addr_b, addr_c = ring or _ring(origin_count)
     tx_ab, tx_bc, tx_ca = (uuid.uuid4().hex * 2 for _ in range(3))
     leg_1, leg_2 = leg_amounts
 
+    middle = _tx(
+        tx_bc,
+        origin_slot + leg_gap,
+        [addr_b],
+        [(addr_c, leg_2 // leg_2_outputs)] * leg_2_outputs,
+    )
     ch.insert_transactions_batch(
         [
             _tx(tx_ab, origin_slot, origins, [(addr_b, leg_1), *extra_origin_outputs]),
-            _tx(tx_bc, origin_slot + leg_gap, [addr_b], [(addr_c, leg_2)]),
+            middle,
+            *(decoys(origins, addr_b) if decoys else []),
         ]
     )
+    if replay_middle_leg:
+        ch.insert_transactions_batch([middle])
     closing = _tx(
         tx_ca,
         closing_slot if closing_slot is not None else origin_slot + 2 * leg_gap,
@@ -194,9 +220,9 @@ class TestForwardBfsFindsAPlantedCycle:
     def test_repayment_split_into_equal_outputs_counts_in_full(self, ch):
         """Equal outputs to one origin address must all count.
 
-        The hop query is DISTINCT on (tx_hash, address, amount, slot), so real
-        ClickHouse returns the two halves as ONE row. The total must still
-        include both, or half the repayment reads as lost and the gate rejects.
+        The loop stops at the first origin-paying row, one of the halves. The
+        total must still include both, or half the repayment reads as lost and
+        the gate rejects.
         """
         half = _LEG_3 // 2
         tx_ab, _ = _plant(ch, lambda o: [(o[0], half), (o[0], half)])
@@ -207,6 +233,127 @@ class TestForwardBfsFindsAPlantedCycle:
         assert cycle["net_loss_ratio"] < _GATE_MAX_NET_LOSS, (
             f"half the repayment was dropped: net_loss_ratio={cycle['net_loss_ratio']}"
         )
+        assert CircularScorer().gate({"cycle": cycle})
+
+    def test_a_payment_into_the_frontier_is_not_a_spend_from_it(self, ch):
+        """Only a transaction SPENDING from a frontier address extends the BFS.
+
+        The hop query prefilters through address_transactions, which lists
+        every transaction touching an address, including ones that only pay
+        it. Here an unrelated wallet pays B and the origin in one transaction,
+        landing after the origin leg and before B's real spend. Taken as B's
+        spend, it would close a 2-leg "cycle" first; the BFS stops at the first
+        origin-paying row and the gate discards 2-leg cycles, so the real 3-leg
+        cycle would go unreported. Confirming each candidate against
+        transaction_inputs is what keeps it out.
+        """
+
+        def payer_into_b(origins, addr_b):
+            return [
+                _tx(
+                    uuid.uuid4().hex * 2,
+                    _ORIGIN_SLOT + _LEG_SLOT_GAP // 2,
+                    [f"addr_test1qqx_{uuid.uuid4().hex[:12]}"],
+                    [(addr_b, _DUST), (origins[0], _LEG_3)],
+                )
+            ]
+
+        tx_ab, origins = _plant(ch, lambda o: [(o[0], _LEG_3)], decoys=payer_into_b)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None, "a payment into B masked the real cycle"
+        assert cycle["cycle_length"] == _CYCLE_LEGS
+        assert CircularScorer().gate({"cycle": cycle})
+
+    @pytest.mark.attack_must_fire
+    def test_a_middle_leg_split_into_equal_outputs_counts_in_full(self, ch):
+        """Two equal outputs of one transaction both count toward the hop.
+
+        The hop query's rows were DISTINCT on (tx_hash, address, amount, slot),
+        so a middle leg paid as equal outputs to one address read as one of
+        them: the hop looked half its size and the ring uneven, which took
+        the similarity below the recycling credit's bar for the price of an
+        extra output. The ring must measure exactly as it does unsplit.
+        """
+        tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)])
+        tx_split, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], leg_2_outputs=2)
+
+        plain = graph.detect_cycle(tx_plain, LIVE_NETWORK)
+        split = graph.detect_cycle(tx_split, LIVE_NETWORK)
+
+        assert plain is not None and split is not None
+        assert split["amount_similarity"] == plain["amount_similarity"]
+        assert CircularScorer().gate({"cycle": split})
+
+    @pytest.mark.parametrize("leg_2_outputs", [1, 2], ids=["one-output", "split-in-two"])
+    def test_a_replayed_middle_leg_is_counted_once(self, ch, leg_2_outputs):
+        """A middle leg inserted twice must not count its outputs twice.
+
+        The hop query reads transaction_outputs without FINAL, so the duplicate
+        rows a replayed block leaves until a merge would double the hop and
+        read the ring as uneven. The ring must measure exactly as it does
+        without the replay.
+        """
+        tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)])
+        tx_replayed, _ = _plant(
+            ch, lambda o: [(o[0], _LEG_3)], leg_2_outputs=leg_2_outputs, replay_middle_leg=True
+        )
+
+        plain = graph.detect_cycle(tx_plain, LIVE_NETWORK)
+        replayed = graph.detect_cycle(tx_replayed, LIVE_NETWORK)
+
+        assert plain is not None and replayed is not None
+        assert replayed["amount_similarity"] == plain["amount_similarity"]
+
+    @pytest.mark.attack_must_fire
+    def test_equal_outputs_ahead_of_a_ring_leg_leave_the_leg_in_the_hop(self, ch):
+        """A batch of equal outputs landing ahead of a ring's leg must not push
+        the leg out of the hop.
+
+        The origin also pays D, a second wallet or a vendor, and D splits what
+        it holds into equal outputs to itself before B's leg, as wallets and
+        batchers routinely do. With a row per output those rows alone filled
+        circular.cycle.bfs_hop_row_limit, the hop was cut before B's spend and
+        the ring went unseen. A row per (transaction, address) leaves D's batch
+        one row per transaction.
+        """
+        addr_d = f"addr_test1qqd_{uuid.uuid4().hex[:12]}"
+        outputs_per_split = math.ceil(graph._BFS_HOP_ROW_LIMIT / _SPLIT_TXS)
+
+        def splits(origins, addr_b):
+            # In the slots right after the origin's, all before B's leg.
+            return [
+                _tx(
+                    uuid.uuid4().hex * 2,
+                    _ORIGIN_SLOT + 1 + i,
+                    [addr_d],
+                    [(addr_d, _DUST)] * outputs_per_split,
+                )
+                for i in range(_SPLIT_TXS)
+            ]
+
+        tx_ab, _ = _plant(
+            ch, lambda o: [(o[0], _LEG_3)], extra_origin_outputs=[(addr_d, _DUST)], decoys=splits
+        )
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None, "a batch of equal outputs pushed the ring's leg out of the hop"
+        assert cycle["cycle_length"] == _CYCLE_LEGS
+        assert CircularScorer().gate({"cycle": cycle})
+
+    def test_a_ring_through_a_frontier_address_that_sorts_second_is_found(self, ch):
+        """The origin also pays an address that sorts ahead of B and never
+        spends: the prefilter must read the whole frontier, not its first entry.
+        """
+        first = f"addr_test1qq0_{uuid.uuid4().hex[:12]}"
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], extra_origin_outputs=[(first, _DUST)])
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None, "the ring through the second frontier address was missed"
+        assert cycle["cycle_length"] == _CYCLE_LEGS
         assert CircularScorer().gate({"cycle": cycle})
 
     @pytest.mark.parametrize(
@@ -224,8 +371,7 @@ class TestForwardBfsFindsAPlantedCycle:
         but read as the closing hop's amount it turned routine change into an
         uneven cycle and dropped a real one out of the alert band. The cycle
         must measure exactly as it does without the change, also when the
-        repayment is split into equal outputs (which the hop query's DISTINCT
-        collapses) beside change to the same address.
+        repayment is split into equal outputs beside change to the same address.
         """
         tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], origin_count=2)
         tx_change, _ = _plant(ch, closing, origin_count=2)
@@ -276,6 +422,156 @@ class TestForwardBfsHorizon:
         tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], closing_slot=beyond)
 
         assert graph.detect_cycle(tx_ab, LIVE_NETWORK) is None
+
+    def test_a_ring_chained_inside_the_origin_s_block_is_found(self, ch):
+        """Every leg in the origin's own slot: the window's lower edge counts."""
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], leg_gap=0)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None and cycle["cycle_length"] == _CYCLE_LEGS
+
+    def test_a_closing_leg_in_the_horizon_s_last_slot_is_found(self, ch):
+        """The window's upper edge counts too."""
+        edge = _ORIGIN_SLOT + graph._MAX_AGE_SLOTS
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], closing_slot=edge)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None and cycle["cycle_length"] == _CYCLE_LEGS
+
+
+def _primary_key_columns(plan_lines):
+    """Per table, the primary-key columns an EXPLAIN indexes = 1 plan narrows by."""
+    keys: dict[str, set[str]] = {}
+    table = None
+    in_primary_key = in_keys = False
+    for line in plan_lines:
+        text = line.strip()
+        if text.startswith("ReadFromMergeTree ("):
+            table = text.split("(", 1)[1].rstrip(")").split(".")[-1]
+            keys.setdefault(table, set())
+            in_primary_key = in_keys = False
+        elif text == "PrimaryKey":
+            in_primary_key = True
+        elif in_primary_key and text == "Keys:":
+            in_keys = True
+        elif in_keys and text and ":" not in text:
+            keys[table].add(text)
+        else:
+            in_keys = False
+    return keys
+
+
+class TestHopQueryPlan:
+    """The hop query's cost must not grow with the history: the address index is
+    read by address and slot, and the spends by tx_hash, never scanned."""
+
+    def test_the_index_and_the_spends_are_read_by_primary_key(self, ch):
+        params = {
+            "addresses": [f"addr_test1qqplan_{uuid.uuid4().hex[:12]}"],
+            "network": LIVE_NETWORK,
+            "min_slot": _ORIGIN_SLOT,
+            "max_slot": _ORIGIN_SLOT + graph._MAX_AGE_SLOTS,
+            "origin_tx": uuid.uuid4().hex * 2,
+            "hop_row_limit": graph._BFS_HOP_ROW_LIMIT,
+        }
+
+        def keys(sql):
+            plan = ch._get_client().execute("EXPLAIN indexes = 1 " + sql, params)
+            return _primary_key_columns([row[0] for row in plan])
+
+        assert graph._HOP_SPENDS in graph._HOP_QUERY
+        assert graph._HOP_PREFILTER in graph._HOP_SPENDS
+        assert {"address", "slot"} <= keys(graph._HOP_PREFILTER)["address_transactions"]
+        assert "tx_hash" in keys(graph._HOP_SPENDS)["transaction_inputs"]
+
+
+class TestAddressIndexGaps:
+    """graph.address_index_gaps counts the recent spends the hop query's
+    prefilter cannot see. Each test plants on a network of its own, so no other
+    plant in the database counts."""
+
+    def _spend(self, network, left_out_of_index=False, slotless=False, unresolved=False):
+        spender, payee = (f"addr_test1qqg{leg}_{uuid.uuid4().hex[:12]}" for leg in "sp")
+        spend = _tx(uuid.uuid4().hex * 2, _ORIGIN_SLOT, [spender], [(payee, _LEG_1)])
+        update: dict = {"network": network}
+        if left_out_of_index:
+            # Stored without its input address, as a broken enrichment path
+            # would: address_transactions never learns that the spender spent.
+            update["addresses"] = [payee]
+        if slotless:
+            update["slot"] = None
+        if unresolved:
+            # An input whose spent output was never found: no address to follow.
+            update["inputs"] = [i.model_copy(update={"address": ""}) for i in spend.inputs]
+            update["addresses"] = [payee]
+        return spend.model_copy(update=update)
+
+    def _network(self):
+        return f"{LIVE_NETWORK}-addrindex-{uuid.uuid4().hex[:8]}"
+
+    def _check(self, network):
+        return graph.address_index_gaps(network, settings.ADDRESS_INDEX_CHECK_WINDOW_SECONDS)
+
+    def test_a_complete_index_has_no_gaps(self, ch):
+        network = self._network()
+        ch.insert_transactions_batch([self._spend(network)])
+
+        assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=1, unresolved=0)
+
+    def test_a_spend_left_out_of_the_index_is_counted(self, ch):
+        network = self._network()
+        ch.insert_transactions_batch(
+            [self._spend(network), self._spend(network, left_out_of_index=True)]
+        )
+
+        assert self._check(network) == graph.AddressIndexCheck(missing=1, checked=2, unresolved=0)
+
+    def test_a_superseded_version_of_a_spend_is_not_a_gap(self, ch):
+        """Only a transaction's latest version counts.
+
+        After a fork switch the rollback purge deletes the transaction and its
+        index rows, and the re-confirmed transaction is indexed at its new
+        slot; but a time-range read of transactions goes through the
+        p_by_time_v2 projection, which serves the deleted version until its
+        part merges. Planted here as two unmerged versions with the old slot's
+        index rows gone: read at the old slot, every spend of the switch was a
+        false gap.
+        """
+        network = self._network()
+        spend = self._spend(network)
+        ch.insert_transactions_batch([spend])
+        ch._get_client().execute(
+            "DELETE FROM address_transactions WHERE network = %(network)s AND tx_hash = %(tx)s",
+            {"network": network, "tx": spend.tx_hash},
+        )
+        reconfirmed = spend.model_copy(
+            update={
+                "slot": spend.slot + _LEG_SLOT_GAP,
+                "block_height": spend.block_height + _LEG_SLOT_GAP,
+                "ingestion_timestamp": spend.ingestion_timestamp + timedelta(seconds=1),
+            }
+        )
+        ch.insert_transactions_batch([reconfirmed])
+
+        assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=1, unresolved=0)
+
+    def test_a_slotless_spend_is_not_checked(self, ch):
+        """No hop window holds a transaction without a slot, so the BFS never
+        misses its spends by the index: it cannot see them at all."""
+        network = self._network()
+        ch.insert_transactions_batch([self._spend(network, left_out_of_index=True, slotless=True)])
+
+        assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=0, unresolved=0)
+
+    def test_an_unresolved_input_is_counted_apart(self, ch):
+        """An input without an address is a failure of input enrichment, which
+        the index cannot fix: reported on its own, not as a missing spend."""
+        network = self._network()
+        ch.insert_transactions_batch([self._spend(network), self._spend(network, unresolved=True)])
+
+        assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=1, unresolved=1)
 
 
 # A second pass of a ring starts well after the first has closed, so the hop

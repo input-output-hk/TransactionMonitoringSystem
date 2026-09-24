@@ -676,7 +676,9 @@ def _create_address_lookup(client: Client) -> None:
                   NOT IN (SELECT network, address, slot, tx_hash FROM address_transactions)
         """)
     except Exception as e:
-        logger.debug(f"address_transactions backfill skipped: {e}")
+        # The circular BFS finds spends only through this table, so a spend the
+        # backfill failed to add is a cycle leg it cannot see.
+        logger.warning(f"address_transactions backfill failed: {e}")
 
 
 def _add_circular_history_columns(client: Client) -> None:

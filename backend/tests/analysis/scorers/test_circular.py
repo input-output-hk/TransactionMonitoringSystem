@@ -295,11 +295,11 @@ class _PlantedCycleClient:
 
     ``closing_outputs`` are every output of the closing transaction as
     (address, amount). The hop query sees them the way its SQL returns them,
-    DISTINCT and sorted by address then amount DESC; the closing-leg read sees
-    them without DISTINCT, filtered to the transaction and the origin set it is
-    asked about. ``fail_closing_read`` makes that read raise. ``prior_cycles``
-    are the history read's rows, (circular, circular_intermediaries) per
-    earlier cycle of the origin.
+    one row per address holding the sum of its outputs, sorted by address; the
+    closing-leg read sees each output, filtered to the transaction and the
+    origin set it is asked about. ``fail_closing_read`` makes that read raise.
+    ``prior_cycles`` are the history read's rows, (circular,
+    circular_intermediaries) per earlier cycle of the origin.
     """
 
     def __init__(
@@ -315,10 +315,10 @@ class _PlantedCycleClient:
         two_hop: bool = False,
     ):
         close_slot = _ORIGIN_SLOT + (gap if two_hop else 2 * gap)
-        closing_rows = sorted(
-            {(_CLOSING_TX, addr, amount, close_slot) for addr, amount in closing_outputs},
-            key=lambda r: (r[1], -r[2]),
-        )
+        paid: dict[str, int] = {}
+        for addr, amount in closing_outputs:
+            paid[addr] = paid.get(addr, 0) + amount
+        closing_rows = [(_CLOSING_TX, addr, paid[addr], close_slot) for addr in sorted(paid)]
         leg_2_row = (_LEG_2_TX, _HOP_2, leg_2, _ORIGIN_SLOT + gap)
         self._hops = [closing_rows] if two_hop else [[leg_2_row], closing_rows]
         self._closing_outputs = closing_outputs
@@ -381,9 +381,9 @@ class TestClosingLegFromTheHopQuery:
     def test_repayment_split_into_equal_outputs_counts_in_full(self, scorer):
         """A repayment split into equal outputs must count in full.
 
-        The hop query's DISTINCT collapses equal outputs to one address into a
-        single row, so half the repayment looked lost and the gate discarded
-        the cycle. Splitting an output is free, so this is the easier evasion.
+        The loop stops at the first origin-paying row, one of the halves, so
+        read alone half the repayment looked lost and the gate discarded the
+        cycle. Splitting an output is free, so this is the easier evasion.
         Measured 87.11 through the full path, so the floor sits at High.
         """
         half = _REPAID // 2
@@ -447,7 +447,7 @@ class TestClosingLegFromTheHopQuery:
         """A failed read of the closing leg must not cost the finding.
 
         The cycle is measured with the matched row, which is exact when the
-        closing leg pays the origin one output, and flagged so the engine
+        closing leg pays one origin address, and flagged so the engine
         retries the transaction for the full reading; if the read keeps
         failing, the engine writes this score with a marker.
         """

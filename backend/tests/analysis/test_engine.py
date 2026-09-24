@@ -402,9 +402,9 @@ class TestCycleEnrichment:
         assert row["_enrichment_failed"] == ["cycle_history"]
 
     def test_a_cycle_measured_without_its_closing_leg_is_kept_and_retried(self):
-        """Kept with the matched output's reading, exact for a single-output
-        close, so a read that keeps failing still writes the cycle's score once
-        the retries run out."""
+        """Kept with the matched row's reading, exact for a close paying one
+        origin address, so a read that keeps failing still writes the cycle's
+        score once the retries run out."""
         cycle = {"cycle_length": 3, "history_unavailable": False, "closing_leg_unavailable": True}
         row = self._enrich(lambda tx_hash, network: cycle)
         assert row["cycle"] is cycle

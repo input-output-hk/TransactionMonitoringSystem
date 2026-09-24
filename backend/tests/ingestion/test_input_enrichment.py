@@ -187,3 +187,24 @@ class TestCollateralResolution:
         collateral = next(i for i in out.inputs if i.is_collateral)
         assert collateral.is_collateral is True
         assert collateral.amount == 4_000_000
+
+
+class TestSpentFromAddressesReachTheAddressList:
+    """A validated tx's regular input addresses must land in ``addresses``.
+
+    address_transactions is built from this list, and the circular BFS finds
+    each spend through it (graph.detect_cycle). An address missing here is a
+    spend the BFS can never see, so a cycle through it goes undetected with no
+    error anywhere. Both resolution paths feed the insert, so both are pinned.
+    """
+
+    SPENDER = "addr_test1qqspender"
+
+    def test_resolved_from_clickhouse(self):
+        out = _resolve([_tx()], {(SOURCE_TX, 0): (self.SPENDER, 2_000_000)})[0]
+        assert self.SPENDER in out.addresses
+
+    def test_resolved_from_the_mempool_cache(self):
+        resolved = {(SOURCE_TX, 0): {"address": self.SPENDER, "amount": 2_000_000}}
+        out = apply_resolved_inputs(_tx(), resolved)
+        assert self.SPENDER in out.addresses
