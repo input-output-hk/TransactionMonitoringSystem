@@ -10,7 +10,7 @@ import logging
 import math
 import statistics
 from collections import Counter
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.analysis.features import LOVELACE_PER_ADA, is_script_address
 from app.analysis.normalise import BAND_HIGH_THRESHOLD
@@ -60,6 +60,196 @@ _VALUE_PRESERVING_SIMILARITY = float(_CIRCULAR_CFG["recycling_min_amount_similar
 # resolution, so they are at most one slot apart: measured, and as fast as a
 # ring can move, not unmeasurable.
 _SAME_SLOT_DELTA_SLOTS = 1
+
+# The BFS hop: every output of the transactions that spend from the frontier
+# inside the slot window. Spends only: a transaction that merely pays a frontier
+# address does not move value on from it. The window is bounded because cycles
+# spanning more than circular.cycle.max_age_slots are almost always incidental
+# reuses of an address, not deliberate layering.
+#
+# Shape matters as much as the filters here. Filtering transaction_inputs by
+# address cannot narrow it: the table is ordered by tx_hash, and its address
+# bloom index passes about 2.5% of granules per address as false positives, so
+# a frontier of a few dozen addresses passes most of them and the filter read
+# the whole table on every hop, growing with every day of history.
+# address_transactions is ordered by (network, address, slot), so the frontier's
+# transactions inside the window are a primary-key range read at any history
+# size. That set is a superset (it also holds transactions that only PAY these
+# addresses), so it is a prefilter and nothing more: each candidate is still
+# confirmed as a spend against transaction_inputs and windowed on
+# transactions.slot, with the conditions this query always used (except that an
+# empty frontier address never matches, since the index leaves empty addresses
+# out), both read by tx_hash through their primary keys. What remains scales
+# with the transactions the frontier made inside the window, not with the
+# history: small for ordinary addresses, while a hub in the frontier still
+# costs every transaction it made in the window. Replayed on 60 real mainnet
+# hops interleaved on one snapshot: all 60 results byte-identical on merged
+# data, CPU 49.7 -> 14.5 seconds. When retuning, compare
+# OSCPUVirtualTimeMicroseconds and memory_usage across interleaved replays, not
+# read_rows alone: #107's shape read more rows and cost less.
+#
+# The prefilter is exactly as complete as address_transactions, which
+# address_transactions_mv fills from transactions.addresses. That list holds
+# every regular input address because input enrichment runs before the insert
+# (input_enrichment._flow_addresses, pinned by test_input_enrichment.py).
+# Measured on mainnet on 2026-09-22: all 2,556,830 spend pairs this query can
+# match were present at their slot, and address_index_gaps keeps checking it
+# (see app.tasks.housekeeping). Retention (CH_RETENTION_DAYS_IO) and the
+# rollback purge treat the table like transaction_inputs. Outputs are joined
+# only once the candidates are known, which is what keeps peak memory near 31MB
+# (#107; p95 36.5MB with the prefilter).
+#
+# The ORDER BY carries a full tiebreaker (tx_hash, address, amount) rather than
+# slot alone. Slot ties are common (many spends land in one block), so ordering
+# by slot alone left the LIMIT truncation picking an arbitrary subset of
+# equally-ranked rows: the same hop could explore a different frontier
+# run-to-run and miss a cycle through the dropped legs. Same reproducibility
+# rationale as _first_sorted.
+#
+# Which origin-paying row sorts first no longer decides how much came back. The
+# loop stops at that row only to learn WHICH transaction closes the cycle;
+# _closing_leg_amounts then reads that transaction's outputs to the whole
+# origin set. No row order could have done this: amount DESC still let dust to
+# a second origin address, sorted ahead by address, stand in for the repayment.
+# amount keeps its DESC tiebreak only for a total, reproducible order.
+#
+# Built from its two narrowing reads so the live tests can EXPLAIN each of them
+# (a plan of the whole query shows neither: ClickHouse builds IN sets before
+# planning the main query).
+_HOP_PREFILTER = """
+    SELECT tx_hash
+    FROM address_transactions
+    WHERE network = %(network)s
+      AND address IN %(addresses)s
+      AND slot >= %(min_slot)s
+      AND slot <= %(max_slot)s
+"""
+_HOP_SPENDS = f"""
+    SELECT tx_hash
+    FROM transaction_inputs
+    WHERE network = %(network)s
+      AND address IN %(addresses)s
+      AND is_collateral = 0
+      AND is_reference = 0
+      AND is_unspent_attempt = 0
+      AND tx_hash != %(origin_tx)s
+      AND tx_hash IN ({_HOP_PREFILTER})
+"""
+_HOP_QUERY = f"""
+    WITH cand AS (
+        SELECT DISTINCT tx_hash, slot
+        FROM transactions
+        WHERE network = %(network)s
+          AND slot >= %(min_slot)s
+          AND slot <= %(max_slot)s
+          AND tx_hash IN ({_HOP_SPENDS})
+    )
+    SELECT DISTINCT c.tx_hash, to2.address, to2.amount, c.slot
+    FROM cand c
+    JOIN (
+        SELECT tx_hash, address, amount
+        FROM transaction_outputs
+        WHERE network = %(network)s
+          AND is_collateral = 0
+          AND tx_hash IN (SELECT tx_hash FROM cand)
+    ) to2 ON c.tx_hash = to2.tx_hash
+    ORDER BY c.slot ASC, c.tx_hash ASC, to2.address ASC, to2.amount DESC
+    LIMIT %(hop_row_limit)s
+"""
+
+# ingestion_timestamp is stamped when a transaction is parsed, after its block,
+# and its inputs and index rows carry the same value, so a transaction inside
+# the check's window of block time was ingested inside it too. The margin only
+# absorbs a host clock running behind the chain's slot clock.
+_INGESTION_CLOCK_MARGIN_SECONDS = 300
+
+# Spends in the recent window whose (address, slot, tx_hash) row is missing from
+# address_transactions: legs _HOP_QUERY's prefilter cannot see. Spends are read
+# as _HOP_QUERY confirms them; slotless transactions are left out, since no hop
+# window holds them, and so are inputs whose address was never resolved, which
+# no hop can follow either: those are counted apart.
+#
+# recent takes each transaction's latest version. A time-range read of
+# transactions is served by its p_by_time_v2 projection, which keeps rows a
+# rollback purge deleted until their part merges, so after a fork switch the
+# re-confirmed transaction also shows at its orphaned slot, whose index row is
+# gone: counted, that is a false gap on every spend of the switch.
+#
+# The IN sets hold every transaction of the window, thousands on mainnet, which
+# touch nearly every granule of the two history-sized tables, so their keys
+# prune little. The ingestion_timestamp bound lets PREWHERE skip the granules
+# of parts older than the window instead.
+_ADDRESS_INDEX_GAPS_QUERY = """
+    WITH recent AS (
+        SELECT tx_hash, argMax(slot, ingestion_timestamp) AS tx_slot
+        FROM transactions
+        WHERE network = %(network)s
+          AND timestamp >= now() - toIntervalSecond(%(window_seconds)s)
+          AND isNotNull(slot)
+        GROUP BY tx_hash
+    )
+    SELECT
+        uniqExactIf((spender, spend_tx), resolved AND NOT indexed),
+        uniqExactIf((spender, spend_tx), resolved),
+        uniqExactIf((spend_tx, spend_input), NOT resolved)
+    FROM (
+        SELECT
+            ti.address AS spender,
+            ti.tx_hash AS spend_tx,
+            ti.input_index AS spend_input,
+            ti.address != '' AS resolved,
+            (ti.address, assumeNotNull(r.tx_slot), ti.tx_hash) IN (
+                SELECT address, slot, tx_hash
+                FROM address_transactions
+                WHERE network = %(network)s
+                  AND ingestion_timestamp >= now() - toIntervalSecond(%(horizon_seconds)s)
+                  AND tx_hash IN (SELECT tx_hash FROM recent)
+            ) AS indexed
+        FROM transaction_inputs AS ti
+        INNER JOIN recent AS r ON ti.tx_hash = r.tx_hash
+        WHERE ti.network = %(network)s
+          AND ti.ingestion_timestamp >= now() - toIntervalSecond(%(horizon_seconds)s)
+          AND ti.tx_hash IN (SELECT tx_hash FROM recent)
+          AND ti.is_collateral = 0
+          AND ti.is_reference = 0
+          AND ti.is_unspent_attempt = 0
+    )
+"""
+
+
+class AddressIndexCheck(NamedTuple):
+    """One address_index_gaps pass over a window of recent spends."""
+
+    # Resolved spends the index lacks: cycle legs the BFS cannot see.
+    missing: int
+    # Resolved spends looked at; 0 means the window held nothing to check.
+    checked: int
+    # Inputs whose address was never resolved: invisible to the BFS as well,
+    # but a failure of input enrichment, not of the index.
+    unresolved: int
+
+
+def address_index_gaps(network: str, window_seconds: int) -> AddressIndexCheck:
+    """How many spends of the last window_seconds the circular BFS cannot see.
+
+    The hop query finds a spend only through its row in address_transactions,
+    so a spend missing there is a cycle leg the BFS skips without an error.
+    The index is complete by construction (see _HOP_QUERY); this checks it.
+    """
+    client = clickhouse._get_client()
+    rows = client.execute(
+        _ADDRESS_INDEX_GAPS_QUERY,
+        {
+            "network": network,
+            "window_seconds": window_seconds,
+            "horizon_seconds": window_seconds + _INGESTION_CLOCK_MARGIN_SECONDS,
+        },
+        settings={"max_threads": settings.ADDRESS_INDEX_CHECK_MAX_THREADS},
+    )
+    if not rows:
+        return AddressIndexCheck(missing=0, checked=0, unresolved=0)
+    missing, checked, unresolved = rows[0]
+    return AddressIndexCheck(int(missing), int(checked), int(unresolved))
 
 
 def _address_key(address: str) -> str:
@@ -194,89 +384,9 @@ def detect_cycle(
         addr_list = sorted(current_addresses)[:max_fanout]
         queried.append(addr_list)
 
-        # Find txs where these addresses are inputs (they spent received funds).
-        # The slot window is bounded: cycles spanning >24h are almost always
-        # incidental reuses of an address, not deliberate layering.
-        #
-        # Shape matters as much as the filters here. Filtering
-        # transaction_inputs by address cannot narrow it: the table is ordered
-        # by tx_hash, and its address bloom index passes nearly every granule
-        # for a multi-address frontier, so that filter read the whole table on
-        # every hop and grew with every day of history. address_transactions is
-        # ordered by (network, address, slot), so the frontier's transactions
-        # inside the window are a primary-key range read at any history size.
-        # That set is a superset (it also holds transactions that only PAY these
-        # addresses), so it is a prefilter and nothing more: each candidate is
-        # still confirmed as a spend against transaction_inputs, and windowed on
-        # transactions.slot, with the exact conditions this query always used,
-        # both now read by tx_hash through their primary keys. What remains
-        # scales with the number of candidates, not with the history. Replayed
-        # on 60 real mainnet hops interleaved on one snapshot: all 60 results
-        # byte-identical, CPU 49.7 -> 14.5 seconds.
-        #
-        # The prefilter is exactly as complete as address_transactions, which
-        # address_transactions_mv fills from transactions.addresses. That list
-        # holds every regular input address because input enrichment runs
-        # before the insert (input_enrichment._flow_addresses, pinned by
-        # test_input_enrichment.py). Measured on mainnet on 2026-09-22: all
-        # 2,556,830 spend pairs this query can match were present at their
-        # slot. Retention (CH_RETENTION_DAYS_IO) and the rollback purge treat
-        # the table like transaction_inputs. Outputs are joined only once the
-        # candidates are known, which is what keeps peak memory near 37MB (#107).
-        #
-        # The ORDER BY carries a full tiebreaker (tx_hash, address, amount)
-        # rather than slot alone. Slot ties are common (many spends land in one
-        # block), so ordering by slot alone left the LIMIT truncation picking an
-        # arbitrary subset of equally-ranked rows: the same hop could explore a
-        # different frontier run-to-run and miss a cycle through the dropped
-        # legs. Same reproducibility rationale as _first_sorted above.
-        #
-        # Which origin-paying row sorts first no longer decides how much came
-        # back. The loop stops at that row only to learn WHICH transaction
-        # closes the cycle; _closing_leg_amounts then reads that transaction's
-        # outputs to the whole origin set. No row order could have done this:
-        # amount DESC still let dust to a second origin address, sorted ahead
-        # by address, stand in for the repayment. amount keeps its DESC
-        # tiebreak only for a total, reproducible order.
+        # The spends from the frontier inside the window (see _HOP_QUERY).
         next_rows = client.execute(
-            """
-            WITH cand AS (
-                SELECT DISTINCT tx_hash, slot
-                FROM transactions
-                WHERE network = %(network)s
-                  AND slot >= %(min_slot)s
-                  AND slot <= %(max_slot)s
-                  AND tx_hash IN (
-                      SELECT tx_hash
-                      FROM transaction_inputs
-                      WHERE network = %(network)s
-                        AND address IN %(addresses)s
-                        AND is_collateral = 0
-                        AND is_reference = 0
-                        AND is_unspent_attempt = 0
-                        AND tx_hash != %(origin_tx)s
-                        AND tx_hash IN (
-                            SELECT tx_hash
-                            FROM address_transactions
-                            WHERE network = %(network)s
-                              AND address IN %(addresses)s
-                              AND slot >= %(min_slot)s
-                              AND slot <= %(max_slot)s
-                        )
-                  )
-            )
-            SELECT DISTINCT c.tx_hash, to2.address, to2.amount, c.slot
-            FROM cand c
-            JOIN (
-                SELECT tx_hash, address, amount
-                FROM transaction_outputs
-                WHERE network = %(network)s
-                  AND is_collateral = 0
-                  AND tx_hash IN (SELECT tx_hash FROM cand)
-            ) to2 ON c.tx_hash = to2.tx_hash
-            ORDER BY c.slot ASC, c.tx_hash ASC, to2.address ASC, to2.amount DESC
-            LIMIT %(hop_row_limit)s
-            """,
+            _HOP_QUERY,
             {
                 "addresses": addr_list,
                 "network": network,

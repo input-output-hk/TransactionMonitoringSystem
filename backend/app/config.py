@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,11 @@ _TMS_ENV_RE = re.compile(r"[a-z0-9_-]+")
 # field default and the production fail-fast guard (main._validate_startup_settings)
 # reference the same value rather than duplicating the literal.
 DEFAULT_DEV_POSTGRES_PASSWORD = "tms_password"
+
+# The shortest interval between two address-index checks: five minutes of chain
+# time is ~15 mainnet blocks, and a check reads the window's spends out of two
+# history-sized tables, so running it more often only repeats that read.
+_ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS = 300
 
 
 def _env_files() -> list[str]:
@@ -438,7 +443,36 @@ class Settings(BaseSettings):
     COLLISION_DETECTION_ENABLED: bool = True
     CYCLE_DETECTION_ENABLED: bool = True
     CYCLE_MAX_HOPS: int = 6
-    CYCLE_MAX_FANOUT: int = 50
+    # The frontier is bound into the circular hop query twice (graph._HOP_QUERY),
+    # and ClickHouse rejects a query text past max_query_size (256 KiB by
+    # default): 1,000 bootstrap addresses of 150 characters already fail, 845
+    # pass, so the bound keeps a margin under that.
+    CYCLE_MAX_FANOUT: int = Field(default=50, ge=1, le=500)
+    # How often housekeeping checks that address_transactions lists every recent
+    # spend (graph.address_index_gaps): the circular BFS sees a leg only through
+    # that index. 0 turns the check off; otherwise at least
+    # _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS, since each check reads the
+    # window's spends out of two history-sized tables.
+    ADDRESS_INDEX_CHECK_INTERVAL_SECONDS: int = Field(default=900, ge=0)
+    # Chain time each check covers: an hour is ~180 mainnet blocks, enough for a
+    # broken enrichment path to show within one check. At most a day: the reads
+    # grow with the window (a week measured 1.1 GiB and 15 CPU-s at mainnet's
+    # volume).
+    ADDRESS_INDEX_CHECK_WINDOW_SECONDS: int = Field(default=3600, ge=1, le=86_400)
+    # max_threads for the check, which runs beside scoring on a host it shares
+    # with the Cardano node. The count does not depend on it, so it trades peak
+    # cores for duration only. ge=1: ClickHouse reads 0 as "every core".
+    ADDRESS_INDEX_CHECK_MAX_THREADS: int = Field(default=2, ge=1)
+
+    @field_validator("ADDRESS_INDEX_CHECK_INTERVAL_SECONDS")
+    @classmethod
+    def _address_index_check_interval_floor(cls, value: int) -> int:
+        if 0 < value < _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS:
+            raise ValueError(
+                f"must be 0 (off) or at least {_ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS}"
+            )
+        return value
+
     # Whether startup rewrites tx_class_scores parts that predate the circular
     # history columns (clickhouse_schema._materialize_circular_history). Off
     # only to get out of a MATERIALIZE that keeps failing: the values stay right

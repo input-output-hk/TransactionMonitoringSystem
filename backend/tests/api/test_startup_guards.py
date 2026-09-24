@@ -8,7 +8,7 @@ that family (review finding: shipping '*' as a production default).
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings, settings
+from app.config import _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS, Settings, settings
 from app.main import _validate_startup_settings
 
 
@@ -180,6 +180,57 @@ class TestAnalysisBatchesValidation:
             Settings(ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK=5).ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK
             == 5
         )
+
+
+class TestCycleFanoutValidation:
+    """le: the frontier is bound into the hop query twice, and a query text past
+    ClickHouse's max_query_size fails every hop whose frontier reaches it."""
+
+    def _bound(self):
+        field = Settings.model_fields["CYCLE_MAX_FANOUT"]
+        return next(m.le for m in field.metadata if hasattr(m, "le"))
+
+    def test_a_fanout_past_the_bound_is_rejected(self):
+        with pytest.raises(ValidationError, match="CYCLE_MAX_FANOUT"):
+            Settings(CYCLE_MAX_FANOUT=self._bound() + 1)
+
+    def test_the_bound_itself_is_accepted(self):
+        assert Settings(CYCLE_MAX_FANOUT=self._bound()).CYCLE_MAX_FANOUT == self._bound()
+
+
+class TestAddressIndexCheckSettings:
+    """Each check reads the window's spends out of two history-sized tables, so
+    its cost grows with the window and repeats with every interval."""
+
+    def _window_bound(self):
+        field = Settings.model_fields["ADDRESS_INDEX_CHECK_WINDOW_SECONDS"]
+        return next(m.le for m in field.metadata if hasattr(m, "le"))
+
+    def test_a_window_past_the_bound_is_rejected(self):
+        with pytest.raises(ValidationError, match="ADDRESS_INDEX_CHECK_WINDOW_SECONDS"):
+            Settings(ADDRESS_INDEX_CHECK_WINDOW_SECONDS=self._window_bound() + 1)
+
+    def test_an_interval_under_the_floor_is_rejected(self):
+        with pytest.raises(ValidationError, match="ADDRESS_INDEX_CHECK_INTERVAL_SECONDS"):
+            Settings(
+                ADDRESS_INDEX_CHECK_INTERVAL_SECONDS=_ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS - 1
+            )
+
+    @pytest.mark.parametrize(
+        "interval", [0, _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS], ids=["off", "the-floor"]
+    )
+    def test_off_and_the_floor_are_accepted(self, interval):
+        assert (
+            Settings(
+                ADDRESS_INDEX_CHECK_INTERVAL_SECONDS=interval
+            ).ADDRESS_INDEX_CHECK_INTERVAL_SECONDS
+            == interval
+        )
+
+    def test_zero_threads_is_rejected(self):
+        """ClickHouse reads max_threads=0 as every core, lifting the cap."""
+        with pytest.raises(ValidationError, match="ADDRESS_INDEX_CHECK_MAX_THREADS"):
+            Settings(ADDRESS_INDEX_CHECK_MAX_THREADS=0)
 
 
 class TestDocsGating:

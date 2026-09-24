@@ -58,6 +58,42 @@ class TestHealthDetail:
         assert "pipeline_state" in body
 
 
+class TestAddressIndexHealth:
+    """/health/detail carries housekeeping's last address-index check."""
+
+    @pytest.fixture(autouse=True)
+    def _dev_open(self, monkeypatch):
+        from app.auth import api_key
+
+        monkeypatch.setattr(api_key, "_valid_keys", [])
+        monkeypatch.setattr(api_key, "_dev_mode", True)
+
+    def test_the_last_check_is_reported(self, client, monkeypatch):
+        from app.config import settings
+        from app.tasks import housekeeping
+
+        status = {"state": "gaps", "missing_spends": 2}
+        monkeypatch.setattr(settings, "CYCLE_DETECTION_ENABLED", True)
+        monkeypatch.setattr(housekeeping, "_address_index_status", status)
+
+        assert client.get("/health/detail").json()["address_index"] == status
+
+    def test_a_check_turned_off_reads_disabled(self, client, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "CYCLE_DETECTION_ENABLED", True)
+        monkeypatch.setattr(settings, "ADDRESS_INDEX_CHECK_INTERVAL_SECONDS", 0)
+
+        assert client.get("/health/detail").json()["address_index"] == {"state": "disabled"}
+
+    def test_absent_without_cycle_detection(self, client, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "CYCLE_DETECTION_ENABLED", False)
+
+        assert "address_index" not in client.get("/health/detail").json()
+
+
 class TestClusteringHealthHeartbeat:
     """The clustering dot tracks a job heartbeat (clustering is running), not
     the last published anomaly, so a healthy-but-quiet contract stays green."""

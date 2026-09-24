@@ -524,7 +524,10 @@ Variables are layered across files:
 | `CYCLE_DETECTION_ENABLED` | `true` | Enable transfer graph cycle detection |
 | `CYCLE_MAX_HOPS` | `6` | Maximum BFS depth for cycle detection |
 | `CIRCULAR_HISTORY_MATERIALIZE` | `true` | Rewrite the circular history columns into existing parts at boot; see [Circular history columns](#circular-history-columns) |
-| `CYCLE_MAX_FANOUT` | `50` | Maximum addresses tracked per BFS hop |
+| `CYCLE_MAX_FANOUT` | `50` | Maximum addresses tracked per BFS hop (at most 500: the frontier is bound into the hop query twice, and ClickHouse rejects a query text past `max_query_size`) |
+| `ADDRESS_INDEX_CHECK_INTERVAL_SECONDS` | `900` | How often housekeeping checks that `address_transactions` lists every recent spend (see "`address_index` reports gaps"); `0` turns it off, otherwise at least `300` |
+| `ADDRESS_INDEX_CHECK_WINDOW_SECONDS` | `3600` | Block time each address-index check covers (at most `86400`: the check's reads grow with it) |
+| `ADDRESS_INDEX_CHECK_MAX_THREADS` | `2` | ClickHouse `max_threads` for the address-index check, so it cannot take every core from scoring |
 | `SANDWICH_SIMPLIFIED_ENABLED` | `true` | Enable structural sandwich pattern detection |
 | `BASELINE_MIN_SAMPLES` | `200` | Minimum samples before per-entity baseline is valid |
 | `SMTP_ENABLED` | `true` | Send magic-link emails over SMTP; `false` logs the link instead |
@@ -876,6 +879,67 @@ curl -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
 Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempool`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
+
+### `address_index` reports gaps
+
+`/health/detail` carries the last address-index check while cycle detection is on:
+
+```bash
+curl -s -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail | grep -o '"address_index":{[^}]*}'
+```
+
+The check counts, over the spends of the last `window_seconds` of block time, how many are missing from `address_transactions` (`missing_spends`) out of how many it looked at (`checked_spends`). The circular detector finds a cycle's legs only through that table, so a missing spend is a leg invisible to it: a recall gap, not a cosmetic one. The states:
+
+| `state` | Meaning |
+|---|---|
+| `ok` | Every checked spend is indexed. |
+| `gaps` | `missing_spends` are not; the log says the same at WARNING. Repair below. |
+| `idle` | The window held nothing to check: ingestion has stalled, or is catching up on blocks older than the window, which the check never covers. Look at chain sync, not the index. |
+| `error` | The check itself failed, usually ClickHouse being unreachable. |
+| `disabled` | `ADDRESS_INDEX_CHECK_INTERVAL_SECONDS` is `0`. |
+| `unchecked` | This process has not run a check yet. Housekeeping is a leader duty, so a standby always reads this. |
+
+`unresolved_inputs` counts inputs whose spent output was never found, so they carry no address. The detector cannot follow those either, but that is a failure of input enrichment, which no repair of the index fixes; the check does not count them as missing.
+
+Each transaction is read at its latest version, so a fork switch (a transaction rolled back and re-confirmed at another slot) does not read as a gap, and transactions without a slot are left out, since no hop window holds them.
+
+The table is filled from `transactions.addresses` at insert, so a gap means a transaction was stored without its input addresses, or the materialized view failed; find why, starting with input enrichment. The startup backfill cannot close that kind of gap, since it reads the same list. Add the rows from `transaction_inputs` instead, over the window the check covers (widen `window` if the gap is older; duplicate rows collapse on merge, so running it twice is safe):
+
+```bash
+# Credentials and database resolve inside the container, as for the shell above.
+docker exec -i tms-clickhouse sh -c \
+  'exec clickhouse-client --user "${CLICKHOUSE_USER:-default}" --database "${CLICKHOUSE_DB:-tms_analytics}" --param_network=mainnet --param_window=3600' \
+  < repair.sql
+```
+
+```sql
+-- repair.sql
+INSERT INTO address_transactions (network, address, slot, tx_hash, timestamp, ingestion_timestamp)
+SELECT ti.network, ti.address, t.tx_slot, ti.tx_hash, t.tx_time, t.tx_ingested
+FROM transaction_inputs AS ti
+INNER JOIN (
+    SELECT
+        tx_hash,
+        argMax(assumeNotNull(slot), ingestion_timestamp) AS tx_slot,
+        argMax(timestamp, ingestion_timestamp) AS tx_time,
+        max(ingestion_timestamp) AS tx_ingested
+    FROM transactions
+    WHERE network = {network:String}
+      AND timestamp >= now() - toIntervalSecond({window:UInt32})
+      AND isNotNull(slot)
+    GROUP BY tx_hash
+) AS t ON ti.tx_hash = t.tx_hash
+WHERE ti.network = {network:String}
+  -- Rows are ingested after their block; the extra 300 s absorbs clock skew,
+  -- and the bound keeps the read to recent parts instead of the whole table.
+  AND ti.ingestion_timestamp >= now() - toIntervalSecond({window:UInt32} + 300)
+  AND ti.is_collateral = 0
+  AND ti.is_reference = 0
+  AND ti.is_unspent_attempt = 0
+  AND ti.address != ''
+```
+
+Transactions scored while the gap was open were searched without those legs, and the repair does not search them again.
 
 ### Database containers won't start
 

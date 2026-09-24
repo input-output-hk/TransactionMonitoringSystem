@@ -544,6 +544,8 @@ async def health_detail(api_key: str = Security(verify_api_key)):
         result["pipeline_state"] = ogmios_status["pipeline_state"]
     if settings.CLUSTERING_ENABLED:
         result["clustering"] = await _clustering_health()
+    if settings.CYCLE_DETECTION_ENABLED:
+        result["address_index"] = housekeeping_task.address_index_status()
     return result
 
 
