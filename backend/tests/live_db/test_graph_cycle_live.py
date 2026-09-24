@@ -17,6 +17,8 @@ Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+
 from app.analysis import graph
 from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorers.circular import (
@@ -47,6 +49,9 @@ _LEG_3 = 9_800_000
 # on Cardano (token dust, change) and the reason the hop query orders amount
 # DESC: see test_dust_output_on_the_closing_leg_does_not_mask_the_cycle.
 _DUST = 1_000_000
+# Change the closing leg sends back to the wallet beside the repayment, 20% of
+# the cycled amount (routine when one wallet controls every leg).
+_CHANGE = 2_000_000
 # Every plant here closes after 3 legs; the gate's loss ceiling for that
 # length, from the scorer's own constants so a retune cannot leave a stale copy.
 _CYCLE_LEGS = 3
@@ -98,6 +103,7 @@ def _plant(
     leg_gap=_LEG_SLOT_GAP,
     leg_amounts=(_LEG_1, _LEG_2),
     extra_origin_outputs=(),
+    replay_closing=False,
 ):
     """Plant origin -> B -> C -> origin and return (origin_tx_hash, origins).
 
@@ -105,7 +111,9 @@ def _plant(
     named so they sort in list order. `closing_outputs` is a factory taking that
     list and returning the final leg's outputs, so a test varies only how the
     cycle closes. Passing the same `ring` (from _ring) twice replays the cycle
-    through the same addresses, from `origin_slot` on.
+    through the same addresses, from `origin_slot` on. `replay_closing` inserts
+    the closing transaction a second time, as a replayed block does, leaving
+    duplicate rows until a merge.
     """
     origins, addr_b, addr_c = ring or _ring(origin_count)
     tx_ab, tx_bc, tx_ca = (uuid.uuid4().hex * 2 for _ in range(3))
@@ -115,14 +123,16 @@ def _plant(
         [
             _tx(tx_ab, origin_slot, origins, [(addr_b, leg_1), *extra_origin_outputs]),
             _tx(tx_bc, origin_slot + leg_gap, [addr_b], [(addr_c, leg_2)]),
-            _tx(
-                tx_ca,
-                closing_slot if closing_slot is not None else origin_slot + 2 * leg_gap,
-                [addr_c],
-                closing_outputs(origins),
-            ),
         ]
     )
+    closing = _tx(
+        tx_ca,
+        closing_slot if closing_slot is not None else origin_slot + 2 * leg_gap,
+        [addr_c],
+        closing_outputs(origins),
+    )
+    for _ in range(2 if replay_closing else 1):
+        ch.insert_transactions_batch([closing])
     return tx_ab, origins
 
 
@@ -198,6 +208,49 @@ class TestForwardBfsFindsAPlantedCycle:
             f"half the repayment was dropped: net_loss_ratio={cycle['net_loss_ratio']}"
         )
         assert CircularScorer().gate({"cycle": cycle})
+
+    @pytest.mark.parametrize(
+        "closing",
+        [
+            lambda o: [(o[0], _LEG_3), (o[1], _CHANGE)],
+            lambda o: [(o[0], _LEG_3 // 2), (o[0], _LEG_3 // 2), (o[0], _CHANGE)],
+        ],
+        ids=["change-to-second-origin-address", "split-repayment-and-change-to-the-same-address"],
+    )
+    def test_change_back_to_the_wallet_does_not_lower_amount_similarity(self, ch, closing):
+        """Change back to the origin wallet is not a mismatch.
+
+        The closing leg's total to the origin set is what the loss gate needs,
+        but read as the closing hop's amount it turned routine change into an
+        uneven cycle and dropped a real one out of the alert band. The cycle
+        must measure exactly as it does without the change, also when the
+        repayment is split into equal outputs (which the hop query's DISTINCT
+        collapses) beside change to the same address.
+        """
+        tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], origin_count=2)
+        tx_change, _ = _plant(ch, closing, origin_count=2)
+
+        plain = graph.detect_cycle(tx_plain, LIVE_NETWORK)
+        with_change = graph.detect_cycle(tx_change, LIVE_NETWORK)
+
+        assert plain is not None and with_change is not None
+        assert with_change["amount_similarity"] == plain["amount_similarity"]
+        assert CircularScorer().gate({"cycle": with_change})
+
+    def test_a_replayed_closing_transaction_is_counted_once(self, ch):
+        """A closing leg inserted twice must not count its repayment twice.
+
+        A replayed block re-inserts its transactions, and the duplicate rows
+        stay until ClickHouse merges them. Read without FINAL, the repayment
+        doubles, the loss reads as zero and the similarity as uneven. The
+        measured loss must be the single-count one.
+        """
+        tx_ab, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], replay_closing=True)
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None
+        assert cycle["net_loss_ratio"] == round((_LEG_1 - _LEG_3) / _LEG_1, 4)
 
 
 class TestForwardBfsHorizon:

@@ -111,7 +111,7 @@ def _minimal_config():
     # are pinned to each invariant's inclusive lower bound, driven by the
     # loader's own _BAND_INVARIANTS table so the fixture stays valid by
     # construction when a new invariant row is added.
-    for dotted, lower, _upper, _why in sc._BAND_INVARIANTS:
+    for dotted, lower, _upper, _why in (*sc._BAND_INVARIANTS, *sc._RANGE_INVARIANTS):
         _set_dotted(cfg, dotted, lower)
     return cfg
 
@@ -217,6 +217,31 @@ class TestValidation:
             RuntimeError,
             match=r"high_band_cap.*violates its band contract",
         ):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_missing_cycle_key_fails_at_load(self, tmp_path, monkeypatch):
+        # graph.py reads it only on the first cycle enrichment (a lazy import),
+        # so without the required-key check a missing knob would surface as a
+        # KeyError inside the scoring loop instead of at startup.
+        cfg = _minimal_config()
+        del cfg["scorers"]["circular"]["cycle"]["closing_subset_max_outputs"]
+        with pytest.raises(RuntimeError, match=r"scorers\.circular\.cycle\.closing_subset_max"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_recycling_bar_at_or_above_one_raises(self, tmp_path, monkeypatch):
+        # Similarity tops out at 1.0: a bar there denies every cycle the
+        # recycling credit, so repeated rings could no longer page.
+        cfg = _minimal_config()
+        cfg["scorers"]["circular"]["recycling_min_amount_similarity"] = 1.0
+        with pytest.raises(RuntimeError, match=r"recycling_min_amount_similarity.*outside"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
+    def test_closing_subset_search_past_its_limit_raises(self, tmp_path, monkeypatch):
+        # Each two outputs more double the search, inside the scoring loop.
+        cfg = _minimal_config()
+        limit = _sc()._CLOSING_SUBSET_OUTPUTS_LIMIT
+        cfg["scorers"]["circular"]["cycle"]["closing_subset_max_outputs"] = limit + 1
+        with pytest.raises(RuntimeError, match=r"closing_subset_max_outputs.*outside"):
             _reload_module(monkeypatch, tmp_path, cfg)
 
     def test_band_floor_below_threshold_raises(self, tmp_path, monkeypatch):

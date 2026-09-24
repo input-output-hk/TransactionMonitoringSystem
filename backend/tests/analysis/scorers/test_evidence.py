@@ -225,6 +225,9 @@ def test_circular_evidence():
         result,
         "cycle_length",
         "net_loss_ratio",
+        # What the loss is measured on; the closing hop's amount is only the
+        # part of it that fits the ring.
+        "returned_lovelace",
         "hops",
         "first_slot",
         "origin_cluster",

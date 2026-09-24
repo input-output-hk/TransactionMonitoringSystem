@@ -1009,7 +1009,8 @@ The circular scorer reads an origin's earlier cycles through three columns
 ClickHouse materializes from the stored evidence: `tx_class_scores.circular_origins`,
 `circular_intermediaries` and `circular_first_slot`. The first boot of the release
 that adds them rewrites them into the existing parts with one `ALTER TABLE
-tx_class_scores MATERIALIZE COLUMN ...` (one mutation per column). No backfill
+tx_class_scores MATERIALIZE COLUMN ...`: one mutation, which `system.mutations`
+lists once per column, so expect three rows with the same `mutation_id`. No backfill
 script is needed: until the rewrite finishes, ClickHouse computes the values from
 `evidence` on read, so scores are right from the first boot; each history read
 just costs about 2 CPU-s and 600 MiB instead of 0.3 CPU-s and 170 MiB. On a

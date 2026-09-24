@@ -10,16 +10,16 @@ latest commit.
 
 | Tier | Location | Count | Services needed | CI job |
 |---|---|---|---|---|
-| Backend hermetic | `backend/tests/` | 1444 | none (all I/O mocked) | Backend (pytest + recall gate) |
-| Recall gate | `backend/tests/analysis/` | 632 (subset of the above) | none | Backend (run first, on its own) |
-| Live-DB tier | `backend/tests/live_db/` | 57 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
+| Backend hermetic | `backend/tests/` | 1478 | none (all I/O mocked) | Backend (pytest + recall gate) |
+| Recall gate | `backend/tests/analysis/` | 666 (subset of the above) | none | Backend (run first, on its own) |
+| Live-DB tier | `backend/tests/live_db/` | 60 | ClickHouse + Postgres | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Sidecar live-DB tier | `services/clustering/backend/tests/live_db/` | 8 | ClickHouse | Live-DB tier (ClickHouse 26.x + Postgres) |
 | Performance tier | `backend/tests/perf/` | 3 | ClickHouse (2 of 3) | Performance (separate workflow) |
 | Clustering sidecar | `services/clustering/backend/tests/` | 497 | none | Clustering sidecar (pytest) |
 | Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 | none | Frontend (lint + build) |
 | End-to-end | `frontend/e2e/` | 11 | the whole stack (app + Postgres + ClickHouse + Mailpit), via `./scripts/e2e.sh` | E2E (full stack) |
 
-That is 2,188 tests across the seven independent tiers (the recall gate is a
+That is 2,225 tests across the seven independent tiers (the recall gate is a
 subset of the backend suite, not an additional tier, so it is not added into
 the total). A CI step re-collects every tier on each run and fails the build if
 this table drifts.

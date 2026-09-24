@@ -1,6 +1,8 @@
 """Unit tests for the transfer graph cycle detection module."""
 
+import itertools
 import math
+import random
 from unittest.mock import MagicMock, patch
 
 from app.analysis import graph
@@ -378,3 +380,142 @@ class TestRecyclingNeedsValuePassedAlong:
         assert again["amount_similarity"] <= graph._VALUE_PRESERVING_SIMILARITY
         assert again["recycled_share"] == 1.0
         assert again["recipient_entropy"] == alone["recipient_entropy"]
+
+    # The similarity is stored at 4 dp, so a bar one step below it is the
+    # nearest one the cycle clears.
+    _BAR_STEP = 0.0001
+
+    def _ring(self, middle_leg, prior_cycles):
+        ada = 1_000_000
+        hops = [
+            {"address": "addr_a", "amount_lovelace": 10_000 * ada, "slot": 100},
+            {"address": "addr_b", "amount_lovelace": middle_leg * ada, "slot": 103},
+            {"address": "addr_a", "amount_lovelace": 9_979 * ada, "slot": 106},
+        ]
+        return _build_cycle_result(
+            cycle_length=3,
+            addresses=["addr_a", "addr_b", "addr_c", "addr_a"],
+            origin_amount=10_000 * ada,
+            final_amount=9_979 * ada,
+            hops=hops,
+            origin_addresses={"addr_a"},
+            intermediaries=["addr_b", "addr_c"],
+            prior_cycles=prior_cycles,
+        )
+
+    def test_the_credit_starts_above_the_configured_similarity(self):
+        """At the bar no credit, just above it the reused path counts."""
+        reused = [(40.0, ["addr_b", "addr_c"])]
+        own = self._ring(8_000, [])
+        with patch.object(graph, "_VALUE_PRESERVING_SIMILARITY", own["amount_similarity"]):
+            assert self._ring(8_000, reused)["recipient_entropy"] == own["recipient_entropy"]
+        just_below = own["amount_similarity"] - self._BAR_STEP
+        with patch.object(graph, "_VALUE_PRESERVING_SIMILARITY", just_below):
+            assert self._ring(8_000, reused)["recipient_entropy"] == 0.0
+
+
+class TestClosingReading:
+    """The part of the closing leg's payment to the origin set that fits the
+    other hops, found without scoring every subset of its outputs."""
+
+    _RING = [10_000_000_000, 9_990_000_000]
+    _REPAID = 9_979_000_000
+    _CHANGE = 2_000_000_000
+    _DUST = 1_000_000
+    # Seeded random closing legs checked against every subset sum; small enough
+    # to enumerate, varied enough to put the best sum on either side of the peak.
+    _CASES = 300
+    _MAX_HOPS = 6
+    _MAX_OUTPUTS = 8
+    _MAX_LOVELACE = 10**10
+    # A few legs longer than the old 16-output limit, still enumerable.
+    _LONG_CASES = 5
+    _LONG_OUTPUTS = 18
+
+    def _best_of_every_subset(self, amounts, prior):
+        sums = {
+            sum(subset)
+            for size in range(1, len(amounts) + 1)
+            for subset in itertools.combinations(amounts, size)
+        }
+        return max(graph._amount_similarity([*prior, c]) for c in sums)
+
+    def _random_leg(self, rng, outputs):
+        prior = [rng.randint(1, self._MAX_LOVELACE) for _ in range(rng.randint(2, self._MAX_HOPS))]
+        return prior, [rng.randint(1, self._MAX_LOVELACE) for _ in range(outputs)]
+
+    def test_matches_scoring_every_subset_sum(self):
+        """Only the nearest sums on each side of the peak are scored, so the
+        search must find a reading as good as the best of all of them."""
+        rng = random.Random(0)
+        for _ in range(self._CASES):
+            prior, amounts = self._random_leg(rng, rng.randint(1, self._MAX_OUTPUTS))
+            reading = graph._closing_reading(amounts, amounts[0], sum(amounts), prior)
+            best = self._best_of_every_subset(amounts, prior)
+            assert graph._amount_similarity([*prior, reading]) == best
+
+    def test_finds_the_nearest_sums_past_the_old_limit(self):
+        """Legs with more outputs than the old exhaustive limit (16) are still
+        searched exactly: the subset sums nearest the target on either side."""
+        rng = random.Random(1)
+        for _ in range(self._LONG_CASES):
+            amounts = [rng.randint(1, self._MAX_LOVELACE) for _ in range(self._LONG_OUTPUTS)]
+            target = rng.uniform(0, sum(amounts))
+            sums = {0}
+            for amount in amounts:
+                sums |= {s + amount for s in sums}
+            sums.discard(0)
+            below = max((s for s in sums if s <= target), default=None)
+            above = min((s for s in sums if s >= target), default=None)
+            assert graph._nearest_subset_sums(amounts, target) == (below, above)
+
+    def test_a_target_below_every_output_has_no_sum_under_it(self):
+        """The empty subset is never a reading."""
+        amounts = [self._REPAID, self._CHANGE]
+        assert graph._nearest_subset_sums(amounts, self._DUST) == (None, self._CHANGE)
+
+    def test_a_sum_equal_to_the_target_is_found_on_both_sides(self):
+        amounts = [self._REPAID, self._CHANGE, self._DUST]
+        target = self._REPAID + self._DUST
+        assert graph._nearest_subset_sums(amounts, target) == (target, target)
+
+    def test_the_matched_row_is_a_candidate_when_the_reads_disagree(self):
+        """If the closing-leg read misses the matched output, the matched row
+        still stands: the similarity is never lower than it gave."""
+        amounts = [2 * self._REPAID]
+        reading = graph._closing_reading(amounts, self._REPAID, sum(amounts), self._RING)
+        assert reading == self._REPAID
+
+    def test_a_split_repayment_beside_change_reads_as_the_repayment(self):
+        half = self._REPAID // 2
+        amounts = [half, half, self._CHANGE]
+        assert graph._closing_reading(amounts, half, sum(amounts), self._RING) == 2 * half
+
+    def test_ties_go_to_the_total(self):
+        """A closing leg out of all proportion to the other hops scores 0 on
+        every reading, the nearest to the peak included: the total is kept."""
+        amounts = [self._MAX_LOVELACE, 2 * self._MAX_LOVELACE]
+        total = 3 * self._MAX_LOVELACE
+        assert graph._closing_reading(amounts, self._MAX_LOVELACE, total, [1, 1]) == total
+
+    def test_past_the_cap_the_part_that_fits_is_assumed_to_be_there(self):
+        """Too many outputs to search: the reading is the similarity peak
+        itself, within what the leg paid, so splitting the repayment across
+        more outputs than the search takes apart cannot lower the similarity."""
+        peak = sum(h * h for h in self._RING) / sum(self._RING)
+        half = self._REPAID // 2
+        split = [half, self._REPAID - half, self._CHANGE, *[self._DUST] * 2]
+        short = [self._DUST] * 3
+        oversized = [2 * self._REPAID] * 3
+        # Every leg below has more outputs than this, so none is searched.
+        with patch.object(graph, "_CLOSING_SUBSET_MAX_OUTPUTS", len(short) - 1):
+            reading = graph._closing_reading(split, half, sum(split), self._RING)
+            assert reading == round(peak)
+            best = self._best_of_every_subset(split, self._RING)
+            assert graph._amount_similarity([*self._RING, reading]) >= best
+            # Never more than the leg paid, never less than one output.
+            assert graph._closing_reading(short, self._DUST, sum(short), self._RING) == sum(short)
+            assert (
+                graph._closing_reading(oversized, oversized[0], sum(oversized), self._RING)
+                == oversized[0]
+            )
