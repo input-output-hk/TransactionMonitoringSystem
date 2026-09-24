@@ -27,8 +27,9 @@ _MAX_AGE_SLOTS = int(_CYCLE_CFG["max_age_slots"])
 _MAX_OUTPUT_FANOUT = int(_CYCLE_CFG["max_output_fanout"])
 # Per-hop row cap on the forward BFS scan. Config-backed (not an inline literal)
 # because it controls recall: rows are ordered by slot ASC so a truncation keeps
-# the earliest legs, but a hub hop with more than this many spends loses the
-# tail. Raise in config if real layering is missed; never lower for precision.
+# the earliest legs, but a hub hop with more rows than this, one per address a
+# spend pays, loses the tail. Raise in config if real layering is missed; never
+# lower for precision.
 _BFS_HOP_ROW_LIMIT = int(_CYCLE_CFG["bfs_hop_row_limit"])
 # Fallback inter-hop delta (slots) when hop timing is unmeasurable. Shared with
 # the circular scorer via config so the feature and the read cannot drift.
@@ -99,9 +100,9 @@ _SAME_SLOT_DELTA_SLOTS = 1
 # only once the candidates are known, which is what keeps peak memory near 31MB
 # (#107; p95 36.5MB with the prefilter).
 #
-# The ORDER BY carries a full tiebreaker (tx_hash, address, amount) rather than
-# slot alone. Slot ties are common (many spends land in one block), so ordering
-# by slot alone left the LIMIT truncation picking an arbitrary subset of
+# The ORDER BY carries a full tiebreaker (tx_hash, address) rather than slot
+# alone. Slot ties are common (many spends land in one block), so ordering by
+# slot alone left the LIMIT truncation picking an arbitrary subset of
 # equally-ranked rows: the same hop could explore a different frontier
 # run-to-run and miss a cycle through the dropped legs. Same reproducibility
 # rationale as _first_sorted.
@@ -109,9 +110,19 @@ _SAME_SLOT_DELTA_SLOTS = 1
 # Which origin-paying row sorts first no longer decides how much came back. The
 # loop stops at that row only to learn WHICH transaction closes the cycle;
 # _closing_leg_amounts then reads that transaction's outputs to the whole
-# origin set. No row order could have done this: amount DESC still let dust to
-# a second origin address, sorted ahead by address, stand in for the repayment.
-# amount keeps its DESC tiebreak only for a total, reproducible order.
+# origin set. No row order could have done this: dust to a second origin
+# address, sorted ahead by address, would still stand in for the repayment.
+#
+# A row is what one transaction paid one address, the sum of its outputs there,
+# and the inner DISTINCT drops the duplicate rows a replayed block leaves until
+# a merge, so each output counts once. Rows DISTINCT on (tx_hash, address,
+# amount) merged equal outputs, so a leg paid as equal outputs to one address
+# read as one of them: an uneven ring for the price of an extra output. A row
+# per output instead spends circular.cycle.bfs_hop_row_limit on each one, and
+# equal outputs to one address are routine (UTxO splits, script seeding, min-ADA
+# token outputs; ~300 in one testnet transaction), so a batch landing ahead of a
+# ring's leg pushed the leg out of the hop. Summed, a hop has no more rows than
+# under either, and every output counts.
 #
 # Built from its two narrowing reads so the live tests can EXPLAIN each of them
 # (a plan of the whole query shows neither: ClickHouse builds IN sets before
@@ -144,16 +155,17 @@ _HOP_QUERY = f"""
           AND slot <= %(max_slot)s
           AND tx_hash IN ({_HOP_SPENDS})
     )
-    SELECT DISTINCT c.tx_hash, to2.address, to2.amount, c.slot
+    SELECT c.tx_hash, to2.address, sum(to2.amount) AS paid, c.slot
     FROM cand c
     JOIN (
-        SELECT tx_hash, address, amount
+        SELECT DISTINCT tx_hash, output_index, address, amount
         FROM transaction_outputs
         WHERE network = %(network)s
           AND is_collateral = 0
           AND tx_hash IN (SELECT tx_hash FROM cand)
     ) to2 ON c.tx_hash = to2.tx_hash
-    ORDER BY c.slot ASC, c.tx_hash ASC, to2.address ASC, to2.amount DESC
+    GROUP BY c.tx_hash, c.slot, to2.address
+    ORDER BY c.slot ASC, c.tx_hash ASC, to2.address ASC
     LIMIT %(hop_row_limit)s
 """
 
@@ -474,15 +486,14 @@ def _closing_leg_amounts(
 ) -> tuple[int, int, bool]:
     """What the closing transaction returned: (total, amount for similarity, read failed).
 
-    The hop query answers whether a cycle closes, not how much came back. Its
-    rows are DISTINCT on (tx_hash, address, amount, slot) and the loop stops at
-    the first origin-paying row, so that row's amount let a closing leg hide its
-    repayment two ways: a dust output to one origin address sorted ahead of the
-    real repayment to another, or the repayment split into equal outputs that
-    DISTINCT collapses into one. Either pushed net_loss_ratio toward 1.0 and
-    CircularScorer's hard gate discarded a genuine cycle. So every
-    non-collateral output of the closing transaction that pays the origin set is
-    read here, without DISTINCT.
+    The hop query answers whether a cycle closes, not how much came back. The
+    loop stops at the first origin-paying row, what the closing transaction paid
+    one origin address, so that row's amount let a closing leg hide its
+    repayment two ways: dust to one origin address sorted ahead of the real
+    repayment to another, or the repayment split across origin addresses.
+    Either pushed net_loss_ratio toward 1.0 and CircularScorer's hard gate
+    discarded a genuine cycle. So every non-collateral output of the closing
+    transaction that pays the origin set is read here.
 
     The two amounts answer different questions. The total feeds net_loss_ratio,
     the gate: extra outputs can only lower the measured loss, never raise it.
@@ -500,7 +511,7 @@ def _closing_leg_amounts(
     FINAL for the same reason origin_amount uses it: a not-yet-merged duplicate
     row would otherwise double the total. A closure the gate never scores skips
     the read. A failed read keeps the cycle, measured with the matched row
-    (exact when the closing leg pays the origin a single output), and flags it:
+    (exact when the closing leg pays a single origin address), and flags it:
     the engine then retries the transaction, and if the read keeps failing
     writes the score with a marker rather than dropping the cycle.
     """
@@ -520,13 +531,13 @@ def _closing_leg_amounts(
         )
     except Exception:
         logger.warning(
-            "Closing-leg read failed for %s; measuring the cycle with the matched output",
+            "Closing-leg read failed for %s; measuring the cycle with the matched row",
             closing_tx[:16],
             exc_info=True,
         )
         return matched_amount, matched_amount, True
     amounts = [int(amount) for _, amount in rows]
-    # The matched output is one of the summed rows, so the total cannot be
+    # The matched row sums some of these outputs, so the total cannot be
     # smaller unless the two reads disagree; never report less than was seen.
     total = max(sum(amounts), matched_amount)
     return total, _closing_reading(amounts, matched_amount, total, prior_hop_amounts), False

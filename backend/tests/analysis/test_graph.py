@@ -480,8 +480,8 @@ class TestClosingReading:
         assert graph._nearest_subset_sums(amounts, target) == (target, target)
 
     def test_the_matched_row_is_a_candidate_when_the_reads_disagree(self):
-        """If the closing-leg read misses the matched output, the matched row
-        still stands: the similarity is never lower than it gave."""
+        """If the closing-leg read misses outputs the matched row summed, the
+        matched row still stands: the similarity is never lower than it gave."""
         amounts = [2 * self._REPAID]
         reading = graph._closing_reading(amounts, self._REPAID, sum(amounts), self._RING)
         assert reading == self._REPAID

@@ -14,6 +14,7 @@ test asserts through ``CircularScorer.gate`` for that reason.
 Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import math
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -46,10 +47,14 @@ _ORIGIN_SLOT = 2_000_000
 _LEG_1 = 10_000_000
 _LEG_2 = 9_900_000
 _LEG_3 = 9_800_000
-# A min-UTxO-sized second output back to the origin on the closing leg. Routine
-# on Cardano (token dust, change) and the reason the hop query orders amount
-# DESC: see test_dust_output_on_the_closing_leg_does_not_mask_the_cycle.
+# A min-UTxO-sized second output back to the origin on the closing leg, routine
+# on Cardano (token dust, change): see
+# test_dust_output_on_the_closing_leg_does_not_mask_the_cycle.
 _DUST = 1_000_000
+# A wallet splitting what it holds into equal outputs does it in batches, since
+# one transaction holds a few hundred outputs at most; this many batches
+# together fill a hop's row limit when each output takes a row.
+_SPLIT_TXS = 2
 # Change the closing leg sends back to the wallet beside the repayment, 20% of
 # the cycled amount (routine when one wallet controls every leg).
 _CHANGE = 2_000_000
@@ -111,6 +116,8 @@ def _plant(
     extra_origin_outputs=(),
     replay_closing=False,
     decoys=None,
+    leg_2_outputs=1,
+    replay_middle_leg=False,
 ):
     """Plant origin -> B -> C -> origin and return (origin_tx_hash, origins).
 
@@ -118,22 +125,32 @@ def _plant(
     named so they sort in list order. `closing_outputs` is a factory taking that
     list and returning the final leg's outputs, so a test varies only how the
     cycle closes. Passing the same `ring` (from _ring) twice replays the cycle
-    through the same addresses, from `origin_slot` on. `replay_closing` inserts
-    the closing transaction a second time, as a replayed block does, leaving
-    duplicate rows until a merge. `decoys`, if given, takes (origins, addr_b)
-    and returns extra transactions planted alongside the cycle.
+    through the same addresses, from `origin_slot` on. `replay_closing` and
+    `replay_middle_leg` insert that leg's transaction a second time, as a
+    replayed block does, leaving duplicate rows until a merge. `decoys`, if
+    given, takes (origins, addr_b) and returns extra transactions planted
+    alongside the cycle. `leg_2_outputs` pays the middle leg as that many equal
+    outputs to C.
     """
     origins, addr_b, addr_c = ring or _ring(origin_count)
     tx_ab, tx_bc, tx_ca = (uuid.uuid4().hex * 2 for _ in range(3))
     leg_1, leg_2 = leg_amounts
 
+    middle = _tx(
+        tx_bc,
+        origin_slot + leg_gap,
+        [addr_b],
+        [(addr_c, leg_2 // leg_2_outputs)] * leg_2_outputs,
+    )
     ch.insert_transactions_batch(
         [
             _tx(tx_ab, origin_slot, origins, [(addr_b, leg_1), *extra_origin_outputs]),
-            _tx(tx_bc, origin_slot + leg_gap, [addr_b], [(addr_c, leg_2)]),
+            middle,
             *(decoys(origins, addr_b) if decoys else []),
         ]
     )
+    if replay_middle_leg:
+        ch.insert_transactions_batch([middle])
     closing = _tx(
         tx_ca,
         closing_slot if closing_slot is not None else origin_slot + 2 * leg_gap,
@@ -203,9 +220,9 @@ class TestForwardBfsFindsAPlantedCycle:
     def test_repayment_split_into_equal_outputs_counts_in_full(self, ch):
         """Equal outputs to one origin address must all count.
 
-        The hop query is DISTINCT on (tx_hash, address, amount, slot), so real
-        ClickHouse returns the two halves as ONE row. The total must still
-        include both, or half the repayment reads as lost and the gate rejects.
+        The loop stops at the first origin-paying row, one of the halves. The
+        total must still include both, or half the repayment reads as lost and
+        the gate rejects.
         """
         half = _LEG_3 // 2
         tx_ab, _ = _plant(ch, lambda o: [(o[0], half), (o[0], half)])
@@ -249,6 +266,83 @@ class TestForwardBfsFindsAPlantedCycle:
         assert cycle["cycle_length"] == _CYCLE_LEGS
         assert CircularScorer().gate({"cycle": cycle})
 
+    @pytest.mark.attack_must_fire
+    def test_a_middle_leg_split_into_equal_outputs_counts_in_full(self, ch):
+        """Two equal outputs of one transaction both count toward the hop.
+
+        The hop query's rows were DISTINCT on (tx_hash, address, amount, slot),
+        so a middle leg paid as equal outputs to one address read as one of
+        them: the hop looked half its size and the ring uneven, which took
+        the similarity below the recycling credit's bar for the price of an
+        extra output. The ring must measure exactly as it does unsplit.
+        """
+        tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)])
+        tx_split, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], leg_2_outputs=2)
+
+        plain = graph.detect_cycle(tx_plain, LIVE_NETWORK)
+        split = graph.detect_cycle(tx_split, LIVE_NETWORK)
+
+        assert plain is not None and split is not None
+        assert split["amount_similarity"] == plain["amount_similarity"]
+        assert CircularScorer().gate({"cycle": split})
+
+    @pytest.mark.parametrize("leg_2_outputs", [1, 2], ids=["one-output", "split-in-two"])
+    def test_a_replayed_middle_leg_is_counted_once(self, ch, leg_2_outputs):
+        """A middle leg inserted twice must not count its outputs twice.
+
+        The hop query reads transaction_outputs without FINAL, so the duplicate
+        rows a replayed block leaves until a merge would double the hop and
+        read the ring as uneven. The ring must measure exactly as it does
+        without the replay.
+        """
+        tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)])
+        tx_replayed, _ = _plant(
+            ch, lambda o: [(o[0], _LEG_3)], leg_2_outputs=leg_2_outputs, replay_middle_leg=True
+        )
+
+        plain = graph.detect_cycle(tx_plain, LIVE_NETWORK)
+        replayed = graph.detect_cycle(tx_replayed, LIVE_NETWORK)
+
+        assert plain is not None and replayed is not None
+        assert replayed["amount_similarity"] == plain["amount_similarity"]
+
+    @pytest.mark.attack_must_fire
+    def test_equal_outputs_ahead_of_a_ring_leg_leave_the_leg_in_the_hop(self, ch):
+        """A batch of equal outputs landing ahead of a ring's leg must not push
+        the leg out of the hop.
+
+        The origin also pays D, a second wallet or a vendor, and D splits what
+        it holds into equal outputs to itself before B's leg, as wallets and
+        batchers routinely do. With a row per output those rows alone filled
+        circular.cycle.bfs_hop_row_limit, the hop was cut before B's spend and
+        the ring went unseen. A row per (transaction, address) leaves D's batch
+        one row per transaction.
+        """
+        addr_d = f"addr_test1qqd_{uuid.uuid4().hex[:12]}"
+        outputs_per_split = math.ceil(graph._BFS_HOP_ROW_LIMIT / _SPLIT_TXS)
+
+        def splits(origins, addr_b):
+            # In the slots right after the origin's, all before B's leg.
+            return [
+                _tx(
+                    uuid.uuid4().hex * 2,
+                    _ORIGIN_SLOT + 1 + i,
+                    [addr_d],
+                    [(addr_d, _DUST)] * outputs_per_split,
+                )
+                for i in range(_SPLIT_TXS)
+            ]
+
+        tx_ab, _ = _plant(
+            ch, lambda o: [(o[0], _LEG_3)], extra_origin_outputs=[(addr_d, _DUST)], decoys=splits
+        )
+
+        cycle = graph.detect_cycle(tx_ab, LIVE_NETWORK)
+
+        assert cycle is not None, "a batch of equal outputs pushed the ring's leg out of the hop"
+        assert cycle["cycle_length"] == _CYCLE_LEGS
+        assert CircularScorer().gate({"cycle": cycle})
+
     def test_a_ring_through_a_frontier_address_that_sorts_second_is_found(self, ch):
         """The origin also pays an address that sorts ahead of B and never
         spends: the prefilter must read the whole frontier, not its first entry.
@@ -277,8 +371,7 @@ class TestForwardBfsFindsAPlantedCycle:
         but read as the closing hop's amount it turned routine change into an
         uneven cycle and dropped a real one out of the alert band. The cycle
         must measure exactly as it does without the change, also when the
-        repayment is split into equal outputs (which the hop query's DISTINCT
-        collapses) beside change to the same address.
+        repayment is split into equal outputs beside change to the same address.
         """
         tx_plain, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], origin_count=2)
         tx_change, _ = _plant(ch, closing, origin_count=2)
