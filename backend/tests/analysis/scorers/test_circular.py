@@ -260,6 +260,12 @@ _ODD_LOVELACE = 170_001
 # A min-UTxO-sized extra output back to the wallet: routine on Cardano as token
 # dust or change, and free for an attacker to add.
 _DUST = 1 * LOVELACE_PER_ADA
+# Change the closing leg sends back to the wallet beside the repayment, ~20% of
+# the cycled amount: routine when one wallet controls every leg.
+_CHANGE = 2_000 * LOVELACE_PER_ADA
+# Value the closing leg re-locks at a script the origin also spent from, far
+# larger than the cycle itself.
+_RELOCK = 500_000 * LOVELACE_PER_ADA
 # Prior High findings of this same ring, as in the hand-fed must-fire case
 # above, so both describe the same recurring pattern.
 _PRIOR_CYCLES = 4
@@ -274,28 +280,36 @@ _OTHER_RINGS = [
 class _PlantedCycleClient:
     """Answers detect_cycle's queries as ClickHouse would for one planted cycle.
 
-    ``closing_rows`` are the hop query's rows for the closing transaction, in
-    that query's sort order and with its DISTINCT applied; ``closing_total`` is
-    what the transaction really paid the origin set, which only a lookup without
-    DISTINCT sees. ``prior_cycles`` are the history read's rows, (circular,
-    circular_intermediaries) per earlier cycle of the origin.
+    ``closing_outputs`` are every output of the closing transaction as
+    (address, amount). The hop query sees them the way its SQL returns them,
+    DISTINCT and sorted by address then amount DESC; the closing-leg read sees
+    them without DISTINCT, filtered to the transaction and the origin set it is
+    asked about. ``fail_closing_read`` makes that read raise. ``prior_cycles``
+    are the history read's rows, (circular, circular_intermediaries) per
+    earlier cycle of the origin.
     """
 
     def __init__(
         self,
-        closing_rows: list[tuple],
-        closing_total: int,
+        closing_outputs: list[tuple[str, int]],
         prior_cycles: list[tuple] = _PRIOR_HIGHS,
         fail_history_read: bool = False,
+        fail_closing_read: bool = False,
         gap: int = _LEG_GAP_SLOTS,
         sent: int = _SENT,
         leg_2: int = _LEG_2,
         decoy: bool = False,
         two_hop: bool = False,
     ):
+        close_slot = _ORIGIN_SLOT + (gap if two_hop else 2 * gap)
+        closing_rows = sorted(
+            {(_CLOSING_TX, addr, amount, close_slot) for addr, amount in closing_outputs},
+            key=lambda r: (r[1], -r[2]),
+        )
         leg_2_row = (_LEG_2_TX, _HOP_2, leg_2, _ORIGIN_SLOT + gap)
         self._hops = [closing_rows] if two_hop else [[leg_2_row], closing_rows]
-        self._closing_total = closing_total
+        self._closing_outputs = closing_outputs
+        self._fail_closing_read = fail_closing_read
         self._prior_cycles = prior_cycles
         self._fail_history_read = fail_history_read
         self._origin_outputs = [(_HOP_1, sent, _ORIGIN_SLOT)]
@@ -308,8 +322,12 @@ class _PlantedCycleClient:
     def execute(self, sql, params=None, **_):
         if "WITH cand AS" in sql:
             return self._hops.pop(0) if self._hops else []
-        if "sum(amount)" in sql:
-            return [(self._closing_total,)]
+        if "SELECT address, amount" in sql:
+            if self._fail_closing_read:
+                raise ConnectionError("planted closing-leg read failure")
+            if params["tx_hash"] != _CLOSING_TX:
+                return []
+            return [(a, amt) for a, amt in self._closing_outputs if a in params["origin"]]
         if "tx_class_scores" in sql:
             if self._fail_history_read:
                 raise ConnectionError("ClickHouse went away")
@@ -323,17 +341,13 @@ class _PlantedCycleClient:
         raise AssertionError(f"unexpected query: {sql.strip()[:80]}")
 
 
-def _detect(closing_rows: list[tuple], closing_total: int, **client_opts) -> dict | None:
+def _detect(closing_outputs: list[tuple[str, int]], **client_opts) -> dict | None:
     with patch("app.analysis.graph.clickhouse") as mock_ch:
-        mock_ch._get_client.return_value = _PlantedCycleClient(
-            closing_rows, closing_total, **client_opts
-        )
+        mock_ch._get_client.return_value = _PlantedCycleClient(closing_outputs, **client_opts)
         return graph.detect_cycle(_ORIGIN_TX, "preprod")
 
 
 class TestClosingLegFromTheHopQuery:
-    _CLOSE_SLOT = _ORIGIN_SLOT + 2 * _LEG_GAP_SLOTS
-
     @pytest.mark.attack_must_fire
     def test_dust_to_a_second_origin_address_does_not_mask_the_repayment(self, scorer):
         """Dust to the origin address that sorts first must not stand in for
@@ -344,13 +358,7 @@ class TestClosingLegFromTheHopQuery:
         ~0.9999 and the gate discarded the cycle outright: no finding at all.
         Measured 87.11 through the full path, so the floor sits at High.
         """
-        cycle = _detect(
-            closing_rows=[
-                (_CLOSING_TX, _ORIGIN_A, _DUST, self._CLOSE_SLOT),
-                (_CLOSING_TX, _ORIGIN_B, _REPAID, self._CLOSE_SLOT),
-            ],
-            closing_total=_DUST + _REPAID,
-        )
+        cycle = _detect([(_ORIGIN_A, _DUST), (_ORIGIN_B, _REPAID)])
         assert cycle is not None and cycle["cycle_length"] == 3
         features = _features(cycle=cycle)
         assert scorer.gate(features), f"gate rejected: net_loss_ratio={cycle['net_loss_ratio']}"
@@ -366,14 +374,84 @@ class TestClosingLegFromTheHopQuery:
         Measured 87.11 through the full path, so the floor sits at High.
         """
         half = _REPAID // 2
-        cycle = _detect(
-            closing_rows=[(_CLOSING_TX, _ORIGIN_A, half, self._CLOSE_SLOT)],
-            closing_total=2 * half,
-        )
+        cycle = _detect([(_ORIGIN_A, half), (_ORIGIN_A, half)])
         assert cycle is not None and cycle["cycle_length"] == 3
         features = _features(cycle=cycle)
         assert scorer.gate(features), f"gate rejected: net_loss_ratio={cycle['net_loss_ratio']}"
         assert scorer.score(features).score >= BAND_HIGH_THRESHOLD
+
+    @pytest.mark.attack_must_fire
+    @pytest.mark.parametrize(
+        "closing_outputs",
+        [
+            [(_ORIGIN_A, _REPAID), (_ORIGIN_B, _CHANGE)],
+            [(_ORIGIN_A, _REPAID), (_ORIGIN_A, _CHANGE)],
+            [(_ORIGIN_A, _REPAID), (_ORIGIN_B, _RELOCK)],
+            [(_ORIGIN_A, _REPAID // 2), (_ORIGIN_A, _REPAID // 2), (_ORIGIN_B, _CHANGE)],
+            [(_ORIGIN_A, _REPAID // 2), (_ORIGIN_A, _REPAID // 2), (_ORIGIN_A, _CHANGE)],
+            [
+                (_ORIGIN_A, _REPAID // 3),
+                (_ORIGIN_A, _REPAID // 3),
+                (_ORIGIN_A, _REPAID - 2 * (_REPAID // 3)),
+                (_ORIGIN_A, 2 * _CHANGE),
+                (_ORIGIN_B, 2 * _CHANGE),
+            ],
+            [(_ORIGIN_A, _REPAID // 2), (_ORIGIN_B, _REPAID // 2), (_ORIGIN_A, _RELOCK)],
+        ],
+        ids=[
+            "change-to-second-origin-address",
+            "change-to-same-address",
+            "script-re-lock",
+            "split-repayment-and-change",
+            "split-repayment-and-change-to-the-same-address",
+            "repayment-in-thirds-beside-two-changes",
+            "halves-to-two-addresses-and-a-re-lock",
+        ],
+    )
+    def test_extra_value_back_to_the_wallet_does_not_demote_the_cycle(
+        self, scorer, closing_outputs
+    ):
+        """Value the closing leg pays the wallet beyond the repayment must not
+        count as a mismatch between hops.
+
+        The total returned is right for the loss gate, but as the closing hop's
+        amount in amount_similarity it turned change, or a re-lock at a script
+        the origin spent from, into an uneven cycle: against four earlier Highs
+        of the same ring, #108's reading scored the change 78.5 and the re-lock
+        37.11 (Moderate). The similarity now reads the part of the payment that
+        fits the other hops best, whichever outputs it is split across, so each
+        shape measures as the plain cycle does, 87.11.
+        """
+        plain = _detect([(_ORIGIN_A, _REPAID)])
+        cycle = _detect(closing_outputs)
+        assert cycle is not None and cycle["cycle_length"] == 3
+        assert cycle["amount_similarity"] == plain["amount_similarity"]
+        features = _features(cycle=cycle)
+        assert scorer.gate(features), f"gate rejected: net_loss_ratio={cycle['net_loss_ratio']}"
+        assert scorer.score(features).score >= BAND_HIGH_THRESHOLD
+
+    def test_a_failed_closing_leg_read_keeps_the_cycle_and_asks_for_a_retry(self, scorer):
+        """A failed read of the closing leg must not cost the finding.
+
+        The cycle is measured with the matched row, which is exact when the
+        closing leg pays the origin one output, and flagged so the engine
+        retries the transaction for the full reading; if the read keeps
+        failing, the engine writes this score with a marker.
+        """
+        plain = _detect([(_ORIGIN_A, _REPAID)])
+        cycle = _detect([(_ORIGIN_A, _REPAID)], fail_closing_read=True)
+        assert cycle["closing_leg_unavailable"] is True
+        assert plain["closing_leg_unavailable"] is False
+        features = _features(cycle=cycle)
+        assert scorer.gate(features), f"gate rejected: net_loss_ratio={cycle['net_loss_ratio']}"
+        assert scorer.score(features).score == scorer.score(_features(cycle=plain)).score
+
+    def test_a_two_hop_closure_reads_no_closing_leg(self):
+        """The gate never scores a two-hop closure, so it must not cost a read or
+        a retry when the read would fail."""
+        cycle = _detect([(_ORIGIN_A, _REPAID)], fail_closing_read=True, two_hop=True)
+        assert cycle is not None and cycle["cycle_length"] == 2
+        assert cycle["closing_leg_unavailable"] is False
 
 
 class TestRecyclingOverTheWindow:
@@ -383,11 +461,9 @@ class TestRecyclingOverTheWindow:
     its own: the forward search never revisits an address.
     """
 
-    def _cycle(self, prior_cycles, gap=_LEG_GAP_SLOTS, odd=0, **client_opts):
-        close_slot = _ORIGIN_SLOT + 2 * gap
+    def _cycle(self, prior_cycles, gap=_LEG_GAP_SLOTS, odd=0, closing=None, **client_opts):
         return _detect(
-            [(_CLOSING_TX, _ORIGIN_A, _REPAID + odd, close_slot)],
-            _REPAID + odd,
+            closing or [(_ORIGIN_A, _REPAID + odd)],
             prior_cycles=prior_cycles,
             gap=gap,
             sent=_SENT + odd,
@@ -438,6 +514,36 @@ class TestRecyclingOverTheWindow:
         """
         _, again, result = self._second_pass(scorer, gap=0, odd=_ODD_LOVELACE)
         assert again["recycled_share"] == 1.0
+        assert result.score >= BAND_HIGH_THRESHOLD
+
+    @pytest.mark.attack_must_fire
+    @pytest.mark.parametrize(
+        "closing",
+        [
+            [(_ORIGIN_A, _REPAID), (_ORIGIN_B, _CHANGE)],
+            [(_ORIGIN_A, _REPAID), (_ORIGIN_B, _RELOCK)],
+            [(_ORIGIN_A, _REPAID // 2), (_ORIGIN_A, _REPAID // 2), (_ORIGIN_A, _CHANGE)],
+        ],
+        ids=[
+            "change-to-second-origin-address",
+            "script-re-lock",
+            "split-repayment-and-change-to-the-same-address",
+        ],
+    )
+    def test_a_repeated_ring_paying_the_wallet_extra_on_close_reaches_high(self, scorer, closing):
+        """Value the closing leg pays the wallet beyond the repayment must not
+        keep a repeated ring below High.
+
+        The recycling credit and the amount axis both read amount_similarity,
+        and with the closing hop read as the total paid to the origin set the
+        extra counted as a mismatch: change, split repayment or not, stopped
+        the second pass at 54.5, and the re-lock left the ring without the
+        credit, at 13.11 on both passes. Measured 43.11 then 63.11 for each,
+        so the floor sits at High.
+        """
+        _, again, result = self._second_pass(scorer, closing=closing)
+        assert again["recycled_share"] == 1.0
+        assert again["recurrence_count"] == 0
         assert result.score >= BAND_HIGH_THRESHOLD
 
     @pytest.mark.attack_must_fire
@@ -508,10 +614,8 @@ class TestRecyclingOverTheWindow:
     def test_a_two_hop_round_trip_reads_no_history(self):
         """The gate never scores a two-hop closure, so it must not cost a read or
         a retry when the read would fail."""
-        close_slot = _ORIGIN_SLOT + _LEG_GAP_SLOTS
         cycle = _detect(
-            [(_CLOSING_TX, _ORIGIN_A, _REPAID, close_slot)],
-            _REPAID,
+            [(_ORIGIN_A, _REPAID)],
             fail_history_read=True,
             two_hop=True,
         )

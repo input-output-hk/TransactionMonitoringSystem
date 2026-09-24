@@ -1,6 +1,8 @@
 """Unit tests for the transfer graph cycle detection module."""
 
+import itertools
 import math
+import random
 from unittest.mock import MagicMock, patch
 
 from app.analysis import graph
@@ -378,3 +380,77 @@ class TestRecyclingNeedsValuePassedAlong:
         assert again["amount_similarity"] <= graph._VALUE_PRESERVING_SIMILARITY
         assert again["recycled_share"] == 1.0
         assert again["recipient_entropy"] == alone["recipient_entropy"]
+
+
+class TestClosingReading:
+    """The part of the closing leg's payment to the origin set that fits the
+    other hops, found without scoring every subset of its outputs."""
+
+    _RING = [10_000_000_000, 9_990_000_000]
+    _REPAID = 9_979_000_000
+    _CHANGE = 2_000_000_000
+    # Seeded random closing legs checked against every subset sum; small enough
+    # to enumerate, varied enough to put the best sum on either side of the peak.
+    _CASES = 300
+    _MAX_HOPS = 6
+    _MAX_OUTPUTS = 6
+    _MAX_LOVELACE = 10**10
+
+    def test_matches_scoring_every_subset_sum(self):
+        """Only the nearest sums on each side of the peak are scored, so the
+        shortcut must find a reading as good as the best of all of them."""
+        rng = random.Random(0)
+        for _ in range(self._CASES):
+            prior = [
+                rng.randint(1, self._MAX_LOVELACE) for _ in range(rng.randint(2, self._MAX_HOPS))
+            ]
+            paid = [
+                (rng.choice("ab"), rng.randint(1, self._MAX_LOVELACE))
+                for _ in range(rng.randint(1, self._MAX_OUTPUTS))
+            ]
+            matched = paid[0][1]
+            total = sum(amount for _, amount in paid)
+            amounts = [amount for _, amount in paid]
+            sums = {
+                sum(subset)
+                for size in range(1, len(amounts) + 1)
+                for subset in itertools.combinations(amounts, size)
+            }
+            best = max(graph._amount_similarity([*prior, c]) for c in sums)
+            reading = graph._closing_reading(paid, matched, total, prior)
+            assert graph._amount_similarity([*prior, reading]) == best
+
+    def test_a_split_repayment_beside_change_reads_as_the_repayment(self):
+        half = self._REPAID // 2
+        paid = [("a", half), ("a", half), ("a", self._CHANGE)]
+        total = sum(amount for _, amount in paid)
+        assert graph._closing_reading(paid, half, total, self._RING) == 2 * half
+
+    def test_ties_go_to_the_total(self):
+        """A closing leg out of all proportion to the other hops scores 0 on
+        every reading, the nearest to the peak included: the total is kept."""
+        paid = [("a", self._MAX_LOVELACE), ("b", 2 * self._MAX_LOVELACE)]
+        total = 3 * self._MAX_LOVELACE
+        assert graph._closing_reading(paid, self._MAX_LOVELACE, total, [1, 1]) == total
+
+    def test_past_the_cap_reads_outputs_address_totals_and_the_total(self):
+        half = self._REPAID // 2
+        split = [("a", half), ("a", half), ("a", self._CHANGE)]
+        single = [("a", self._REPAID), ("b", self._CHANGE), ("b", self._CHANGE)]
+        by_address = [("a", half), ("a", half), ("b", self._CHANGE)]
+        with patch.object(graph, "_CLOSING_SUBSET_MAX_OUTPUTS", len(split) - 1):
+            # Subsets are no longer tried, and no single output, address total
+            # or the total is the split repayment...
+            split_total = sum(amount for _, amount in split)
+            assert graph._closing_reading(split, half, split_total, self._RING) != 2 * half
+            # ...but a repayment in one output is still read as itself, and one
+            # split across outputs to one address as that address's total.
+            single_total = sum(amount for _, amount in single)
+            assert (
+                graph._closing_reading(single, self._REPAID, single_total, self._RING)
+                == self._REPAID
+            )
+            by_address_total = sum(amount for _, amount in by_address)
+            assert (
+                graph._closing_reading(by_address, half, by_address_total, self._RING) == 2 * half
+            )

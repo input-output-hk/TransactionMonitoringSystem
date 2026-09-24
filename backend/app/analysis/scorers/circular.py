@@ -176,6 +176,7 @@ class CircularScorer(BaseScorer):
         evidence = {
             "cycle_length": int(cycle.get("cycle_length", 0)),
             "net_loss_ratio": round(cycle.get("net_loss_ratio", 0), 4),
+            "returned_lovelace": int(cycle.get("returned_lovelace", 0)),
             "amount_similarity_raw": round(amt_sim, 4),
             "hops": hops,
             "mean_inter_hop_slots": float(cycle.get("mean_inter_hop_delta_slots", 0)),

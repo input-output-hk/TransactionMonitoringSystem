@@ -36,10 +36,14 @@ _DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE_CFG["default_inter_hop_delta_slots"]
 # Public alias: the engine's cycle pre-filter must key off the same knob so
 # the two sites cannot drift (the engine previously hardcoded the value).
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
-# The gate's length bounds. A closure outside them is never scored, so its
-# history is not worth a read (see _cycle_history).
+# The gate's length bounds. A closure outside them is never scored, so neither
+# its closing leg nor its history is worth a read (see _closing_leg_amounts and
+# _cycle_history).
 _MIN_CYCLE_LENGTH = int(_CYCLE_CFG["min_length"])
 _MAX_CYCLE_LENGTH = int(_CYCLE_CFG["max_length"])
+# Outputs to the origin set up to which the closing leg's similarity reading
+# tries every subset of them (2^N sums); beyond it, see _closing_reading.
+_CLOSING_SUBSET_MAX_OUTPUTS = int(_CYCLE_CFG["closing_subset_max_outputs"])
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
 # Every Shelley-era Cardano network has a one-second slot (genesis
 # slotLength = 1), so a day of chain time is this many slots.
@@ -220,7 +224,7 @@ def detect_cycle(
         #
         # Which origin-paying row sorts first no longer decides how much came
         # back. The loop stops at that row only to learn WHICH transaction
-        # closes the cycle; _returned_to_origin then totals that transaction's
+        # closes the cycle; _closing_leg_amounts then reads that transaction's
         # outputs to the whole origin set. No row order could have done this:
         # amount DESC still let dust to a second origin address, sorted ahead
         # by address, stand in for the repayment. amount keeps its DESC
@@ -278,13 +282,21 @@ def detect_cycle(
 
             # Check if cycle detected (output goes back to origin)
             if out_addr in origin_addresses:
-                # Cycle found. This row identifies the closing transaction; the
-                # amount it returned is that transaction's total to the origin
-                # set, not this one output (see _returned_to_origin).
-                returned = _returned_to_origin(client, network, r[0], origin_addresses, out_amt)
+                # Cycle found. This row identifies the closing transaction; how
+                # much it returned comes from all of that transaction's outputs
+                # to the origin set, not this one row (see _closing_leg_amounts).
+                returned, closing_amount, closing_leg_unavailable = _closing_leg_amounts(
+                    client,
+                    network,
+                    r[0],
+                    hop + 1,
+                    origin_addresses,
+                    out_amt,
+                    [h["amount_lovelace"] for h in hops],
+                )
                 all_cycle_addresses.extend(list(current_addresses))
                 all_cycle_addresses.append(out_addr)
-                hops.append({"address": out_addr, "amount_lovelace": returned, "slot": slot})
+                hops.append({"address": out_addr, "amount_lovelace": closing_amount, "slot": slot})
                 intermediaries, prior_cycles, history_unavailable = _cycle_history(
                     client,
                     network,
@@ -307,6 +319,7 @@ def detect_cycle(
                     intermediaries=intermediaries,
                     prior_cycles=prior_cycles,
                     history_unavailable=history_unavailable,
+                    closing_leg_unavailable=closing_leg_unavailable,
                 )
 
             if out_addr not in visited_addresses:
@@ -323,35 +336,53 @@ def detect_cycle(
     return None
 
 
-def _returned_to_origin(
+def _closing_leg_amounts(
     client: Any,
     network: str,
     closing_tx: str,
+    cycle_length: int,
     origin_addresses: set[str],
-    seen_amount: int,
-) -> int:
-    """Total lovelace the closing transaction pays back to ANY origin address.
+    matched_amount: int,
+    prior_hop_amounts: list[int],
+) -> tuple[int, int, bool]:
+    """What the closing transaction returned: (total, amount for similarity, read failed).
 
     The hop query answers whether a cycle closes, not how much came back. Its
     rows are DISTINCT on (tx_hash, address, amount, slot) and the loop stops at
-    the first origin-paying row, so using that row's amount let a closing leg
-    hide its repayment two ways: a dust output to one origin address sorted
-    ahead of the real repayment to another, or the repayment split into equal
-    outputs that DISTINCT collapses into one. Either pushed net_loss_ratio
-    toward 1.0 and CircularScorer's hard gate discarded a genuine cycle.
-    Totalling every non-collateral output of the closing transaction that pays
-    the origin set closes both, and extra outputs can only lower the measured
-    loss, never raise it.
+    the first origin-paying row, so that row's amount let a closing leg hide its
+    repayment two ways: a dust output to one origin address sorted ahead of the
+    real repayment to another, or the repayment split into equal outputs that
+    DISTINCT collapses into one. Either pushed net_loss_ratio toward 1.0 and
+    CircularScorer's hard gate discarded a genuine cycle. So every
+    non-collateral output of the closing transaction that pays the origin set is
+    read here, without DISTINCT.
+
+    The two amounts answer different questions. The total feeds net_loss_ratio,
+    the gate: extra outputs can only lower the measured loss, never raise it.
+    The second feeds amount_similarity, which asks whether the same quantity
+    passed through every hop, and there the total is the wrong reading whenever
+    the closing leg also pays the wallet change or re-locks value at a script
+    the origin spent from: the extra would count as a mismatch and push a real
+    cycle out of the alert band, and would also deny it the recycling credit,
+    which only a cycle that passes value along gets (see _build_cycle_result).
+    So it is the part of the payment that fits the other hops best (see
+    _closing_reading), of which the matched row and the total are both
+    candidates: the similarity never comes out lower than under either earlier
+    reading (the matched row before the total existed, the total after).
 
     FINAL for the same reason origin_amount uses it: a not-yet-merged duplicate
-    row would otherwise double the total. If the lookup fails, the amount
-    already matched is kept, which is what the cycle was measured with before,
-    so a transient error cannot cost the finding.
+    row would otherwise double the total. A closure the gate never scores skips
+    the read. A failed read keeps the cycle, measured with the matched row
+    (exact when the closing leg pays the origin a single output), and flags it:
+    the engine then retries the transaction, and if the read keeps failing
+    writes the score with a marker rather than dropping the cycle.
     """
+    if not _MIN_CYCLE_LENGTH <= cycle_length <= _MAX_CYCLE_LENGTH:
+        return matched_amount, matched_amount, False
     try:
         rows = client.execute(
             """
-            SELECT sum(amount)
+            SELECT address, amount
             FROM transaction_outputs FINAL
             WHERE network = %(network)s
               AND tx_hash = %(tx_hash)s
@@ -362,15 +393,60 @@ def _returned_to_origin(
         )
     except Exception:
         logger.warning(
-            "Closing-leg total failed for %s; keeping the matched output",
+            "Closing-leg read failed for %s; measuring the cycle with the matched output",
             closing_tx[:16],
             exc_info=True,
         )
-        return seen_amount
-    total = rows[0][0] if rows and rows[0][0] is not None else 0
+        return matched_amount, matched_amount, True
+    paid = [(address, int(amount)) for address, amount in rows]
     # The matched output is one of the summed rows, so the total cannot be
     # smaller unless the two reads disagree; never report less than was seen.
-    return max(int(total), seen_amount)
+    total = max(sum(amount for _, amount in paid), matched_amount)
+    return total, _closing_reading(paid, matched_amount, total, prior_hop_amounts), False
+
+
+def _closing_reading(
+    paid: list[tuple[str, int]],
+    matched_amount: int,
+    total: int,
+    prior_hop_amounts: list[int],
+) -> int:
+    """The part of the closing leg's payment to the origin that fits the other hops best.
+
+    Change or a re-lock can sit beside the repayment on the same address or
+    another, and the repayment itself can be split across outputs, so the
+    candidates are the sums of every subset of the outputs. Past
+    circular.cycle.closing_subset_max_outputs outputs that is too many sums,
+    and the candidates are each output, each address's total and the total. The
+    matched row and the total are always candidates, and ties go to the total.
+
+    amount_similarity is unimodal in the closing amount x: 1 - CV falls on
+    either side of x = sum(h^2) / sum(h) over the other hops h, so only the
+    candidate nearest that point from below and from above can score highest.
+    """
+    amounts = [amount for _, amount in paid]
+    if len(amounts) <= _CLOSING_SUBSET_MAX_OUTPUTS:
+        sums = {0}
+        for amount in amounts:
+            sums |= {s + amount for s in sums}
+        sums.discard(0)
+    else:
+        per_address: Counter[str] = Counter()
+        for address, amount in paid:
+            per_address[address] += amount
+        sums = {*amounts, *per_address.values()}
+    sums |= {matched_amount, total}
+    # Total first, so max() keeps it on a tie.
+    finalists = [total]
+    weight = sum(prior_hop_amounts)
+    if weight > 0:
+        peak = sum(h * h for h in prior_hop_amounts) / weight
+        below = max((c for c in sums if c <= peak), default=None)
+        above = min((c for c in sums if c >= peak), default=None)
+        finalists += [c for c in (below, above) if c is not None]
+    else:
+        finalists += sorted(sums)
+    return max(finalists, key=lambda c: _amount_similarity([*prior_hop_amounts, c]))
 
 
 def _cycle_history(
@@ -547,6 +623,19 @@ def _shannon_bits(observations: list[str]) -> float:
     return sum((c / n) * math.log2(n / c) for c in counts.values())
 
 
+def _amount_similarity(hop_amounts: list[int]) -> float:
+    """1 - CV(hop_amounts), clipped to [0, 1]: how evenly value passed through."""
+    if len(hop_amounts) >= 2:
+        mean_amt = statistics.mean(hop_amounts)
+        if mean_amt > 0:
+            cv = statistics.stdev(hop_amounts) / mean_amt
+            return max(0.0, min(1.0, 1.0 - cv))
+        return 0.0
+    if hop_amounts and hop_amounts[0] > 0:
+        return 1.0
+    return 0.0
+
+
 def _build_cycle_result(
     cycle_length: int,
     addresses: list[str],
@@ -557,6 +646,7 @@ def _build_cycle_result(
     intermediaries: list[str],
     prior_cycles: list[tuple[float, list[str]]],
     history_unavailable: bool = False,
+    closing_leg_unavailable: bool = False,
 ) -> dict:
     """Build the cycle dict expected by the CircularScorer.
 
@@ -574,18 +664,7 @@ def _build_cycle_result(
     hop_amounts = [int(h.get("amount_lovelace", 0)) for h in hops]
     hop_slots = [int(h.get("slot", 0)) for h in hops]
 
-    # Amount similarity: 1 - CV(hop_amounts) (coefficient of variation)
-    if len(hop_amounts) >= 2:
-        mean_amt = statistics.mean(hop_amounts)
-        if mean_amt > 0:
-            cv = statistics.stdev(hop_amounts) / mean_amt
-            amount_similarity = max(0.0, min(1.0, 1.0 - cv))
-        else:
-            amount_similarity = 0.0
-    elif hop_amounts and hop_amounts[0] > 0:
-        amount_similarity = 1.0
-    else:
-        amount_similarity = 0.0
+    amount_similarity = _amount_similarity(hop_amounts)
 
     # Net loss ratio: how much value was lost (fees)
     if origin_amount > 0:
@@ -677,4 +756,9 @@ def _build_cycle_result(
         "intermediaries": list(intermediaries),
         "origin_keys": sorted({_address_key(a) for a in origin_addresses}),
         "history_unavailable": history_unavailable,
+        # What the closing leg paid the origin set in total, which the loss is
+        # measured on. The closing hop's amount above is the part of it that
+        # fits the ring (see _closing_reading), so the two differ by any change.
+        "returned_lovelace": int(final_amount),
+        "closing_leg_unavailable": closing_leg_unavailable,
     }

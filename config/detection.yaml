@@ -767,6 +767,13 @@ scorers:
       # for cost: RAISE it if real layering through high-degree hubs is missed,
       # never lower it as a precision knob.
       bfs_hop_row_limit: 500
+      # How many outputs to the origin a closing leg may have for its similarity
+      # reading to try every subset of them: the repayment can be split across
+      # outputs and sit beside change or a re-lock, and only a subset sum finds
+      # it then. The cost doubles per output (2^16 sums take ~5 ms, once per
+      # cycle found). Past it, single outputs, address totals and the total are
+      # tried. Raise it if closing legs with more outputs to the origin appear.
+      closing_subset_max_outputs: 16
     reason_threshold: 0.5
     moderate_cap: 59.0                  # top of Moderate band
     # Floor on the sum of corroborating signals (entropy + auxiliary + speed).

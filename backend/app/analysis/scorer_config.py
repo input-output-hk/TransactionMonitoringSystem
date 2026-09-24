@@ -255,6 +255,7 @@ _KNOWN_OPTIONAL_KEYS: dict[str, tuple[str, ...]] = {
         "cycle.max_output_fanout",
         "cycle.bfs_hop_row_limit",
         "cycle.default_inter_hop_delta_slots",
+        "cycle.closing_subset_max_outputs",
     ),
     "fake_token": (
         "unicode_scores.zero_width",
