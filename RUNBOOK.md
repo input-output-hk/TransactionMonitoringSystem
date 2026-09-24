@@ -523,6 +523,7 @@ Variables are layered across files:
 | `ANALYSIS_ENABLED` | `true` | Enable multi-class detection engine |
 | `CYCLE_DETECTION_ENABLED` | `true` | Enable transfer graph cycle detection |
 | `CYCLE_MAX_HOPS` | `6` | Maximum BFS depth for cycle detection |
+| `CIRCULAR_HISTORY_MATERIALIZE` | `true` | Rewrite the circular history columns into existing parts at boot; see [Circular history columns](#circular-history-columns) |
 | `CYCLE_MAX_FANOUT` | `50` | Maximum addresses tracked per BFS hop |
 | `SANDWICH_SIMPLIFIED_ENABLED` | `true` | Enable structural sandwich pattern detection |
 | `BASELINE_MIN_SAMPLES` | `200` | Minimum samples before per-entity baseline is valid |
@@ -998,7 +999,48 @@ the value is baked into the dashboard bundle at build time. And startup runs
 the whole table, inside the same `CLICKHOUSE_MEM_LIMIT` that has already failed a
 `MODIFY TTL` with Code 241 on this deployment; raise the limit before a
 projection-changing upgrade and expect list queries to fall back to the base
-table while it runs.
+table while it runs. The first boot of a release that adds the circular history
+columns runs another part-rewriting mutation, on `tx_class_scores`: see
+[Circular history columns](#circular-history-columns) before that upgrade.
+
+### Circular history columns
+
+The circular scorer reads an origin's earlier cycles through three columns
+ClickHouse materializes from the stored evidence: `tx_class_scores.circular_origins`,
+`circular_intermediaries` and `circular_first_slot`. The first boot of the release
+that adds them rewrites them into the existing parts with one `ALTER TABLE
+tx_class_scores MATERIALIZE COLUMN ...`: one mutation, which `system.mutations`
+lists once per column, so expect three rows with the same `mutation_id`. No backfill
+script is needed: until the rewrite finishes, ClickHouse computes the values from
+`evidence` on read, so scores are right from the first boot; each history read
+just costs about 2 CPU-s and 600 MiB instead of 0.3 CPU-s and 170 MiB. On a
+mainnet-shaped synthetic table (1.53M scores) the rewrite took 1.75 s wall, 2.2
+CPU-s and 25 MiB peak. Later boots find no part to rewrite and issue nothing. Two
+instances that boot at the same moment can both issue it; the second rewrite is
+redundant and short. The columns are additive, so a rollback past this release
+needs no restore.
+
+Mutations on a table run in order, so every `tx_class_scores` DELETE (the rollback
+purge, `scripts/reset.sh`) waits behind the rewrite and fails while it fails, and
+chain sync stalls at the next rollback. The app logs a failing rewrite at ERROR on
+every boot. Check before and after the deploy:
+
+```sql
+SELECT mutation_id, command, parts_to_do, latest_fail_reason
+FROM system.mutations
+WHERE table = 'tx_class_scores' AND NOT is_done
+```
+
+To get out of a rewrite that keeps failing, fix the cause (usually memory: raise
+`CLICKHOUSE_MEM_LIMIT`), or kill it and set `CIRCULAR_HISTORY_MATERIALIZE=false` so
+the next boot does not issue it again:
+
+```sql
+KILL MUTATION WHERE table = 'tx_class_scores' AND command LIKE '%MATERIALIZE COLUMN circular_%'
+```
+
+With the setting off the values stay right, computed on read until those parts
+merge, and the history reads cost more. Turn it back on once the cause is fixed.
 
 ## Schema migration (dedup-safe v2)
 

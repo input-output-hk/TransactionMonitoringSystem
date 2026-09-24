@@ -271,13 +271,13 @@ export const SUB_SCORE_LABELS: Record<
 			key: "cycle_recurrence",
 			label: "Repeated Cycle",
 			description:
-				"How many prior cycles originated from the same address within the configured recurrence window. Repeat layering patterns get amplified here.",
+				"How many earlier cycles from the same address that went through at least one of the same intermediaries reached High within the recurrence window. Repeat layering patterns get amplified here.",
 		},
 		{
 			key: "recipient_entropy_inv",
 			label: "Low Address Diversity",
 			description:
-				"Inverted Shannon entropy of the hop addresses. A cycle reusing the same 2–3 addresses scores high; a cycle through many distinct addresses scores low.",
+				"How much of this cycle's path the same address's earlier cycles in the recurrence window already used. A cycle recycling its intermediaries scores high; one through addresses never used before scores low.",
 		},
 		{
 			key: "auxiliary",

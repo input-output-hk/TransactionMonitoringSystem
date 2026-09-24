@@ -5,16 +5,19 @@ value cycles (ADA returning to the origin within max_hops).  Queries
 address_transactions, transaction_inputs and transaction_outputs in ClickHouse.
 """
 
+import bisect
 import logging
 import math
 import statistics
 from collections import Counter
 from typing import Any
 
-from app.analysis.features import LOVELACE_PER_ADA
+from app.analysis.features import LOVELACE_PER_ADA, is_script_address
+from app.analysis.normalise import BAND_HIGH_THRESHOLD
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
 from app.db import clickhouse
+from app.utils.bech32 import payment_credential_or_raw
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,43 @@ _DEFAULT_INTER_HOP_DELTA_SLOTS = int(_CYCLE_CFG["default_inter_hop_delta_slots"]
 # Public alias: the engine's cycle pre-filter must key off the same knob so
 # the two sites cannot drift (the engine previously hardcoded the value).
 MAX_OUTPUT_FANOUT = _MAX_OUTPUT_FANOUT
+# The gate's length bounds. A closure outside them is never scored, so neither
+# its closing leg nor its history is worth a read (see _closing_leg_amounts and
+# _cycle_history).
+_MIN_CYCLE_LENGTH = int(_CYCLE_CFG["min_length"])
+_MAX_CYCLE_LENGTH = int(_CYCLE_CFG["max_length"])
+# Outputs to the origin set up to which the closing leg's similarity reading
+# searches every subset of them (see _nearest_subset_sums); past it, see
+# _closing_reading.
+_CLOSING_SUBSET_MAX_OUTPUTS = int(_CYCLE_CFG["closing_subset_max_outputs"])
 _RECURRENCE_WINDOW_DAYS = int(_CIRCULAR_CFG["recurrence_window_days"])
+# Every Shelley-era Cardano network has a one-second slot (genesis
+# slotLength = 1), so a day of chain time is this many slots.
+_SLOTS_PER_DAY = 86_400
+# The history window in chain time, so a re-score reads the same earlier cycles
+# the live score did, and never a later one.
+_RECURRENCE_WINDOW_SLOTS = _RECURRENCE_WINDOW_DAYS * _SLOTS_PER_DAY
+# The amount similarity a cycle must exceed for the recycling credit: its value
+# passed along hop to hop, not loosely related amounts routed through the same
+# hubs (see circular.recycling_min_amount_similarity).
+_VALUE_PRESERVING_SIMILARITY = float(_CIRCULAR_CFG["recycling_min_amount_similarity"])
+# Two hops in one block land in the same slot. A slot is the chain's time
+# resolution, so they are at most one slot apart: measured, and as fast as a
+# ring can move, not unmeasurable.
+_SAME_SLOT_DELTA_SLOTS = 1
+
+
+def _address_key(address: str) -> str:
+    """The identity an address is compared by across an origin's cycles.
+
+    A key-hash payment credential names the wallet that controls the address,
+    whatever stake part the address carries, so that credential is the key. A
+    script address stays whole: one script hash is shared by every user of a
+    DEX or a lending pool, and keying on it would merge all of them.
+    """
+    if is_script_address(address):
+        return address
+    return payment_credential_or_raw(address)
 
 
 def _first_sorted(addresses) -> str:
@@ -138,6 +177,10 @@ def detect_cycle(
     hops: list[dict[str, Any]] = [
         {"address": origin_repr, "amount_lovelace": origin_amount, "slot": origin_slot}
     ]
+    # For the ring's path (see _ring_path): the transaction that first paid
+    # each address the search reached, and the frontier queried at each hop.
+    creator: dict[str, str] = dict.fromkeys(current_addresses, tx_hash)
+    queried: list[list[str]] = []
 
     for hop in range(1, max_hops + 1):
         if not current_addresses:
@@ -149,6 +192,7 @@ def detect_cycle(
         # miss cycles through the dropped legs. Same rationale as
         # _first_sorted, applied to the cap that actually controls recall.
         addr_list = sorted(current_addresses)[:max_fanout]
+        queried.append(addr_list)
 
         # Find txs where these addresses are inputs (they spent received funds).
         # The slot window is bounded: cycles spanning >24h are almost always
@@ -189,7 +233,7 @@ def detect_cycle(
         #
         # Which origin-paying row sorts first no longer decides how much came
         # back. The loop stops at that row only to learn WHICH transaction
-        # closes the cycle; _returned_to_origin then totals that transaction's
+        # closes the cycle; _closing_leg_amounts then reads that transaction's
         # outputs to the whole origin set. No row order could have done this:
         # amount DESC still let dust to a second origin address, sorted ahead
         # by address, stand in for the repayment. amount keeps its DESC
@@ -255,13 +299,32 @@ def detect_cycle(
 
             # Check if cycle detected (output goes back to origin)
             if out_addr in origin_addresses:
-                # Cycle found. This row identifies the closing transaction; the
-                # amount it returned is that transaction's total to the origin
-                # set, not this one output (see _returned_to_origin).
-                returned = _returned_to_origin(client, network, r[0], origin_addresses, out_amt)
+                # Cycle found. This row identifies the closing transaction; how
+                # much it returned comes from all of that transaction's outputs
+                # to the origin set, not this one row (see _closing_leg_amounts).
+                returned, closing_amount, closing_leg_unavailable = _closing_leg_amounts(
+                    client,
+                    network,
+                    r[0],
+                    hop + 1,
+                    origin_addresses,
+                    out_amt,
+                    [h["amount_lovelace"] for h in hops],
+                )
                 all_cycle_addresses.extend(list(current_addresses))
                 all_cycle_addresses.append(out_addr)
-                hops.append({"address": out_addr, "amount_lovelace": returned, "slot": slot})
+                hops.append({"address": out_addr, "amount_lovelace": closing_amount, "slot": slot})
+                intermediaries, prior_cycles, history_unavailable = _cycle_history(
+                    client,
+                    network,
+                    origin_tx=tx_hash,
+                    closing_tx=r[0],
+                    cycle_length=hop + 1,
+                    origin_addresses=origin_addresses,
+                    hops=hops,
+                    queried=queried,
+                    creator=creator,
+                )
 
                 return _build_cycle_result(
                     cycle_length=hop + 1,
@@ -270,12 +333,15 @@ def detect_cycle(
                     final_amount=returned,
                     hops=hops,
                     origin_addresses=origin_addresses,
-                    tx_hash=tx_hash,
-                    network=network,
+                    intermediaries=intermediaries,
+                    prior_cycles=prior_cycles,
+                    history_unavailable=history_unavailable,
+                    closing_leg_unavailable=closing_leg_unavailable,
                 )
 
             if out_addr not in visited_addresses:
                 next_addresses.add(out_addr)
+                creator.setdefault(out_addr, r[0])
                 hop_amount += out_amt
 
         all_cycle_addresses.extend(list(current_addresses))
@@ -287,35 +353,53 @@ def detect_cycle(
     return None
 
 
-def _returned_to_origin(
+def _closing_leg_amounts(
     client: Any,
     network: str,
     closing_tx: str,
+    cycle_length: int,
     origin_addresses: set[str],
-    seen_amount: int,
-) -> int:
-    """Total lovelace the closing transaction pays back to ANY origin address.
+    matched_amount: int,
+    prior_hop_amounts: list[int],
+) -> tuple[int, int, bool]:
+    """What the closing transaction returned: (total, amount for similarity, read failed).
 
     The hop query answers whether a cycle closes, not how much came back. Its
     rows are DISTINCT on (tx_hash, address, amount, slot) and the loop stops at
-    the first origin-paying row, so using that row's amount let a closing leg
-    hide its repayment two ways: a dust output to one origin address sorted
-    ahead of the real repayment to another, or the repayment split into equal
-    outputs that DISTINCT collapses into one. Either pushed net_loss_ratio
-    toward 1.0 and CircularScorer's hard gate discarded a genuine cycle.
-    Totalling every non-collateral output of the closing transaction that pays
-    the origin set closes both, and extra outputs can only lower the measured
-    loss, never raise it.
+    the first origin-paying row, so that row's amount let a closing leg hide its
+    repayment two ways: a dust output to one origin address sorted ahead of the
+    real repayment to another, or the repayment split into equal outputs that
+    DISTINCT collapses into one. Either pushed net_loss_ratio toward 1.0 and
+    CircularScorer's hard gate discarded a genuine cycle. So every
+    non-collateral output of the closing transaction that pays the origin set is
+    read here, without DISTINCT.
+
+    The two amounts answer different questions. The total feeds net_loss_ratio,
+    the gate: extra outputs can only lower the measured loss, never raise it.
+    The second feeds amount_similarity, which asks whether the same quantity
+    passed through every hop, and there the total is the wrong reading whenever
+    the closing leg also pays the wallet change or re-locks value at a script
+    the origin spent from: the extra would count as a mismatch and push a real
+    cycle out of the alert band, and would also deny it the recycling credit,
+    which only a cycle that passes value along gets (see _build_cycle_result).
+    So it is the part of the payment that fits the other hops best (see
+    _closing_reading), of which the matched row and the total are both
+    candidates: the similarity never comes out lower than under either earlier
+    reading (the matched row before the total existed, the total after).
 
     FINAL for the same reason origin_amount uses it: a not-yet-merged duplicate
-    row would otherwise double the total. If the lookup fails, the amount
-    already matched is kept, which is what the cycle was measured with before,
-    so a transient error cannot cost the finding.
+    row would otherwise double the total. A closure the gate never scores skips
+    the read. A failed read keeps the cycle, measured with the matched row
+    (exact when the closing leg pays the origin a single output), and flags it:
+    the engine then retries the transaction, and if the read keeps failing
+    writes the score with a marker rather than dropping the cycle.
     """
+    if not _MIN_CYCLE_LENGTH <= cycle_length <= _MAX_CYCLE_LENGTH:
+        return matched_amount, matched_amount, False
     try:
         rows = client.execute(
             """
-            SELECT sum(amount)
+            SELECT address, amount
             FROM transaction_outputs FINAL
             WHERE network = %(network)s
               AND tx_hash = %(tx_hash)s
@@ -326,65 +410,269 @@ def _returned_to_origin(
         )
     except Exception:
         logger.warning(
-            "Closing-leg total failed for %s; keeping the matched output",
+            "Closing-leg read failed for %s; measuring the cycle with the matched output",
             closing_tx[:16],
             exc_info=True,
         )
-        return seen_amount
-    total = rows[0][0] if rows and rows[0][0] is not None else 0
+        return matched_amount, matched_amount, True
+    amounts = [int(amount) for _, amount in rows]
     # The matched output is one of the summed rows, so the total cannot be
     # smaller unless the two reads disagree; never report less than was seen.
-    return max(int(total), seen_amount)
+    total = max(sum(amounts), matched_amount)
+    return total, _closing_reading(amounts, matched_amount, total, prior_hop_amounts), False
 
 
-def _count_origin_recurrence(
-    origin_address: str,
-    network: str,
-    exclude_tx: str,
+def _closing_reading(
+    amounts: list[int],
+    matched_amount: int,
+    total: int,
+    prior_hop_amounts: list[int],
 ) -> int:
-    """Count prior transactions from the same origin that were scored as circular.
+    """The part of the closing leg's payment to the origin that fits the other hops best.
 
-    Queries tx_class_scores joined with transaction_inputs to find how many
-    previous cycles originated from this address within a rolling window
-    (per Polimi spec Section 5.3, default 30 days, tunable via
-    circular.recurrence_window_days).  This feeds the cycle_recurrence
-    sub-score (30% weight in the CircularScorer).
+    Change or a re-lock can sit beside the repayment on the same address or
+    another, and the repayment itself can be split across outputs, so the
+    candidates are the sums of every subset of the outputs. The matched row and
+    the total are always candidates, and ties go to the total.
 
-    Only counts ancestors scored High or above (>=60). Counting every tx with
-    circular > 0 self-reinforces: once a single tx scored non-zero, every
-    subsequent tx from the same origin got a recurrence boost, cascading
-    false positives. High+ is the signal we want to amplify.
+    amount_similarity is unimodal in the closing amount x: 1 - CV falls on
+    either side of x = sum(h^2) / sum(h) over the other hops h, so only the
+    subset sum nearest that point from below and from above can score highest,
+    and _nearest_subset_sums finds both without listing every sum. Past
+    circular.cycle.closing_subset_max_outputs outputs even that search costs
+    too much, and the reading is that point itself, within what the leg paid:
+    a subset that fits is assumed to be there, because splitting a repayment
+    across more outputs than any search takes apart costs an attacker only fees.
     """
-    if not origin_address:
-        return 0
+    # Total first, so max() keeps it on a tie.
+    finalists = [total, matched_amount]
+    weight = sum(prior_hop_amounts)
+    if weight > 0 and amounts:
+        peak = sum(h * h for h in prior_hop_amounts) / weight
+        if len(amounts) <= _CLOSING_SUBSET_MAX_OUTPUTS:
+            finalists += [c for c in _nearest_subset_sums(amounts, peak) if c is not None]
+        else:
+            finalists.append(min(max(round(peak), min(amounts)), total))
+    return max(finalists, key=lambda c: _amount_similarity([*prior_hop_amounts, c]))
+
+
+def _subset_sums(amounts: list[int]) -> set[int]:
+    """Every subset sum of amounts, the empty subset's 0 included."""
+    sums = {0}
+    for amount in amounts:
+        sums |= {s + amount for s in sums}
+    return sums
+
+
+def _nearest_subset_sums(amounts: list[int], target: float) -> tuple[int | None, int | None]:
+    """The largest non-empty subset sum at or below target, and the smallest at or above.
+
+    Meet in the middle: every subset sum of each half of the outputs, one half
+    sorted and searched for each sum of the other, so N outputs cost about
+    2 * 2^(N/2) sums instead of 2^N.
+    """
+    half = len(amounts) // 2
+    left = _subset_sums(amounts[:half])
+    right = sorted(_subset_sums(amounts[half:]))
+    below: int | None = None
+    above: int | None = None
+    for a in left:
+        # right[i - 1] <= target - a < right[i]. Both halves empty (a and the
+        # right sum both 0) is the empty subset, never a reading.
+        i = bisect.bisect_right(right, target - a)
+        if i and (a or right[i - 1]) and (below is None or a + right[i - 1] > below):
+            below = a + right[i - 1]
+        j = bisect.bisect_left(right, target - a)
+        if j < len(right) and (a or right[j]) and (above is None or a + right[j] < above):
+            above = a + right[j]
+    return below, above
+
+
+def _cycle_history(
+    client: Any,
+    network: str,
+    *,
+    origin_tx: str,
+    closing_tx: str,
+    cycle_length: int,
+    origin_addresses: set[str],
+    hops: list[dict[str, Any]],
+    queried: list[list[str]],
+    creator: dict[str, str],
+) -> tuple[list[str], list[tuple[float, list[str]]], bool]:
+    """The ring's path and its origin's earlier cycles, for the window axes.
+
+    Returns ``(intermediaries, prior cycles, whether the read failed)``. A
+    closure outside the gate's length bounds is never scored, so it gets its
+    per-step representatives and no read: most closures are two-hop round trips
+    through a script, and the read would otherwise run, and could fail, for
+    every one of them.
+
+    A failed read does not raise. The cycle keeps its representatives and no
+    history, which scores it as it scored before the window existed, and is
+    flagged so enrichment asks the engine to retry the transaction. A read
+    that keeps failing then writes that score with a marker rather than losing
+    the finding.
+    """
+    representatives = _representatives(hops)
+    if not _MIN_CYCLE_LENGTH <= cycle_length <= _MAX_CYCLE_LENGTH:
+        return representatives, [], False
     try:
-        client = clickhouse._get_client()
-        rows = client.execute(
-            """
-            SELECT count(DISTINCT s.tx_hash) AS cnt
-            FROM tx_class_scores s FINAL
-            JOIN transaction_inputs ti
-                ON s.tx_hash = ti.tx_hash AND s.network = ti.network
-            WHERE ti.address = %(origin)s
-              AND s.network = %(network)s
-              AND s.circular >= 60
-              AND s.tx_hash != %(exclude)s
-              AND s.analyzed_at >= now() - INTERVAL %(window)s DAY
-              AND ti.is_collateral = 0
-              AND ti.is_reference = 0
-              AND ti.is_unspent_attempt = 0
-            """,
-            {
-                "origin": origin_address,
-                "network": network,
-                "exclude": exclude_tx,
-                "window": _RECURRENCE_WINDOW_DAYS,
-            },
+        path = _ring_path(client, network, origin_tx, closing_tx, queried, creator)
+        prior_cycles = _prior_origin_cycles(
+            client, network, origin_addresses, int(hops[0]["slot"]), origin_tx
         )
-        return rows[0][0] if rows else 0
-    except Exception as e:
-        logger.debug(f"Recurrence count query failed for {origin_address[:16]}: {e}")
-        return 0
+    except Exception:
+        logger.warning(
+            "Circular history read failed for %s; scoring the cycle without it",
+            origin_tx[:16],
+            exc_info=True,
+        )
+        return representatives, [], True
+    # An empty path means transaction_inputs lacks a spend the hop query saw;
+    # the representatives are the closest measure left.
+    return path or representatives, prior_cycles, False
+
+
+def _ring_path(
+    client: Any,
+    network: str,
+    origin_tx: str,
+    closing_tx: str,
+    queried: list[list[str]],
+    creator: dict[str, str],
+) -> list[str]:
+    """Every address the ring's value passed through between the origin and the close.
+
+    The search expands whole frontiers and learns only which transaction
+    closes the cycle, so the path is recovered backwards: the addresses of each
+    frontier that spent into the transactions found one level up, then the
+    transactions that first paid those addresses, down to the origin
+    transaction. Recipients that never carried value back are left out, and the
+    address that pays the origin back is included. One small primary-key read
+    per level, and only for a closure the gate can score.
+    """
+    on_path: set[str] = set()
+    txs = {closing_tx}
+    for frontier in reversed(queried):
+        if not txs:
+            break
+        spenders = _spenders(client, network, txs) & set(frontier)
+        on_path |= spenders
+        txs = {creator[a] for a in spenders} - {origin_tx}
+    return sorted(on_path)
+
+
+def _spenders(client: Any, network: str, txs: set[str]) -> set[str]:
+    """Addresses the given transactions spent from, as the hop query counts a spend.
+
+    FINAL so an outdated version of an input row cannot add an address, with
+    skip indexes off: under FINAL they re-select every granule sharing a key
+    range with the selection (see _prior_origin_cycles).
+    """
+    rows = client.execute(
+        """
+        SELECT DISTINCT address
+        FROM transaction_inputs FINAL
+        WHERE network = %(network)s
+          AND tx_hash IN %(txs)s
+          AND is_collateral = 0
+          AND is_reference = 0
+          AND is_unspent_attempt = 0
+        SETTINGS use_skip_indexes_if_final = 0
+        """,
+        {"network": network, "txs": sorted(txs)},
+    )
+    return {r[0] for r in rows}
+
+
+def _prior_origin_cycles(
+    client: Any,
+    network: str,
+    origin_addresses: set[str],
+    origin_slot: int,
+    exclude_tx: str,
+) -> list[tuple[float, list[str]]]:
+    """Earlier cycles from the same origin in the recurrence window.
+
+    Returns ``(circular score, intermediaries)`` per earlier cycle, read from
+    what scoring persisted, so no cycle is re-walked. A cycle is from the same
+    origin when one of its origin addresses matches one of this cycle's,
+    compared by _address_key; rows stored before the origin set was recorded
+    carry only their representative address, so raw addresses match too.
+    Scored cycles are read and so are the ones the scorer suppressed as
+    structural-only, which store their path as well; a -1 row without
+    intermediaries has nothing to compare (the scorer never engaged it, or
+    suppressed it before paths were stored). The window is
+    chain time, circular.recurrence_window_days up to this cycle's first slot,
+    so a re-score reads what the live score read and never a later cycle.
+
+    The columns are materialized from the stored evidence
+    (clickhouse_schema._CIRCULAR_HISTORY_COLUMNS) and read for the whole
+    network under FINAL. That cost follows the table, not the origin: on a
+    mainnet-shaped synthetic table (1.53M scores in 7 parts, 6.3M inputs) every
+    origin took 0.26-0.30 CPU-s and 150-180 MiB per call, where the recurrence
+    query this replaced took 0.25 s for a new origin and 1.3-1.6 s for one that
+    spent thousands of times, the kind that makes most production calls. Skip
+    indexes are off because under FINAL they re-select every granule sharing
+    a key range with the selection, which one small fresh part makes the whole
+    table; none serves these predicates anyway, so the setting only keeps a
+    future index from changing that.
+    """
+    keys = {_address_key(a) for a in origin_addresses} | set(origin_addresses)
+    rows = client.execute(
+        """
+        SELECT circular, circular_intermediaries
+        FROM tx_class_scores FINAL
+        WHERE network = %(network)s
+          AND hasAny(circular_origins, %(origins)s)
+          AND (circular >= 0 OR notEmpty(circular_intermediaries))
+          AND circular_first_slot >= %(min_slot)s
+          AND circular_first_slot <= %(max_slot)s
+          AND tx_hash != %(exclude)s
+        SETTINGS use_skip_indexes_if_final = 0
+        """,
+        {
+            "network": network,
+            "origins": sorted(keys),
+            "min_slot": max(0, origin_slot - _RECURRENCE_WINDOW_SLOTS),
+            "max_slot": origin_slot,
+            "exclude": exclude_tx,
+        },
+    )
+    # circular >= 0 is the schema convention for "scored"; -1 is no finding.
+    return [(float(score), list(intermediaries)) for score, intermediaries in rows]
+
+
+def _representatives(hops: list[dict[str, Any]]) -> list[str]:
+    """Each step's representative address, without the origin and the close.
+
+    What a cycle's intermediaries fall back to when its path is not read, and
+    what rows stored before the path was recorded hold.
+    """
+    return [h["address"] for h in hops[1:-1]]
+
+
+def _shannon_bits(observations: list[str]) -> float:
+    """Shannon entropy, in bits, of how often each distinct value occurs."""
+    counts = Counter(observations)
+    n = len(observations)
+    # p * log2(1/p) rather than -(p * log2(p)): the same sum, but a single
+    # repeated value then comes out 0.0 instead of -0.0 in the stored evidence.
+    return sum((c / n) * math.log2(n / c) for c in counts.values())
+
+
+def _amount_similarity(hop_amounts: list[int]) -> float:
+    """1 - CV(hop_amounts), clipped to [0, 1]: how evenly value passed through."""
+    if len(hop_amounts) >= 2:
+        mean_amt = statistics.mean(hop_amounts)
+        if mean_amt > 0:
+            cv = statistics.stdev(hop_amounts) / mean_amt
+            return max(0.0, min(1.0, 1.0 - cv))
+        return 0.0
+    if hop_amounts and hop_amounts[0] > 0:
+        return 1.0
+    return 0.0
 
 
 def _build_cycle_result(
@@ -394,8 +682,10 @@ def _build_cycle_result(
     final_amount: int,
     hops: list[dict[str, Any]],
     origin_addresses: set[str],
-    tx_hash: str = "",
-    network: str = "",
+    intermediaries: list[str],
+    prior_cycles: list[tuple[float, list[str]]],
+    history_unavailable: bool = False,
+    closing_leg_unavailable: bool = False,
 ) -> dict:
     """Build the cycle dict expected by the CircularScorer.
 
@@ -405,22 +695,15 @@ def _build_cycle_result(
     entropy calculation needs the full per-step address list (which may
     include duplicates and is longer than ``hops`` when a step had
     multiple recipients), not just the per-hop representative.
+    ``intermediaries`` and ``prior_cycles`` come from _cycle_history: this
+    cycle's path and its origin's earlier cycles as (circular score,
+    intermediaries) pairs, which the recurrence and recycling axes are
+    measured over.
     """
     hop_amounts = [int(h.get("amount_lovelace", 0)) for h in hops]
     hop_slots = [int(h.get("slot", 0)) for h in hops]
 
-    # Amount similarity: 1 - CV(hop_amounts) (coefficient of variation)
-    if len(hop_amounts) >= 2:
-        mean_amt = statistics.mean(hop_amounts)
-        if mean_amt > 0:
-            cv = statistics.stdev(hop_amounts) / mean_amt
-            amount_similarity = max(0.0, min(1.0, 1.0 - cv))
-        else:
-            amount_similarity = 0.0
-    elif hop_amounts and hop_amounts[0] > 0:
-        amount_similarity = 1.0
-    else:
-        amount_similarity = 0.0
+    amount_similarity = _amount_similarity(hop_amounts)
 
     # Net loss ratio: how much value was lost (fees)
     if origin_amount > 0:
@@ -429,15 +712,42 @@ def _build_cycle_result(
         net_loss_ratio = 1.0
 
     # Recipient entropy: Shannon entropy of address frequency distribution
-    addr_counts = Counter(addresses)
-    n_total = len(addresses)
-    n_unique = len(addr_counts)
-    if n_unique > 1 and n_total > 0:
-        entropy = -sum((c / n_total) * math.log2(c / n_total) for c in addr_counts.values())
-        max_entropy = math.log2(n_unique)
-        entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+    n_unique = len(set(addresses))
+    if n_unique > 1:
+        cycle_entropy = _shannon_bits(addresses) / math.log2(n_unique)
     else:
-        entropy = 0.0
+        cycle_entropy = 0.0
+
+    # Recycling across the origin's window. A cycle is credited only for its
+    # own reuse: the share of its intermediaries that the origin's earlier
+    # cycles already passed through. Earlier cycles through other addresses
+    # can then neither dilute a ring that reuses its intermediaries nor lend
+    # their concentration to one that reuses none.
+    current_keys = {_address_key(a) for a in intermediaries}
+    prior = [(score, {_address_key(a) for a in path}) for score, path in prior_cycles]
+    seen: set[str] = set().union(*(keys for _, keys in prior))
+    recycled_share = len(current_keys & seen) / len(current_keys) if current_keys else 0.0
+    # On the entropy axis's scale, reusing every intermediary is fully
+    # concentrated and reusing none fully diverse. The lower of this and the
+    # cycle's own reading is kept, so the window can only raise the sub-score.
+    # Credited only to a cycle that passes its value along (the similarity the
+    # scorer sees, above circular.recycling_min_amount_similarity): bots that
+    # route unrelated amounts through the same hubs otherwise read as recycled
+    # rings. Replaying every stored mainnet cycle, 732 of 4,584 would have
+    # moved into Moderate with no bar; the config says why the bar is not
+    # higher.
+    if round(amount_similarity, 4) > _VALUE_PRESERVING_SIMILARITY:
+        entropy = min(cycle_entropy, 1.0 - recycled_share)
+    else:
+        entropy = cycle_entropy
+
+    # Earlier cycles that reached High and went through at least one of the
+    # same intermediaries: "the same cycle or a near-identical one" (Polimi
+    # Section 4.7.2). High only, so a low score cannot boost every later cycle
+    # from the origin, which would then count in turn (Section 4.7.3).
+    recurrence_count = sum(
+        1 for score, keys in prior if score >= BAND_HIGH_THRESHOLD and keys & current_keys
+    )
 
     # Round amount flag: origin amount is a round number (divisible by 1 ADA)
     round_amount_flag = origin_amount > 0 and origin_amount % LOVELACE_PER_ADA == 0
@@ -452,12 +762,15 @@ def _build_cycle_result(
     else:
         temporal_concentration = 0.0
 
-    # Mean inter-hop delta in slots
+    # Mean inter-hop delta in slots. Hops in one block share a slot and count
+    # as _SAME_SLOT_DELTA_SLOTS apart; dropping them fell back to the default
+    # and scored a ring chained within one block, the fastest there is, as
+    # slow. Only a later hop at an earlier slot is left out.
     if len(hop_slots) >= 2:
         deltas = [
-            hop_slots[i + 1] - hop_slots[i]
+            max(hop_slots[i + 1] - hop_slots[i], _SAME_SLOT_DELTA_SLOTS)
             for i in range(len(hop_slots) - 1)
-            if hop_slots[i + 1] > hop_slots[i]
+            if hop_slots[i + 1] >= hop_slots[i]
         ]
         mean_delta = sum(deltas) / len(deltas) if deltas else float(_DEFAULT_INTER_HOP_DELTA_SLOTS)
     else:
@@ -469,19 +782,22 @@ def _build_cycle_result(
         "hops": hops,
         "amount_similarity": round(amount_similarity, 4),
         "net_loss_ratio": round(net_loss_ratio, 4),
-        # Deterministic origin representative: set iteration order is unstable
-        # across processes (string hash randomization), so list(set)[0] made
-        # the recurrence query target and the origin_cluster key vary run-to-run
-        # (a cycle could score differently on re-score after a rollback). Use
-        # the same _first_sorted representative the hop machinery already uses.
-        "recurrence_count": _count_origin_recurrence(
-            _first_sorted(origin_addresses),
-            network,
-            tx_hash,
-        ),
+        "recurrence_count": recurrence_count,
+        "prior_cycles_in_window": len(prior_cycles),
+        "recycled_share": round(recycled_share, 4),
         "recipient_entropy": round(entropy, 4),
         "round_amount_flag": round_amount_flag,
         "temporal_concentration": round(min(temporal_concentration, 1.0), 4),
         "mean_inter_hop_delta_slots": round(mean_delta, 2),
         "origin_cluster": _first_sorted(origin_addresses) or "__unknown__",
+        # Stored with the score, so the origin's later cycles can read them back
+        # (clickhouse_schema._CIRCULAR_HISTORY_COLUMNS).
+        "intermediaries": list(intermediaries),
+        "origin_keys": sorted({_address_key(a) for a in origin_addresses}),
+        "history_unavailable": history_unavailable,
+        # What the closing leg paid the origin set in total, which the loss is
+        # measured on. The closing hop's amount above is the part of it that
+        # fits the ring (see _closing_reading), so the two differ by any change.
+        "returned_lovelace": int(final_amount),
+        "closing_leg_unavailable": closing_leg_unavailable,
     }

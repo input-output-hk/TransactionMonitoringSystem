@@ -80,10 +80,13 @@ def _table_info(client, table: str):
 
 
 def _columns(client, table: str):
+    # Only columns an INSERT may name: ClickHouse rejects a MATERIALIZED or
+    # ALIAS column in the column list, and computes them itself on the copy.
     rows = client.execute(
         """
         SELECT name FROM system.columns
         WHERE database = currentDatabase() AND table = %(t)s
+          AND default_kind NOT IN ('MATERIALIZED', 'ALIAS')
         ORDER BY position
         """,
         {"t": table},

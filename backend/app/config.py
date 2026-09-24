@@ -439,6 +439,11 @@ class Settings(BaseSettings):
     CYCLE_DETECTION_ENABLED: bool = True
     CYCLE_MAX_HOPS: int = 6
     CYCLE_MAX_FANOUT: int = 50
+    # Whether startup rewrites tx_class_scores parts that predate the circular
+    # history columns (clickhouse_schema._materialize_circular_history). Off
+    # only to get out of a MATERIALIZE that keeps failing: the values stay right
+    # (computed on read until parts merge), the history read just costs more.
+    CIRCULAR_HISTORY_MATERIALIZE: bool = True
     SANDWICH_SIMPLIFIED_ENABLED: bool = True
 
     # ClickHouse write resilience.

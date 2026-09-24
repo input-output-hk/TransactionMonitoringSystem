@@ -368,3 +368,50 @@ class TestContractAddressOnScoreRow:
         result = _score_transaction(_make_row(), _build_scorers())
         assert result["max_class"] == ""
         assert result["contract_address"] == ""
+
+
+class TestCycleEnrichment:
+    """How a cycle read's outcome reaches the engine's defer-and-retry path."""
+
+    def _enrich(self, detect):
+        from app.analysis import enrichment
+
+        row = _make_row()
+        with (
+            patch.object(enrichment.settings, "SCORER_CIRCULAR_ENABLED", True),
+            patch.object(enrichment.settings, "CYCLE_DETECTION_ENABLED", True),
+            patch("app.analysis.graph.detect_cycle", side_effect=detect),
+        ):
+            enrichment.enrich_cycle_features([row], "preprod")
+        return row
+
+    def test_a_failed_search_asks_for_a_retry_without_a_cycle(self):
+        def detect(tx_hash, network):
+            raise ConnectionError("ClickHouse went away")
+
+        row = self._enrich(detect)
+        assert "cycle" not in row
+        assert row["_enrichment_failed"] == ["cycle"]
+
+    def test_a_cycle_scored_without_its_history_is_kept_and_retried(self):
+        """Kept, so a read that keeps failing still writes the cycle's score
+        once the retries run out, instead of no circular finding at all."""
+        cycle = {"cycle_length": 3, "history_unavailable": True}
+        row = self._enrich(lambda tx_hash, network: cycle)
+        assert row["cycle"] is cycle
+        assert row["_enrichment_failed"] == ["cycle_history"]
+
+    def test_a_cycle_measured_without_its_closing_leg_is_kept_and_retried(self):
+        """Kept with the matched output's reading, exact for a single-output
+        close, so a read that keeps failing still writes the cycle's score once
+        the retries run out."""
+        cycle = {"cycle_length": 3, "history_unavailable": False, "closing_leg_unavailable": True}
+        row = self._enrich(lambda tx_hash, network: cycle)
+        assert row["cycle"] is cycle
+        assert row["_enrichment_failed"] == ["cycle_closing_leg"]
+
+    def test_a_complete_cycle_asks_for_nothing(self):
+        cycle = {"cycle_length": 3, "history_unavailable": False}
+        row = self._enrich(lambda tx_hash, network: cycle)
+        assert row["cycle"] is cycle
+        assert "_enrichment_failed" not in row

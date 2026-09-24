@@ -177,6 +177,14 @@ def enrich_cycle_features(rows: list[dict[str, Any]], network: str):
             cycle = graph_mod.detect_cycle(row["tx_hash"], network)
             if cycle:
                 row["cycle"] = cycle
+                # Found, but measured without its origin's history or without
+                # its closing leg's outputs: retry for them, and if a read keeps
+                # failing the engine writes this score with a marker rather than
+                # dropping the cycle.
+                if cycle.get("history_unavailable"):
+                    _mark_enrichment_failed(row, "cycle_history")
+                if cycle.get("closing_leg_unavailable"):
+                    _mark_enrichment_failed(row, "cycle_closing_leg")
         except Exception as e:
             logger.debug(f"Cycle detection failed for {row['tx_hash'][:16]}: {e}")
             _mark_enrichment_failed(row, "cycle")

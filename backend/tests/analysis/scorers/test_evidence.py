@@ -225,9 +225,18 @@ def test_circular_evidence():
         result,
         "cycle_length",
         "net_loss_ratio",
+        # What the loss is measured on; the closing hop's amount is only the
+        # part of it that fits the ring.
+        "returned_lovelace",
         "hops",
         "first_slot",
         "origin_cluster",
+        # Read back by the origin's later cycles (the circular_* columns).
+        "intermediaries",
+        "origin_keys",
+        "recipient_entropy",
+        "recycled_share",
+        "prior_cycles_in_window",
     )
     # The per-hop entries the UI iterates must keep address/amount aligned.
     hops = result.evidence["hops"]
