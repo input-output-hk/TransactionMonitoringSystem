@@ -785,6 +785,15 @@ scorers:
     structural_corroboration_floor: 0.1
     recurrence_window_days: 30          # lookback for the origin's prior cycles:
                                         # recurrence count and recipient entropy
+    # Amount similarity a cycle must exceed for the recycling credit (its path
+    # reused by the origin's earlier cycles): the amount axis's p50 anchor, so
+    # a cycle that does not pass its value along at all never earns it.
+    # Exchange, DEX-batcher and dApp flows through the same hubs sit above it
+    # (0.72-0.92 on mainnet) and stay Moderate on repeats. Raising it to 0.95
+    # would drop them to Informational, but a ring chained in one block in
+    # whole ADA whose hops drift 6-9% would then stop paging on its second
+    # pass (66.76 -> 46.76 measured), so recall keeps it here.
+    recycling_min_amount_similarity: 0.70
 
   # ------------------------------------------------------------------
   fake_token:

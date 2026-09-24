@@ -8,6 +8,7 @@ from app.analysis import graph
 from app.analysis.features import LOVELACE_PER_ADA
 from app.analysis.normalise import (
     BAND_HIGH_THRESHOLD,
+    BAND_INFORMATIONAL_MAX,
     BAND_MODERATE_MAX,
     BAND_MODERATE_THRESHOLD,
 )
@@ -216,8 +217,9 @@ class TestRecurringLayeringEscape:
 
     def test_recurring_fresh_address_cycle_capped_not_suppressed(self, scorer):
         result = scorer.score(_features(cycle=self._fresh_address_cycle(recurrence_count=25)))
-        # A finding is surfaced (not the -1 no_finding sentinel)...
-        assert result.score >= 0
+        # A finding is surfaced at Moderate (not the -1 no_finding sentinel,
+        # and not the one-off cap: recurrence is behaviour)...
+        assert result.score > BAND_INFORMATIONAL_MAX
         # ...and it is capped at Moderate, never escalated to High/Critical.
         from app.analysis.scorers.circular import _MODERATE_CAP
 
@@ -255,6 +257,17 @@ _SLOW_LEG_GAP_SLOTS = 25
 _SENT = 10_000 * LOVELACE_PER_ADA
 _LEG_2 = 9_990 * LOVELACE_PER_ADA
 _REPAID = 9_979 * LOVELACE_PER_ADA
+# A ring losing ~3% a hop (amount_similarity ~0.97): still one sum passed along,
+# inside the recycling credit's margin.
+_VARIED_LEG_2 = 9_700 * LOVELACE_PER_ADA
+_VARIED_REPAID = 9_409 * LOVELACE_PER_ADA
+# A middle leg ~15% off the others (amount_similarity ~0.91): inside the range
+# where the exchange, DEX-batcher and dApp flows reusing the same hubs sat in
+# the mainnet history.
+_DRIFTING_LEG_2 = 8_500 * LOVELACE_PER_ADA
+# About an hour between hops: how long an exchange takes to credit a deposit and
+# pay a withdrawal back, far outside the speed axis's range.
+_EXCHANGE_DELTA_SLOTS = 3_600
 # Added to every leg to make the amounts non-round (not a whole ADA).
 _ODD_LOVELACE = 170_001
 # A min-UTxO-sized extra output back to the wallet: routine on Cardano as token
@@ -461,13 +474,15 @@ class TestRecyclingOverTheWindow:
     its own: the forward search never revisits an address.
     """
 
-    def _cycle(self, prior_cycles, gap=_LEG_GAP_SLOTS, odd=0, closing=None, **client_opts):
+    def _cycle(
+        self, prior_cycles, gap=_LEG_GAP_SLOTS, odd=0, closing=None, leg_2=None, **client_opts
+    ):
         return _detect(
             closing or [(_ORIGIN_A, _REPAID + odd)],
             prior_cycles=prior_cycles,
             gap=gap,
             sent=_SENT + odd,
-            leg_2=_LEG_2 + odd,
+            leg_2=(leg_2 if leg_2 is not None else _LEG_2 + odd),
             **client_opts,
         )
 
@@ -558,6 +573,31 @@ class TestRecyclingOverTheWindow:
         assert again["prior_cycles_in_window"] == 1
         assert result.score >= BAND_MODERATE_THRESHOLD
 
+    @pytest.mark.attack_must_fire
+    def test_a_repeated_ring_whose_hops_differ_by_a_few_percent_reaches_high(self, scorer):
+        """The recycling credit asks for the value to be passed along, not for
+        identical amounts: a ring losing ~3% a hop must still page on its
+        second pass. Measured 43.06 then 63.06, so the floor sits at High.
+        """
+        _, again, result = self._second_pass(
+            scorer, closing=[(_ORIGIN_A, _VARIED_REPAID)], leg_2=_VARIED_LEG_2
+        )
+        assert again["amount_similarity"] > graph._VALUE_PRESERVING_SIMILARITY
+        assert again["recycled_share"] == 1.0
+        assert result.score >= BAND_HIGH_THRESHOLD
+
+    @pytest.mark.attack_must_fire
+    def test_a_ring_chained_in_one_block_drifting_a_few_percent_reaches_high(self, scorer):
+        """A ring chained in one block in whole ADA whose middle leg is ~9% off
+        (similarity ~0.91) must still page on its second pass. It sits where
+        the mainnet hub flows do (0.72-0.92), which is why the recycling bar
+        stays at the amount axis's p50 anchor: at 0.95 this ring stopped at
+        43.27. Measured 43.27 then 63.27, so the floor sits at High.
+        """
+        _, again, result = self._second_pass(scorer, gap=0, leg_2=_DRIFTING_LEG_2)
+        assert again["recycled_share"] == 1.0
+        assert result.score >= BAND_HIGH_THRESHOLD
+
     def test_earlier_cycles_through_other_addresses_add_nothing(self, scorer):
         """The precision half: an origin that cycles often, through different
         addresses each time, must read exactly as a first-time ring."""
@@ -621,6 +661,38 @@ class TestRecyclingOverTheWindow:
         )
         assert cycle is not None and cycle["cycle_length"] == 2
         assert cycle["history_unavailable"] is False
+
+
+class TestOneOffSlowCycles:
+    """A cycle with no speed, no reused path and no earlier High of the ring
+    carries only its amount and the auxiliary axis: what a deposit to an
+    exchange and the withdrawal back look like."""
+
+    def _cycle(self, mean_delta):
+        return {
+            "cycle_length": 3,
+            "amount_similarity": 0.99,
+            "net_loss_ratio": 0.002,
+            "recurrence_count": 0,
+            "recipient_entropy": 1.0,
+            "round_amount_flag": True,
+            "temporal_concentration": 0.0,
+            "mean_inter_hop_delta_slots": mean_delta,
+            "origin_cluster": "o",
+        }
+
+    def test_an_exchange_round_trip_stays_visible_at_informational(self, scorer):
+        """Hours between hops, the amount back as sent, a whole number of ADA:
+        35 (Moderate) before, now the top of Informational, still a finding."""
+        result = scorer.score(_features(cycle=self._cycle(_EXCHANGE_DELTA_SLOTS)))
+        assert result.score == BAND_INFORMATIONAL_MAX
+
+    @pytest.mark.attack_must_fire
+    def test_a_fast_one_off_ring_is_not_capped(self, scorer):
+        """Speed is behaviour: the same ring with legs seconds apart stays a
+        Moderate finding. Measured 41.3."""
+        result = scorer.score(_features(cycle=self._cycle(_LEG_GAP_SLOTS)))
+        assert result.score >= BAND_MODERATE_THRESHOLD
 
 
 class TestRecycledAddressesWithoutValuePreservation:

@@ -15,9 +15,14 @@ Sub-scores (Polimi Section 4.7.3):
                                the same ring (a shared intermediary)
   recipient_entropy    (0.20): inverted, fixed anchors; share of this cycle's
                                intermediaries the origin's earlier cycles reused,
-                               for a cycle that passes value along
+                               for a cycle that passes its value along
+                               (circular.recycling_min_amount_similarity)
   auxiliary            (0.10): round amounts + temporal concentration
   speed                (0.10): inter-hop slot delta reciprocal, fixed anchors
+
+A cycle with no speed, no reused path and no recurrence is capped at the top of
+Informational: its preserved amount and round amounts alone are what a deposit
+to an exchange and the withdrawal back look like.
 
 Infrastructure dependency: transfer graph construction and cycle detection
 (bounded 6-hop BFS from tx sender) must be run by a background analysis
@@ -27,7 +32,7 @@ task.  Until that infrastructure is built, this scorer's gate will not pass.
 import logging
 from typing import Any
 
-from app.analysis.normalise import EPSILON, normalise
+from app.analysis.normalise import BAND_INFORMATIONAL_MAX, EPSILON, normalise
 from app.analysis.scorer_config import (
     anchor as _anchor,
 )
@@ -257,6 +262,16 @@ class CircularScorer(BaseScorer):
         # tight wash, so cap it at Moderate instead of letting it reach High.
         if final > _MODERATE_CAP and net_loss > expected_fee * FEE_TOLERANCE_STRICT:
             final = _MODERATE_CAP
+
+        # One-off, slow and never recycled: with no speed, no reused path and no
+        # earlier High of the ring, a cycle carries only its preserved amount and
+        # the auxiliary axis (round amounts, timing), which is what a deposit to
+        # an exchange and the withdrawal back look like; every such Moderate in
+        # the stored mainnet history was one. It stays visible, at the top of
+        # Informational. Judged on the structural floor without the auxiliary
+        # axis, so any behavioural signal lifts the cap.
+        if (s_entropy + s_speed + s_recurrence) < _STRUCTURAL_CORROBORATION_FLOOR:
+            final = min(final, BAND_INFORMATIONAL_MAX)
 
         reasons = []
         if s_amount > _REASON_T:

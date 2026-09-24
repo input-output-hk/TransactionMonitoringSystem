@@ -246,6 +246,7 @@ _KNOWN_OPTIONAL_KEYS: dict[str, tuple[str, ...]] = {
     "circular": (
         "structural_corroboration_floor",
         "recurrence_window_days",
+        "recycling_min_amount_similarity",
         "cycle.min_length",
         "cycle.max_length",
         "cycle.fee_tolerance_multiplier",

@@ -381,6 +381,38 @@ class TestRecyclingNeedsValuePassedAlong:
         assert again["recycled_share"] == 1.0
         assert again["recipient_entropy"] == alone["recipient_entropy"]
 
+    # The similarity is stored at 4 dp, so a bar one step below it is the
+    # nearest one the cycle clears.
+    _BAR_STEP = 0.0001
+
+    def _ring(self, middle_leg, prior_cycles):
+        ada = 1_000_000
+        hops = [
+            {"address": "addr_a", "amount_lovelace": 10_000 * ada, "slot": 100},
+            {"address": "addr_b", "amount_lovelace": middle_leg * ada, "slot": 103},
+            {"address": "addr_a", "amount_lovelace": 9_979 * ada, "slot": 106},
+        ]
+        return _build_cycle_result(
+            cycle_length=3,
+            addresses=["addr_a", "addr_b", "addr_c", "addr_a"],
+            origin_amount=10_000 * ada,
+            final_amount=9_979 * ada,
+            hops=hops,
+            origin_addresses={"addr_a"},
+            intermediaries=["addr_b", "addr_c"],
+            prior_cycles=prior_cycles,
+        )
+
+    def test_the_credit_starts_above_the_configured_similarity(self):
+        """At the bar no credit, just above it the reused path counts."""
+        reused = [(40.0, ["addr_b", "addr_c"])]
+        own = self._ring(8_000, [])
+        with patch.object(graph, "_VALUE_PRESERVING_SIMILARITY", own["amount_similarity"]):
+            assert self._ring(8_000, reused)["recipient_entropy"] == own["recipient_entropy"]
+        just_below = own["amount_similarity"] - self._BAR_STEP
+        with patch.object(graph, "_VALUE_PRESERVING_SIMILARITY", just_below):
+            assert self._ring(8_000, reused)["recipient_entropy"] == 0.0
+
 
 class TestClosingReading:
     """The part of the closing leg's payment to the origin set that fits the

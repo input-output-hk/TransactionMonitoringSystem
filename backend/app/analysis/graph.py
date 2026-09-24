@@ -13,7 +13,6 @@ from typing import Any
 
 from app.analysis.features import LOVELACE_PER_ADA, is_script_address
 from app.analysis.normalise import BAND_HIGH_THRESHOLD
-from app.analysis.scorer_config import anchor as _anchor
 from app.analysis.scorer_config import get as _get_cfg
 from app.config import settings
 from app.db import clickhouse
@@ -51,9 +50,10 @@ _SLOTS_PER_DAY = 86_400
 # The history window in chain time, so a re-score reads the same earlier cycles
 # the live score did, and never a later one.
 _RECURRENCE_WINDOW_SLOTS = _RECURRENCE_WINDOW_DAYS * _SLOTS_PER_DAY
-# The amount similarity above which the circular scorer's amount axis starts to
-# score (its p50 anchor): a cycle below it does not pass value along.
-_VALUE_PRESERVING_SIMILARITY = float(_anchor(_CIRCULAR_CFG["fixed_anchors"], "amount_sim")[0])
+# The amount similarity a cycle must exceed for the recycling credit: its value
+# passed along hop to hop, not loosely related amounts routed through the same
+# hubs (see circular.recycling_min_amount_similarity).
+_VALUE_PRESERVING_SIMILARITY = float(_CIRCULAR_CFG["recycling_min_amount_similarity"])
 # Two hops in one block land in the same slot. A slot is the chain's time
 # resolution, so they are at most one slot apart: measured, and as fast as a
 # ring can move, not unmeasurable.
@@ -691,12 +691,12 @@ def _build_cycle_result(
     # On the entropy axis's scale, reusing every intermediary is fully
     # concentrated and reusing none fully diverse. The lower of this and the
     # cycle's own reading is kept, so the window can only raise the sub-score.
-    # Credited only to a cycle that passes value along (the similarity the
-    # scorer sees, above the amount axis's p50 anchor): bots that route
-    # unrelated amounts through the same hubs otherwise read as recycled rings:
-    # replaying every stored mainnet cycle, 732 of 4,584, none passing value
-    # along, would have moved into Moderate without this, and none could reach
-    # High either way.
+    # Credited only to a cycle that passes its value along (the similarity the
+    # scorer sees, above circular.recycling_min_amount_similarity): bots that
+    # route unrelated amounts through the same hubs otherwise read as recycled
+    # rings. Replaying every stored mainnet cycle, 732 of 4,584 would have
+    # moved into Moderate with no bar; the config says why the bar is not
+    # higher.
     if round(amount_similarity, 4) > _VALUE_PRESERVING_SIMILARITY:
         entropy = min(cycle_entropy, 1.0 - recycled_share)
     else:
