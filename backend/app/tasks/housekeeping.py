@@ -62,14 +62,17 @@ async def _check_address_index() -> None:
         # keeps it from taking every core from the scoring beside it.
         check = await clickhouse._in_executor(graph.address_index_gaps, network, window)
     except Exception as e:
-        logger.warning(f"Address index check [{network}] failed: {e}")
+        # No network name in these lines: a process serves one network, which
+        # its startup log names, and CodeQL's clear-text-logging heuristic
+        # takes CARDANO_NETWORK for private data.
+        logger.warning(f"Address index check failed: {e}")
         _address_index_status = {"state": "error", "checked_at": checked_at}
         return
     if check.missing:
         logger.warning(
-            f"Address index [{network}]: {check.missing} of {check.checked} spend(s) of "
-            f"the last {window}s are missing from address_transactions; the circular "
-            f"BFS cannot see them"
+            f"Address index: {check.missing} of {check.checked} spend(s) of the last "
+            f"{window}s are missing from address_transactions; the circular BFS "
+            f"cannot see them"
         )
         state = "gaps"
     elif check.checked:
