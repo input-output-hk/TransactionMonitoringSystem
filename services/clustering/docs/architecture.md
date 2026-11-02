@@ -139,6 +139,13 @@ makes this work (host_ch only, controlled by `FEED_ENABLED`):
 - Per-tick work is capped (`FEED_MAX_CONTRACTS_PER_TICK`) so a large watchlist
   cannot flood the worker. Re-fits are drift-driven only: a fitted model is
   refreshed when its online drift crosses the threshold, not on a timer.
+- A contract with a non-terminal job is skipped as busy, so a job whose end was
+  never recorded would keep it unscored for good. A failed job's status write
+  is therefore retried (`JOB_FAILED_WRITE_ATTEMPTS`, `JOB_FAILED_WRITE_RETRY_SECONDS`),
+  and each tick first re-enqueues any non-terminal job the worker neither holds
+  in its queue nor is running (`JobManager.reap_orphans`), as a restart would.
+  The process owns every job, so this needs no timeout: a long onboard is never
+  mistaken for a dead one.
 - On completion the pipeline publishes flagged verdicts to `tx_contract_anomaly`
   (see [service/publish.py](../backend/app/service/publish.py)) for the host to
   surface as `contract_anomaly`.

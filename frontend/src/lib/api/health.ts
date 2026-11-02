@@ -85,8 +85,35 @@ export function useHealth(options?: { pollMs?: number }) {
 	});
 }
 
+/**
+ * "warning" is a module that works but is not keeping up, kept apart from
+ * "offline" (not working) so a backlog being drained does not read the same
+ * as a scorer that has stopped.
+ */
+export type ModuleStatus = "online" | "warning" | "offline";
+
 /** Flatten the health payload to the module list shown in the TopNav dropdown. */
-export type SystemModule = { name: string; online: boolean };
+export type SystemModule = { name: string; status: ModuleStatus };
+
+const onOff = (online: boolean): ModuleStatus =>
+	online ? "online" : "offline";
+
+/**
+ * "behind" and "starting" still score every live transaction, and "unguarded"
+ * scores them too, only with nothing behind the live lane: all three are
+ * amber. "stalled" and "disabled" score nothing, and rows about to expire
+ * unscored are lost detections, so those are red, as is any state this build
+ * does not know (an unrecognised state must not pass for a working one).
+ */
+function scoringStatus(s: ScoringHealth): ModuleStatus {
+	if (s.state === "ok") return "online";
+	if (s.retention_at_risk) return "offline";
+	return s.state === "behind" ||
+		s.state === "starting" ||
+		s.state === "unguarded"
+		? "warning"
+		: "offline";
+}
 
 export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 	if (!h) return [];
@@ -95,14 +122,18 @@ export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 	// render offline rather than crashing the dropdown.
 	const o = h.ogmios;
 	const modules: SystemModule[] = [
-		{ name: "Pipeline", online: h.pipeline_state === "OK" },
-		{ name: "Chain Sync", online: o?.chain_sync === "connected" },
-		{ name: "Mempool Monitor", online: o?.mempool_monitor === "connected" },
+		{ name: "Pipeline", status: onOff(h.pipeline_state === "OK") },
+		{ name: "Chain Sync", status: onOff(o?.chain_sync === "connected") },
+		{
+			name: "Mempool Monitor",
+			status: onOff(o?.mempool_monitor === "connected"),
+		},
 		{
 			name: "Breakers",
-			online:
+			status: onOff(
 				o?.circuit_breaker_chain === "CLOSED" &&
-				o?.circuit_breaker_mempool === "CLOSED",
+					o?.circuit_breaker_mempool === "CLOSED",
+			),
 		},
 	];
 	// The row appears only when the sidecar module is enabled, so a plain
@@ -110,12 +141,15 @@ export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 	// "absent" and "error" all render as offline: a sidecar that stopped
 	// scoring is exactly what this row exists to make visible.
 	if (h.clustering_enabled) {
-		modules.push({ name: "Clustering", online: h.clustering?.state === "ok" });
+		modules.push({
+			name: "Clustering",
+			status: onOff(h.clustering?.state === "ok"),
+		});
 	}
 	// Ingestion can be at the tip while nothing is scored, and every row above
 	// stays green then: this is the row that shows it.
 	if (h.scoring) {
-		modules.push({ name: "Scoring", online: h.scoring.state === "ok" });
+		modules.push({ name: "Scoring", status: scoringStatus(h.scoring) });
 	}
 	return modules;
 }

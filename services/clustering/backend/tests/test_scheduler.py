@@ -10,10 +10,11 @@ every tick) still runs; only the futile ``onboard`` re-fit is skipped.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.config import Settings, get_settings
-from app.service.scheduler import _decide
+from app.service.scheduler import _decide, feed_tick
 
 # Real mainnet fit coverages observed 2026-07-23 (see config.min_cluster_coverage):
 # the two degenerate stablecoin-validator fits vs a genuinely healthy one.
@@ -126,3 +127,53 @@ def test_default_floor_stops_strike_style_tight_loop() -> None:
     test_unclusterable_rebaselines_on_slow_cadence.)"""
     c = _contract(drift_score=1.0, fit_coverage=_COV_STRIKE_DEGENERATE, last_fit_at=_recent())
     assert _decide(c, Settings(), now=_NOW) == ("classify", 0)
+
+
+class _OrphanRepo:
+    """A watched, fitted contract whose only job was left non-terminal by a
+    run that could not record its failure."""
+
+    def __init__(self) -> None:
+        self.jobs = [{"job_id": "job-orphan", "target": "addr1a", "status": "scoring"}]
+        self.created: list[str] = []
+
+    def nonterminal_jobs(self) -> list[dict[str, Any]]:
+        return list(self.jobs)
+
+    def list_contracts(self, *, limit: int, offset: int) -> list[dict[str, Any]]:
+        return [_contract()] if offset == 0 else []
+
+    def create_job(self, job_id: str, *args: Any, **kwargs: Any) -> None:
+        self.created.append(job_id)
+
+    def close(self) -> None:
+        pass
+
+
+class _Manager:
+    def __init__(self) -> None:
+        self.enqueue_lock = threading.Lock()
+        self.reaped_under_lock: list[bool] = []
+        self.enqueued: list[str] = []
+
+    def reap_orphans(self, repo: Any) -> list[str]:
+        self.reaped_under_lock.append(self.enqueue_lock.locked())
+        self.enqueued.extend(j["job_id"] for j in repo.nonterminal_jobs())
+        return list(self.enqueued)
+
+    def enqueue(self, job_id: str) -> None:
+        self.enqueued.append(job_id)
+
+
+def test_feed_tick_puts_an_orphaned_job_back_instead_of_skipping_its_contract() -> None:
+    repo = _OrphanRepo()
+    manager = _Manager()
+
+    enqueued = feed_tick(manager=manager, repo_factory=lambda: repo, settings=get_settings())  # type: ignore[arg-type]
+
+    assert manager.reaped_under_lock == [True]
+    assert manager.enqueued == ["job-orphan"]
+    # The orphan is running again, so the contract is busy for this tick: no
+    # second job is created beside it.
+    assert enqueued == 0
+    assert repo.created == []

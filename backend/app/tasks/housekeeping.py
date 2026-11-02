@@ -16,6 +16,7 @@ from typing import Any
 
 from app.config import settings
 from app.db import clickhouse, postgres, raw_store
+from app.tasks import analysis
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,8 @@ def address_index_status() -> dict[str, Any]:
     """The last address-index check, for /health/detail.
 
     "unchecked" until this process runs one: housekeeping is a leader duty, so
-    a standby never does.
+    a standby never does. "filling" while the spend_edges history fill runs,
+    which holds the check back.
     """
     if settings.ADDRESS_INDEX_CHECK_INTERVAL_SECONDS == 0:
         return {"state": "disabled"}
@@ -93,7 +95,7 @@ async def _tick() -> None:
     """One pass: the stale-PENDING sweep every tick, plus the throttled
     retention + auth-purge sweep. Split out from _loop() so a test can drive
     a single pass without the sleep/while wrapper."""
-    global _last_retention_sweep, _last_address_index_check
+    global _last_retention_sweep, _last_address_index_check, _address_index_status
 
     # Lifecycle cleanup: mark stale PENDING transactions as DROPPED.
     # Runs on every interval tick; the partial index ensures it is a fast
@@ -208,11 +210,16 @@ async def _tick() -> None:
     # Address-index check, throttled to ADDRESS_INDEX_CHECK_INTERVAL_SECONDS
     # (0 = off), and only while the BFS that depends on the index runs.
     check_interval = settings.ADDRESS_INDEX_CHECK_INTERVAL_SECONDS
-    if (
-        settings.CYCLE_DETECTION_ENABLED
-        and check_interval > 0
-        and time.time() - _last_address_index_check > check_interval
-    ):
+    if not (settings.CYCLE_DETECTION_ENABLED and check_interval > 0):
+        return
+    if analysis.spend_edges_filling():
+        # The spends of the window stored before this process have no edges
+        # until the fill reaches them: counting now reports gaps the fill is
+        # about to close. The throttle clock is left alone, so the first tick
+        # after the fill checks.
+        _address_index_status = {"state": "filling"}
+        return
+    if time.time() - _last_address_index_check > check_interval:
         _last_address_index_check = time.time()
         await _check_address_index()
 

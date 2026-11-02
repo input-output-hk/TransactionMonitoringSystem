@@ -253,6 +253,15 @@ async def _run_baseline_recompute(stop_event: threading.Event) -> None:
         logger.info("Baseline recomputation: %s rows updated", total)
 
 
+def spend_edges_filling() -> bool:
+    """Whether the spend_edges history fill this process started is still running.
+
+    Until it ends, spends stored before the upgrade have no edges yet, so a
+    gap count reads them as missing (housekeeping waits for it).
+    """
+    return _scoring.edges_filling
+
+
 def _edges_progressed(filled_chunks: int) -> None:
     _scoring.edges_filled_chunks = filled_chunks
     _scoring.edges_progress_at = datetime.now(UTC)

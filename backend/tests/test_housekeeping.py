@@ -160,6 +160,8 @@ class TestAddressIndexCheck:
             "ADDRESS_INDEX_CHECK_INTERVAL_SECONDS",
             _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS,
         )
+        # Whatever fill state an earlier test's analysis start left behind.
+        monkeypatch.setattr(housekeeping.analysis, "spend_edges_filling", lambda: False)
 
         async def inline(fn, *args):
             return fn(*args)
@@ -242,3 +244,22 @@ class TestAddressIndexCheck:
         await housekeeping._tick()
 
         assert calls == []
+
+    async def test_the_check_waits_for_the_spend_edges_fill(self, monkeypatch):
+        """Spends stored before the upgrade have no edges until the fill
+        reaches them: a count taken meanwhile reports gaps that are not
+        there (mainnet, first start: 233 of 2085 at 20:03, 0 after the fill)."""
+        calls = self._gaps(monkeypatch, AddressIndexCheck(missing=3, checked=40, unresolved=0))
+        filling = True
+        monkeypatch.setattr(housekeeping.analysis, "spend_edges_filling", lambda: filling)
+
+        await housekeeping._tick()
+
+        assert calls == []
+        assert housekeeping.address_index_status()["state"] == "filling"
+
+        filling = False
+        await housekeeping._tick()
+
+        assert len(calls) == 1, "the first tick after the fill checks, throttle or not"
+        assert housekeeping.address_index_status()["state"] == "gaps"

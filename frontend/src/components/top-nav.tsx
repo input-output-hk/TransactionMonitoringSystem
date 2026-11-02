@@ -228,7 +228,7 @@ export function TopNav() {
 		? "down"
 		: !health
 			? "loading"
-			: modules.every((m) => m.online)
+			: modules.every((m) => m.status === "online")
 				? "online"
 				: "warning";
 
@@ -284,7 +284,9 @@ export function TopNav() {
 									<span
 										className={cn(
 											"h-2.5 w-2.5 rounded-full",
-											m.online ? "bg-status-online" : "bg-status-offline",
+											m.status === "online" && "bg-status-online",
+											m.status === "warning" && "bg-status-warning",
+											m.status === "offline" && "bg-status-offline",
 										)}
 									/>
 									{m.name}

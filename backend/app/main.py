@@ -583,6 +583,35 @@ async def _clustering_health() -> dict:
     return {"state": state, "last_activity_at": str(latest), "age_seconds": round(age)}
 
 
+# index.html names the hashed bundle of its build, so a cached copy outlives a
+# deploy and points at a bundle that is gone (404, blank page until a forced
+# reload). "no-cache" still lets the browser keep it, but makes it revalidate
+# on every load (a 304 while the build is unchanged); the hashed assets need no
+# such header, since a new build gives them new names.
+_INDEX_HTML_HEADERS = {"Cache-Control": "no-cache"}
+
+
+def _spa_response(dist_root: Path, full_path: str) -> FileResponse:
+    """The dist file at ``full_path``, or index.html for any other path.
+
+    Starlette's :path convertor matches ".." segments verbatim and does NOT
+    normalise them, so a request like /../../etc/passwd arrives here intact.
+    Resolve the candidate and require it to stay inside the dist root before
+    serving; anything else falls through to index.html so client-side routing
+    still works (no information leak on traversal).
+    """
+    index = dist_root / "index.html"
+    candidate = (dist_root / full_path).resolve()
+    if (
+        full_path
+        and candidate != index
+        and candidate.is_file()
+        and candidate.is_relative_to(dist_root)
+    ):
+        return FileResponse(candidate)
+    return FileResponse(index, headers=_INDEX_HTML_HEADERS)
+
+
 # SPA mount goes LAST so /api/*, /health, /ws, etc. still match their routes
 # first. Hashed asset filenames are served directly by StaticFiles; any other
 # path (client-side router URL like /attacks/123) falls through to index.html.
@@ -598,12 +627,4 @@ if _spa_present:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
-        # Starlette's :path convertor matches ".." segments verbatim and does
-        # NOT normalise them, so a request like /../../etc/passwd arrives here
-        # intact. Resolve the candidate and require it to stay inside the dist
-        # root before serving; anything else falls through to index.html so
-        # client-side routing still works (no information leak on traversal).
-        candidate = (_DIST_ROOT / full_path).resolve()
-        if full_path and candidate.is_file() and candidate.is_relative_to(_DIST_ROOT):
-            return FileResponse(candidate)
-        return FileResponse(_DIST_ROOT / "index.html")
+        return _spa_response(_DIST_ROOT, full_path)

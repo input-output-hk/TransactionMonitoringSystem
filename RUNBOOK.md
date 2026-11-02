@@ -943,6 +943,7 @@ The check counts, over the spends of the last `window_seconds` of block time, ho
 | `idle` | The window held nothing to check: ingestion has stalled, or is catching up on blocks older than the window, which the check never covers. Look at chain sync, not the index. |
 | `error` | The check itself failed, usually ClickHouse being unreachable. |
 | `disabled` | `ADDRESS_INDEX_CHECK_INTERVAL_SECONDS` is `0`. |
+| `filling` | The `spend_edges` history fill of this start is still running, so spends stored before the upgrade have no edges yet and a count would report them as gaps. The first housekeeping tick after the fill runs the check. If it stays here, see `scoring.spend_edges_filling` ("Post-upgrade backfills"). |
 | `unchecked` | This process has not run a check yet. Housekeeping is a leader duty, so a standby always reads this. |
 
 `unresolved_inputs` counts inputs whose spent output was never found, so they carry no address. The detector cannot follow those either, but that is a failure of input enrichment, which no refill of the edges fixes; the check does not count them as missing.
