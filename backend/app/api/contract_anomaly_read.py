@@ -246,18 +246,13 @@ async def _flagged_effective(
     tx's contract_anomaly score/band (via the same projection the merge uses)
     alongside its stored score/band so the read endpoints can reconcile to the
     effective values. Archived / unscored txs are absent
-    (``get_class_scores_by_hashes`` applies the same archive anti-join the
+    (``get_score_bands_by_hashes`` applies the same archive anti-join the
     stats/timeseries do, so they stay excluded)."""
     flagged = await clustering_queries.flagged_for_network_async(network)
     if not flagged:
         return {}
-    stored_rows = await clickhouse.get_class_scores_by_hashes_async(
-        network,
-        list(flagged),
-    )
-    stored = {
-        r["tx_hash"]: (str(r["risk_band"]).lower(), float(r["max_score"])) for r in stored_rows
-    }
+    bands = await clickhouse.get_score_bands_by_hashes_async(network, list(flagged))
+    stored = {tx: (band.lower(), score) for tx, (band, score) in bands.items()}
     out: dict[str, tuple[str, float, str, float]] = {}
     for tx, rows in flagged.items():
         s = stored.get(tx)

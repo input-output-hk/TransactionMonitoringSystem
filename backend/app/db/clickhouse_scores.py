@@ -191,6 +191,13 @@ def get_class_scores_by_hashes(
     score/band filter would otherwise have excluded. Applies the same archive
     anti-join as the list query by default so an admin-archived false positive
     is not re-surfaced through the rescue path. Returns ``[]`` for empty input.
+
+    The latest version is taken with LIMIT 1 BY rather than FINAL. A flagged
+    set's hashes are spread over the whole table, so either way the read
+    touches nearly every granule; FINAL also merges every column of all of
+    them. On mainnet (500 hashes, 3.2M score rows) that was 6.1 CPU-s and
+    1.1 GiB per call, 1.9 CPU-s and 0.7 GiB this way, and the dashboard
+    issues it on every poll of several endpoints.
     """
     if not tx_hashes:
         return []
@@ -198,12 +205,44 @@ def get_class_scores_by_hashes(
     rows = _client().execute(
         f"""
         SELECT {_SCORE_SELECT}
-        FROM tx_class_scores FINAL
+        FROM tx_class_scores
         WHERE network = %(network)s AND tx_hash IN %(hashes)s{archive_clause}
+        ORDER BY analyzed_at DESC
+        LIMIT 1 BY tx_hash
         """,
         {"network": network, "hashes": tx_hashes},
     )
     return [_decode_score_json(dict(zip(_SCORE_COLS, row))) for row in rows]
+
+
+def get_score_bands_by_hashes(network: str, tx_hashes: list[str]) -> dict[str, tuple[str, float]]:
+    """``{tx_hash: (risk_band, max_score)}`` of the latest score of each of tx_hashes.
+
+    The two columns the contract_anomaly stats and timeseries overlays compare,
+    without the evidence get_class_scores_by_hashes carries: on mainnet 0.5
+    CPU-s and 0.2 GiB per 500 hashes against its 1.9 CPU-s and 0.7 GiB. Same
+    archive anti-join, so an archived false positive stays out of the counts.
+    Unaliased argMax: an alias named after a source column would shadow it in
+    the sibling aggregate (Code 184 on 26.x).
+    """
+    if not tx_hashes:
+        return {}
+    rows = _client().execute(
+        f"""
+        SELECT tx_hash, argMax(risk_band, analyzed_at), argMax(max_score, analyzed_at)
+        FROM tx_class_scores
+        WHERE network = %(network)s AND tx_hash IN %(hashes)s AND {_ARCHIVE_ANTI_JOIN}
+        GROUP BY tx_hash
+        """,
+        {"network": network, "hashes": tx_hashes},
+    )
+    return {tx_hash: (str(band), float(score)) for tx_hash, band, score in rows}
+
+
+async def get_score_bands_by_hashes_async(
+    network: str, tx_hashes: list[str]
+) -> dict[str, tuple[str, float]]:
+    return await _run(partial(get_score_bands_by_hashes, network, tx_hashes))
 
 
 async def get_class_scores_by_hashes_async(

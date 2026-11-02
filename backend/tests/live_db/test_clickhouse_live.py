@@ -337,6 +337,35 @@ class TestScoreReadPath:
         stats = scores.get_class_scores_stats(LIVE_NETWORK)
         assert isinstance(stats, dict) and stats
 
+    def test_lookups_by_hash_read_the_latest_score_and_skip_archived(self, ch):
+        """The contract_anomaly rescue reads without FINAL: unmerged versions of
+        a score must still come back as their latest one, and an archived false
+        positive must stay out of both lookups."""
+        from datetime import timedelta
+
+        from app.db import archive_queries
+
+        rescored, archived = uuid.uuid4().hex * 2, uuid.uuid4().hex * 2
+        older = _score_row(rescored)
+        older["analyzed_at"] = _naive_utc_now() - timedelta(minutes=5)
+        newer = _score_row(rescored)
+        newer.update(max_score=40.0, risk_band="Moderate", max_class="token_dust", token_dust=40.0)
+        # Two inserts, two parts: nothing has merged them yet.
+        scores.insert_class_scores([older])
+        scores.insert_class_scores([newer])
+        scores.insert_class_scores([_score_row(archived)])
+        archive_queries._archive_insert(
+            LIVE_NETWORK, archived, "live-db test", "tests", _naive_utc_now(), "local"
+        )
+
+        rows = scores.get_class_scores_by_hashes(LIVE_NETWORK, [rescored, archived])
+        assert [(r["tx_hash"], r["risk_band"], r["max_score"]) for r in rows] == [
+            (rescored, "Moderate", 40.0)
+        ]
+        assert scores.get_score_bands_by_hashes(LIVE_NETWORK, [rescored, archived]) == {
+            rescored: ("Moderate", 40.0)
+        }
+
         timeseries = scores.get_alert_timeseries(LIVE_NETWORK, days=7)
         assert isinstance(timeseries, list)
 

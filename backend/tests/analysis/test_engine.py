@@ -262,6 +262,9 @@ _LIVE_BATCH = 100
 _BACKLOG_PICK = 2000
 _RANGE_START = datetime(2026, 3, 2, tzinfo=UTC)
 _RANGE_END = _RANGE_START + timedelta(days=1)
+# Upper bound on any wait for a worker thread; the live batch must start within
+# half of it, while the shared workers are still held.
+_WAIT_SECONDS = 5
 
 
 class TestLanes:
@@ -284,6 +287,33 @@ class TestLanes:
         assert kwargs["newest_first"] is True
         assert "until" not in kwargs
         assert before - window <= kwargs["since"] <= datetime.now(UTC) - window
+
+    async def test_live_lane_runs_beside_busy_role_workers(self, monkeypatch):
+        """Its own worker: with every shared worker held (API reads, block
+        inserts), a live batch still starts at once."""
+        import threading
+
+        from app.db import clickhouse
+
+        held = threading.Event()
+        workers = clickhouse._ch_executor._max_workers
+        blockers = [
+            clickhouse._ch_executor.submit(held.wait, _WAIT_SECONDS) for _ in range(workers)
+        ]
+        ran_on: list[str] = []
+
+        def fake_run_once(network, history_complete=True, should_stop=None):
+            ran_on.append(threading.current_thread().name)
+            return 0
+
+        monkeypatch.setattr(_engine_mod, "run_once", fake_run_once)
+        try:
+            await asyncio.wait_for(_engine_mod.run_once_async("preprod"), _WAIT_SECONDS / 2)
+        finally:
+            held.set()
+            for b in blockers:
+                b.result(_WAIT_SECONDS)
+        assert ran_on and ran_on[0].startswith("clickhouse-live"), ran_on
 
     @patch("app.analysis.engine.clickhouse")
     @patch("app.analysis.engine.settings")

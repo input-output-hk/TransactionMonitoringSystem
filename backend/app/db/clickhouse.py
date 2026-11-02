@@ -68,6 +68,14 @@ _ch_backlog_executor = ThreadPoolExecutor(
     initargs=(settings.ANALYSIS_BACKLOG_MAX_THREADS,),
 )
 
+# The scoring live lane's single worker (engine.run_once). On the three role
+# workers its batches queued behind API reads and ingestion's block inserts, and
+# held a worker those waited on in turn: on mainnet, with one dashboard tab
+# polling, live scores trailed ingestion by about 4 minutes at the median,
+# against 1.5 with the tab closed. Uncapped, unlike the backlog lane: live
+# scoring is the latency detection depends on.
+_ch_live_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clickhouse-live")
+
 
 async def _in_executor(fn, *args):
     """Run a blocking ClickHouse call on the dedicated executor.
@@ -148,11 +156,12 @@ def close_client():
     # At shutdown no new tasks are submitted, so three tasks distribute one
     # per worker reliably.
     futures = [_ch_executor.submit(_close_thread) for _ in range(3)]
-    # The maintenance and backlog workers may be mid-scan; a close then queues
-    # behind the scan and the timeout below gives up on it rather than holding
-    # shutdown.
+    # The maintenance and scoring workers may be mid-scan or mid-batch; a close
+    # then queues behind it and the timeout below gives up on it rather than
+    # holding shutdown.
     futures.append(_ch_maintenance_executor.submit(_close_thread))
     futures.append(_ch_backlog_executor.submit(_close_thread))
+    futures.append(_ch_live_executor.submit(_close_thread))
     for f in futures:
         try:
             f.result(timeout=5)
@@ -171,9 +180,10 @@ def shutdown_executor():
     # recompute finishes the scope it is on, which the analysis task's stop()
     # keeps to one scope; anything queued behind it is dropped.
     _ch_maintenance_executor.shutdown(wait=False, cancel_futures=True)
-    # Likewise: the backlog lane stops between batches (analysis stop()), so
-    # at most the batch in flight finishes; its scores are durable either way.
+    # Likewise for both scoring lanes: a batch in flight when its lane stops
+    # stores nothing (analysis stop()) and is picked again after the restart.
     _ch_backlog_executor.shutdown(wait=False, cancel_futures=True)
+    _ch_live_executor.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
@@ -986,6 +996,8 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     get_class_scores_stats,
     get_class_scores_stats_async,
     get_pending_count,
+    get_score_bands_by_hashes,
+    get_score_bands_by_hashes_async,
     get_tx_block_dates,
     get_tx_block_dates_async,
     get_unanalyzed_transactions,

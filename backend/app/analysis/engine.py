@@ -747,13 +747,13 @@ async def run_once_async(
     history_complete: bool = True,
     should_stop: Callable[[], bool] | None = None,
 ) -> int:
-    """Non-blocking wrapper: runs run_once on the dedicated ClickHouse executor."""
+    """Non-blocking wrapper: runs run_once on the live lane's own executor."""
     loop = asyncio.get_running_loop()
     # Collision enrichment runs on a worker thread and bridges async postgres
     # calls back onto this loop (see app.analysis.enrichment).
     set_main_loop(loop)
     return await loop.run_in_executor(
-        clickhouse._ch_executor, run_once, network, history_complete, should_stop
+        clickhouse._ch_live_executor, run_once, network, history_complete, should_stop
     )
 
 
