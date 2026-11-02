@@ -47,6 +47,13 @@ class ImmediateAlert(BaseModel):
     contributing_features: dict[str, float] = Field(default_factory=dict)
     baseline_source: str  # per_script | per_policy | global_fallback
     dashboard_url: str
+    # ISO 8601 UTC block time of the transaction, so a consumer can tell how
+    # long after the fact this alert was raised; "" when not known.
+    tx_timestamp: str = ""
+    # True when the transaction left the live scoring window unscored (an
+    # outage, or more transactions than the engine could score at once) and
+    # was scored afterwards by the backlog lane: a real finding, raised late.
+    late_detection: bool = False
 
 
 class ReportSummary(BaseModel):
@@ -123,6 +130,8 @@ def build_immediate_alert(result: dict, network: str) -> ImmediateAlert:
         ),
         baseline_source=_spec_baseline_source(result.get("baseline_source")),
         dashboard_url=f"{base}/attacks/{tx_hash}",
+        tx_timestamp=_utc_isoformat(result.get("tx_timestamp")),
+        late_detection=bool(result.get("late_detection")),
     )
 
 

@@ -220,7 +220,7 @@ async def _start_leader_duties() -> None:
     """Start the analysis engine, housekeeping, notification schedulers, and
     Ogmios ingestion — the leader-only work.
 
-    Ingestion and analysis advance state (the analysis poll watermark, the
+    Ingestion and analysis advance state (the scoring checkpoint, the
     chain-sync checkpoint) that exactly one live process may own; the
     notification schedulers are here because the periodic-report path is
     check-then-act with no atomic claim (get_report_state → dispatch →
@@ -529,7 +529,7 @@ async def health_ready():
 
 @app.get("/health/detail")
 async def health_detail(api_key: str = Security(verify_api_key)):
-    """Full operational state: network, pipeline, Ogmios, connections."""
+    """Full operational state: network, pipeline, Ogmios, connections, scoring."""
     result = {
         "status": "healthy",
         "network": settings.CARDANO_NETWORK,
@@ -546,6 +546,10 @@ async def health_detail(api_key: str = Security(verify_api_key)):
         result["clustering"] = await _clustering_health()
     if settings.CYCLE_DETECTION_ENABLED:
         result["address_index"] = housekeeping_task.address_index_status()
+    # Leader only, like the ogmios block: a standby scores nothing, and its
+    # lanes would read as never started.
+    if settings.ANALYSIS_ENGINE_ENABLED and _leader_duties_started:
+        result["scoring"] = analysis_task.scoring_status()
     return result
 
 

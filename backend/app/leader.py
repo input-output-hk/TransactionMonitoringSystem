@@ -1,7 +1,7 @@
 """Single-instance leader guard for ingestion + analysis.
 
 The Ogmios chain-sync checkpoint (``save_sync_point``) and the analysis
-engine's poll watermark both assume exactly one process is advancing them: a
+engine's scoring checkpoint both assume exactly one process is advancing them: a
 second live instance reading the same Postgres/ClickHouse would double-insert
 transactions and race the checkpoint update, corrupting the position both
 readers rely on (review finding). This module gates "am I the leader" behind

@@ -31,6 +31,21 @@ export type ClusteringHealth = {
 	age_seconds?: number;
 };
 
+export type ScoringHealth = {
+	// "behind": transactions older than the live window may be unscored;
+	// "stalled": the live lane has stopped finishing its polls.
+	state: OpenEnum<"ok" | "behind" | "stalled" | "starting">;
+	// Unscored rows behind the checkpoint near their row retention: they
+	// expire unscored unless the retention is raised or the drain catches up.
+	retention_at_risk?: boolean;
+	live_window_seconds: number;
+	live_polled_at: string | null;
+	backlog_enabled: boolean;
+	// Every transaction ingested before this has a score.
+	checkpoint: string | null;
+	oldest_unscored_at: string | null;
+};
+
 export type HealthDetail = {
 	status: OpenEnum<"healthy" | "degraded" | "down">;
 	network: string;
@@ -44,6 +59,8 @@ export type HealthDetail = {
 	// Validators UI surfaces.
 	clustering_enabled?: boolean;
 	clustering?: ClusteringHealth;
+	// Present on the leader only: a standby scores nothing.
+	scoring?: ScoringHealth;
 };
 
 async function fetchHealthDetail(): Promise<HealthDetail> {
@@ -92,6 +109,11 @@ export function deriveModules(h: HealthDetail | undefined): SystemModule[] {
 	// scoring is exactly what this row exists to make visible.
 	if (h.clustering_enabled) {
 		modules.push({ name: "Clustering", online: h.clustering?.state === "ok" });
+	}
+	// Ingestion can be at the tip while nothing is scored, and every row above
+	// stays green then: this is the row that shows it.
+	if (h.scoring) {
+		modules.push({ name: "Scoring", online: h.scoring.state === "ok" });
 	}
 	return modules;
 }

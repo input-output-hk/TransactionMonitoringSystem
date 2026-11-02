@@ -26,6 +26,7 @@ from typing import Any
 from app.analysis.contract_identity import NO_CONTRACT
 from app.config import settings
 from app.models.transaction import ALERT_BANDS, FINDING_MIN_SCORE
+from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -942,8 +943,6 @@ def get_pending_count(network: str) -> int:
       - ``greatest(0, ...)`` guards the rare case of a score row without a
         matching transactions row (e.g. cross-instance score import), which
         would otherwise drive the figure negative.
-      - Input-deferred txs (awaiting transaction_inputs) have no score row yet
-        and are correctly counted as pending.
     """
     rows = _client().execute(
         """
@@ -1032,65 +1031,121 @@ async def get_alert_timeseries_async(
 def get_unanalyzed_transactions(
     network: str,
     batch_size: int,
-    since: datetime | None = None,
+    since: datetime,
+    until: datetime | None = None,
+    newest_first: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return transactions that have no multi-class score yet.
+    """Return transactions ingested in [since, until) that have no score yet.
 
-    Fetches raw_data alongside the standard fields so that the feature
-    extraction pipeline can derive UTxO-level and script-level features
-    without a second round-trip.
-
-    Defers a tx until ``transaction_inputs`` rows for it are visible. The
-    ingester writes ``transactions`` and ``transaction_inputs`` as separate
-    ``INSERT`` statements (ClickHouse has no multi-statement transactions;
-    see :func:`insert_transactions_batch` for the writer side), so a poll
-    that lands between the two writes would see the tx with no resolved
-    input addresses, the scorer enrichment would no-op, and gate conditions
-    like ``≥2 inputs from same script`` would silently fail. Per-statement
-    atomicity guarantees that if any ``transaction_inputs`` row exists for
-    the tx, all of them do; "any row exists" is therefore a sufficient
-    witness that the inputs side is ready. Txs with ``input_count = 0``
-    (treasury / collateral-only edge cases) are admitted directly since
-    they need no input enrichment.
-
-    ``since`` is the engine's watermark cursor (see engine._poll_since).
-    Without it, every poll anti-joins the ENTIRE transactions table against
-    the ENTIRE tx_class_scores table plus an unbounded transaction_inputs
-    subquery: cost grows with total table size, not backlog size. With it,
-    all three sides are bounded by ingestion/analysis time. Soundness:
-    child transaction_inputs rows carry the parent tx's ingestion_timestamp
-    (passed explicitly by the writer), and a tx ingested at >= since can
-    only have been scored at analyzed_at >= since (scoring follows
-    ingestion on the same host clock). The engine's periodic since=None
-    full rescan is the never-skip safety net.
+    The live lane's poll: the newest since the start of its window (see
+    engine.run_once). Two steps, so that the payload is read for the batch
+    alone: the unbounded anti-join this replaced read every unscored row's
+    raw_data to return a batch of them, so behind a large backlog every poll
+    read the whole backlog's payload.
     """
-    since_bound = "AND t.ingestion_timestamp >= %(since)s" if since else ""
-    scores_bound = "AND analyzed_at >= %(since)s" if since else ""
-    inputs_bound = "AND ingestion_timestamp >= %(since)s" if since else ""
-    params: dict[str, Any] = {"network": network, "batch_size": batch_size}
-    if since:
-        params["since"] = since
+    picked = pick_unanalyzed(network, batch_size, since, until, newest_first)
+    if not picked:
+        return []
+    return hydrate_transactions(network, [tx_hash for tx_hash, _ in picked], since, until)
+
+
+def pick_unanalyzed(
+    network: str,
+    limit: int,
+    since: datetime,
+    until: datetime | None = None,
+    newest_first: bool = False,
+) -> list[tuple[str, datetime]]:
+    """(tx_hash, ingestion stamp) of up to ``limit`` unscored transactions in [since, until).
+
+    Narrow columns only, oldest first unless ``newest_first``; a tx
+    re-ingested before its parts merge appears once, at its newest stamp.
+    Every read is bounded by the range. A range of recent ingestion lives in
+    small parts and costs little; one that reaches merged parts reads the
+    history's tx_hash columns whatever its width (a cost that follows the
+    table, not the range), with memory that follows the range's
+    transaction count, which is why the backlog lane picks many per read and
+    keeps its slices short (ANALYSIS_BACKLOG_SLICE_SECONDS).
+
+    Readiness comes from the writer, not from a witness here: the ingester
+    writes a block's tables as separate ``INSERT`` statements (ClickHouse has
+    no multi-statement transactions), ``transactions`` last (see
+    :func:`insert_transactions_batch`), so a visible transactions row already
+    means its inputs, outputs and feature rows are committed. The
+    ``transaction_inputs`` witness this used to require read that table's
+    ingestion stamps on every pick, and passed over for good a transaction whose
+    inputs rows were gone (expired by CH_RETENTION_DAYS_IO before it was
+    scored): such a transaction is now picked and scored on what remains.
+
+    Soundness of the bounds: a tx ingested at >= since can only have been
+    scored at analyzed_at >= since (scoring follows ingestion on the same
+    host clock). The scores side is further narrowed to the range's own
+    transactions, so even a range far in the past reads only its own scores.
+    """
+    until_bound = "AND ingestion_timestamp < %(until)s" if until else ""
+    order = "DESC" if newest_first else "ASC"
+    params: dict[str, Any] = {"network": network, "limit": limit, "since": since}
+    if until:
+        params["until"] = until
     rows = _client().execute(
         f"""
-        SELECT t.tx_hash, t.network, t.fee, t.input_count, t.output_count,
-               t.total_output_value, t.metadata, t.addresses, t.raw_data,
-               t.raw_data_truncated, t.script_valid, t.slot, t.block_height,
-               t.timestamp, t.ingestion_timestamp
-        FROM transactions t
-        LEFT ANTI JOIN (
-            SELECT tx_hash, network FROM tx_class_scores
-            WHERE network = %(network)s {scores_bound}
-        ) s
-          ON t.tx_hash = s.tx_hash AND t.network = s.network
-        WHERE t.network = %(network)s
-          {since_bound}
-          AND (t.input_count = 0
-               OR t.tx_hash IN (
-                   SELECT tx_hash FROM transaction_inputs
-                   WHERE network = %(network)s {inputs_bound}
-               ))
-        ORDER BY t.ingestion_timestamp ASC
-        LIMIT %(batch_size)s
+        SELECT tx_hash, max(ingestion_timestamp) AS ingested
+        FROM transactions
+        WHERE network = %(network)s
+          AND ingestion_timestamp >= %(since)s {until_bound}
+          AND tx_hash NOT IN (
+              SELECT tx_hash FROM tx_class_scores
+              WHERE network = %(network)s
+                AND analyzed_at >= %(since)s
+                AND tx_hash IN (
+                    SELECT tx_hash FROM transactions
+                    WHERE network = %(network)s
+                      AND ingestion_timestamp >= %(since)s {until_bound}
+                )
+          )
+        GROUP BY tx_hash
+        ORDER BY ingested {order}, tx_hash {order}
+        LIMIT %(limit)s
+        """,
+        params,
+    )
+    return [(tx_hash, ingested) for tx_hash, ingested in rows]
+
+
+def hydrate_transactions(
+    network: str,
+    hashes: list[str],
+    since: datetime | None,
+    until: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """The scoring rows of picked transactions, raw_data included, in ``hashes`` order.
+
+    By primary key, so the payload is read for these transactions alone. The
+    range is the one they were picked from: a copy re-ingested since does not
+    replace the one picked. No range (since=None) reads the newest copy, for a
+    transaction scored again rather than picked.
+    """
+    if not hashes:
+        return []
+    since_bound = "AND ingestion_timestamp >= %(since)s" if since else ""
+    until_bound = "AND ingestion_timestamp < %(until)s" if until else ""
+    params: dict[str, Any] = {"network": network, "hashes": hashes}
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+    rows = _client().execute(
+        f"""
+        SELECT tx_hash, network, fee, input_count, output_count,
+               total_output_value, metadata, addresses, raw_data,
+               raw_data_truncated, script_valid, slot, block_height,
+               timestamp, ingestion_timestamp
+        FROM transactions
+        WHERE network = %(network)s
+          AND tx_hash IN %(hashes)s
+          {since_bound} {until_bound}
+        ORDER BY ingestion_timestamp DESC
+        LIMIT 1 BY tx_hash
         """,
         params,
     )
@@ -1111,4 +1166,24 @@ def get_unanalyzed_transactions(
         "timestamp",
         "ingestion_timestamp",
     )
-    return [dict(zip(keys, row)) for row in rows]
+    # In the order they were picked (the read follows the primary key); a tx
+    # gone since the pick (a rollback purge) is simply absent.
+    by_hash = {row[0]: dict(zip(keys, row)) for row in rows}
+    return [by_hash[h] for h in hashes if h in by_hash]
+
+
+def earliest_ingestion(network: str) -> datetime | None:
+    """The oldest ingestion stamp on record, or None when nothing is ingested.
+
+    Where the backlog lane's first pass starts when no scoring checkpoint has
+    been saved yet (a new deployment, or the first start of the lane on an
+    existing one): from there it checks every transaction ever ingested.
+    """
+    rows = _client().execute(
+        "SELECT min(ingestion_timestamp), count() FROM transactions WHERE network = %(network)s",
+        {"network": network},
+    )
+    # min() over no rows is the type's zero, not NULL, hence the count.
+    if not rows or not rows[0][1]:
+        return None
+    return to_aware_utc(rows[0][0])

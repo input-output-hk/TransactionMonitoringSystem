@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from clickhouse_driver import Client
@@ -21,6 +21,7 @@ from app.db.clickhouse_schema import (  # noqa: F401  (re-exported API)
     stale_count_columns,
 )
 from app.models.transaction import NormalizedTransaction
+from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,23 @@ _ch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="clickhouse"
 # thread-local like theirs.
 _ch_maintenance_executor = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="clickhouse-maintenance"
+)
+
+
+def _cap_thread_queries(max_threads: int) -> None:
+    """Executor initializer: this thread's Client sends every query capped."""
+    _thread_local.client_settings = {"max_threads": max_threads}
+
+
+# The scoring backlog lane's single worker (engine.run_backlog_once). Draining a
+# backlog can take days and one late-scored transaction can take seconds, so it
+# must neither hold one of the three role workers (live scoring would wait
+# behind it) nor run its queries on every core: its Client caps them all.
+_ch_backlog_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="clickhouse-backlog",
+    initializer=_cap_thread_queries,
+    initargs=(settings.ANALYSIS_BACKLOG_MAX_THREADS,),
 )
 
 
@@ -94,6 +112,9 @@ def _get_client() -> Client:
             # shared executor thread for the driver's 300s default (see config).
             connect_timeout=settings.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS,
             send_receive_timeout=settings.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS,
+            # Set by an executor initializer (_cap_thread_queries); a query's
+            # own settings still override it.
+            settings=getattr(_thread_local, "client_settings", None),
         )
         _thread_local.client = client
     return client
@@ -127,9 +148,11 @@ def close_client():
     # At shutdown no new tasks are submitted, so three tasks distribute one
     # per worker reliably.
     futures = [_ch_executor.submit(_close_thread) for _ in range(3)]
-    # The maintenance worker may be mid-scan; its close then queues behind the
-    # scan and the timeout below gives up on it rather than holding shutdown.
+    # The maintenance and backlog workers may be mid-scan; a close then queues
+    # behind the scan and the timeout below gives up on it rather than holding
+    # shutdown.
     futures.append(_ch_maintenance_executor.submit(_close_thread))
+    futures.append(_ch_backlog_executor.submit(_close_thread))
     for f in futures:
         try:
             f.result(timeout=5)
@@ -148,6 +171,9 @@ def shutdown_executor():
     # recompute finishes the scope it is on, which the analysis task's stop()
     # keeps to one scope; anything queued behind it is dropped.
     _ch_maintenance_executor.shutdown(wait=False, cancel_futures=True)
+    # Likewise: the backlog lane stops between batches (analysis stop()), so
+    # at most the batch in flight finishes; its scores are durable either way.
+    _ch_backlog_executor.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
@@ -228,16 +254,6 @@ def insert_transactions_batch(transactions: list[NormalizedTransaction]):
                     tx.ingestion_timestamp or now,
                 )
             )
-        client.execute(
-            """
-            INSERT INTO transactions (
-                tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
-                input_count, output_count, total_input_value, total_output_value,
-                addresses, metadata, raw_data, raw_data_truncated, script_valid, ingestion_timestamp
-            ) VALUES
-            """,
-            tx_rows,
-        )
 
         all_inputs = [
             (
@@ -346,6 +362,23 @@ def insert_transactions_batch(transactions: list[NormalizedTransaction]):
             # Feature INSERTS are still non-critical; log and continue
             logger.warning(f"Feature extraction failed (non-fatal): {e}")
 
+        # Last, so that a visible transactions row means every other row of the
+        # block is committed: the scoring lanes pick from transactions, and a
+        # transaction scored before its outputs landed would be stored with
+        # circular and sandwich at -1 and never picked again. A failure before
+        # this point leaves no transactions row, and the block's retry or replay
+        # writes the rest again.
+        client.execute(
+            """
+            INSERT INTO transactions (
+                tx_hash, network, slot, block_height, block_hash, block_index, timestamp, fee, deposit,
+                input_count, output_count, total_input_value, total_output_value,
+                addresses, metadata, raw_data, raw_data_truncated, script_valid, ingestion_timestamp
+            ) VALUES
+            """,
+            tx_rows,
+        )
+
         logger.debug(f"Inserted {len(transactions)} transactions into ClickHouse")
     except ClickHouseError as e:
         logger.error(f"Failed to insert transactions batch: {e}")
@@ -441,20 +474,78 @@ async def delete_rolled_back_txs_async(network: str, rollback_slot: int) -> list
     return await _in_executor(delete_rolled_back_txs, network, rollback_slot)
 
 
+def _scoring_reachable_seconds() -> float:
+    """How old an ingestion stamp can be and still lie ahead of the scoring checkpoint.
+
+    The backlog lane never moves the checkpoint past now minus the live window
+    and the settle margin, so a transaction stamped later than that is still
+    picked once it has no score. Less one send/receive timeout: a backlog pick
+    in flight while the purge runs may still find the transaction scored and
+    move the checkpoint past it as the DELETE lands.
+    """
+    return (
+        settings.ANALYSIS_LIVE_WINDOW_SECONDS
+        + settings.ANALYSIS_BACKLOG_SETTLE_SECONDS
+        - settings.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+    )
+
+
 def delete_score_rows(network: str, hashes: list[str]) -> None:
     """Targeted tx_class_scores purge: the delayed second rollback pass.
 
     Closes the purge/score-writer race: an engine batch holding rolled-back
     rows when the purge ran inserts its scores AFTER the first DELETE, and
     the stale row then blocks re-scoring forever via the anti-join.
+
+    A rolled-back transaction that has since re-confirmed is scored again only
+    if a lane still reaches it. One stamped within reach loses every score row,
+    as it always did, and is scored afresh. One stamped behind the scoring
+    checkpoint (a pending repurge replayed hours later) keeps the scores written
+    after its re-confirmed copy was ingested: those were computed from that copy,
+    and deleting them would leave it unscored for good, which no lane repairs.
     """
     if not hashes:
         return
-    _get_client().execute(
-        "DELETE FROM tx_class_scores WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+    client = _get_client()
+    # Taken before the read, so the reach is never overstated.
+    reachable_from = datetime.now(UTC) - timedelta(seconds=_scoring_reachable_seconds())
+    # Projections off: p_by_time_v2 holds these columns and can still serve rows
+    # a lightweight DELETE removed (the purged fork copy) until its part merges.
+    rows = client.execute(
+        """
+        SELECT tx_hash, max(ingestion_timestamp)
+        FROM transactions
+        WHERE network = %(network)s AND tx_hash IN %(hashes)s
+        GROUP BY tx_hash
+        SETTINGS optimize_use_projections = 0
+        """,
         {"network": network, "hashes": hashes},
-        settings=_LIGHTWEIGHT_DELETE_SETTINGS,
     )
+    reconfirmed: dict[str, datetime] = {}
+    for tx_hash, stamp in rows:
+        aware = to_aware_utc(stamp)
+        if aware is not None:
+            reconfirmed[tx_hash] = aware
+    purge_all = [h for h in hashes if h not in reconfirmed or reconfirmed[h] >= reachable_from]
+    if purge_all:
+        client.execute(
+            "DELETE FROM tx_class_scores WHERE network = %(network)s AND tx_hash IN %(hashes)s",
+            {"network": network, "hashes": purge_all},
+            settings=_LIGHTWEIGHT_DELETE_SETTINGS,
+        )
+    # Behind the checkpoint: only the rows older than the copy now on chain.
+    # A block's transactions share one stamp, so this is a DELETE per block.
+    behind: dict[datetime, list[str]] = {}
+    for tx_hash, stamp in reconfirmed.items():
+        if stamp < reachable_from:
+            behind.setdefault(stamp, []).append(tx_hash)
+    for stamp, stamp_hashes in behind.items():
+        client.execute(
+            "DELETE FROM tx_class_scores WHERE network = %(network)s "
+            "AND tx_hash IN %(hashes)s AND analyzed_at < %(stamp)s",
+            {"network": network, "hashes": stamp_hashes, "stamp": stamp},
+            settings=_LIGHTWEIGHT_DELETE_SETTINGS,
+        )
 
 
 async def delete_score_rows_async(network: str, hashes: list[str]) -> None:
@@ -883,6 +974,7 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     _score_filter_conditions,
     count_class_scores,
     count_class_scores_async,
+    earliest_ingestion,
     get_alert_timeseries,
     get_alert_timeseries_async,
     get_class_scores,
@@ -899,6 +991,8 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     get_unanalyzed_transactions,
     group_class_scores_by_contract,
     group_class_scores_by_contract_async,
+    hydrate_transactions,
     insert_class_scores,
+    pick_unanalyzed,
     query_multiple_sat_extraction_percentiles,
 )

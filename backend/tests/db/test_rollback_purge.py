@@ -7,6 +7,7 @@ scripts/verify_rollback_purge.py). These tests pin the setting on every
 DELETE and the purge's structural behaviour against a mocked client.
 """
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -151,3 +152,55 @@ class TestClusteringPurge:
         # The sidecar may never have run; a rollback must not crash chain sync.
         client.execute.side_effect = RuntimeError("UNKNOWN_TABLE")
         delete_clustering_rows("preprod", ["aa" * 32])  # must not raise
+
+
+class TestScoreRepurgeReach:
+    """delete_score_rows deletes outright only what a scoring lane will score again.
+
+    A rolled-back tx that re-confirmed is picked again only while its stamp lies
+    ahead of the scoring checkpoint; a repurge replayed later must keep the
+    scores written from that copy (see the live tier for the full sequence).
+    """
+
+    _GONE, _NEAR, _BEHIND = "aa" * 32, "bb" * 32, "cc" * 32
+
+    def _repurge(self, client, reconfirmed):
+        # The read of the re-confirmed copies, then the DELETEs.
+        client.execute.side_effect = [reconfirmed] + [None] * len(reconfirmed + [None])
+        clickhouse.delete_score_rows("preprod", [self._GONE, self._NEAR, self._BEHIND])
+        return _delete_calls(client)
+
+    def _stamps(self):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        reach = timedelta(seconds=clickhouse._scoring_reachable_seconds())
+        # One live window inside and outside the reach.
+        margin = timedelta(seconds=settings.ANALYSIS_LIVE_WINDOW_SECONDS)
+        return now - reach + margin, now - reach - margin
+
+    def test_only_a_copy_behind_the_checkpoint_keeps_its_newer_scores(self, client):
+        near, behind = self._stamps()
+        deletes = self._repurge(client, [(self._NEAR, near), (self._BEHIND, behind)])
+        outright, bounded = deletes
+        # Never re-confirmed, or still reached by a lane: every score row goes.
+        assert outright.args[1]["hashes"] == [self._GONE, self._NEAR]
+        assert "analyzed_at" not in outright.args[0]
+        # Behind the checkpoint: only rows older than the copy now on chain.
+        assert bounded.args[1]["hashes"] == [self._BEHIND]
+        assert "analyzed_at < %(stamp)s" in bounded.args[0]
+        assert bounded.args[1]["stamp"] == behind.replace(tzinfo=UTC)
+
+    def test_every_repurge_delete_carries_projection_mode(self, client):
+        near, behind = self._stamps()
+        for call in self._repurge(client, [(self._NEAR, near), (self._BEHIND, behind)]):
+            assert call.kwargs.get("settings") == _LIGHTWEIGHT_DELETE_SETTINGS
+
+    def test_the_copy_read_bypasses_the_projection(self, client):
+        # p_by_time_v2 can still serve the purged fork copy until its part merges.
+        self._repurge(client, [])
+        (read, *_) = client.execute.call_args_list
+        assert "optimize_use_projections = 0" in read.args[0]
+
+    def test_the_reach_is_inside_the_checkpoint_bound(self):
+        # The checkpoint never passes now - window - settle.
+        bound = settings.ANALYSIS_LIVE_WINDOW_SECONDS + settings.ANALYSIS_BACKLOG_SETTLE_SECONDS
+        assert 0 < clickhouse._scoring_reachable_seconds() < bound

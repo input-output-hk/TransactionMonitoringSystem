@@ -229,6 +229,19 @@ async def execute_schema():
             )
         """)
 
+        # Scoring checkpoint: every transaction ingested before complete_through
+        # has a score row. Advanced only by the engine's backlog lane, and only
+        # past ingestion time a poll found fully scored, so it is the record of
+        # the never-skip guarantee and survives restarts (the in-process cursor
+        # it replaced did not, and restarted with a full rescan).
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scoring_checkpoint (
+                network           TEXT PRIMARY KEY,
+                complete_through  TIMESTAMPTZ NOT NULL,
+                updated_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Quarantined blocks — the checkpoint advanced past a block the decoder
         # could not read, so its transactions were never scored. This is a
         # RECALL GAP and the only durable record that it exists: without the
@@ -1182,6 +1195,37 @@ async def get_sync_point(network: str) -> dict[str, Any] | None:
         if row:
             return {"slot": row["slot"], "id": row["block_id"]}
         return None
+
+
+# --- Scoring checkpoint ---
+
+
+async def save_scoring_checkpoint(network: str, complete_through: datetime) -> None:
+    """Record that every transaction ingested before complete_through is scored.
+
+    Never moves backwards: GREATEST keeps the stored value if a stale writer
+    (a lane from before a leader hand-back) saves an older one.
+    """
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO scoring_checkpoint (network, complete_through, updated_at)
+            VALUES ($1, $2, CURRENT_TIMESTAMP)
+            ON CONFLICT (network) DO UPDATE SET
+                complete_through = GREATEST(scoring_checkpoint.complete_through, $2),
+                updated_at       = CURRENT_TIMESTAMP
+        """,
+            network,
+            complete_through,
+        )
+
+
+async def get_scoring_checkpoint(network: str) -> datetime | None:
+    """Return the network's scoring checkpoint, or None before the first one."""
+    async with get_connection() as conn:
+        return await conn.fetchval(
+            "SELECT complete_through FROM scoring_checkpoint WHERE network = $1", network
+        )
 
 
 # --- Pending score repurges (durable rollback second pass) ---

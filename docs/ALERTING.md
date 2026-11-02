@@ -17,7 +17,7 @@ The analysis engine polls ClickHouse for unanalyzed transactions, scores a batch
 1. **Filter.** A result is skipped outright unless `risk_band` is truthy, `max_class` is truthy, and `max_score > 0`. A benign transaction scores `max_class=""` with `max_score=0` and lands in the Informational band; it is never an alert on any channel, even if an operator has deliberately routed Informational for diagnostics. This gate is in the hook, ahead of any configuration lookup, so it cannot be turned off from the UI.
 2. **Route.** `triggers.resolve_dispatch(band, max_class)` reads the in-process cache of the configuration document and returns a list of `Dispatch` records, each naming a channel plus its resolved recipients or URL. An empty list means this (band, class) pair goes nowhere, and the hook moves on with no I/O.
 3. **Build.** `payloads.build_immediate_alert` maps the engine result to the `immediate_alert` wire schema, including the top `NOTIFY_TOP_FEATURES` (default 5) sub-scores of the dominant class as `contributing_features`.
-4. **Schedule.** The hook calls `asyncio.run_coroutine_threadsafe(_deliver_with_dedup(...), main_loop)` and **discards the future**. This is fire-and-forget by design: a slow SMTP server or a hung webhook receiver must never stall the scoring loop or hold up the analysis watermark.
+4. **Schedule.** The hook calls `asyncio.run_coroutine_threadsafe(_deliver_with_dedup(...), main_loop)` and **discards the future**. This is fire-and-forget by design: a slow SMTP server or a hung webhook receiver must never stall the scoring loop.
 
 Delivery then happens on the main event loop in `_deliver_with_dedup`: read the dedup ledger, acquire the delivery semaphore (`NOTIFY_MAX_CONCURRENT_DELIVERIES`, default 8), fan out through the dispatcher, and write the dedup claim only if at least one channel reported success.
 
@@ -41,7 +41,7 @@ Two bounds keep this safe. The sidecar read is configured to **raise** rather th
 
 ### What the Two Paths Share
 
-Both emit the same `immediate_alert` payload schema, so a webhook receiver needs no special handling. Two fields differ by source, which is useful for receiver-side routing:
+Both emit the same `immediate_alert` payload schema, so a webhook receiver needs no special handling. Some fields differ by source, which is useful for receiver-side routing:
 
 | Field | Scorer path | contract_anomaly poller |
 |---|---|---|
@@ -49,6 +49,10 @@ Both emit the same `immediate_alert` payload schema, so a webhook receiver needs
 | `baseline_source` | `per_script`, `per_policy` or `global_fallback` | always `global_fallback` (a consensus verdict has no per-script baseline) |
 | `contributing_features` | top-N sub-scores of the dominant class | `consensus`, `iso_score`, `lof_score`, `votes` |
 | `timestamp` | the score's `analyzed_at` | the verdict's `scored_at`; empty string in the degraded fallback |
+| `tx_timestamp` | the transaction's block time | always empty |
+| `late_detection` | `true` when the backlog lane scored it, after it left the live window unscored | always `false` |
+
+**Late detections.** A transaction the engine could not score while it was fresh (an outage, a restart, or more transactions than the live lane could take) is scored afterwards by the backlog lane, and a finding on it still alerts: recall first, so it is raised, not dropped. Its payload says so with `late_detection: true`, the gap between `tx_timestamp` and `timestamp` says by how much, and the email subject reads `[TMS <band>, late detection]`. A burst of them follows any scoring outage, oldest transaction first.
 
 Both are gated on the leader instance. The engine and the poller both run only where the Postgres session-level advisory leader lock is held; the configuration cache, the captured event loop and the channel objects, by contrast, are initialised on every instance including standbys, so a promotion needs no re-initialisation.
 
@@ -348,7 +352,7 @@ An SMTP failure is logged (`SMTP send failed: ...`) and returns `ok=False`. The 
 
 ### The Scorer Path Retries Through a Dead Letter
 
-The engine itself never retries an alert, because it never re-presents a scored transaction. Its poll query, `clickhouse_scores.get_unanalyzed_transactions`, is a `LEFT ANTI JOIN` of `transactions` against `tx_class_scores`: a transaction is "unanalyzed" precisely as long as it has no score row, and in `engine.run_once` the score rows are inserted **before** the alert hook runs. By the time the alert is attempted, the transaction has already stopped satisfying the poll's predicate, and the periodic full rescan uses the same anti-join, so it does not resurface it either.
+The engine itself never retries an alert, because it never re-presents a scored transaction. Both of its lanes pick with `clickhouse_scores.pick_unanalyzed`, an anti-join of `transactions` against `tx_class_scores`: a transaction is "unanalyzed" precisely as long as it has no score row, and the score rows are inserted **before** the alert hook runs. By the time the alert is attempted, the transaction has already stopped satisfying the pick's predicate, so neither the live lane nor the backlog lane resurfaces it.
 
 That is why a scorer alert whose **every** channel failed is dead-lettered instead: `_deliver_with_dedup` records it in the `failed_notifications` table (Postgres), and a retry sweep in the notification scheduler re-attempts it until it delivers or the attempt budget is spent. The sweep's behaviour:
 

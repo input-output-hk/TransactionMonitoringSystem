@@ -766,7 +766,9 @@ class OgmiosClient:
                 # in flight during the purge can insert a stale score row
                 # right after it, which would block re-scoring forever via
                 # the unanalyzed anti-join. Deleting a FRESH score of a
-                # re-confirmed tx is recall-safe (it just re-scores).
+                # re-confirmed tx is recall-safe while a scoring lane still
+                # reaches its stamp (it just re-scores); a replay behind the
+                # scoring checkpoint keeps it (see delete_score_rows).
                 #
                 # Persist the hashes BEFORE scheduling the in-memory task:
                 # the task is volatile (restart, shutdown inside the delay

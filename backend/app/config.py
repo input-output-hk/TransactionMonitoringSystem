@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -229,7 +229,7 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
 
     # Single-instance leader guard (app.leader): ingestion's Ogmios sync
-    # checkpoint and the analysis engine's poll watermark both assume exactly
+    # checkpoint and the analysis engine's scoring checkpoint both assume exactly
     # one process is advancing them, so a second live instance would
     # double-insert transactions and race the checkpoint update. Gated behind
     # a Postgres session-level advisory lock; a non-leader instance still
@@ -273,24 +273,80 @@ class Settings(BaseSettings):
     # Pause between drained batches: lets ingestion inserts and API reads
     # interleave on the 3-worker ClickHouse executor.
     ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS: float = 0.5
-    # Watermark cursor for the unanalyzed poll. The overlap absorbs
-    # same-second ordering skew and the tx-row-before-inputs-row insert gap;
-    # the periodic full rescan (since=None) is the never-skip guarantee and
-    # the recovery path for raw-data-deferred transactions.
-    UNANALYZED_OVERLAP_SECONDS: int = 120
-    UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS: int = 600
-    # Lookback bound for the periodic full rescan. The rescan is the never-skip
-    # net for txs that slipped the watermark (deferred raw-data / scorer /
-    # enrichment retries, same-second skew); those are always recent, so a
-    # generous window (e.g. 604800 = 7 days) recovers them while keeping the
-    # rescan's anti-join cost proportional to the window rather than the whole
-    # (keep-forever) table. Default 0 = unbounded (the legacy never-skip
-    # behaviour, recall-maximal). RECOMMENDED for mainnet: set a window, because
-    # at mainnet size the since=None rescan materialises an anti-join over all
-    # of tx_class_scores plus an unbounded inputs subquery (multiple GB) and can
-    # hit ClickHouse per-query memory limits. (Even unbounded, a rescan that
-    # fails no longer halts scoring: run_once falls back to the watermark poll.)
-    UNANALYZED_FULL_RESCAN_WINDOW_SECONDS: int = 0
+    # Scoring runs in two lanes (engine.run_once, engine.run_backlog_once). The
+    # live lane polls only what was ingested in the last
+    # ANALYSIS_LIVE_WINDOW_SECONDS, newest first, so no backlog can hold a fresh
+    # transaction back: behind a single oldest-first queue, a burst larger than
+    # the engine's throughput delays every newer transaction until the burst is
+    # cleared, and late scoring costs more the later it is. Newest first
+    # is also cheapest first: a transaction scored late reads a circular BFS
+    # horizon that has filled in (circular.cycle.max_age_slots). When more
+    # arrives than the lane can score, the excess ages out of the window into
+    # the backlog lane; it is never dropped.
+    ANALYSIS_LIVE_WINDOW_SECONDS: int = Field(default=600, ge=1)
+    # The backlog lane scores what aged out of the live window unscored, oldest
+    # first, on its own executor thread, and is the never-skip guarantee: its
+    # checkpoint (postgres scoring_checkpoint) moves past ingestion time only
+    # once a poll finds nothing unscored there, so a deferred retry holds it
+    # until the retry resolves. Off, nothing scores what the live lane missed.
+    ANALYSIS_BACKLOG_ENABLED: bool = True
+    # Ingestion time one backlog pick covers. A pick's memory follows the
+    # slice's transaction count, so an hour keeps even the densest burst of
+    # ingestion well inside ClickHouse's per-query memory limit, where a day of
+    # it would not.
+    ANALYSIS_BACKLOG_SLICE_SECONDS: int = Field(default=3600, ge=1)
+    # Transactions one backlog pick returns, then scored a batch at a time. A
+    # pick over merged parts reads the history's tx_hash columns whatever it
+    # returns (a cost that grows with the table, not with the pick), so picking
+    # per batch would have spent most of a large drain on picking.
+    ANALYSIS_BACKLOG_PICK_SIZE: int = Field(default=2000, ge=1)
+    # How far the checkpoint trails the live window. A row becomes visible up to
+    # one insert-retry cycle after its ingestion stamp (the stamp is taken at
+    # parse, and every retry re-sends it), so the checkpoint must not pass a
+    # stamp that recent or such a row would land behind it unscored. At least
+    # _insert_visibility_seconds() (see _backlog_settle_floor); an hour covers
+    # the slow path to ClickHouse ahead of the insert as well.
+    ANALYSIS_BACKLOG_SETTLE_SECONDS: int = Field(default=3600, ge=1)
+    # Smaller than the live batch: a transaction scored late reads a full BFS
+    # horizon and can take seconds, and a short batch keeps the claim (and the
+    # work a shutdown discards) short.
+    ANALYSIS_BACKLOG_BATCH_SIZE: int = Field(default=20, ge=1)
+    # Ingestion time just behind the live window that the backlog lane scores
+    # ahead of its oldest-first walk, every ANALYSIS_ENGINE_INTERVAL_SECONDS
+    # while the walk is further back (tasks/analysis._RecentPass): what has just
+    # left the live window unscored is scored first, not after months of older
+    # backlog. A day covers a restart, a deploy or a burst; to drain a recent
+    # outage before older history, set it to reach back over the outage. Its
+    # picks read the region's transactions, so it is not made larger than the
+    # work it is meant to put first. 0 leaves everything to the walk.
+    ANALYSIS_BACKLOG_RECENT_SECONDS: int = Field(default=86400, ge=0)
+    # max_threads for every backlog query. The lane runs back to back on its
+    # own thread, so this is what bounds its load: draining a backlog can never
+    # take the cores live scoring, ingestion and the API need (the rationale of
+    # BASELINE_QUERY_MAX_THREADS). ge=1: ClickHouse reads 0 as "every core".
+    ANALYSIS_BACKLOG_MAX_THREADS: int = Field(default=2, ge=1)
+    # /health/detail reports scoring "behind" once a transaction has waited
+    # this long past the live window unscored, or the checkpoint trails its
+    # settle position by this much; "stalled" once the live lane has not
+    # finished a poll for this long past its interval.
+    ANALYSIS_SCORING_LAG_TOLERANCE_SECONDS: int = Field(default=600, ge=1)
+    # Neither lane stores cycles in chain order, so a ring's later pass can be
+    # stored before an earlier one and miss it in its recycling and recurrence
+    # axes. Each stored batch re-scores those later passes (engine.
+    # _rescore_later_passes), and this caps how many one batch and its cascade
+    # may re-score: a busy origin can have hundreds in its window, each a full
+    # re-score with a late BFS on the lane's thread. What the cap leaves out is
+    # logged and keeps its stored score. 0 turns the re-score off.
+    ANALYSIS_HISTORY_RESCORE_MAX_TXS: int = Field(default=100, ge=0)
+    # /health/detail reports retention_at_risk (and scoring "behind") once the
+    # backlog checkpoint is older than this share of the shortest row retention
+    # (CH_RETENTION_DAYS_TRANSACTIONS, CH_RETENTION_DAYS_IO): rows still unscored
+    # behind it expire before the backlog lane reaches them, a transactions row
+    # for good, inputs leaving the score without them. A half leaves the backlog
+    # as long again as it has already waited, to raise the retention or speed up
+    # the drain. A share and not a number of days, so a short retention does not
+    # read at risk with nothing behind. Ignored while no retention is set.
+    ANALYSIS_RETENTION_WARNING_SHARE: float = Field(default=0.5, gt=0, le=1)
     # Baseline lookup cache (0 disables). Baselines change once per daily
     # recompute but were point-SELECTed per feature per scored tx: the
     # engine's dominant N+1. insert_baselines() clears the cache; the 1 h
@@ -472,6 +528,39 @@ class Settings(BaseSettings):
                 f"must be 0 (off) or at least {_ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS}"
             )
         return value
+
+    def _insert_visibility_seconds(self) -> float:
+        """How long a block's rows can stay invisible after their stamp.
+
+        Every attempt of the block-insert retry loop re-sends the same stamp and
+        can wait out a connect and a send/receive timeout against a silent
+        server, with the backoff between attempts; past the last attempt the
+        block replays under a fresh stamp. The send/receive timeout bounds
+        silence, not a slow transfer, but a block's insert is small enough that
+        only silence takes this long.
+        """
+        attempts = self.CLICKHOUSE_INSERT_MAX_RETRIES
+        backoff, delay = 0.0, self.CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS
+        for _ in range(attempts - 1):
+            backoff += delay
+            delay = min(delay * 2, self.CLICKHOUSE_INSERT_RETRY_MAX_DELAY_SECONDS)
+        per_attempt = (
+            self.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS + self.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+        )
+        return attempts * per_attempt + backoff
+
+    @model_validator(mode="after")
+    def _backlog_settle_floor(self) -> "Settings":
+        # See ANALYSIS_BACKLOG_SETTLE_SECONDS: a shorter settle lets the backlog
+        # checkpoint pass a stamp whose row is still in flight, which would
+        # then never be scored.
+        floor = self._insert_visibility_seconds()
+        if self.ANALYSIS_BACKLOG_SETTLE_SECONDS < floor:
+            raise ValueError(
+                f"ANALYSIS_BACKLOG_SETTLE_SECONDS must be at least {floor:.0f} "
+                "(one block-insert retry cycle at the configured timeouts)"
+            )
+        return self
 
     # Whether startup rewrites tx_class_scores parts that predate the circular
     # history columns (clickhouse_schema._materialize_circular_history). Off

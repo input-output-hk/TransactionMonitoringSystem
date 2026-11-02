@@ -94,6 +94,39 @@ class TestAddressIndexHealth:
         assert "address_index" not in client.get("/health/detail").json()
 
 
+class TestScoringHealth:
+    """/health/detail carries the scoring lanes' state on the leader."""
+
+    @pytest.fixture(autouse=True)
+    def _dev_open(self, monkeypatch):
+        from app.auth import api_key
+
+        monkeypatch.setattr(api_key, "_valid_keys", [])
+        monkeypatch.setattr(api_key, "_dev_mode", True)
+
+    def test_the_leader_reports_its_lanes(self, client, monkeypatch):
+        from app import main
+        from app.config import settings
+        from app.tasks import analysis
+
+        status = {"state": "behind", "checkpoint": "2026-03-03T14:20:00Z"}
+        monkeypatch.setattr(settings, "ANALYSIS_ENGINE_ENABLED", True)
+        monkeypatch.setattr(main, "_leader_duties_started", True)
+        monkeypatch.setattr(analysis, "scoring_status", lambda: status)
+
+        assert client.get("/health/detail").json()["scoring"] == status
+
+    def test_a_standby_reports_no_scoring(self, client, monkeypatch):
+        # It scores nothing; its lanes would read as never started.
+        from app import main
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "ANALYSIS_ENGINE_ENABLED", True)
+        monkeypatch.setattr(main, "_leader_duties_started", False)
+
+        assert "scoring" not in client.get("/health/detail").json()
+
+
 class TestClusteringHealthHeartbeat:
     """The clustering dot tracks a job heartbeat (clustering is running), not
     the last published anomaly, so a healthy-but-quiet contract stays green."""

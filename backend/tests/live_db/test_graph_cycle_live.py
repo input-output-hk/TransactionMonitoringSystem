@@ -14,6 +14,7 @@ test asserts through ``CircularScorer.gate`` for that reason.
 Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import json
 import math
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -799,3 +800,70 @@ class TestCycleHistoryFromStoredScores:
 
         assert cycle["cycle_length"] == 4
         assert cycle["intermediaries"] == [b, c, d]
+
+
+class TestLaterPassesStoredFirst:
+    """Neither scoring lane stores a ring's passes in chain order, so a later
+    pass can be stored before an earlier one and miss it in its history read.
+    Once the earlier pass is stored, the engine finds the later ones and scores
+    them again (engine._rescore_later_passes)."""
+
+    def test_the_lookup_finds_exactly_the_passes_whose_read_now_includes_it(self, ch):
+        ring = _ring()
+        origins, addr_b, addr_c = ring
+        window = graph._RECURRENCE_WINDOW_SLOTS
+        later_slot = _ORIGIN_SLOT + _WINDOW_EDGE_SLOTS
+        same_ring = [addr_b, addr_c]
+        other_ring = [f"addr_test1qq_other_{uuid.uuid4().hex[:8]}"]
+        stranger = [f"addr_test1qq_stranger_{uuid.uuid4().hex[:8]}"]
+        cases = {
+            "later": (later_slot, same_ring, origins),
+            "same slot": (_ORIGIN_SLOT, same_ring, origins),
+            # Not found: past the window, before the pass, another origin, no
+            # shared intermediary (neither history axis could move).
+            "past the window": (_ORIGIN_SLOT + window + _WINDOW_EDGE_SLOTS, same_ring, origins),
+            "earlier": (_ORIGIN_SLOT - _WINDOW_EDGE_SLOTS, same_ring, origins),
+            "another origin": (later_slot, same_ring, stranger),
+            "another ring": (later_slot, other_ring, origins),
+        }
+        hashes = {name: uuid.uuid4().hex * 2 for name in cases}
+        for name, (first_slot, path, origin_keys) in cases.items():
+            _store_score(ch, hashes[name], _BELOW_HIGH, _prior(first_slot, path, origin_keys))
+        source = uuid.uuid4().hex * 2
+        evidence = _prior(_ORIGIN_SLOT, same_ring, origins)
+
+        later = graph.stored_later_cycles(LIVE_NETWORK, [(source, _BELOW_HIGH, evidence)])
+
+        assert set(later) == {hashes["later"], hashes["same slot"]}
+        assert later[hashes["later"]] == graph.StoredCycle(later_slot, _BELOW_HIGH, _BELOW_HIGH)
+
+    def test_a_later_pass_stored_first_is_raised_once_the_earlier_one_is_stored(self, ch):
+        from app.analysis import engine
+
+        ring = _ring()
+        later_tx, _ = _plant(
+            ch,
+            lambda o: [(o[0], _LEG_3)],
+            ring=ring,
+            origin_slot=_ORIGIN_SLOT + _REPLAY_OFFSET_SLOTS,
+        )
+        later_cycle, later_result = _score_and_store(ch, later_tx)
+        assert later_cycle["prior_cycles_in_window"] == 0, "stored before its earlier pass"
+        first_tx, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], ring=ring)
+        _, first_result = _score_and_store(ch, first_tx)
+        stored_first = {
+            "tx_hash": first_tx,
+            "circular": first_result.score,
+            "evidence": {"circular": first_result.evidence},
+        }
+
+        engine._rescore_later_passes(LIVE_NETWORK, [stored_first], "backlog", True)
+
+        rows = ch._execute_query(
+            "SELECT circular, evidence FROM tx_class_scores FINAL "
+            "WHERE network = %(network)s AND tx_hash = %(tx)s",
+            {"network": LIVE_NETWORK, "tx": later_tx},
+        )
+        (circular, evidence), *_ = rows
+        assert json.loads(evidence)["circular"]["prior_cycles_in_window"] == 1
+        assert circular > later_result.score

@@ -621,26 +621,47 @@ analysis is deferred and retried.
 | `ANALYSIS_DEFER_RETRY_SECONDS` | `30` | Spacing between deferred-scoring attempts |
 | `ROLLBACK_CLEANUP_ENABLED` | `true` | On a chain rollback, delete ClickHouse rows for transactions past the rollback point, so orphaned-fork data cannot feed scorers or API reads. `archived_alerts` is exempt: it is admin curation, not chain state |
 
-**Analysis engine internals.** Tuning knobs for the scoring loop; the
-defaults suit preprod. `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` bounds the
-periodic full rescan to a recent window, which caps its anti-join cost as
-history accumulates (`0` = rescan all history). Treat it as a recall
-trade-off, not a routine mainnet setting: the full rescan is the never-skip
-guarantee, and the incremental query only looks back
-`UNANALYZED_OVERLAP_SECONDS`, so anything still unscored past the window is
-never picked up. If ingestion outlives scoring (engine disabled, crash-loop,
-multi-day resync) that gap is a permanent detection miss. Bound it only once
-the rescan's cost is measured on the deployment, and then pick a window that
-comfortably exceeds the longest plausible scoring outage.
+**Analysis engine internals.** Scoring runs in two lanes. The live lane
+scores the newest transactions ingested in the last
+`ANALYSIS_LIVE_WINDOW_SECONDS`, so no backlog, however large, delays a fresh
+transaction. The backlog lane scores, oldest first, whatever left that window
+unscored (an outage, a restart, or more transactions than the live lane could
+score at once), on its own thread, with every ClickHouse query capped at
+`ANALYSIS_BACKLOG_MAX_THREADS`; its alerts carry `late_detection: true`. It is
+the never-skip guarantee: the Postgres `scoring_checkpoint` row records the
+ingestion time before which every transaction has a score, and it moves only
+past ingestion time a pick found fully scored. On a deployment without a
+checkpoint (a new install, or the first start of this version) the lane first
+checks everything ever ingested, a slice at a time, then settles behind the
+live window. While that walk is further back than `ANALYSIS_BACKLOG_RECENT_SECONDS`,
+the lane gives the region just behind the live window its turn first, at the
+start of every tick and then every `ANALYSIS_ENGINE_INTERVAL_SECONDS` between
+batches, oldest first and without moving the checkpoint: a transaction that has
+just left the live window is scored ahead of the older history, not after it.
+To drain a recent outage before older history (for example the first start of
+this version over a backlog), set it to reach back over the outage for the
+drain, then back to its default. The drain rate itself is bounded by what a
+late score costs (every late transaction reads the circular search's full
+forward horizon), so a large backlog takes a long time to clear whatever the
+lane's order; watch `checkpoint` and the per-batch log lines. Both lanes report
+under `scoring` in `/health/detail` (see "`scoring` reports behind or stalled").
 
 | Variable | Default | Description |
 |---|---|---|
 | `ANALYSIS_MAX_REF_TXS` | `2000` | Cap on reference txs pulled per enrichment fetch |
-| `ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK` | `20` | Batches drained per engine tick before yielding |
-| `ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS` | `0.5` | Pause between drained batches |
-| `UNANALYZED_OVERLAP_SECONDS` | `120` | Look-back overlap on the incremental unscored-tx query |
-| `UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS` | `600` | How often the safety-net full rescan runs |
-| `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` | `0` | Bound the full rescan to the last N seconds; `0` = all history. Narrowing it trades recall for query cost (see the warning above) |
+| `ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK` | `20` | Live-lane batches drained per engine tick before yielding to the tick's other duties. When the cap stops a drain whose last poll was still full, the next tick starts after the drain pause instead of a full interval; what is still left ages into the backlog lane |
+| `ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS` | `0.5` | Pause between drained live batches |
+| `ANALYSIS_LIVE_WINDOW_SECONDS` | `600` | Ingestion time the live lane covers, newest first |
+| `ANALYSIS_BACKLOG_ENABLED` | `true` | Run the backlog lane. Off, nothing scores what the live lane missed, and nothing reports it |
+| `ANALYSIS_BACKLOG_SLICE_SECONDS` | `3600` | Ingestion time one backlog pick covers; bounds the pick's memory |
+| `ANALYSIS_BACKLOG_PICK_SIZE` | `2000` | Transactions one backlog pick returns before they are scored in batches |
+| `ANALYSIS_BACKLOG_BATCH_SIZE` | `20` | Transactions the backlog lane scores per batch |
+| `ANALYSIS_BACKLOG_RECENT_SECONDS` | `86400` | Ingestion time just behind the live window that the backlog lane scores ahead of its oldest-first walk while the walk is further back; never moves the checkpoint. Reach it back over a recent outage to drain that first. `0` leaves everything to the walk |
+| `ANALYSIS_BACKLOG_SETTLE_SECONDS` | `3600` | How far the checkpoint trails the live window, so a row still on its way to ClickHouse cannot land behind it. Startup rejects a value shorter than one block-insert retry cycle at the configured timeouts |
+| `ANALYSIS_BACKLOG_MAX_THREADS` | `2` | ClickHouse `max_threads` for every backlog query: the most a drain of any size can take |
+| `ANALYSIS_SCORING_LAG_TOLERANCE_SECONDS` | `600` | Slack before `/health/detail` reports scoring `behind` or `stalled` |
+| `ANALYSIS_RETENTION_WARNING_SHARE` | `0.5` | Share of the shortest row retention (`CH_RETENTION_DAYS_TRANSACTIONS`, `CH_RETENTION_DAYS_IO`) the checkpoint may lag before `/health/detail` reports `retention_at_risk` and `behind`: rows still unscored behind it would expire before the backlog lane reaches them. Ignored while no retention is set |
+| `ANALYSIS_HISTORY_RESCORE_MAX_TXS` | `100` | Later passes of a ring that one stored batch, and its cascade, may score again: the lanes do not store cycles in chain order, and a pass stored before an earlier one misses it in its recycling and recurrence axes. A re-score is kept only if it raises `circular` without lowering `max_score`; passes past the cap are logged and keep their score. `0` turns it off |
 
 **Baselines.** Per-entity percentile baselines and the token registry.
 
@@ -770,7 +791,7 @@ table; these are the rest.
 
 ### Running more than one instance
 
-The app is built to run as a single instance: the Ogmios chain-sync checkpoint and the analysis engine's poll watermark are both in-process state that assumes exactly one writer. A second live process advancing the same state would double-insert transactions and race the checkpoint update.
+The app is built to run as a single instance: the Ogmios chain-sync checkpoint and the analysis engine's scoring checkpoint each assume exactly one writer. A second live process advancing the same state would double-insert transactions and race the checkpoint updates.
 
 Ingestion, analysis, housekeeping, and the notification schedulers (periodic report, contract-anomaly poller) are gated behind a Postgres session-level advisory lock (`LEADER_LOCK_ENABLED`, on by default) so this is safe to get wrong: only the instance that holds the lock runs them; any other instance still serves the read-only API, dashboard, and WebSocket feed, and retries every `LEADER_LOCK_RETRY_SECONDS` to take over (for example after the leader is redeployed or crashes). There is no need to manually pick a leader or coordinate a rolling restart; whichever instance acquires the lock first wins, and a standby is promoted automatically once it frees up.
 
@@ -879,6 +900,23 @@ curl -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 ```
 
 Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempool`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
+
+### `scoring` reports behind or stalled
+
+Ingestion at the tip says nothing about scoring. `/health/detail` reports the two scoring lanes on the leader, and the dashboard's Scoring row turns amber with them:
+
+```bash
+curl -s -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail | grep -o '"scoring":{[^}]*}'
+```
+
+| `state` | Meaning |
+|---|---|
+| `ok` | Everything ingested before the live window is scored, and the live lane is polling. |
+| `behind` | A transaction has waited past the live window by more than the tolerance (`oldest_unscored_at`), or the checkpoint has not yet checked the history (`checkpoint` far in the past, as on the first start of this version), or `retention_at_risk` is true: the checkpoint lags far enough that unscored rows behind it may expire first (see `ANALYSIS_RETENTION_WARNING_SHARE`). The backlog lane is draining it; its alerts arrive marked `late_detection`. |
+| `stalled` | The live lane has not finished a poll for the tolerance past its interval: look for `Analysis Engine error` in the logs, usually ClickHouse. |
+| `starting` | The live lane has not finished its first tick. |
+
+`checkpoint` is the ingestion time before which every transaction has a score; `oldest_unscored_at` is the oldest one the backlog lane last found waiting. A `behind` that persists while `checkpoint` does not move means the backlog lane is stuck on one slice: the log names the cause (`Backlog lane:` or `Analysis Engine backlog lane error`). A transaction scored late is a real finding; it is raised, not dropped.
 
 ### `address_index` reports gaps
 
@@ -1066,6 +1104,24 @@ projection-changing upgrade and expect list queries to fall back to the base
 table while it runs. The first boot of a release that adds the circular history
 columns runs another part-rewriting mutation, on `tx_class_scores`: see
 [Circular history columns](#circular-history-columns) before that upgrade.
+
+A rollback across the two-lane scoring release needs one setting in place
+first. The versions before it keep their poll cursor in memory, so they restart
+with a full rescan, bounded only by `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS`
+(default `0`, unbounded). Unbounded, that rescan reads the payload of every
+unscored transaction; behind a large backlog it fails on ClickHouse's memory
+limit on every tick and the rolled-back engine scores nothing at all. Keep
+`UNANALYZED_FULL_RESCAN_WINDOW_SECONDS=1800` set in `.env` (the two-lane release
+ignores it, so it is safe to leave there) and check it before any rollback. The
+rolled-back engine then scores from about the last half hour on and never looks
+further back; nothing is lost, because the two-lane release keeps its
+`scoring_checkpoint` in Postgres and its backlog lane scores the gap after a
+roll-forward. If the reason for rolling back is the backlog lane's load, prefer
+the levers that keep the release: `ANALYSIS_BACKLOG_MAX_THREADS=1`, or
+`ANALYSIS_BACKLOG_RECENT_SECONDS=0`, or as a last resort
+`ANALYSIS_BACKLOG_ENABLED=false`, which stops it until it is turned back on (its
+checkpoint keeps its place, but nothing scores what the live lane misses
+meanwhile, and `scoring` still reads `ok`).
 
 ### Circular history columns
 

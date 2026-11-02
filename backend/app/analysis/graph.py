@@ -765,6 +765,77 @@ def _prior_origin_cycles(
     return [(float(score), list(intermediaries)) for score, intermediaries in rows]
 
 
+class StoredCycle(NamedTuple):
+    """A stored cycle whose history read would now find a cycle stored after it."""
+
+    first_slot: int
+    circular: float
+    max_score: float
+
+
+def stored_later_cycles(
+    network: str, sources: list[tuple[str, int, dict[str, Any]]]
+) -> dict[str, StoredCycle]:
+    """Stored cycles that count one of ``sources`` among their origin's earlier ones.
+
+    ``sources`` are (tx_hash, circular score, circular evidence) of just-stored
+    transactions. A cycle stored before an earlier pass of its origin missed
+    that pass for good: the scoring lanes do not store cycles in chain order.
+    Returned are those whose _prior_origin_cycles read would now include a
+    source: one of its origin keys, a first slot from the source's up to the
+    window after it, and a path through at least one of the source's
+    intermediaries, without which neither the recycling share nor the
+    recurrence count can move. Same table read, under the same settings, as
+    _prior_origin_cycles.
+    """
+    picked = []
+    for tx_hash, score, ev in sources:
+        hops = ev.get("hops") or []
+        intermediaries = ev.get("intermediaries") or [
+            h.get("address", "") for h in hops[1:-1] if isinstance(h, dict)
+        ]
+        origins = ev.get("origin_keys") or [ev.get("origin_cluster") or ""]
+        origins = [o for o in origins if o]
+        # The read's own predicate for a cycle that counts as history.
+        if origins and (score >= 0 or intermediaries):
+            path = {_address_key(a) for a in intermediaries if a}
+            picked.append((tx_hash, int(ev.get("first_slot") or 0), set(origins), path))
+    if not picked:
+        return {}
+    rows = clickhouse._get_client().execute(
+        """
+        SELECT tx_hash, circular, max_score, circular_origins,
+               circular_intermediaries, circular_first_slot
+        FROM tx_class_scores FINAL
+        WHERE network = %(network)s
+          AND hasAny(circular_origins, %(origins)s)
+          AND (circular >= 0 OR notEmpty(circular_intermediaries))
+          AND circular_first_slot >= %(min_slot)s
+          AND circular_first_slot <= %(max_slot)s
+        SETTINGS use_skip_indexes_if_final = 0
+        """,
+        {
+            "network": network,
+            "origins": sorted(set().union(*(o for _, _, o, _ in picked))),
+            "min_slot": min(first for _, first, _, _ in picked),
+            "max_slot": max(first for _, first, _, _ in picked) + _RECURRENCE_WINDOW_SLOTS,
+        },
+    )
+    later: dict[str, StoredCycle] = {}
+    for tx_hash, circular, max_score, origins, intermediaries, first_slot in rows:
+        path = {_address_key(a) for a in intermediaries}
+        for src_hash, src_first, src_origins, src_path in picked:
+            if (
+                tx_hash != src_hash
+                and src_first <= first_slot <= src_first + _RECURRENCE_WINDOW_SLOTS
+                and src_origins.intersection(origins)
+                and src_path & path
+            ):
+                later[tx_hash] = StoredCycle(int(first_slot), float(circular), float(max_score))
+                break
+    return later
+
+
 def _representatives(hops: list[dict[str, Any]]) -> list[str]:
     """Each step's representative address, without the origin and the close.
 

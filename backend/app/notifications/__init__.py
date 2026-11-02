@@ -121,7 +121,7 @@ def on_new_scores(results: list[dict[str, Any]], network: str) -> None:
             )  # future intentionally discarded — fire-and-forget
         except Exception:
             # One malformed result — or the loop closing mid-shutdown — must
-            # never propagate into run_once and stall the scoring watermark.
+            # never propagate into run_once and fail the scoring batch.
             logger.exception(
                 "notification: skipping result %s", r.get("tx_hash") if isinstance(r, dict) else "?"
             )

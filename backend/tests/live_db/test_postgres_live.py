@@ -2,12 +2,12 @@
 
 Covers the paths the hermetic suite only sees through mocks: idempotent
 schema DDL, the lifecycle upsert state machine, entity state, and the
-sync checkpoint. All rows live under the LIVE_NETWORK namespace and are
-removed afterwards. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
+sync and scoring checkpoints. All rows live under the LIVE_NETWORK namespace
+and are removed afterwards. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.db import postgres
 from app.db.postgres import get_connection
@@ -82,6 +82,31 @@ class TestEntityState:
                         "DELETE FROM entity_state WHERE entity_id = $1",
                         entity_id,
                     )
+
+        pg_run(scenario)
+
+
+class TestScoringCheckpoint:
+    def test_save_then_get_and_never_backwards(self, pg_run):
+        # A stale writer (a lane from before a leader hand-back) must not move
+        # the never-skip checkpoint back over ingestion time already checked.
+        caught_up = datetime(2026, 11, 2, 10, 50, tzinfo=UTC)
+
+        async def _clear():
+            async with get_connection() as conn:
+                await conn.execute(
+                    "DELETE FROM scoring_checkpoint WHERE network = $1", LIVE_NETWORK
+                )
+
+        async def scenario():
+            await _clear()
+            try:
+                assert await postgres.get_scoring_checkpoint(LIVE_NETWORK) is None
+                await postgres.save_scoring_checkpoint(LIVE_NETWORK, caught_up)
+                await postgres.save_scoring_checkpoint(LIVE_NETWORK, caught_up - timedelta(days=1))
+                assert await postgres.get_scoring_checkpoint(LIVE_NETWORK) == caught_up
+            finally:
+                await _clear()
 
         pg_run(scenario)
 

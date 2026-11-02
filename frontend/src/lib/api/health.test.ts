@@ -83,4 +83,36 @@ describe("deriveModules", () => {
 		const modules = deriveModules(healthFixture({ clustering_enabled: true }));
 		expect(modules).toContainEqual({ name: "Clustering", online: false });
 	});
+
+	function scoringFixture(state: string): HealthDetail["scoring"] {
+		return {
+			state,
+			live_window_seconds: 600,
+			live_polled_at: "2026-11-02T12:00:00Z",
+			backlog_enabled: true,
+			checkpoint: "2026-11-02T10:50:00Z",
+			oldest_unscored_at: null,
+		};
+	}
+
+	it("shows Scoring online when the lanes are caught up", () => {
+		const modules = deriveModules(healthFixture({ scoring: scoringFixture("ok") }));
+		expect(modules).toContainEqual({ name: "Scoring", online: true });
+	});
+
+	it.each(["behind", "stalled", "starting"])(
+		"shows Scoring offline when %s, though ingestion is fine",
+		(state) => {
+			// Ingestion at the tip says nothing about scoring: this is the row
+			// that turns the overall dot amber when transactions go unscored.
+			const modules = deriveModules(healthFixture({ scoring: scoringFixture(state) }));
+			expect(modules).toContainEqual({ name: "Scoring", online: false });
+			expect(modules.find((m) => m.name === "Chain Sync")?.online).toBe(true);
+		},
+	);
+
+	it("omits the Scoring row on an instance that does not score", () => {
+		const names = deriveModules(healthFixture()).map((m) => m.name);
+		expect(names).not.toContain("Scoring");
+	});
 });

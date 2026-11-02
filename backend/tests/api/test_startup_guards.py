@@ -182,6 +182,31 @@ class TestAnalysisBatchesValidation:
         )
 
 
+class TestBacklogSettleValidation:
+    """A settle margin shorter than one block-insert retry cycle lets the
+    scoring checkpoint pass a stamp whose row is still on its way: that row
+    then lands behind it and is never scored."""
+
+    def test_a_settle_inside_the_insert_retry_cycle_is_rejected(self):
+        floor = Settings()._insert_visibility_seconds()
+        with pytest.raises(ValidationError, match="ANALYSIS_BACKLOG_SETTLE_SECONDS"):
+            Settings(ANALYSIS_BACKLOG_SETTLE_SECONDS=int(floor) - 1)
+
+    def test_the_floor_follows_the_insert_timeouts(self):
+        # A longer send/receive timeout lengthens every attempt.
+        base = Settings()._insert_visibility_seconds()
+        slower = Settings(
+            CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=Settings().CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+            * 2,
+            ANALYSIS_BACKLOG_SETTLE_SECONDS=Settings().ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+        )
+        assert slower._insert_visibility_seconds() > base
+
+    def test_the_default_clears_the_floor(self):
+        default = Settings()
+        assert default.ANALYSIS_BACKLOG_SETTLE_SECONDS >= default._insert_visibility_seconds()
+
+
 class TestCycleFanoutValidation:
     """le: the frontier is bound into the hop query twice, and a query text past
     ClickHouse's max_query_size fails every hop whose frontier reaches it."""
