@@ -147,7 +147,7 @@ def _ok(value):
 
 
 class TestAddressIndexCheck:
-    """The circular BFS sees a leg only through address_transactions, so a gap
+    """The circular BFS sees a leg only through spend_edges, so a gap
     there must surface as a warning and in /health/detail, not stay silent."""
 
     @pytest.fixture(autouse=True)
@@ -192,8 +192,7 @@ class TestAddressIndexCheck:
         assert status["checked_spends"] == 40
         assert status["unresolved_inputs"] == 2
         assert any(
-            r.levelname == "WARNING" and "address_transactions" in r.getMessage()
-            for r in caplog.records
+            r.levelname == "WARNING" and "spend_edges" in r.getMessage() for r in caplog.records
         )
 
     async def test_a_complete_index_reads_ok(self, monkeypatch):

@@ -21,7 +21,7 @@ from typing import Any
 
 from app.analysis import baselines, engine, external
 from app.config import settings
-from app.db import clickhouse, postgres
+from app.db import clickhouse, postgres, spend_edges
 from app.utils.datetime_utils import format_iso_utc
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,9 @@ _backlog_task: asyncio.Task | None = None
 # loop could not supply (collision enrichment, alerts). One per start, for the
 # reason given at _baseline_stop.
 _lane_stop: threading.Event | None = None
+# The one-time spend_edges history backfill both lanes wait on before their first
+# batch (see _wait_for_spend_edges). None when no start() began one.
+_edges_task: asyncio.Task | None = None
 
 
 @dataclass
@@ -48,6 +51,8 @@ class _ScoringState:
     # Ingestion stamp of the oldest transaction the backlog lane last found
     # waiting; None once a tick reached the live window with nothing waiting.
     oldest_unscored: datetime | None = None
+    # While the spend_edges history is being filled, and neither lane scores.
+    edges_filling: bool = False
 
 
 _scoring = _ScoringState()
@@ -115,6 +120,7 @@ async def _loop():
     # newer than anything the store has caught up with.
     _last_baseline_recompute = max(_last_baseline_recompute, await _initial_baseline_schedule())
 
+    await _wait_for_spend_edges()
     while True:
         try:
             # Drain loop: keep pulling batches while the poll comes back
@@ -243,6 +249,27 @@ async def _run_baseline_recompute(stop_event: threading.Event) -> None:
         logger.info("Baseline recomputation: %s rows updated", total)
 
 
+async def _fill_spend_edges(network: str, should_stop: Callable[[], bool]) -> None:
+    """Fill the spend_edges history, then let the lanes score."""
+    await spend_edges.ensure_backfilled(network, should_stop)
+    if not should_stop():
+        _scoring.edges_filling = False
+        # The stall clock starts when the lane can first poll, not while it waits.
+        _scoring.live_started_at = datetime.now(UTC)
+
+
+async def _wait_for_spend_edges() -> None:
+    """Hold a lane until the spend_edges history is filled.
+
+    A cycle scored against a partial graph misses the legs not yet filled in,
+    and nothing would score it again: so neither lane starts before it is whole.
+    Shielded, since the two lanes share one backfill and cancelling either
+    must not cancel it for the other.
+    """
+    if _edges_task is not None:
+        await asyncio.shield(_edges_task)
+
+
 async def _backlog_loop() -> None:
     """Score what left the live window unscored, oldest first, forever."""
     logger.info(
@@ -252,6 +279,7 @@ async def _backlog_loop() -> None:
         settings.ANALYSIS_BACKLOG_BATCH_SIZE,
         settings.ANALYSIS_BACKLOG_MAX_THREADS,
     )
+    await _wait_for_spend_edges()
     while True:
         try:
             await _backlog_tick(settings.CARDANO_NETWORK)
@@ -513,7 +541,8 @@ def scoring_status() -> dict[str, Any]:
     """The scoring lanes' health for /health/detail.
 
     ``state`` is "disabled" when ANALYSIS_ENABLED is off (nothing scores),
-    "starting" until the live lane finishes its first poll, "stalled" when it
+    "starting" while the spend_edges history is filled and until the live lane
+    finishes its first poll after it, "stalled" when it
     has not finished one (or, since it started, its first) for the tolerance
     past its interval, "behind" when transactions older than the live window
     may be unscored (see _history_incomplete) or rows behind the checkpoint
@@ -530,6 +559,8 @@ def scoring_status() -> dict[str, Any]:
     last_progress = _scoring.live_polled_at or _scoring.live_started_at
     if not settings.ANALYSIS_ENABLED:
         state = "disabled"
+    elif _scoring.edges_filling:
+        state = "starting"
     elif last_progress is not None and now - last_progress > stall_after:
         state = "stalled"
     elif _scoring.live_polled_at is None:
@@ -548,6 +579,7 @@ def scoring_status() -> dict[str, Any]:
         "backlog_enabled": settings.ANALYSIS_BACKLOG_ENABLED,
         "checkpoint": format_iso_utc(_scoring.checkpoint),
         "oldest_unscored_at": format_iso_utc(_scoring.oldest_unscored),
+        "spend_edges_filling": _scoring.edges_filling,
     }
 
 
@@ -578,7 +610,7 @@ def start():
     and run two drain loops per lane (duplicate scoring is RMT-absorbed, but
     the wasted work and a second checkpoint writer are not worth it).
     """
-    global _task, _backlog_task, _lane_stop
+    global _task, _backlog_task, _lane_stop, _edges_task
     if _task is not None and not _task.done():
         logger.warning("Analysis loop already running; start() ignored")
         return
@@ -589,6 +621,10 @@ def start():
     _scoring.live_polled_at = None
     _scoring.live_started_at = datetime.now(UTC)
     _lane_stop = threading.Event()
+    _scoring.edges_filling = True
+    _edges_task = asyncio.create_task(
+        _fill_spend_edges(settings.CARDANO_NETWORK, _lane_stop.is_set)
+    )
     _task = asyncio.create_task(_loop())
     if settings.ANALYSIS_BACKLOG_ENABLED:
         _backlog_task = asyncio.create_task(_backlog_loop())
@@ -601,7 +637,7 @@ def start():
 
 def stop():
     """Cancel the background tasks on shutdown."""
-    global _task, _backlog_task, _baseline_task
+    global _task, _backlog_task, _baseline_task, _edges_task
     # Ends an in-flight recompute at its next scope: cancelling the awaiting
     # task alone would leave the executor thread scanning to the end.
     if _baseline_stop is not None:
@@ -616,6 +652,11 @@ def stop():
     if _backlog_task and not _backlog_task.done():
         _backlog_task.cancel()
     _backlog_task = None
+    # A chunk in flight finishes on its thread; the next start resumes after
+    # the last chunk recorded.
+    if _edges_task and not _edges_task.done():
+        _edges_task.cancel()
+    _edges_task = None
     if _task and not _task.done():
         _task.cancel()
         _task = None

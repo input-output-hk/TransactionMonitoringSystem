@@ -755,7 +755,7 @@ means keep forever. This is verified in `backend/app/config.py`:
 | Variable | Default | What it prunes |
 |---|---|---|
 | `CH_RETENTION_DAYS_TRANSACTIONS` | `0` | ClickHouse `transactions` |
-| `CH_RETENTION_DAYS_IO` | `0` | `transaction_inputs`, `transaction_outputs`, `address_transactions` |
+| `CH_RETENTION_DAYS_IO` | `0` | `transaction_inputs`, `transaction_outputs`, `address_transactions`, `spend_edges` |
 | `CH_RETENTION_DAYS_FEATURES` | `0` | `utxo_features`, `tx_script_features` |
 | `LIFECYCLE_RETENTION_DAYS` | `0` | Terminal (`DROPPED`, `ROLLED_BACK`) Postgres lifecycle rows only |
 | `MEMPOOL_COLLISION_RETENTION_DAYS` | `0` | Mempool collision bookkeeping |

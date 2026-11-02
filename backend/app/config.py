@@ -27,10 +27,11 @@ _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS = 300
 # Statements between a block's ingestion stamp and its transactions row
 # becoming visible. One ClickHouse read ahead of the insert (resolve_input_amounts'
 # outputs lookup), then per insert attempt the statements of
-# clickhouse.insert_transactions_batch: inputs, outputs, the three feature
-# tables and transactions last (tests/db/test_block_write_order pins the count).
+# clickhouse.insert_transactions_batch: inputs, outputs, spend_edges, the three
+# feature tables and transactions last (tests/db/test_block_write_order pins the
+# count).
 _PRE_INSERT_STATEMENTS = 1
-_BLOCK_INSERT_STATEMENTS = 6
+_BLOCK_INSERT_STATEMENTS = 7
 
 # Most transaction hashes one scoring batch binds into a query. clickhouse-driver
 # writes a bound list into the query text (about 68 bytes per hash), and
@@ -320,7 +321,7 @@ class Settings(BaseSettings):
     # one insert-retry cycle after its ingestion stamp (the stamp is taken at
     # parse, and every retry re-sends it), so the checkpoint must not pass a
     # stamp that recent or such a row would land behind it unscored. At least
-    # _insert_visibility_seconds() (see _backlog_settle_floor), about 3,800 s at
+    # _insert_visibility_seconds() (see _backlog_settle_floor), about 4,400 s at
     # the default timeouts; two hours leave room for the insert's wait on the
     # shared ClickHouse executor, which no timeout bounds. Only the checkpoint
     # trails: the walk still scores up to the live window.
@@ -431,7 +432,7 @@ class Settings(BaseSettings):
     # data). tx_class_scores / archived_alerts / baselines are never
     # expired regardless of these settings.
     CH_RETENTION_DAYS_TRANSACTIONS: int = 0
-    CH_RETENTION_DAYS_IO: int = 0  # inputs / outputs / address_transactions
+    CH_RETENTION_DAYS_IO: int = 0  # inputs / outputs / address_transactions / spend_edges
     CH_RETENTION_DAYS_FEATURES: int = 0  # utxo_features / tx_script_features
     LIFECYCLE_RETENTION_DAYS: int = 0  # terminal (DROPPED/ROLLED_BACK) rows only
     MEMPOOL_COLLISION_RETENTION_DAYS: int = 0
@@ -520,16 +521,17 @@ class Settings(BaseSettings):
     COLLISION_DETECTION_ENABLED: bool = True
     CYCLE_DETECTION_ENABLED: bool = True
     CYCLE_MAX_HOPS: int = 6
-    # The frontier is bound into the circular hop query twice (graph._HOP_QUERY),
-    # and ClickHouse rejects a query text past max_query_size (256 KiB by
-    # default): 1,000 bootstrap addresses of 150 characters already fail, 845
-    # pass, so the bound keeps a margin under that.
+    # The frontier is bound into the circular hop query (graph._HOP_QUERY) as
+    # text, and ClickHouse rejects a query text past max_query_size (256 KiB by
+    # default). Measured while the query bound it twice: 1,000 bootstrap
+    # addresses of 150 characters failed, 845 passed. Bound once since
+    # spend_edges, the same cap keeps twice that margin.
     CYCLE_MAX_FANOUT: int = Field(default=50, ge=1, le=500)
-    # How often housekeeping checks that address_transactions lists every recent
-    # spend (graph.address_index_gaps): the circular BFS sees a leg only through
-    # that index. 0 turns the check off; otherwise at least
+    # How often housekeeping checks that spend_edges holds every recent spend
+    # (graph.address_index_gaps): the circular BFS sees a leg only through those
+    # edges. 0 turns the check off; otherwise at least
     # _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS, since each check reads the
-    # window's spends out of two history-sized tables.
+    # window's spends out of history-sized tables.
     ADDRESS_INDEX_CHECK_INTERVAL_SECONDS: int = Field(default=900, ge=0)
     # Chain time each check covers: an hour is ~180 mainnet blocks, enough for a
     # broken enrichment path to show within one check. At most a day: the reads

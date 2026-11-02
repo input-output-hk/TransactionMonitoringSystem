@@ -13,7 +13,7 @@ from clickhouse_driver import Client
 from clickhouse_driver.errors import Error as ClickHouseError
 
 from app.config import settings
-from app.db import clickhouse_schema
+from app.db import clickhouse_schema, spend_edges
 from app.db.clickhouse_schema import (  # noqa: F401  (re-exported API)
     DEDUP_TABLE_KEYS,
     SCHEMA_DDL,
@@ -321,6 +321,11 @@ def insert_transactions_batch(transactions: list[NormalizedTransaction]):
                 all_outputs,
             )
 
+        # Not best-effort like the features below: the circular BFS follows
+        # value only through these rows, so a missing one is a cycle leg it
+        # cannot see. A failure fails the block, which is written again.
+        spend_edges.insert_rows(client, spend_edges.rows_for(transactions, now))
+
         # ------------------------------------------------------------------
         # Populate extended feature tables from raw_data (best-effort)
         try:
@@ -423,6 +428,7 @@ _ROLLBACK_CLEANUP_TABLES: tuple[str, ...] = (
     "utxo_features",
     "tx_script_features",
     "address_transactions",
+    "spend_edges",
     "tx_class_scores",
     "transactions",
 )

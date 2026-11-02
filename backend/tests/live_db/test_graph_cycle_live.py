@@ -69,8 +69,8 @@ def _tx(tx_hash, slot, from_addrs, outputs):
     """One leg of a cycle: spends from `from_addrs`, pays `outputs` [(addr, amount)].
 
     `addresses` lists the spent-from addresses as well as the paid ones, as
-    input enrichment does before every production insert. The hop query finds
-    spends through address_transactions, which is built from this list.
+    input enrichment does before every production insert. The block writer
+    makes the spend_edges the hop query reads from the inputs and outputs.
     """
     total = sum(amount for _, amount in outputs)
     return NormalizedTransaction(
@@ -239,14 +239,14 @@ class TestForwardBfsFindsAPlantedCycle:
     def test_a_payment_into_the_frontier_is_not_a_spend_from_it(self, ch):
         """Only a transaction SPENDING from a frontier address extends the BFS.
 
-        The hop query prefilters through address_transactions, which lists
-        every transaction touching an address, including ones that only pay
-        it. Here an unrelated wallet pays B and the origin in one transaction,
+        address_transactions lists every transaction touching an address,
+        including ones that only pay it, and the hop query once prefiltered
+        through it. Here an unrelated wallet pays B and the origin in one transaction,
         landing after the origin leg and before B's real spend. Taken as B's
         spend, it would close a 2-leg "cycle" first; the BFS stops at the first
         origin-paying row and the gate discards 2-leg cycles, so the real 3-leg
-        cycle would go unreported. Confirming each candidate against
-        transaction_inputs is what keeps it out.
+        cycle would go unreported. spend_edges holds spends only, which is
+        what keeps it out.
         """
 
         def payer_into_b(origins, addr_b):
@@ -465,10 +465,10 @@ def _primary_key_columns(plan_lines):
 
 
 class TestHopQueryPlan:
-    """The hop query's cost must not grow with the history: the address index is
-    read by address and slot, and the spends by tx_hash, never scanned."""
+    """The hop query's cost must not grow with the history: spend_edges is read
+    by address and slot, never scanned, and no hash-ordered table is read."""
 
-    def test_the_index_and_the_spends_are_read_by_primary_key(self, ch):
+    def test_the_edges_are_read_by_address_and_slot(self, ch):
         params = {
             "addresses": [f"addr_test1qqplan_{uuid.uuid4().hex[:12]}"],
             "network": LIVE_NETWORK,
@@ -482,25 +482,20 @@ class TestHopQueryPlan:
             plan = ch._get_client().execute("EXPLAIN indexes = 1 " + sql, params)
             return _primary_key_columns([row[0] for row in plan])
 
-        assert graph._HOP_SPENDS in graph._HOP_QUERY
-        assert graph._HOP_PREFILTER in graph._HOP_SPENDS
-        assert {"address", "slot"} <= keys(graph._HOP_PREFILTER)["address_transactions"]
-        assert "tx_hash" in keys(graph._HOP_SPENDS)["transaction_inputs"]
+        read = keys(graph._HOP_QUERY)
+        assert set(read) == {"spend_edges"}
+        assert {"address", "slot"} <= read["spend_edges"]
 
 
 class TestAddressIndexGaps:
-    """graph.address_index_gaps counts the recent spends the hop query's
-    prefilter cannot see. Each test plants on a network of its own, so no other
+    """graph.address_index_gaps counts the recent spends the hop query cannot
+    see in spend_edges. Each test plants on a network of its own, so no other
     plant in the database counts."""
 
-    def _spend(self, network, left_out_of_index=False, slotless=False, unresolved=False):
+    def _spend(self, network, slotless=False, unresolved=False):
         spender, payee = (f"addr_test1qqg{leg}_{uuid.uuid4().hex[:12]}" for leg in "sp")
         spend = _tx(uuid.uuid4().hex * 2, _ORIGIN_SLOT, [spender], [(payee, _LEG_1)])
         update: dict = {"network": network}
-        if left_out_of_index:
-            # Stored without its input address, as a broken enrichment path
-            # would: address_transactions never learns that the spender spent.
-            update["addresses"] = [payee]
         if slotless:
             update["slot"] = None
         if unresolved:
@@ -512,6 +507,13 @@ class TestAddressIndexGaps:
     def _network(self):
         return f"{LIVE_NETWORK}-addrindex-{uuid.uuid4().hex[:8]}"
 
+    def _drop_edges(self, ch, network, tx_hash):
+        # As a block whose edges never landed would leave it.
+        ch._get_client().execute(
+            "DELETE FROM spend_edges WHERE network = %(network)s AND tx_hash = %(tx)s",
+            {"network": network, "tx": tx_hash},
+        )
+
     def _check(self, network):
         return graph.address_index_gaps(network, settings.ADDRESS_INDEX_CHECK_WINDOW_SECONDS)
 
@@ -521,11 +523,11 @@ class TestAddressIndexGaps:
 
         assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=1, unresolved=0)
 
-    def test_a_spend_left_out_of_the_index_is_counted(self, ch):
+    def test_a_spend_without_its_edges_is_counted(self, ch):
         network = self._network()
-        ch.insert_transactions_batch(
-            [self._spend(network), self._spend(network, left_out_of_index=True)]
-        )
+        missing = self._spend(network)
+        ch.insert_transactions_batch([self._spend(network), missing])
+        self._drop_edges(ch, network, missing.tx_hash)
 
         assert self._check(network) == graph.AddressIndexCheck(missing=1, checked=2, unresolved=0)
 
@@ -533,20 +535,17 @@ class TestAddressIndexGaps:
         """Only a transaction's latest version counts.
 
         After a fork switch the rollback purge deletes the transaction and its
-        index rows, and the re-confirmed transaction is indexed at its new
-        slot; but a time-range read of transactions goes through the
+        edges, and the re-confirmed transaction gets edges at its new slot;
+        but a time-range read of transactions goes through the
         p_by_time_v2 projection, which serves the deleted version until its
         part merges. Planted here as two unmerged versions with the old slot's
-        index rows gone: read at the old slot, every spend of the switch was a
+        edges gone: read at the old slot, every spend of the switch was a
         false gap.
         """
         network = self._network()
         spend = self._spend(network)
         ch.insert_transactions_batch([spend])
-        ch._get_client().execute(
-            "DELETE FROM address_transactions WHERE network = %(network)s AND tx_hash = %(tx)s",
-            {"network": network, "tx": spend.tx_hash},
-        )
+        self._drop_edges(ch, network, spend.tx_hash)
         reconfirmed = spend.model_copy(
             update={
                 "slot": spend.slot + _LEG_SLOT_GAP,
@@ -560,15 +559,15 @@ class TestAddressIndexGaps:
 
     def test_a_slotless_spend_is_not_checked(self, ch):
         """No hop window holds a transaction without a slot, so the BFS never
-        misses its spends by the index: it cannot see them at all."""
+        misses its spends by the edges: it cannot see them at all."""
         network = self._network()
-        ch.insert_transactions_batch([self._spend(network, left_out_of_index=True, slotless=True)])
+        ch.insert_transactions_batch([self._spend(network, slotless=True)])
 
         assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=0, unresolved=0)
 
     def test_an_unresolved_input_is_counted_apart(self, ch):
         """An input without an address is a failure of input enrichment, which
-        the index cannot fix: reported on its own, not as a missing spend."""
+        the edges cannot fix: reported on its own, not as a missing spend."""
         network = self._network()
         ch.insert_transactions_batch([self._spend(network), self._spend(network, unresolved=True)])
 

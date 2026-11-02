@@ -242,6 +242,19 @@ async def execute_schema():
             )
         """)
 
+        # Progress of the one-time spend_edges history backfill
+        # (app.db.spend_edges): chunks below next_chunk are filled, and the
+        # scoring lanes wait for completed_at. Kept here, beside the scoring
+        # checkpoint it protects, so a restart resumes rather than refills.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS spend_edges_backfill (
+                network       TEXT PRIMARY KEY,
+                next_chunk    INTEGER NOT NULL,
+                completed_at  TIMESTAMPTZ,
+                updated_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Quarantined blocks — the checkpoint advanced past a block the decoder
         # could not read, so its transactions were never scored. This is a
         # RECALL GAP and the only durable record that it exists: without the
@@ -1245,6 +1258,36 @@ async def get_scoring_checkpoint(network: str) -> datetime | None:
     async with get_connection() as conn:
         return await conn.fetchval(
             "SELECT complete_through FROM scoring_checkpoint WHERE network = $1", network
+        )
+
+
+async def get_spend_edges_backfill(network: str) -> tuple[int, bool]:
+    """(next chunk to fill, whether the backfill completed) for the network."""
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT next_chunk, completed_at FROM spend_edges_backfill WHERE network = $1",
+            network,
+        )
+    if row is None:
+        return 0, False
+    return int(row["next_chunk"]), row["completed_at"] is not None
+
+
+async def save_spend_edges_backfill(network: str, next_chunk: int, completed: bool) -> None:
+    """Record backfill progress. Never moves backwards, and stays completed once it is."""
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO spend_edges_backfill (network, next_chunk, completed_at, updated_at)
+            VALUES ($1, $2, CASE WHEN $3 THEN CURRENT_TIMESTAMP END, CURRENT_TIMESTAMP)
+            ON CONFLICT (network) DO UPDATE SET
+                next_chunk   = GREATEST(spend_edges_backfill.next_chunk, $2),
+                completed_at = COALESCE(spend_edges_backfill.completed_at, EXCLUDED.completed_at),
+                updated_at   = CURRENT_TIMESTAMP
+        """,
+            network,
+            next_chunk,
+            completed,
         )
 
 

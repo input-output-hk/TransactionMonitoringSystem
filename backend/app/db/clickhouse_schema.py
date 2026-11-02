@@ -183,6 +183,31 @@ SCHEMA_DDL: dict[str, str] = {
         ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
         ORDER BY (network, address, slot, tx_hash)
     """,
+    # The circular BFS's transfer graph: one row per (address a confirmed
+    # transaction spends from, that transaction, address it pays), with what it
+    # paid there. Ordered by spender and slot, so a hop (graph._HOP_QUERY) is a
+    # primary-key range read per frontier address whatever the window holds:
+    # the reads it replaced confirmed candidates by tx_hash IN on the three
+    # hash-ordered fact tables, and a busy frontier over a full window touched
+    # every granule of them (about 35M rows per hop on mainnet once scoring ran
+    # a day late). Spends and payments only, as the hop counts them: no
+    # collateral, reference or failed-transaction inputs, no collateral outputs,
+    # no empty addresses, no slotless (mempool) copies. About 3.5 rows per
+    # transaction on mainnet (p99 16, max 1,849). Written by the block writer
+    # beside the inputs and outputs and backfilled once (app.db.spend_edges).
+    "spend_edges": """
+        CREATE TABLE IF NOT EXISTS {table} (
+            network     String,
+            address     String,
+            slot        UInt64,
+            tx_hash     String,
+            to_address  String,
+            paid        UInt64,
+            ingestion_timestamp DateTime DEFAULT now(),
+            INDEX idx_tx_hash tx_hash TYPE bloom_filter GRANULARITY 1
+        ) ENGINE = ReplacingMergeTree(ingestion_timestamp)
+        ORDER BY (network, address, slot, tx_hash, to_address)
+    """,
     # Policy-id first-sighting lookup: (network, policy_id) -> min slot ever
     # observed carrying the policy (output value bundles + mint maps).
     # Backs policy-age signals (token_dust established-collection cap; the
@@ -315,6 +340,10 @@ DEDUP_TABLE_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
     "transaction_inputs": (("network", "tx_hash", "input_index"), "ingestion_timestamp"),
     "transaction_outputs": (("network", "tx_hash", "output_index"), "ingestion_timestamp"),
     "address_transactions": (("network", "address", "slot", "tx_hash"), "ingestion_timestamp"),
+    "spend_edges": (
+        ("network", "address", "slot", "tx_hash", "to_address"),
+        "ingestion_timestamp",
+    ),
     "utxo_features": (("network", "tx_hash", "output_index"), "ingestion_timestamp"),
     "tx_script_features": (("network", "tx_hash"), "ingestion_timestamp"),
     "tx_class_scores": (("network", "tx_hash"), "analyzed_at"),
@@ -418,6 +447,7 @@ _RETENTION_TABLE_KNOBS: tuple[tuple[str, str], ...] = (
     ("transaction_inputs", "CH_RETENTION_DAYS_IO"),
     ("transaction_outputs", "CH_RETENTION_DAYS_IO"),
     ("address_transactions", "CH_RETENTION_DAYS_IO"),
+    ("spend_edges", "CH_RETENTION_DAYS_IO"),
     ("utxo_features", "CH_RETENTION_DAYS_FEATURES"),
     ("tx_script_features", "CH_RETENTION_DAYS_FEATURES"),
 )
@@ -681,6 +711,13 @@ def _create_address_lookup(client: Client) -> None:
         logger.warning(f"address_transactions backfill failed: {e}")
 
 
+def _create_spend_edges(client: Client) -> None:
+    """The circular BFS's transfer graph (see SCHEMA_DDL). Its history is filled
+    by app.db.spend_edges.ensure_backfilled, which the scoring lanes wait on: a
+    one-shot INSERT here would hold startup for the whole history."""
+    client.execute(SCHEMA_DDL["spend_edges"].format(table="spend_edges"))
+
+
 def _add_circular_history_columns(client: Client) -> None:
     """Add the circular history columns to an existing tx_class_scores.
 
@@ -917,6 +954,7 @@ def create_all(client: Client) -> None:
 
     _create_transaction_io(client)
     _create_address_lookup(client)
+    _create_spend_edges(client)
     _create_detection_tables(client)
     _create_baselines(client)
 

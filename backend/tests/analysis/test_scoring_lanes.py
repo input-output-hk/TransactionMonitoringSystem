@@ -36,6 +36,8 @@ _RETENTION_DAYS = 30
 
 # Where a fully caught-up checkpoint sits: the settle margin behind the live window.
 _SETTLED = NOW - _WINDOW - _SETTLE
+# Event-loop turns that let freshly started tasks reach their first await.
+_GATE_YIELDS = 10
 
 
 class _Frozen(datetime):
@@ -421,6 +423,13 @@ class TestScoringStatus:
         started = NOW - timedelta(seconds=_INTERVAL_SECONDS) - _TOLERANCE - timedelta(seconds=1)
         assert self._state(live_started_at=started, checkpoint=_SETTLED) == "stalled"
 
+    def test_starting_while_the_spend_edges_history_fills(self):
+        # Neither lane scores meanwhile; filling outlasting the stall tolerance
+        # is not a stall.
+        started = NOW - timedelta(seconds=_INTERVAL_SECONDS) - _TOLERANCE - timedelta(seconds=1)
+        state = self._state(edges_filling=True, live_started_at=started, checkpoint=_SETTLED)
+        assert state == "starting"
+
     def test_disabled_while_analysis_is_off(self, monkeypatch):
         # The live lane's ticks still finish, scoring nothing.
         monkeypatch.setattr(settings, "ANALYSIS_ENABLED", False)
@@ -571,3 +580,40 @@ class TestLiveDrainPacing:
         polls = AsyncMock(side_effect=[full, RuntimeError("ClickHouse down")])
         await self._tick_sleep(monkeypatch, run_once=polls)
         assert analysis._scoring.live_polled_at == NOW
+
+
+class TestSpendEdgesGate:
+    """No lane scores before the spend_edges history is whole: a cycle scored
+    against a partial graph misses the legs not yet filled in, for good."""
+
+    async def test_both_lanes_wait_for_the_backfill(self, monkeypatch):
+        import asyncio
+
+        filled = asyncio.Event()
+
+        async def backfill(network, should_stop):
+            await filled.wait()
+
+        live = AsyncMock(return_value=0)
+        tick = AsyncMock()
+        monkeypatch.setattr(analysis.spend_edges, "ensure_backfilled", backfill)
+        monkeypatch.setattr(analysis.engine, "run_once_async", live)
+        monkeypatch.setattr(analysis, "_backlog_tick", tick)
+        monkeypatch.setattr(analysis, "_initial_baseline_schedule", AsyncMock(return_value=0.0))
+        monkeypatch.setattr(settings, "BASELINE_BOOTSTRAP_ON_STARTUP", False)
+        monkeypatch.setattr(settings, "SCORER_FAKE_TOKEN_ENABLED", False)
+        monkeypatch.setattr(analysis, "_maybe_start_baseline_recompute", lambda: None)
+        monkeypatch.setattr(analysis, "_task", None)
+        analysis.start()
+        try:
+            for _ in range(_GATE_YIELDS):
+                await asyncio.sleep(0)
+            assert not live.called and not tick.called
+            assert analysis.scoring_status()["state"] == "starting"
+            filled.set()
+            for _ in range(_GATE_YIELDS):
+                await asyncio.sleep(0)
+            assert live.called and tick.called
+            assert analysis.scoring_status()["spend_edges_filling"] is False
+        finally:
+            analysis.stop()

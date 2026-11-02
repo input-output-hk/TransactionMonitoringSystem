@@ -333,7 +333,7 @@ class _PlantedCycleClient:
         self._spends = {_LEG_2_TX: [_HOP_1], _CLOSING_TX: [closer]}
 
     def execute(self, sql, params=None, **_):
-        if "WITH cand AS" in sql:
+        if "FROM spend_edges" in sql:
             return self._hops.pop(0) if self._hops else []
         if "SELECT address, amount" in sql:
             if self._fail_closing_read:

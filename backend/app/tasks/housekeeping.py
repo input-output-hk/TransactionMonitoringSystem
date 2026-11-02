@@ -44,8 +44,8 @@ def address_index_status() -> dict[str, Any]:
 async def _check_address_index() -> None:
     """Count recent spends the circular BFS cannot see (graph.address_index_gaps).
 
-    The hop query finds a cycle's legs only through address_transactions, so a
-    gap there loses recall without an error anywhere else: it is logged at
+    The hop query finds a cycle's legs only through spend_edges, so a gap
+    there loses recall without an error anywhere else: it is logged at
     WARNING and reported in /health/detail. "idle" means the window held no
     spend to check (ingestion stalled, or catching up on older blocks), so it
     is not the all-clear "ok" is.
@@ -71,7 +71,7 @@ async def _check_address_index() -> None:
     if check.missing:
         logger.warning(
             f"Address index: {check.missing} of {check.checked} spend(s) of the last "
-            f"{window}s are missing from address_transactions; the circular BFS "
+            f"{window}s are missing from spend_edges; the circular BFS "
             f"cannot see them"
         )
         state = "gaps"

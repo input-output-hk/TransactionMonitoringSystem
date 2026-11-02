@@ -53,7 +53,7 @@ def test_the_transactions_row_is_written_after_every_other_row(client):
     clickhouse.insert_transactions_batch([_tx()])
     tables = _inserted_tables(client)
     assert tables[-1] == "transactions"
-    assert {"transaction_inputs", "transaction_outputs"} <= set(tables[:-1])
+    assert {"transaction_inputs", "transaction_outputs", "spend_edges"} <= set(tables[:-1])
 
 
 def test_a_failure_before_it_leaves_no_transactions_row(client):
@@ -64,6 +64,19 @@ def test_a_failure_before_it_leaves_no_transactions_row(client):
             raise clickhouse.ClickHouseError("timeout")
 
     client.execute.side_effect = fail_on_outputs
+    with pytest.raises(clickhouse.ClickHouseError):
+        clickhouse.insert_transactions_batch([_tx()])
+    assert "transactions" not in _inserted_tables(client)
+
+
+def test_a_failed_spend_edges_insert_fails_the_block(client):
+    # The circular BFS sees value move only through spend_edges: a block whose
+    # edges did not land must be written again, not committed without them.
+    def fail_on_edges(query, *args, **kwargs):
+        if "INSERT INTO spend_edges" in query:
+            raise clickhouse.ClickHouseError("timeout")
+
+    client.execute.side_effect = fail_on_edges
     with pytest.raises(clickhouse.ClickHouseError):
         clickhouse.insert_transactions_batch([_tx()])
     assert "transactions" not in _inserted_tables(client)

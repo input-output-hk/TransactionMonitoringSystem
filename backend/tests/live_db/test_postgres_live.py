@@ -111,6 +111,33 @@ class TestScoringCheckpoint:
         pg_run(scenario)
 
 
+class TestSpendEdgesBackfill:
+    def test_progress_never_goes_back_and_completion_sticks(self, pg_run):
+        # A stale writer (a backfill from before a leader hand-back) must not
+        # send the next start back over chunks already filled, nor undo the
+        # completion the scoring lanes wait for.
+        async def _clear():
+            async with get_connection() as conn:
+                await conn.execute(
+                    "DELETE FROM spend_edges_backfill WHERE network = $1", LIVE_NETWORK
+                )
+
+        async def scenario():
+            await _clear()
+            try:
+                assert await postgres.get_spend_edges_backfill(LIVE_NETWORK) == (0, False)
+                await postgres.save_spend_edges_backfill(LIVE_NETWORK, 7, False)
+                await postgres.save_spend_edges_backfill(LIVE_NETWORK, 3, False)
+                assert await postgres.get_spend_edges_backfill(LIVE_NETWORK) == (7, False)
+                await postgres.save_spend_edges_backfill(LIVE_NETWORK, 9, True)
+                await postgres.save_spend_edges_backfill(LIVE_NETWORK, 9, False)
+                assert await postgres.get_spend_edges_backfill(LIVE_NETWORK) == (9, True)
+            finally:
+                await _clear()
+
+        pg_run(scenario)
+
+
 class TestSyncCheckpoint:
     def test_save_then_get_roundtrip(self, pg_run):
         async def scenario():
