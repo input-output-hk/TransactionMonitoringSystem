@@ -33,8 +33,10 @@ export type ClusteringHealth = {
 
 export type ScoringHealth = {
 	// "behind": transactions older than the live window may be unscored;
-	// "stalled": the live lane has stopped finishing its polls.
-	state: OpenEnum<"ok" | "behind" | "stalled" | "starting">;
+	// "stalled": the live lane has stopped finishing its polls;
+	// "unguarded": the backlog lane is off, so nothing scores what the live
+	// lane misses; "disabled": analysis is off and nothing scores.
+	state: OpenEnum<"ok" | "behind" | "stalled" | "starting" | "unguarded" | "disabled">;
 	// Unscored rows behind the checkpoint near their row retention: they
 	// expire unscored unless the retention is raised or the drain catches up.
 	retention_at_risk?: boolean;

@@ -1220,6 +1220,26 @@ async def save_scoring_checkpoint(network: str, complete_through: datetime) -> N
         )
 
 
+async def rewind_scoring_checkpoint(network: str, complete_through: datetime) -> None:
+    """Move the network's scoring checkpoint back to complete_through if it is later.
+
+    The one way back past save_scoring_checkpoint's GREATEST, for a checkpoint
+    found ahead of the clock. Lowering it is always safe: the backlog lane only
+    checks again what it had already found scored.
+    """
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            UPDATE scoring_checkpoint
+            SET complete_through = LEAST(complete_through, $2),
+                updated_at       = CURRENT_TIMESTAMP
+            WHERE network = $1
+        """,
+            network,
+            complete_through,
+        )
+
+
 async def get_scoring_checkpoint(network: str) -> datetime | None:
     """Return the network's scoring checkpoint, or None before the first one."""
     async with get_connection() as conn:

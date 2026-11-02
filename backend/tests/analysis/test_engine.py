@@ -1,6 +1,8 @@
 """Unit tests for the analysis engine orchestrator."""
 
+import asyncio
 import functools
+import time
 from unittest.mock import patch
 
 from app.analysis.engine import (
@@ -252,6 +254,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import app.analysis.engine as _engine_mod
+from app.config import settings
 
 # Test values for the lane knobs, set on the patched settings below.
 _LIVE_WINDOW_SECONDS = 600
@@ -514,7 +517,7 @@ class TestHistoryRescore:
     def _run(self, stored, lookups, rescored, cap=None):
         calls = []
 
-        def score_claimed(network, rows, lane, history_complete, keep=None):
+        def score_claimed(network, rows, lane, history_complete, keep=None, should_stop=None):
             calls.append([r["tx_hash"] for r in rows])
             return rescored.pop(0) if rescored else []
 
@@ -573,3 +576,80 @@ class TestHistoryRescore:
     def test_off_at_zero(self):
         look, _ = self._run([self._stored("a")], [self._later("b")], [], cap=0)
         assert not look.called
+
+
+class TestLaneStop:
+    """A batch that outlives its lane's stop at shutdown stores nothing: its
+    enrichments may have run after the event loop stopped, and its alerts
+    could not be sent. Unstored, its rows are picked again after the restart."""
+
+    def test_a_stopped_lanes_batch_stores_and_alerts_nothing(self):
+        with (
+            patch.multiple(
+                "app.analysis.engine",
+                _enrich_inputs_with_resolved_addresses=lambda rows, network: None,
+                _enrich_collision_features=lambda rows, network: None,
+                _enrich_cycle_features=lambda rows, network: None,
+                _enrich_sandwich_features=lambda rows, network: None,
+                _build_scorers=lambda: [],
+            ),
+            patch("app.analysis.engine.clickhouse") as mock_ch,
+            patch("app.analysis.engine.notifications") as mock_notify,
+        ):
+            stored = _engine_mod._score_claimed(
+                "preprod", [_make_row()], "backlog", True, should_stop=lambda: True
+            )
+        assert stored == []
+        mock_ch.insert_class_scores.assert_not_called()
+        mock_notify.on_new_scores.assert_not_called()
+
+
+class TestPacedRowsLeaveTheLivePoll:
+    """A deferred transaction re-polled inside its pacing window defers again
+    uncounted; as the newest unscored it would be all the poll returned, so the
+    drain would never reach the older rows of the window."""
+
+    def teardown_method(self):
+        _engine_mod._analysis_defer_attempts.clear()
+        _engine_mod._raw_fallback_attempts.clear()
+
+    @patch("app.analysis.engine._score_batch", return_value=0)
+    @patch("app.analysis.engine.clickhouse")
+    def test_the_poll_passes_over_what_waits_out_its_pacing(self, mock_ch, _scored):
+        now = time.monotonic()
+        overdue = now - max(settings.ANALYSIS_DEFER_RETRY_SECONDS, 1) - 1
+        _engine_mod._analysis_defer_attempts[("preprod", "paced")] = (1, now)
+        _engine_mod._analysis_defer_attempts[("preprod", "due")] = (1, overdue)
+        _engine_mod._analysis_defer_attempts[("preview", "other")] = (1, now)
+        _engine_mod._raw_fallback_attempts[("preprod", "raw")] = (1, now)
+        mock_ch.get_unanalyzed_transactions.return_value = []
+        with patch.object(settings, "ANALYSIS_ENABLED", True):
+            _engine_mod.run_once("preprod")
+        _, kwargs = mock_ch.get_unanalyzed_transactions.call_args
+        assert kwargs["exclude"] == {"paced", "raw"}
+
+
+class TestCollisionEnrichmentLoop:
+    """front_running reads mempool collisions through the main event loop."""
+
+    def test_a_stopped_loop_is_a_failure_not_a_skip(self, monkeypatch):
+        # A batch outliving shutdown: skipped, the tx would be stored with
+        # front_running as no-signal and never picked again.
+        from app.analysis import enrichment
+
+        loop = asyncio.new_event_loop()
+        loop.close()
+        monkeypatch.setattr(settings, "SCORER_FRONT_RUNNING_ENABLED", True)
+        monkeypatch.setattr(enrichment, "_main_loop", loop)
+        row = _make_row()
+        enrichment.enrich_collision_features([row], "preprod")
+        assert row[enrichment._ENRICHMENT_FAILED_KEY] == ["collision"]
+
+    def test_no_loop_at_all_is_still_a_skip(self, monkeypatch):
+        from app.analysis import enrichment
+
+        monkeypatch.setattr(settings, "SCORER_FRONT_RUNNING_ENABLED", True)
+        monkeypatch.setattr(enrichment, "_main_loop", None)
+        row = _make_row()
+        enrichment.enrich_collision_features([row], "preprod")
+        assert enrichment._ENRICHMENT_FAILED_KEY not in row

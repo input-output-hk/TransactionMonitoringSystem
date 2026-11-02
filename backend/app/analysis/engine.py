@@ -464,7 +464,11 @@ class BacklogBatch(NamedTuple):
     scored: int
 
 
-def run_once(network: str, history_complete: bool = True) -> int:
+def run_once(
+    network: str,
+    history_complete: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Live lane: score the newest unscored transactions of the live window.
 
     Returns how many the poll returned, which the drain loop compares with the
@@ -472,6 +476,10 @@ def run_once(network: str, history_complete: bool = True) -> int:
     holds older unscored transactions: features read from earlier scores
     (circular recurrence and recycling) may then be missing some, and each
     score written meanwhile says so (``_meta.history_incomplete``).
+
+    The poll passes over transactions waiting out a deferral's pacing: re-polled
+    they would defer again uncounted, and being the newest unscored they would
+    be all a poll returned, so the drain would never reach older ones.
     """
     if not settings.ANALYSIS_ENABLED:
         return 0
@@ -481,9 +489,25 @@ def run_once(network: str, history_complete: bool = True) -> int:
         settings.ANALYSIS_ENGINE_BATCH_SIZE,
         since=since,
         newest_first=True,
+        exclude=_paced(network),
     )
-    _score_batch(network, fetched, "live", history_complete)
+    _score_batch(network, fetched, "live", history_complete, should_stop)
     return len(fetched)
+
+
+def _paced(network: str) -> set[str]:
+    """Deferred transactions of ``network`` whose next counted attempt is not due yet."""
+    now_mono = time.monotonic()
+    paced = set()
+    for attempts, retry_seconds in (
+        (_raw_fallback_attempts, settings.RAW_FALLBACK_RETRY_SECONDS),
+        (_analysis_defer_attempts, settings.ANALYSIS_DEFER_RETRY_SECONDS),
+    ):
+        # list(): the other lane's thread may add an entry meanwhile.
+        for (net, tx_hash), (_, last) in list(attempts.items()):
+            if net == network and now_mono - last < retry_seconds:
+                paced.add(tx_hash)
+    return paced
 
 
 def pick_backlog(network: str, since: datetime, until: datetime) -> list[tuple[str, datetime]]:
@@ -501,7 +525,11 @@ def pick_backlog(network: str, since: datetime, until: datetime) -> list[tuple[s
 
 
 def run_backlog_once(
-    network: str, hashes: list[str], since: datetime, until: datetime
+    network: str,
+    hashes: list[str],
+    since: datetime,
+    until: datetime,
+    should_stop: Callable[[], bool] | None = None,
 ) -> BacklogBatch:
     """Backlog lane: score picked transactions, ingested in [since, until).
 
@@ -511,7 +539,7 @@ def run_backlog_once(
     if not settings.ANALYSIS_ENABLED:
         return BacklogBatch(0, 0)
     rows = clickhouse.hydrate_transactions(network, hashes, since=since, until=until)
-    return BacklogBatch(len(rows), _score_batch(network, rows, "backlog"))
+    return BacklogBatch(len(rows), _score_batch(network, rows, "backlog", True, should_stop))
 
 
 def _score_batch(
@@ -519,17 +547,19 @@ def _score_batch(
     fetched: list[dict[str, Any]],
     lane: str,
     history_complete: bool = True,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     """Score and persist one polled batch, minus what the other lane holds.
 
-    Returns how many score rows it wrote.
+    Returns how many score rows it wrote. Once ``should_stop`` reads True (its
+    lane was stopped while the batch ran) it stores nothing: see _score_claimed.
     """
     rows = _claim(network, fetched)
     try:
-        stored = _score_claimed(network, rows, lane, history_complete)
+        stored = _score_claimed(network, rows, lane, history_complete, should_stop=should_stop)
     finally:
         _release(network, rows)
-    _rescore_later_passes(network, stored, lane, history_complete)
+    _rescore_later_passes(network, stored, lane, history_complete, should_stop)
     return len(stored)
 
 
@@ -549,6 +579,7 @@ def _rescore_later_passes(
     stored: list[dict[str, Any]],
     lane: str,
     history_complete: bool,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Re-score the origin's later passes that were stored before these.
 
@@ -594,6 +625,7 @@ def _rescore_later_passes(
                     lane,
                     history_complete,
                     keep=functools.partial(_raises_circular, later),
+                    should_stop=should_stop,
                 )
             finally:
                 _release(network, rows)
@@ -614,11 +646,16 @@ def _score_claimed(
     lane: str,
     history_complete: bool,
     keep: Callable[[dict[str, Any]], bool] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Score, persist and alert ``rows``; returns the results it stored.
 
     ``keep``, when given, drops results before they are stored (a re-score
-    that would not raise the stored one).
+    that would not raise the stored one). Nothing is stored once
+    ``should_stop`` reads True: a batch that outlives its lane's stop at
+    shutdown may have run its enrichments after the event loop stopped, and
+    its alerts could not be sent. Left unscored, its rows are picked again
+    after the restart (the checkpoint has not passed them).
     """
     if not rows:
         return []
@@ -673,6 +710,15 @@ def _score_claimed(
         results = [r for r in results if keep(r)]
     if not results:
         return []
+    if should_stop is not None and should_stop():
+        logger.info(
+            "Analysis Engine [%s] %s lane stopped: %d scored txs left unstored, picked "
+            "again after the restart",
+            network,
+            lane,
+            len(results),
+        )
+        return []
 
     clickhouse.insert_class_scores(results)
     # Emit immediate alerts for the just-persisted scores
@@ -696,13 +742,19 @@ def _score_claimed(
     return results
 
 
-async def run_once_async(network: str, history_complete: bool = True) -> int:
+async def run_once_async(
+    network: str,
+    history_complete: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Non-blocking wrapper: runs run_once on the dedicated ClickHouse executor."""
     loop = asyncio.get_running_loop()
     # Collision enrichment runs on a worker thread and bridges async postgres
     # calls back onto this loop (see app.analysis.enrichment).
     set_main_loop(loop)
-    return await loop.run_in_executor(clickhouse._ch_executor, run_once, network, history_complete)
+    return await loop.run_in_executor(
+        clickhouse._ch_executor, run_once, network, history_complete, should_stop
+    )
 
 
 async def pick_backlog_async(
@@ -716,7 +768,11 @@ async def pick_backlog_async(
 
 
 async def run_backlog_once_async(
-    network: str, hashes: list[str], since: datetime, until: datetime
+    network: str,
+    hashes: list[str],
+    since: datetime,
+    until: datetime,
+    should_stop: Callable[[], bool] | None = None,
 ) -> BacklogBatch:
     """Non-blocking wrapper: runs run_backlog_once on the backlog executor.
 
@@ -726,5 +782,11 @@ async def run_backlog_once_async(
     loop = asyncio.get_running_loop()
     set_main_loop(loop)
     return await loop.run_in_executor(
-        clickhouse._ch_backlog_executor, run_backlog_once, network, hashes, since, until
+        clickhouse._ch_backlog_executor,
+        run_backlog_once,
+        network,
+        hashes,
+        since,
+        until,
+        should_stop,
     )

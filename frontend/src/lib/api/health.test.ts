@@ -100,7 +100,7 @@ describe("deriveModules", () => {
 		expect(modules).toContainEqual({ name: "Scoring", online: true });
 	});
 
-	it.each(["behind", "stalled", "starting"])(
+	it.each(["behind", "stalled", "starting", "unguarded", "disabled"])(
 		"shows Scoring offline when %s, though ingestion is fine",
 		(state) => {
 			// Ingestion at the tip says nothing about scoring: this is the row

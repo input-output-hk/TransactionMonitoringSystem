@@ -8,6 +8,7 @@ that family (review finding: shipping '*' as a production default).
 import pytest
 from pydantic import ValidationError
 
+from app import config as config_mod
 from app.config import _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS, Settings, settings
 from app.main import _validate_startup_settings
 
@@ -205,6 +206,39 @@ class TestBacklogSettleValidation:
     def test_the_default_clears_the_floor(self):
         default = Settings()
         assert default.ANALYSIS_BACKLOG_SETTLE_SECONDS >= default._insert_visibility_seconds()
+
+    def test_every_statement_of_an_attempt_counts(self):
+        # The transactions row is written last, so it waits on every statement
+        # before it, each with its own send/receive budget.
+        default = Settings()
+        longer = Settings(
+            CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=default.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+            + 1,
+            ANALYSIS_BACKLOG_SETTLE_SECONDS=default.ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+        )
+        statements = (
+            config_mod._PRE_INSERT_STATEMENTS
+            + default.CLICKHOUSE_INSERT_MAX_RETRIES * config_mod._BLOCK_INSERT_STATEMENTS
+        )
+        grown = longer._insert_visibility_seconds() - default._insert_visibility_seconds()
+        assert grown == pytest.approx(statements)
+
+
+class TestBatchSizeBounds:
+    """A batch's hashes are bound into query text, which ClickHouse rejects
+    past max_query_size: every poll would then fail."""
+
+    @pytest.mark.parametrize(
+        "knob",
+        [
+            "ANALYSIS_ENGINE_BATCH_SIZE",
+            "ANALYSIS_BACKLOG_BATCH_SIZE",
+            "ANALYSIS_HISTORY_RESCORE_MAX_TXS",
+        ],
+    )
+    def test_a_batch_past_the_query_size_bound_is_rejected(self, knob):
+        with pytest.raises(ValidationError, match=knob):
+            Settings(**{knob: config_mod._MAX_HASHES_PER_QUERY + 1})
 
 
 class TestCycleFanoutValidation:

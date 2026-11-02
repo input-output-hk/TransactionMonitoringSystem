@@ -14,6 +14,7 @@ import functools
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -27,13 +28,20 @@ logger = logging.getLogger(__name__)
 
 _task: asyncio.Task | None = None
 _backlog_task: asyncio.Task | None = None
+# Stop signal of the lanes' batches: a batch still on its executor thread when
+# stop() runs stores nothing (engine._score_claimed), so its rows are picked
+# again after the restart instead of being stored with what a stopped event
+# loop could not supply (collision enrichment, alerts). One per start, for the
+# reason given at _baseline_stop.
+_lane_stop: threading.Event | None = None
 
 
 @dataclass
 class _ScoringState:
     """What the two lanes last saw, for scoring_status()."""
 
-    # When the live lane last finished a tick's polls.
+    # When the live lane started, and when it last finished a poll.
+    live_started_at: datetime | None = None
     live_polled_at: datetime | None = None
     # Every transaction ingested before this has a score (scoring_checkpoint).
     checkpoint: datetime | None = None
@@ -45,6 +53,10 @@ class _ScoringState:
 _scoring = _ScoringState()
 # The state last logged, so a change is logged once rather than every tick.
 _logged_state: str | None = None
+# Logged at ERROR: something is wrong. The unguarded states are an operator's
+# choice, logged once at WARNING since nothing then reports what they miss.
+_BAD_STATES = ("behind", "stalled")
+_UNGUARDED_STATES = ("disabled", "unguarded")
 
 _SECONDS_PER_HOUR = 3600
 
@@ -113,8 +125,13 @@ async def _loop():
             history_complete = not _history_incomplete(datetime.now(UTC))
             batches = 0
             while batches < settings.ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK:
-                processed = await engine.run_once_async(settings.CARDANO_NETWORK, history_complete)
+                processed = await engine.run_once_async(
+                    settings.CARDANO_NETWORK, history_complete, _should_stop()
+                )
                 batches += 1
+                # Per poll, not per tick: a saturated tick of slow batches
+                # outlasts the stall tolerance while every poll succeeds.
+                _scoring.live_polled_at = datetime.now(UTC)
                 if processed < settings.ANALYSIS_ENGINE_BATCH_SIZE:
                     break
                 await asyncio.sleep(settings.ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS)
@@ -124,7 +141,6 @@ async def _loop():
             # ages out of the live window into the backlog lane, where a
             # late score costs far more, so the next tick starts at once.
             saturated = processed >= settings.ANALYSIS_ENGINE_BATCH_SIZE
-            _scoring.live_polled_at = datetime.now(UTC)
         except Exception as e:
             saturated = False
             logger.error("Analysis Engine error: %s", e)
@@ -271,19 +287,30 @@ async def _backlog_tick(network: str) -> None:
         # nothing waits: moving the checkpoint over them would leave every
         # transaction of the pause behind it once scoring resumes.
         return
-    if _scoring.checkpoint is None:
-        _scoring.checkpoint = await _initial_checkpoint(network)
-        if _scoring.checkpoint is None:
-            return  # nothing ingested yet
     window_start = datetime.now(UTC) - timedelta(seconds=settings.ANALYSIS_LIVE_WINDOW_SECONDS)
     settled = window_start - timedelta(seconds=settings.ANALYSIS_BACKLOG_SETTLE_SECONDS)
+    if _scoring.checkpoint is None:
+        _scoring.checkpoint = await _initial_checkpoint(network, settled)
+        if _scoring.checkpoint is None:
+            return  # nothing ingested yet
+    if _scoring.checkpoint > settled:
+        await _rewind_checkpoint(network, settled)
     slice_span = timedelta(seconds=settings.ANALYSIS_BACKLOG_SLICE_SECONDS)
+    # A tail up to half a slice is picked with the slice before it: on its own
+    # it costs a full pick (see pick_unanalyzed) and, caught up, lies past the
+    # settle margin, where it cannot move the checkpoint. Caught up, the tail
+    # is what the clock moved since the last tick (its interval and its run),
+    # so it is always longer than the interval alone. The pick's memory follows
+    # its range, hence half a slice and no more.
+    tail = slice_span / 2
     pos = _scoring.checkpoint
     recent = _RecentPass(network)
     await recent.run(walk_at=pos, after=min(pos + slice_span, window_start))
     just_scored: set[str] = set()
     while pos < window_start:
-        end = min(pos + slice_span, window_start)
+        end = pos + slice_span
+        if end + tail >= window_start:
+            end = window_start
         picked = await engine.pick_backlog_async(network, pos, end)
         if not picked:
             # Clean, and so is everything before it.
@@ -326,7 +353,7 @@ async def _score_picked(
     complete = True
     for start in range(0, len(picked), batch):
         hashes = [tx_hash for tx_hash, _ in picked[start : start + batch]]
-        scored = await engine.run_backlog_once_async(network, hashes, since, until)
+        scored = await engine.run_backlog_once_async(network, hashes, since, until, _should_stop())
         complete = complete and scored.scored == len(hashes)
         if recent is not None and recent.due():
             await recent.run(walk_at=since, after=until)
@@ -385,12 +412,19 @@ class _RecentPass:
         batch = settings.ANALYSIS_BACKLOG_BATCH_SIZE
         for start in range(0, len(picked), batch):
             hashes = [tx_hash for tx_hash, _ in picked[start : start + batch]]
-            await engine.run_backlog_once_async(self.network, hashes, since, window_start)
+            await engine.run_backlog_once_async(
+                self.network, hashes, since, window_start, _should_stop()
+            )
         self.last = time.monotonic()
 
 
-async def _initial_checkpoint(network: str) -> datetime | None:
-    """The saved checkpoint, else the first ingestion on record (a full first pass)."""
+async def _initial_checkpoint(network: str, settled: datetime) -> datetime | None:
+    """The saved checkpoint, else the first ingestion on record (a full first pass).
+
+    A first ingestion past the settle margin (a new install) is saved at the
+    margin instead: the checkpoint is never saved ahead of it, which is what
+    lets _rewind_checkpoint read one that is as a clock step.
+    """
     saved = await postgres.get_scoring_checkpoint(network)
     if saved is not None:
         return saved
@@ -404,6 +438,7 @@ async def _initial_checkpoint(network: str) -> datetime | None:
             network,
             format_iso_utc(earliest),
         )
+        earliest = min(earliest, settled)
         await postgres.save_scoring_checkpoint(network, earliest)
     return earliest
 
@@ -413,6 +448,31 @@ async def _advance_checkpoint(network: str, target: datetime) -> None:
         return
     await postgres.save_scoring_checkpoint(network, target)
     _scoring.checkpoint = target
+
+
+async def _rewind_checkpoint(network: str, settled: datetime) -> None:
+    """Bring a checkpoint ahead of the settle margin back to it.
+
+    The checkpoint is only ever saved at or behind the settle margin of its
+    time, so one ahead of it means the host clock stepped back (or differs
+    from the previous leader's), or ANALYSIS_BACKLOG_SETTLE_SECONDS was
+    raised. Left there, every transaction stamped behind it from then on
+    would be scored only if the live lane got to it. Rewinding only re-checks
+    slices.
+    """
+    logger.warning(
+        "Scoring checkpoint %s is ahead of its settle margin %s: the host clock stepped "
+        "back, or the settle margin was raised; rewinding it",
+        format_iso_utc(_scoring.checkpoint),
+        format_iso_utc(settled),
+    )
+    await postgres.rewind_scoring_checkpoint(network, settled)
+    _scoring.checkpoint = settled
+
+
+def _should_stop() -> Callable[[], bool] | None:
+    """The stop test this start's batches check (see _lane_stop)."""
+    return _lane_stop.is_set if _lane_stop is not None else None
 
 
 def _history_incomplete(now: datetime) -> bool:
@@ -452,11 +512,14 @@ def _retention_at_risk(now: datetime) -> bool:
 def scoring_status() -> dict[str, Any]:
     """The scoring lanes' health for /health/detail.
 
-    ``state`` is "starting" until the live lane finishes its first tick,
-    "stalled" when it has not finished one for the tolerance past its
-    interval, "behind" when transactions older than the live window may be
-    unscored (see _history_incomplete) or rows behind the checkpoint near
-    their retention (see _retention_at_risk), and "ok" otherwise.
+    ``state`` is "disabled" when ANALYSIS_ENABLED is off (nothing scores),
+    "starting" until the live lane finishes its first poll, "stalled" when it
+    has not finished one (or, since it started, its first) for the tolerance
+    past its interval, "behind" when transactions older than the live window
+    may be unscored (see _history_incomplete) or rows behind the checkpoint
+    near their retention (see _retention_at_risk), "unguarded" when all is
+    well but the backlog lane is off (so nothing would score, or know of, a
+    transaction the live lane misses), and "ok" otherwise.
     """
     now = datetime.now(UTC)
     stall_after = timedelta(
@@ -464,12 +527,17 @@ def scoring_status() -> dict[str, Any]:
         + settings.ANALYSIS_SCORING_LAG_TOLERANCE_SECONDS
     )
     retention_at_risk = _retention_at_risk(now)
-    if _scoring.live_polled_at is None:
-        state = "starting"
-    elif now - _scoring.live_polled_at > stall_after:
+    last_progress = _scoring.live_polled_at or _scoring.live_started_at
+    if not settings.ANALYSIS_ENABLED:
+        state = "disabled"
+    elif last_progress is not None and now - last_progress > stall_after:
         state = "stalled"
+    elif _scoring.live_polled_at is None:
+        state = "starting"
     elif retention_at_risk or _history_incomplete(now):
         state = "behind"
+    elif not settings.ANALYSIS_BACKLOG_ENABLED:
+        state = "unguarded"
     else:
         state = "ok"
     return {
@@ -494,9 +562,11 @@ def _log_scoring_state() -> None:
         state = f"{state}, retention at risk"
     if state == _logged_state:
         return
-    if status["state"] in ("behind", "stalled"):
+    if status["state"] in _BAD_STATES:
         logger.error("Scoring is %s: %s", state, status)
-    elif _logged_state is not None and _logged_state.startswith(("behind", "stalled")):
+    elif status["state"] in _UNGUARDED_STATES:
+        logger.warning("Scoring is %s: %s", state, status)
+    elif _logged_state is not None and _logged_state.startswith(_BAD_STATES):
         logger.info("Scoring recovered (%s): %s", state, status)
     _logged_state = state
 
@@ -508,7 +578,7 @@ def start():
     and run two drain loops per lane (duplicate scoring is RMT-absorbed, but
     the wasted work and a second checkpoint writer are not worth it).
     """
-    global _task, _backlog_task
+    global _task, _backlog_task, _lane_stop
     if _task is not None and not _task.done():
         logger.warning("Analysis loop already running; start() ignored")
         return
@@ -517,9 +587,16 @@ def start():
     _scoring.checkpoint = None
     _scoring.oldest_unscored = None
     _scoring.live_polled_at = None
+    _scoring.live_started_at = datetime.now(UTC)
+    _lane_stop = threading.Event()
     _task = asyncio.create_task(_loop())
     if settings.ANALYSIS_BACKLOG_ENABLED:
         _backlog_task = asyncio.create_task(_backlog_loop())
+    else:
+        logger.warning(
+            "Analysis Engine backlog lane is off: a transaction the live lane does not "
+            "score within its window is never scored"
+        )
 
 
 def stop():
@@ -529,11 +606,13 @@ def stop():
     # task alone would leave the executor thread scanning to the end.
     if _baseline_stop is not None:
         _baseline_stop.set()
+    if _lane_stop is not None:
+        _lane_stop.set()
     if _baseline_task and not _baseline_task.done():
         _baseline_task.cancel()
     _baseline_task = None
-    # The backlog lane stops between batches: the one in flight, if any,
-    # finishes on its thread and its scores are durable.
+    # Each lane stops between batches: the one in flight, if any, finishes on
+    # its thread without storing (see _lane_stop).
     if _backlog_task and not _backlog_task.done():
         _backlog_task.cancel()
     _backlog_task = None

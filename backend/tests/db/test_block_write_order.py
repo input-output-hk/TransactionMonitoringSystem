@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app import config
 from app.db import clickhouse
 from app.models.transaction import NormalizedTransaction, TransactionInput, TransactionOutput
 
@@ -66,3 +67,17 @@ def test_a_failure_before_it_leaves_no_transactions_row(client):
     with pytest.raises(clickhouse.ClickHouseError):
         clickhouse.insert_transactions_batch([_tx()])
     assert "transactions" not in _inserted_tables(client)
+
+
+def test_an_attempt_runs_the_statements_the_settle_floor_counts(client, monkeypatch):
+    # config._insert_visibility_seconds gives each statement of an attempt its
+    # own silence budget: a statement added here must be counted there.
+    from app.analysis import features
+
+    monkeypatch.setattr(features, "extract_utxo_features", lambda *a: [("utxo",)])
+    monkeypatch.setattr(features, "extract_tx_script_features", lambda *a: ("script",))
+    monkeypatch.setattr(features, "tx_policy_ids", lambda raw: ["policy"])
+    tx = _tx()
+    tx.raw_data = {"body": {}}
+    clickhouse.insert_transactions_batch([tx])
+    assert len(_inserted_tables(client)) == config._BLOCK_INSERT_STATEMENTS

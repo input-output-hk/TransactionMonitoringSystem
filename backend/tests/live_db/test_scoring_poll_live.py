@@ -246,8 +246,12 @@ class TestRollbackRepurgeBehindTheCheckpoint:
 
         network = f"{LIVE_NETWORK}-{uuid.uuid4().hex[:8]}"
         reconfirmed, vanished = _hash(), _hash()
-        # Re-confirmed two hours ago: behind the checkpoint once the lane ticks.
-        stamp = datetime.now(UTC) - timedelta(hours=2)
+        # Re-confirmed an hour before the settle margin: behind the checkpoint
+        # once the lane ticks.
+        settled = timedelta(
+            seconds=settings.ANALYSIS_LIVE_WINDOW_SECONDS + settings.ANALYSIS_BACKLOG_SETTLE_SECONDS
+        )
+        stamp = datetime.now(UTC) - settled - timedelta(hours=1)
         fresh = stamp + timedelta(seconds=5)
         # Written by a batch that still held the rolled-back copy.
         stale = stamp - timedelta(minutes=1)

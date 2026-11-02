@@ -101,6 +101,20 @@ class TestUnanalyzedPollBounds:
         assert params["hashes"] == ["b" * 64, "a" * 64, "c" * 64]
         assert "ingestion_timestamp < %(until)s" in sql
 
+    def test_the_poll_passes_over_excluded_rows_and_stays_full(self, monkeypatch):
+        picked = [("b" * 64, TS), ("a" * 64, TS), ("c" * 64, TS)]
+        captured = self._capture(monkeypatch, picked, [])
+        clickhouse.get_unanalyzed_transactions("preprod", 2, since=TS, exclude={"a" * 64})
+        assert captured[0][1]["limit"] == len(picked)
+        assert captured[1][1]["hashes"] == ["b" * 64, "c" * 64]
+
+    def test_the_pick_reads_the_main_table(self, monkeypatch):
+        # Through projection p_by_time_v2 the filter becomes one PREWHERE that
+        # reads tx_hash for every row in range.
+        captured = self._capture(monkeypatch)
+        clickhouse.pick_unanalyzed("preprod", 20, since=TS, until=UNTIL)
+        assert "optimize_use_projections = 0" in captured[0][0]
+
     def test_earliest_ingestion_is_none_on_an_empty_table(self, monkeypatch):
         # min() over no rows is 1970, not NULL: the count decides.
         self._capture(monkeypatch, [(datetime(1970, 1, 1), 0)])

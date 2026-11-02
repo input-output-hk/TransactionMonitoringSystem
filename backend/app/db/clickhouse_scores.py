@@ -19,6 +19,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Collection
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -1034,6 +1035,7 @@ def get_unanalyzed_transactions(
     since: datetime,
     until: datetime | None = None,
     newest_first: bool = False,
+    exclude: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Return transactions ingested in [since, until) that have no score yet.
 
@@ -1041,12 +1043,14 @@ def get_unanalyzed_transactions(
     engine.run_once). Two steps, so that the payload is read for the batch
     alone: the unbounded anti-join this replaced read every unscored row's
     raw_data to return a batch of them, so behind a large backlog every poll
-    read the whole backlog's payload.
+    read the whole backlog's payload. ``exclude`` is passed over: the pick
+    takes that many more and drops them, so the batch is still full.
     """
-    picked = pick_unanalyzed(network, batch_size, since, until, newest_first)
-    if not picked:
+    picked = pick_unanalyzed(network, batch_size + len(exclude), since, until, newest_first)
+    hashes = [tx_hash for tx_hash, _ in picked if tx_hash not in exclude][:batch_size]
+    if not hashes:
         return []
-    return hydrate_transactions(network, [tx_hash for tx_hash, _ in picked], since, until)
+    return hydrate_transactions(network, hashes, since, until)
 
 
 def pick_unanalyzed(
@@ -1106,6 +1110,7 @@ def pick_unanalyzed(
         GROUP BY tx_hash
         ORDER BY ingested {order}, tx_hash {order}
         LIMIT %(limit)s
+        SETTINGS optimize_use_projections = 0
         """,
         params,
     )

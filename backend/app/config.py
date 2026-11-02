@@ -24,6 +24,21 @@ DEFAULT_DEV_POSTGRES_PASSWORD = "tms_password"
 # history-sized tables, so running it more often only repeats that read.
 _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS = 300
 
+# Statements between a block's ingestion stamp and its transactions row
+# becoming visible. One ClickHouse read ahead of the insert (resolve_input_amounts'
+# outputs lookup), then per insert attempt the statements of
+# clickhouse.insert_transactions_batch: inputs, outputs, the three feature
+# tables and transactions last (tests/db/test_block_write_order pins the count).
+_PRE_INSERT_STATEMENTS = 1
+_BLOCK_INSERT_STATEMENTS = 6
+
+# Most transaction hashes one scoring batch binds into a query. clickhouse-driver
+# writes a bound list into the query text (about 68 bytes per hash), and
+# ClickHouse rejects a text past max_query_size (256 KiB by default) from about
+# 3,850 hashes on: the bound keeps a margin under that for the reads that bind a
+# batch's hashes (hydrate, enrichment, the circular history lookup).
+_MAX_HASHES_PER_QUERY = 1000
+
 
 def _env_files() -> list[str]:
     """Select which dotenv file(s) to load.
@@ -258,7 +273,8 @@ class Settings(BaseSettings):
     # Analysis Engine
     ANALYSIS_ENGINE_ENABLED: bool = True
     ANALYSIS_ENGINE_INTERVAL_SECONDS: int = 30  # how often the engine polls for new txs
-    ANALYSIS_ENGINE_BATCH_SIZE: int = 100  # max transactions scored per run
+    # Max transactions scored per run (le: see _MAX_HASHES_PER_QUERY).
+    ANALYSIS_ENGINE_BATCH_SIZE: int = Field(default=100, ge=1, le=_MAX_HASHES_PER_QUERY)
     # Cap on referenced-tx raw_data lookups per enrichment batch (bounds the
     # IN-clause size); inputs past the cap simply stay unresolved for the run.
     ANALYSIS_MAX_REF_TXS: int = 2000
@@ -304,13 +320,15 @@ class Settings(BaseSettings):
     # one insert-retry cycle after its ingestion stamp (the stamp is taken at
     # parse, and every retry re-sends it), so the checkpoint must not pass a
     # stamp that recent or such a row would land behind it unscored. At least
-    # _insert_visibility_seconds() (see _backlog_settle_floor); an hour covers
-    # the slow path to ClickHouse ahead of the insert as well.
-    ANALYSIS_BACKLOG_SETTLE_SECONDS: int = Field(default=3600, ge=1)
+    # _insert_visibility_seconds() (see _backlog_settle_floor), about 3,800 s at
+    # the default timeouts; two hours leave room for the insert's wait on the
+    # shared ClickHouse executor, which no timeout bounds. Only the checkpoint
+    # trails: the walk still scores up to the live window.
+    ANALYSIS_BACKLOG_SETTLE_SECONDS: int = Field(default=7200, ge=1)
     # Smaller than the live batch: a transaction scored late reads a full BFS
     # horizon and can take seconds, and a short batch keeps the claim (and the
     # work a shutdown discards) short.
-    ANALYSIS_BACKLOG_BATCH_SIZE: int = Field(default=20, ge=1)
+    ANALYSIS_BACKLOG_BATCH_SIZE: int = Field(default=20, ge=1, le=_MAX_HASHES_PER_QUERY)
     # Ingestion time just behind the live window that the backlog lane scores
     # ahead of its oldest-first walk, every ANALYSIS_ENGINE_INTERVAL_SECONDS
     # while the walk is further back (tasks/analysis._RecentPass): what has just
@@ -321,14 +339,17 @@ class Settings(BaseSettings):
     # work it is meant to put first. 0 leaves everything to the walk.
     ANALYSIS_BACKLOG_RECENT_SECONDS: int = Field(default=86400, ge=0)
     # max_threads for every backlog query. The lane runs back to back on its
-    # own thread, so this is what bounds its load: draining a backlog can never
+    # own thread, so this is what bounds its CPU: draining a backlog can never
     # take the cores live scoring, ingestion and the API need (the rationale of
-    # BASELINE_QUERY_MAX_THREADS). ge=1: ClickHouse reads 0 as "every core".
+    # BASELINE_QUERY_MAX_THREADS). It does not bound the bytes the lane reads,
+    # which on a host whose page cache cannot hold the tables come from the
+    # disk the node shares. ge=1: ClickHouse reads 0 as "every core".
     ANALYSIS_BACKLOG_MAX_THREADS: int = Field(default=2, ge=1)
     # /health/detail reports scoring "behind" once a transaction has waited
     # this long past the live window unscored, or the checkpoint trails its
     # settle position by this much; "stalled" once the live lane has not
-    # finished a poll for this long past its interval.
+    # finished a poll (or, since it started, its first) for this long past its
+    # interval.
     ANALYSIS_SCORING_LAG_TOLERANCE_SECONDS: int = Field(default=600, ge=1)
     # Neither lane stores cycles in chain order, so a ring's later pass can be
     # stored before an earlier one and miss it in its recycling and recurrence
@@ -337,7 +358,7 @@ class Settings(BaseSettings):
     # may re-score: a busy origin can have hundreds in its window, each a full
     # re-score with a late BFS on the lane's thread. What the cap leaves out is
     # logged and keeps its stored score. 0 turns the re-score off.
-    ANALYSIS_HISTORY_RESCORE_MAX_TXS: int = Field(default=100, ge=0)
+    ANALYSIS_HISTORY_RESCORE_MAX_TXS: int = Field(default=100, ge=0, le=_MAX_HASHES_PER_QUERY)
     # /health/detail reports retention_at_risk (and scoring "behind") once the
     # backlog checkpoint is older than this share of the shortest row retention
     # (CH_RETENTION_DAYS_TRANSACTIONS, CH_RETENTION_DAYS_IO): rows still unscored
@@ -530,24 +551,26 @@ class Settings(BaseSettings):
         return value
 
     def _insert_visibility_seconds(self) -> float:
-        """How long a block's rows can stay invisible after their stamp.
+        """How long a block's transactions rows can stay invisible after their stamp.
 
-        Every attempt of the block-insert retry loop re-sends the same stamp and
-        can wait out a connect and a send/receive timeout against a silent
-        server, with the backoff between attempts; past the last attempt the
-        block replays under a fresh stamp. The send/receive timeout bounds
-        silence, not a slow transfer, but a block's insert is small enough that
-        only silence takes this long.
+        The stamp is taken at parse, ahead of one ClickHouse read. Every attempt
+        of the block-insert retry loop then re-sends the same stamp, and each of
+        its statements (transactions last) can wait out a send/receive timeout
+        against a silent server, after a connect, with the backoff between
+        attempts; past the last attempt the block replays under a fresh stamp.
+        The send/receive timeout bounds silence, not a slow transfer, but a
+        block's statements are small enough that only silence takes this long.
         """
         attempts = self.CLICKHOUSE_INSERT_MAX_RETRIES
         backoff, delay = 0.0, self.CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS
         for _ in range(attempts - 1):
             backoff += delay
             delay = min(delay * 2, self.CLICKHOUSE_INSERT_RETRY_MAX_DELAY_SECONDS)
-        per_attempt = (
-            self.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS + self.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
-        )
-        return attempts * per_attempt + backoff
+        connect = self.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS
+        silence = self.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+        pre_insert = connect + _PRE_INSERT_STATEMENTS * silence
+        per_attempt = connect + _BLOCK_INSERT_STATEMENTS * silence
+        return pre_insert + attempts * per_attempt + backoff
 
     @model_validator(mode="after")
     def _backlog_settle_floor(self) -> "Settings":

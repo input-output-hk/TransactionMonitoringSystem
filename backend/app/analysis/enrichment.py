@@ -216,11 +216,15 @@ def enrich_collision_features(rows: list[dict[str, Any]], network: str):
     if not settings.SCORER_FRONT_RUNNING_ENABLED:
         return
     loop = _main_loop
-    if loop is None or not loop.is_running():
+    if loop is None:
         logger.debug("Collision enrichment skipped: main event loop unavailable")
         return
     tx_hashes = [r["tx_hash"] for r in rows]
     try:
+        if not loop.is_running():
+            # Captured, then stopped (a batch outliving shutdown): the
+            # collisions exist but cannot be read, which is a failure.
+            raise RuntimeError("main event loop stopped")
         future = asyncio.run_coroutine_threadsafe(
             postgres.get_collisions_for_txs(tx_hashes, network), loop
         )
@@ -229,8 +233,8 @@ def enrich_collision_features(rows: list[dict[str, Any]], network: str):
         logger.warning(f"Collision enrichment failed (non-fatal): {e}")
         # Recall-safe: mark every row so the engine defers rather than scoring
         # front_running (which reads mempool collisions) as no-signal. The
-        # loop-unavailable / feature-disabled early returns above are NOT
-        # failures and deliberately do not mark.
+        # no-loop / feature-disabled early returns above are NOT failures and
+        # deliberately do not mark.
         for r in rows:
             _mark_enrichment_failed(r, "collision")
         return

@@ -65,7 +65,7 @@ class _FakeBacklog:
         found = sorted((s, h) for h, s in self.unscored.items() if since <= s < until)
         return [(h, s) for s, h in found[: settings.ANALYSIS_BACKLOG_PICK_SIZE]]
 
-    async def score(self, network, hashes, since, until):
+    async def score(self, network, hashes, since, until, should_stop=None):
         self.batches.append(list(hashes))
         found = [h for h in hashes if h in self.unscored]
         scored = [h for h in found if self.unscored[h] not in self.held]
@@ -82,7 +82,12 @@ def saved(monkeypatch):
     async def _save(network, complete_through):
         store[network] = max(store.get(network, complete_through), complete_through)
 
+    async def _rewind(network, complete_through):
+        if network in store:
+            store[network] = min(store[network], complete_through)
+
     monkeypatch.setattr(analysis.postgres, "save_scoring_checkpoint", _save)
+    monkeypatch.setattr(analysis.postgres, "rewind_scoring_checkpoint", _rewind)
     monkeypatch.setattr(
         analysis.postgres, "get_scoring_checkpoint", AsyncMock(side_effect=lambda n: store.get(n))
     )
@@ -239,7 +244,7 @@ class TestCheckpointAdvance:
         stamp = NOW - timedelta(days=1)
         fake = _backlog(monkeypatch, _FakeBacklog([stamp]))
 
-        async def _scored_but_still_unscored(network, hashes, since, until):
+        async def _scored_but_still_unscored(network, hashes, since, until, should_stop=None):
             fake.batches.append(list(hashes))
             return BacklogBatch(len(hashes), len(hashes))
 
@@ -249,6 +254,69 @@ class TestCheckpointAdvance:
         assert len(fake.batches) == 1
         assert saved[NETWORK] <= stamp
         assert "still picked as unscored" in caplog.text
+
+
+class TestClockStep:
+    """A checkpoint is only ever saved at or behind its time's settle margin."""
+
+    async def test_a_checkpoint_ahead_of_the_clock_is_rewound(self, monkeypatch, saved, caplog):
+        # The host clock stepped back a day: left ahead, the checkpoint would
+        # sit in front of every transaction the stepped clock stamps meanwhile.
+        _start_at(saved, _SETTLED + timedelta(days=1))
+        stepped_back = NOW - timedelta(hours=1)
+        fake = _backlog(monkeypatch, _FakeBacklog([stepped_back]))
+        with caplog.at_level(logging.WARNING, logger=analysis.logger.name):
+            await analysis._backlog_tick(NETWORK)
+        assert saved[NETWORK] == _SETTLED
+        assert analysis._scoring.checkpoint == _SETTLED
+        assert fake.stamps() == []
+        assert "ahead of its settle margin" in caplog.text
+
+    async def test_a_caught_up_checkpoint_is_left_alone(self, monkeypatch, saved, caplog):
+        _start_at(saved, _SETTLED)
+        _backlog(monkeypatch, _FakeBacklog())
+        with caplog.at_level(logging.WARNING, logger=analysis.logger.name):
+            await analysis._backlog_tick(NETWORK)
+        assert saved[NETWORK] == _SETTLED
+        assert "ahead of its settle margin" not in caplog.text
+
+    async def test_a_new_install_starts_at_the_margin_without_a_warning(
+        self, monkeypatch, saved, caplog
+    ):
+        # Its first ingestion is minutes old, past the margin: legitimately so.
+        monkeypatch.setattr(
+            analysis.clickhouse, "earliest_ingestion", lambda n: NOW - timedelta(minutes=5)
+        )
+        _backlog(monkeypatch, _FakeBacklog())
+        with caplog.at_level(logging.WARNING, logger=analysis.logger.name):
+            await analysis._backlog_tick(NETWORK)
+        assert saved[NETWORK] == _SETTLED
+        assert "ahead of its settle margin" not in caplog.text
+
+
+class TestSliceTail:
+    async def test_a_caught_up_tail_is_picked_with_its_slice(self, monkeypatch, saved):
+        # Caught up, the tail is the interval plus the last tick's run: on its
+        # own it would cost a whole pick and could not move the checkpoint.
+        monkeypatch.setattr(
+            settings, "ANALYSIS_BACKLOG_SLICE_SECONDS", int(_SETTLE.total_seconds())
+        )
+        last_tick_ran = timedelta(minutes=2)
+        start = _SETTLED - timedelta(seconds=_INTERVAL_SECONDS) - last_tick_ran
+        _start_at(saved, start)
+        fake = _backlog(monkeypatch, _FakeBacklog())
+        await analysis._backlog_tick(NETWORK)
+        assert fake.picks == [(start, NOW - _WINDOW)]
+
+    async def test_a_longer_tail_is_a_slice_of_its_own(self, monkeypatch, saved):
+        monkeypatch.setattr(
+            settings, "ANALYSIS_BACKLOG_SLICE_SECONDS", int(_SETTLE.total_seconds())
+        )
+        start = _SETTLED - _SETTLE / 2 - timedelta(seconds=1)
+        _start_at(saved, start)
+        fake = _backlog(monkeypatch, _FakeBacklog())
+        await analysis._backlog_tick(NETWORK)
+        assert len(fake.picks) == 2
 
 
 class TestRecentPass:
@@ -289,7 +357,7 @@ class TestRecentPass:
         walk_score = fake.score
         arrived = NOW - _WINDOW - timedelta(minutes=1)
 
-        async def score(network, hashes, since, until):
+        async def score(network, hashes, since, until, should_stop=None):
             if len(fake.batches) == 1:
                 # Ages out of the live window while the walk drains.
                 fake.unscored["txlate"] = arrived
@@ -327,7 +395,7 @@ class TestRecentPass:
         clock = iter(range(0, 10**6, _INTERVAL_SECONDS))
         monkeypatch.setattr(analysis.time, "monotonic", lambda: next(clock))
 
-        async def scored_but_still_unscored(network, hashes, since, until):
+        async def scored_but_still_unscored(network, hashes, since, until, should_stop=None):
             fake.batches.append(list(hashes))
             return BacklogBatch(len(hashes), len(hashes))
 
@@ -345,8 +413,18 @@ class TestScoringStatus:
             setattr(analysis._scoring, name, value)
         return analysis.scoring_status()["state"]
 
-    def test_starting_until_the_live_lane_finishes_a_tick(self):
-        assert self._state(checkpoint=_SETTLED) == "starting"
+    def test_starting_until_the_live_lane_finishes_a_poll(self):
+        assert self._state(live_started_at=NOW, checkpoint=_SETTLED) == "starting"
+
+    def test_stalled_when_the_first_poll_never_finishes(self):
+        # Every tick failing from boot is a stall, not a slow start.
+        started = NOW - timedelta(seconds=_INTERVAL_SECONDS) - _TOLERANCE - timedelta(seconds=1)
+        assert self._state(live_started_at=started, checkpoint=_SETTLED) == "stalled"
+
+    def test_disabled_while_analysis_is_off(self, monkeypatch):
+        # The live lane's ticks still finish, scoring nothing.
+        monkeypatch.setattr(settings, "ANALYSIS_ENABLED", False)
+        assert self._state(live_polled_at=NOW, checkpoint=_SETTLED) == "disabled"
 
     def test_ok_when_caught_up(self):
         assert self._state(live_polled_at=NOW, checkpoint=_SETTLED) == "ok"
@@ -365,9 +443,17 @@ class TestScoringStatus:
         state = self._state(live_polled_at=NOW, checkpoint=NOW - timedelta(days=25))
         assert state == "behind"
 
-    def test_with_the_backlog_lane_off_nothing_can_say_behind(self, monkeypatch):
+    def test_with_the_backlog_lane_off_it_is_never_ok(self, monkeypatch):
+        # Nothing would then score, or know of, what the live lane misses.
         monkeypatch.setattr(settings, "ANALYSIS_BACKLOG_ENABLED", False)
-        assert self._state(live_polled_at=NOW) == "ok"
+        assert self._state(live_polled_at=NOW) == "unguarded"
+
+    def test_an_unguarded_state_is_logged_as_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setattr(settings, "ANALYSIS_BACKLOG_ENABLED", False)
+        self._state(live_polled_at=NOW)
+        with caplog.at_level(logging.INFO, logger=analysis.logger.name):
+            analysis._log_scoring_state()
+        assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
     def test_the_report_carries_the_lanes_timestamps(self):
         self._state(live_polled_at=NOW, checkpoint=_SETTLED)
@@ -445,7 +531,7 @@ class TestLiveDrainPacing:
     backlog lane, where a late score costs far more: the next tick must not
     wait a whole interval."""
 
-    async def _tick_sleep(self, monkeypatch, processed):
+    async def _tick_sleep(self, monkeypatch, processed=0, run_once=None):
         monkeypatch.setattr(settings, "BASELINE_BOOTSTRAP_ON_STARTUP", False)
         monkeypatch.setattr(settings, "SCORER_FAKE_TOKEN_ENABLED", False)
         tick_done = []
@@ -454,7 +540,9 @@ class TestLiveDrainPacing:
             analysis, "_maybe_start_baseline_recompute", lambda: tick_done.append(True)
         )
         monkeypatch.setattr(analysis, "_initial_baseline_schedule", AsyncMock(return_value=0.0))
-        monkeypatch.setattr(analysis.engine, "run_once_async", AsyncMock(return_value=processed))
+        monkeypatch.setattr(
+            analysis.engine, "run_once_async", run_once or AsyncMock(return_value=processed)
+        )
         slept = []
 
         async def sleep(seconds):
@@ -475,3 +563,11 @@ class TestLiveDrainPacing:
 
     async def test_a_drained_window_waits_the_interval(self, monkeypatch):
         assert await self._tick_sleep(monkeypatch, 0) == settings.ANALYSIS_ENGINE_INTERVAL_SECONDS
+
+    async def test_every_finished_poll_counts_as_progress(self, monkeypatch):
+        # Stamped once per tick, a saturated tick of slow batches outlasts the
+        # stall tolerance while every poll succeeds.
+        full = settings.ANALYSIS_ENGINE_BATCH_SIZE
+        polls = AsyncMock(side_effect=[full, RuntimeError("ClickHouse down")])
+        await self._tick_sleep(monkeypatch, run_once=polls)
+        assert analysis._scoring.live_polled_at == NOW
