@@ -107,6 +107,7 @@ class _Progress:
     def __init__(self, next_chunk=0, completed=False):
         self.next_chunk, self.completed = next_chunk, completed
         self.saved: list[tuple[int, bool]] = []
+        self.resets = 0
 
     async def get(self, network):
         return self.next_chunk, self.completed
@@ -114,6 +115,10 @@ class _Progress:
     async def save(self, network, next_chunk, completed):
         self.saved.append((next_chunk, completed))
         self.next_chunk, self.completed = next_chunk, completed
+
+    async def reset(self, network):
+        self.resets += 1
+        self.next_chunk, self.completed = 0, False
 
 
 @pytest.fixture
@@ -123,6 +128,7 @@ def progress(monkeypatch):
     state = _Progress()
     monkeypatch.setattr(postgres, "get_spend_edges_backfill", state.get)
     monkeypatch.setattr(postgres, "save_spend_edges_backfill", state.save)
+    monkeypatch.setattr(postgres, "reset_spend_edges_backfill", state.reset)
     return state
 
 
@@ -144,6 +150,33 @@ class TestEnsureBackfilled:
         progress.completed = True
         await spend_edges.ensure_backfilled("preprod", lambda: False)
         assert filled == []
+
+    async def test_a_completed_backfill_whose_edges_remain_is_not_run_again(
+        self, progress, filled, monkeypatch
+    ):
+        progress.completed = True
+        monkeypatch.setattr(spend_edges, "history_lost", lambda network, before: False)
+        await spend_edges.ensure_backfilled("preprod", lambda: False, history_before=_NOW)
+        assert filled == []
+        assert progress.resets == 0
+
+    async def test_a_completed_backfill_whose_edges_are_gone_runs_again(
+        self, progress, filled, monkeypatch
+    ):
+        # spend_edges dropped or restored without its history while Postgres
+        # still says complete: scoring on it would miss every old leg.
+        progress.next_chunk, progress.completed = spend_edges.BACKFILL_CHUNKS, True
+        monkeypatch.setattr(spend_edges, "history_lost", lambda network, before: True)
+        await spend_edges.ensure_backfilled("preprod", lambda: False, history_before=_NOW)
+        assert progress.resets == 1
+        assert filled == list(range(spend_edges.BACKFILL_CHUNKS))
+        assert progress.completed
+
+    async def test_progress_is_reported_after_each_chunk(self, progress, filled):
+        reported: list[int] = []
+        progress.next_chunk = spend_edges.BACKFILL_CHUNKS - 2
+        await spend_edges.ensure_backfilled("preprod", lambda: False, on_progress=reported.append)
+        assert reported == [spend_edges.BACKFILL_CHUNKS - 1, spend_edges.BACKFILL_CHUNKS]
 
     async def test_a_stop_leaves_the_rest_for_the_next_start(self, progress, filled):
         await spend_edges.ensure_backfilled("preprod", lambda: len(filled) == 1)

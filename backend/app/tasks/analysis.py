@@ -53,6 +53,10 @@ class _ScoringState:
     oldest_unscored: datetime | None = None
     # While the spend_edges history is being filled, and neither lane scores.
     edges_filling: bool = False
+    # Chunks filled, and when the fill last finished one; None until it
+    # finishes its first since this start.
+    edges_filled_chunks: int | None = None
+    edges_progress_at: datetime | None = None
 
 
 _scoring = _ScoringState()
@@ -249,9 +253,18 @@ async def _run_baseline_recompute(stop_event: threading.Event) -> None:
         logger.info("Baseline recomputation: %s rows updated", total)
 
 
-async def _fill_spend_edges(network: str, should_stop: Callable[[], bool]) -> None:
+def _edges_progressed(filled_chunks: int) -> None:
+    _scoring.edges_filled_chunks = filled_chunks
+    _scoring.edges_progress_at = datetime.now(UTC)
+
+
+async def _fill_spend_edges(
+    network: str, should_stop: Callable[[], bool], started_at: datetime
+) -> None:
     """Fill the spend_edges history, then let the lanes score."""
-    await spend_edges.ensure_backfilled(network, should_stop)
+    await spend_edges.ensure_backfilled(
+        network, should_stop, history_before=started_at, on_progress=_edges_progressed
+    )
     if not should_stop():
         _scoring.edges_filling = False
         # The stall clock starts when the lane can first poll, not while it waits.
@@ -542,10 +555,10 @@ def scoring_status() -> dict[str, Any]:
 
     ``state`` is "disabled" when ANALYSIS_ENABLED is off (nothing scores),
     "starting" while the spend_edges history is filled and until the live lane
-    finishes its first poll after it, "stalled" when it
-    has not finished one (or, since it started, its first) for the tolerance
-    past its interval, "behind" when transactions older than the live window
-    may be unscored (see _history_incomplete) or rows behind the checkpoint
+    finishes its first poll after it, "stalled" when it has not finished one
+    (or, since it started, its first) for the tolerance past its interval, or
+    the fill has not finished a chunk for as long, "behind" when transactions
+    older than the live window may be unscored (see _history_incomplete) or rows behind the checkpoint
     near their retention (see _retention_at_risk), "unguarded" when all is
     well but the backlog lane is off (so nothing would score, or know of, a
     transaction the live lane misses), and "ok" otherwise.
@@ -560,7 +573,11 @@ def scoring_status() -> dict[str, Any]:
     if not settings.ANALYSIS_ENABLED:
         state = "disabled"
     elif _scoring.edges_filling:
-        state = "starting"
+        # A long fill is not a stall, but one that stopped advancing (a chunk
+        # failing on every retry) is: neither lane scores until it ends.
+        fill_progress = _scoring.edges_progress_at or _scoring.live_started_at
+        fill_stuck = fill_progress is not None and now - fill_progress > stall_after
+        state = "stalled" if fill_stuck else "starting"
     elif last_progress is not None and now - last_progress > stall_after:
         state = "stalled"
     elif _scoring.live_polled_at is None:
@@ -580,6 +597,8 @@ def scoring_status() -> dict[str, Any]:
         "checkpoint": format_iso_utc(_scoring.checkpoint),
         "oldest_unscored_at": format_iso_utc(_scoring.oldest_unscored),
         "spend_edges_filling": _scoring.edges_filling,
+        "spend_edges_filled_chunks": _scoring.edges_filled_chunks,
+        "spend_edges_chunks": spend_edges.BACKFILL_CHUNKS,
     }
 
 
@@ -622,8 +641,12 @@ def start():
     _scoring.live_started_at = datetime.now(UTC)
     _lane_stop = threading.Event()
     _scoring.edges_filling = True
+    _scoring.edges_filled_chunks = None
+    _scoring.edges_progress_at = None
+    # Ingestion starts after this (main._start_leader_duties), so every edge
+    # stored before now came from an earlier process or from the fill.
     _edges_task = asyncio.create_task(
-        _fill_spend_edges(settings.CARDANO_NETWORK, _lane_stop.is_set)
+        _fill_spend_edges(settings.CARDANO_NETWORK, _lane_stop.is_set, _scoring.live_started_at)
     )
     _task = asyncio.create_task(_loop())
     if settings.ANALYSIS_BACKLOG_ENABLED:

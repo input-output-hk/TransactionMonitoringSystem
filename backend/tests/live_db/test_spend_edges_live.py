@@ -8,7 +8,7 @@ replays and rollbacks included. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.db import spend_edges
 from app.models.transaction import NormalizedTransaction, TransactionInput, TransactionOutput
@@ -77,8 +77,14 @@ def _plant(ch, network) -> list[NormalizedTransaction]:
     ch.insert_transactions_batch(txs)
     # A replayed block re-inserts the same rows.
     ch.insert_transactions_batch(txs[:1])
-    # A slotless mempool copy of a transaction confirmed later.
-    ch.insert_transactions_batch([txs[0].model_copy(update={"slot": None})])
+    # A slotless mempool copy of a transaction confirmed later, so stamped
+    # earlier: transactions keeps one version per tx_hash, and a copy stamped
+    # after the confirmation would replace it on the next merge, taking its
+    # slot (and with it the backfill's edges) away whenever a merge ran first.
+    seen_in_mempool = datetime.now(UTC) - timedelta(minutes=1)
+    ch.insert_transactions_batch(
+        [txs[0].model_copy(update={"slot": None, "ingestion_timestamp": seen_in_mempool})]
+    )
     return txs
 
 
@@ -126,3 +132,27 @@ class TestBackfill:
         spend_edges.backfill_chunk(network, chunk)
 
         assert {edge[2][:hex_digits] for edge in _edges(ch, network)} == {txs[0].tx_hash[:2]}
+
+
+class TestHistoryLost:
+    """A fill recorded as complete in Postgres is run again only when the
+    edges of the spends stored before the process started are gone."""
+
+    def test_only_spends_without_any_edge_read_as_lost(self, ch):
+        network = _network()
+        before_plant = datetime.now(UTC) - timedelta(minutes=1)
+        after_plant = datetime.now(UTC) + timedelta(minutes=1)
+        assert not spend_edges.history_lost(network, after_plant), "no history, nothing lost"
+
+        txs = _plant(ch, network)
+        assert not spend_edges.history_lost(network, after_plant)
+
+        ch._get_client().execute(
+            "DELETE FROM spend_edges WHERE network = %(network)s", {"network": network}
+        )
+        assert spend_edges.history_lost(network, after_plant)
+        # Spends stored after the bound are this process's own, not history.
+        assert not spend_edges.history_lost(network, before_plant)
+
+        _refill(ch, network, txs)
+        assert not spend_edges.history_lost(network, after_plant)

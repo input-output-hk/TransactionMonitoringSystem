@@ -222,21 +222,23 @@ def get_score_bands_by_hashes(network: str, tx_hashes: list[str]) -> dict[str, t
     without the evidence get_class_scores_by_hashes carries: on mainnet 0.5
     CPU-s and 0.2 GiB per 500 hashes against its 1.9 CPU-s and 0.7 GiB. Same
     archive anti-join, so an archived false positive stays out of the counts.
-    Unaliased argMax: an alias named after a source column would shadow it in
-    the sibling aggregate (Code 184 on 26.x).
+    One argMax over the pair: analyzed_at has whole seconds, so two scores of
+    a transaction can tie, and separate argMaxes could then take the band of
+    one and the score of the other. Unaliased: an alias named after a source
+    column would shadow it in an aggregate (Code 184 on 26.x).
     """
     if not tx_hashes:
         return {}
     rows = _client().execute(
         f"""
-        SELECT tx_hash, argMax(risk_band, analyzed_at), argMax(max_score, analyzed_at)
+        SELECT tx_hash, argMax((risk_band, max_score), analyzed_at)
         FROM tx_class_scores
         WHERE network = %(network)s AND tx_hash IN %(hashes)s AND {_ARCHIVE_ANTI_JOIN}
         GROUP BY tx_hash
         """,
         {"network": network, "hashes": tx_hashes},
     )
-    return {tx_hash: (str(band), float(score)) for tx_hash, band, score in rows}
+    return {tx_hash: (str(band), float(score)) for tx_hash, (band, score) in rows}
 
 
 async def get_score_bands_by_hashes_async(

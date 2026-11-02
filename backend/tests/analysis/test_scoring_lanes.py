@@ -425,10 +425,32 @@ class TestScoringStatus:
 
     def test_starting_while_the_spend_edges_history_fills(self):
         # Neither lane scores meanwhile; filling outlasting the stall tolerance
-        # is not a stall.
+        # is not a stall while chunks keep landing.
+        started = NOW - timedelta(seconds=_INTERVAL_SECONDS) - _TOLERANCE - timedelta(seconds=1)
+        state = self._state(
+            edges_filling=True,
+            live_started_at=started,
+            edges_progress_at=NOW,
+            checkpoint=_SETTLED,
+        )
+        assert state == "starting"
+
+    def test_stalled_when_the_spend_edges_fill_stops_advancing(self):
+        # A chunk failing on every retry holds both lanes for good: that is a
+        # scoring outage, not a slow start.
+        stuck = NOW - timedelta(seconds=_INTERVAL_SECONDS) - _TOLERANCE - timedelta(seconds=1)
+        state = self._state(
+            edges_filling=True,
+            live_started_at=stuck,
+            edges_progress_at=stuck,
+            checkpoint=_SETTLED,
+        )
+        assert state == "stalled"
+
+    def test_stalled_when_the_spend_edges_fill_never_finishes_a_chunk(self):
         started = NOW - timedelta(seconds=_INTERVAL_SECONDS) - _TOLERANCE - timedelta(seconds=1)
         state = self._state(edges_filling=True, live_started_at=started, checkpoint=_SETTLED)
-        assert state == "starting"
+        assert state == "stalled"
 
     def test_disabled_while_analysis_is_off(self, monkeypatch):
         # The live lane's ticks still finish, scoring nothing.
@@ -590,8 +612,11 @@ class TestSpendEdgesGate:
         import asyncio
 
         filled = asyncio.Event()
+        calls: list[dict] = []
 
-        async def backfill(network, should_stop):
+        async def backfill(network, should_stop, history_before=None, on_progress=None):
+            calls.append({"history_before": history_before})
+            on_progress(1)
             await filled.wait()
 
         live = AsyncMock(return_value=0)
@@ -609,7 +634,11 @@ class TestSpendEdgesGate:
             for _ in range(_GATE_YIELDS):
                 await asyncio.sleep(0)
             assert not live.called and not tick.called
-            assert analysis.scoring_status()["state"] == "starting"
+            status = analysis.scoring_status()
+            assert status["state"] == "starting"
+            assert status["spend_edges_filled_chunks"] == 1
+            # The loss check reaches back only to before this start's ingestion.
+            assert calls[0]["history_before"] is not None
             filled.set()
             for _ in range(_GATE_YIELDS):
                 await asyncio.sleep(0)

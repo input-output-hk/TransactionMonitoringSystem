@@ -337,6 +337,9 @@ class TestScoreReadPath:
         stats = scores.get_class_scores_stats(LIVE_NETWORK)
         assert isinstance(stats, dict) and stats
 
+        timeseries = scores.get_alert_timeseries(LIVE_NETWORK, days=7)
+        assert isinstance(timeseries, list)
+
     def test_lookups_by_hash_read_the_latest_score_and_skip_archived(self, ch):
         """The contract_anomaly rescue reads without FINAL: unmerged versions of
         a score must still come back as their latest one, and an archived false
@@ -366,8 +369,19 @@ class TestScoreReadPath:
             rescored: ("Moderate", 40.0)
         }
 
-        timeseries = scores.get_alert_timeseries(LIVE_NETWORK, days=7)
-        assert isinstance(timeseries, list)
+    def test_a_tied_rescore_reads_its_band_and_score_from_one_row(self, ch):
+        """analyzed_at has whole seconds: two scores of a transaction in one
+        second tie, and the band and score must still come from the same one."""
+        tx_hash = uuid.uuid4().hex * 2
+        critical = _score_row(tx_hash)
+        moderate = _score_row(tx_hash)
+        moderate.update(max_score=40.0, risk_band="Moderate", token_dust=40.0)
+        moderate["analyzed_at"] = critical["analyzed_at"]
+        scores.insert_class_scores([critical])
+        scores.insert_class_scores([moderate])
+
+        bands = scores.get_score_bands_by_hashes(LIVE_NETWORK, [tx_hash])
+        assert bands[tx_hash] in {("Critical", _TEST_SCORE), ("Moderate", 40.0)}
 
 
 class TestContractGrouping:

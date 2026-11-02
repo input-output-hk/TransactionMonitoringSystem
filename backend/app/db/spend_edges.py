@@ -100,6 +100,12 @@ def insert_rows(client: Any, rows: list[tuple[Any, ...]]) -> None:
 # address, every slot the transaction is stored at (a slotless mempool copy has
 # none), stamped with the latest ingestion of that copy. Re-running a chunk
 # writes the same keys, which the ReplacingMergeTree collapses.
+#
+# A rollback purge landing between a chunk's read and its write leaves that
+# chunk's edges of the orphaned transaction behind: the DELETE applies only to
+# the parts that existed when it ran. Accepted, since it can happen only while
+# the one-time fill runs and the stray edge is a leg that was on chain, so at
+# worst a cycle is reported that the fork undid, never one missed.
 _BACKFILL_CHUNK = f"""
     INSERT INTO spend_edges ({", ".join(EDGE_COLUMNS)})
     SELECT s.network, s.address, t.tx_slot, s.tx_hash, o.to_address, o.paid, t.stamp
@@ -148,13 +154,54 @@ def backfill_chunk(network: str, chunk: int) -> None:
     clickhouse._get_client().execute(_BACKFILL_CHUNK, {"network": network, "lo": lo, "hi": hi})
 
 
-async def ensure_backfilled(network: str, should_stop: Callable[[], bool]) -> None:
+# A spend stored before `before`, and an edge stored before it. The progress
+# row lives in Postgres and the edges in ClickHouse, so a spend_edges table
+# dropped, truncated or restored from a backup older than the fill leaves the
+# row reading "completed" over a graph without its history. Every spend stored
+# before the process started has its edges by then (the writer makes them in
+# the same attempt, the fill made the rest), and the edges expire with the
+# spends (both under CH_RETENTION_DAYS_IO), so the first without the second is
+# such a loss. The bound keeps out the edges this process writes meanwhile.
+_SPEND_BEFORE = f"""
+    SELECT 1 FROM transaction_inputs
+    WHERE network = %(network)s AND ingestion_timestamp < %(before)s
+      AND {_SPEND_INPUT_CONDITIONS}
+    LIMIT 1
+"""
+_EDGE_BEFORE = """
+    SELECT 1 FROM spend_edges
+    WHERE network = %(network)s AND ingestion_timestamp < %(before)s
+    LIMIT 1
+"""
+
+
+def history_lost(network: str, before: datetime) -> bool:
+    """Whether spends stored before `before` have lost every edge (blocking)."""
+    from app.db import clickhouse
+
+    client = clickhouse._get_client()
+    params = {"network": network, "before": before}
+    return bool(client.execute(_SPEND_BEFORE, params)) and not client.execute(_EDGE_BEFORE, params)
+
+
+async def ensure_backfilled(
+    network: str,
+    should_stop: Callable[[], bool],
+    history_before: datetime | None = None,
+    on_progress: Callable[[int], None] | None = None,
+) -> None:
     """Fill the history once, resuming where a restart left it; return when complete.
 
     Runs on the backlog lane's executor, whose queries are thread-capped and
     which has nothing else to do until this returns. A failed chunk is retried
     every ANALYSIS_ENGINE_INTERVAL_SECONDS: the lanes must not score before the
-    graph is whole, so there is nothing to give up to.
+    graph is whole, so there is nothing to give up to. on_progress gets the
+    count of filled chunks after each one, so a fill that stops advancing shows
+    as a stall (analysis.scoring_status).
+
+    history_before is when this process started: a fill recorded as complete
+    is run again if the edges stored before it are gone (see history_lost).
+    None skips that check.
     """
     from app.db import clickhouse, postgres
 
@@ -162,6 +209,19 @@ async def ensure_backfilled(network: str, should_stop: Callable[[], bool]) -> No
     while True:
         try:
             next_chunk, completed = await postgres.get_spend_edges_backfill(network)
+            if (
+                completed
+                and history_before is not None
+                and await loop.run_in_executor(
+                    clickhouse._ch_backlog_executor, history_lost, network, history_before
+                )
+            ):
+                logger.error(
+                    "spend_edges: the filled history is gone (table dropped, truncated "
+                    "or restored without it); filling it again before scoring starts"
+                )
+                await postgres.reset_spend_edges_backfill(network)
+                next_chunk, completed = 0, False
             if completed:
                 return
             if next_chunk == 0:
@@ -177,6 +237,8 @@ async def ensure_backfilled(network: str, should_stop: Callable[[], bool]) -> No
                 )
                 done = chunk + 1 == BACKFILL_CHUNKS
                 await postgres.save_spend_edges_backfill(network, chunk + 1, done)
+                if on_progress is not None:
+                    on_progress(chunk + 1)
             logger.info("spend_edges: history filled")
             return
         except Exception as e:
