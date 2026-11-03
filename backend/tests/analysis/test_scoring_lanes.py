@@ -388,7 +388,45 @@ class TestRecentPass:
         assert all(since >= _SETTLED for since, _ in fake.picks)
         assert len(fake.picks) == 1
 
-    async def test_a_scored_transaction_picked_again_leaves_the_region_to_the_walk(
+    async def test_a_deferred_transaction_picked_again_does_not_stop_the_pass(
+        self, monkeypatch, saved, caplog
+    ):
+        """Mainnet, 2026-11-02 21:33: a recent transaction whose sandwich
+        enrichment failed was deferred, picked again on the next turn, read as
+        a loop, and the pass left the region for the rest of a tick that lasts
+        the whole drain. A transaction that ages out after it must still be
+        scored ahead of the walk."""
+        _start_at(saved, NOW - timedelta(hours=_HISTORY_HOURS_BACK + 1))
+        deferred = NOW - _WINDOW - timedelta(minutes=30)
+        fake = _backlog(
+            monkeypatch,
+            _FakeBacklog(self._history(_PICK) + [deferred], held=[deferred]),
+        )
+        clock = iter(range(0, 10**6, _INTERVAL_SECONDS))
+        monkeypatch.setattr(analysis.time, "monotonic", lambda: next(clock))
+        walk_score = fake.score
+        arrived = NOW - _WINDOW - timedelta(minutes=1)
+
+        async def score(network, hashes, since, until, should_stop=None):
+            if len(fake.batches) == 2:
+                # Ages out of the live window after the deferral was picked again.
+                fake.unscored["txlate"] = arrived
+            return await walk_score(network, hashes, since, until)
+
+        monkeypatch.setattr(engine, "run_backlog_once_async", score)
+        with caplog.at_level(logging.ERROR, logger=analysis.logger.name):
+            await analysis._backlog_tick(NETWORK)
+        deferred_hash = f"tx{_PICK:06d}"
+        assert sum(deferred_hash in b for b in fake.batches) > 2, "retried on every turn"
+        late_batch = next(i for i, b in enumerate(fake.batches) if "txlate" in b)
+        # _history counts back in time, so its first stamp is the newest: the
+        # walk, oldest first, scores it last.
+        last_of_history = f"tx{0:06d}"
+        walk_done = next(i for i, b in enumerate(fake.batches) if last_of_history in b)
+        assert late_batch < walk_done, "scored before the walk finished its pick"
+        assert "still picked as unscored" not in caplog.text
+
+    async def test_a_scored_transaction_picked_again_is_left_to_the_walk(
         self, monkeypatch, saved, caplog
     ):
         _start_at(saved, NOW - timedelta(hours=_HISTORY_HOURS_BACK + 1))

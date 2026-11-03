@@ -425,10 +425,16 @@ class _RecentPass:
     def __init__(self, network: str) -> None:
         self.network = network
         self.last = time.monotonic()
-        # The hashes of its last pick: picked again, they were scored and are
-        # still not visible as scored, and picking again would loop.
+        # The hashes of its last pick when every one was reported scored:
+        # picked again, they are still not visible as scored, and scoring them
+        # again would loop. A pick that left some unscored (a deferred retry,
+        # or one the live lane holds) is picked again by design, so it records
+        # nothing, as the walk ends its tick instead of checking (_score_picked).
         self.scored: set[str] = set()
-        self.stuck = False
+        # Those found looping: left to the walk, which stops on them itself. A
+        # tick lasts as long as the drain (days on a large backlog), so leaving
+        # the whole region instead would leave every later arrival unrescued.
+        self.looping: set[str] = set()
 
     def due(self) -> bool:
         return time.monotonic() - self.last >= settings.ANALYSIS_ENGINE_INTERVAL_SECONDS
@@ -437,7 +443,7 @@ class _RecentPass:
         """One pick of the region after ``after``, scored, unless the walk at ``walk_at`` is in it."""
         self.last = time.monotonic()
         span = settings.ANALYSIS_BACKLOG_RECENT_SECONDS
-        if not span or self.stuck:
+        if not span:
             return
         window_start = datetime.now(UTC) - timedelta(seconds=settings.ANALYSIS_LIVE_WINDOW_SECONDS)
         region_start = window_start - timedelta(seconds=span)
@@ -447,24 +453,28 @@ class _RecentPass:
         if since >= window_start:
             return
         picked = await engine.pick_backlog_async(self.network, since, window_start)
-        if not picked:
-            return
-        if self.scored.intersection(tx_hash for tx_hash, _ in picked):
+        looping = self.scored.intersection(tx_hash for tx_hash, _ in picked)
+        if looping:
             logger.error(
-                "Backlog lane: transactions scored in the recent region [%s, %s) are still "
-                "picked as unscored; leaving the region to the walk until the next tick",
+                "Backlog lane: %d transaction(s) scored in the recent region [%s, %s) are "
+                "still picked as unscored; leaving them to the walk",
+                len(looping),
                 format_iso_utc(since),
                 format_iso_utc(window_start),
             )
-            self.stuck = True
+            self.looping |= looping
+        picked = [(tx_hash, at) for tx_hash, at in picked if tx_hash not in self.looping]
+        if not picked:
             return
-        self.scored = {tx_hash for tx_hash, _ in picked}
         batch = settings.ANALYSIS_BACKLOG_BATCH_SIZE
+        complete = True
         for start in range(0, len(picked), batch):
             hashes = [tx_hash for tx_hash, _ in picked[start : start + batch]]
-            await engine.run_backlog_once_async(
+            scored = await engine.run_backlog_once_async(
                 self.network, hashes, since, window_start, _should_stop()
             )
+            complete = complete and scored.scored == len(hashes)
+        self.scored = {tx_hash for tx_hash, _ in picked} if complete else set()
         self.last = time.monotonic()
 
 
