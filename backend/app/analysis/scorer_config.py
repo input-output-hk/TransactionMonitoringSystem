@@ -94,6 +94,7 @@ _REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
         "link_scores",
         "window_slots",
         "neighbor_limit",
+        "recurrence_count_cap",
         "min_profit_lovelace",
         "reason_thresholds",
     ),
@@ -569,6 +570,7 @@ def _validate(path: Path, data: dict[str, Any]) -> None:
         )
     _check_band_invariants(path, data)
     _check_ranges(path, data)
+    _check_floors(path, data)
 
 
 # Band-boundary contracts for config values that cap or floor a score into a
@@ -655,6 +657,30 @@ def _check_ranges(path: Path, data: dict[str, Any]) -> None:
         if not lower <= value < upper:
             raise RuntimeError(
                 f"Detection config {path}: {dotted}={value} is outside [{lower}, {upper}): {why}."
+            )
+
+
+# Values that must stay at or above another value of the same document, checked
+# at load like the ranges. Entries: (dotted path, dotted path of its floor, why).
+_FLOOR_INVARIANTS: tuple[tuple[str, str, str], ...] = (
+    (
+        "scorers.sandwich.recurrence_count_cap",
+        "scorers.sandwich.bootstrap_anchors.attacker_recurrence.p99",
+        "the attacker-history count is cut at the cap, so a cap below the "
+        "recurrence anchor's p99 would lower the sub-score of a recurring attacker",
+    ),
+)
+
+
+def _check_floors(path: Path, data: dict[str, Any]) -> None:
+    for dotted, floor_dotted, why in _FLOOR_INVARIANTS:
+        raw, floor = _dotted_get(data, dotted), _dotted_get(data, floor_dotted)
+        if raw is None or floor is None:
+            # Presence is enforced by the required-key checks above.
+            continue
+        if float(raw) < float(floor):
+            raise RuntimeError(
+                f"Detection config {path}: {dotted}={raw} is below {floor_dotted}={floor}: {why}."
             )
 
 

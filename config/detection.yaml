@@ -707,6 +707,13 @@ scorers:
     # detection. Bounds the per-tx query cost; a window busier than this is
     # batcher traffic, not a 3-leg sandwich.
     neighbor_limit: 20
+    # Most prior script payments counted for the attacker's recurrence. The
+    # sub-score saturates at its attacker_recurrence p99, so a count past it
+    # changes no score; uncapped, a busy wallet's history was the cost (one
+    # mainnet bot: ~198k payments). Far above the bootstrap p99 so a computed
+    # baseline up to here still reads the exact count; the load check keeps it
+    # at or above that p99. Capped, the read costs ~15 ms (measured on mainnet).
+    recurrence_count_cap: 1000
     link_scores:
       linked: 1.0                # attacker_linked flag present
       unlinked: 0.2              # triplet present but no linkage evidence

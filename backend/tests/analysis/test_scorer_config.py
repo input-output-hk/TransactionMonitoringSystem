@@ -244,6 +244,16 @@ class TestValidation:
         with pytest.raises(RuntimeError, match=r"closing_subset_max_outputs.*outside"):
             _reload_module(monkeypatch, tmp_path, cfg)
 
+    def test_attacker_history_cap_below_the_recurrence_p99_raises(self, tmp_path, monkeypatch):
+        # The count is cut at the cap: below the anchor's p99 a recurring
+        # attacker's sub-score would drop.
+        cfg = _minimal_config()
+        sandwich = cfg["scorers"]["sandwich"]
+        sandwich["bootstrap_anchors"]["attacker_recurrence"]["p99"] = 5
+        sandwich["recurrence_count_cap"] = 4
+        with pytest.raises(RuntimeError, match=r"recurrence_count_cap.*below"):
+            _reload_module(monkeypatch, tmp_path, cfg)
+
     def test_band_floor_below_threshold_raises(self, tmp_path, monkeypatch):
         # Same contract for floors: a malicious verdict floor below the
         # Critical threshold would demote curated-malicious verdicts.

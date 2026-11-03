@@ -886,7 +886,7 @@ The Front-Running scorer maps `TX_B_CONFIRMED=1.0` (front-run signal) and `TX_A_
 
 ### Active Cross-Transaction Sub-Scores
 - `cycle_recurrence` and `recipient_entropy` (Circular): one read of the origin's earlier cycles. It selects `tx_class_scores FINAL` rows on the network whose `circular_origins` shares an address key with this cycle's input addresses, that were scored (`circular >= 0`) or suppressed with a stored path, and whose `circular_first_slot` lies within `recurrence_window_days` (30) of chain time before this cycle's first slot, excluding the transaction itself. Recurrence counts the rows with `circular >= 60` whose `circular_intermediaries` share an intermediary with this cycle; the recycled share is measured against all of them. `circular_origins`, `circular_intermediaries` and `circular_first_slot` are columns ClickHouse materializes from the stored circular evidence; rows stored before the origin set and the path were recorded fall back to the representative origin address and the per-step hop representatives.
-- `attacker_sandwich_count` (Sandwich): queries historical tx count from same attacker address cluster at script addresses
+- `attacker_sandwich_count` (Sandwich): the number of earlier transactions (before the victim's slot) in which the attacker address spent an input and paid a script address, read from `spend_edges` and counted up to `recurrence_count_cap` (1000). Any spending input counts, not only the first, so a wallet that co-signs from a second input is not undercounted. The recurrence sub-score saturates at its anchor's p99 (5), which the load check keeps at or below the cap.
 
 ### Placeholder Sub-Scores
 Several sub-scores are placeholders pending cross-tx analysis infrastructure:
