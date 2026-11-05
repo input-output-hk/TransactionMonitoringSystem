@@ -141,6 +141,39 @@ class TestPoll:
         assert row["ingestion_timestamp"] == _naive(r.at(1))
 
 
+class TestStoredCopies:
+    """What the engine checks a batch against before storing its scores."""
+
+    def _insert_copy(self, tx_hash, block_hash, ingested):
+        clickhouse._get_client().execute(
+            "INSERT INTO transactions (tx_hash, network, timestamp, fee, raw_data, block_hash, "
+            "ingestion_timestamp) VALUES",
+            [(tx_hash, LIVE_NETWORK, _naive(ingested), 1, "{}", block_hash, _naive(ingested))],
+        )
+
+    def test_a_purged_copy_is_gone_and_its_replacement_told_apart(self, ch):
+        """A slot battle: the purge and the re-confirmation in another block can
+        land in one second, so only the block hash tells the two copies apart,
+        and the projection must not serve the purged one."""
+        r = _Range()
+        tx = _hash()
+        purged, current = "aa" * 32, "bb" * 32
+        self._insert_copy(tx, purged, r.at(1))
+        (hydrated,) = r.poll()
+        assert hydrated["block_hash"] == purged
+
+        clickhouse._get_client().execute(
+            "DELETE FROM transactions WHERE network = %(network)s AND tx_hash = %(tx)s",
+            {"network": LIVE_NETWORK, "tx": tx},
+            settings=clickhouse._LIGHTWEIGHT_DELETE_SETTINGS,
+        )
+        self._insert_copy(tx, current, r.at(1))
+
+        assert scores.stored_copies(LIVE_NETWORK, [tx]) == {(tx, current, _naive(r.at(1)))}
+        held = (tx, hydrated["block_hash"], hydrated["ingestion_timestamp"])
+        assert held not in scores.stored_copies(LIVE_NETWORK, [tx])
+
+
 class TestEarliestIngestion:
     def test_it_reads_the_first_stamp_and_none_before_any(self, ch):
         network = f"{LIVE_NETWORK}-{uuid.uuid4().hex[:8]}"

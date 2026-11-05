@@ -39,6 +39,8 @@ _BLOCK_INSERT_STATEMENTS = 7
 # 3,850 hashes on: the bound keeps a margin under that for the reads that bind a
 # batch's hashes (hydrate, enrichment, the circular history lookup).
 _MAX_HASHES_PER_QUERY = 1000
+# Calendar arithmetic, for a retention set in days checked against margins in hours.
+_HOURS_PER_DAY = 24
 
 
 def _env_files() -> list[str]:
@@ -369,6 +371,41 @@ class Settings(BaseSettings):
     # the drain. A share and not a number of days, so a short retention does not
     # read at risk with nothing behind. Ignored while no retention is set.
     ANALYSIS_RETENTION_WARNING_SHARE: float = Field(default=0.5, gt=0, le=1)
+    # Chunks of the spend_edges history (spend_edges.BACKFILL_CHUNKS) whose
+    # coverage one query of spend_edges.missing_chunks checks. Its anti-join
+    # holds the chunks' spends and edges in memory: over the whole history it
+    # hit MEMORY_LIMIT_EXCEEDED at 3.38 GiB, while 16 chunks peaked at 168 MiB
+    # on 7.5M inputs and 8.1M edges. Mainnet has about twice the inputs and
+    # four times the edges, which keeps a 16-chunk pass under the 3.6 GiB
+    # query limit.
+    SPEND_EDGES_CHECK_CHUNKS_PER_PASS: int = Field(default=16, ge=1)
+    # With CH_RETENTION_DAYS_IO set, the coverage check leaves out the spends
+    # this close to their expiry. Inputs and edges expire on the same
+    # ingestion_timestamp, but TTL merges run per table, so near the boundary
+    # an edge can be gone while its input still waits for its merge; that is
+    # no gap, and a refill could not keep the edge. A day is several TTL merge
+    # intervals (merge_with_ttl_timeout, 4 hours by default) on a loaded host,
+    # and what it leaves out expires within the day anyway.
+    SPEND_EDGES_CHECK_TTL_MARGIN_HOURS: int = Field(default=24, ge=0)
+
+    @model_validator(mode="after")
+    def _spend_edges_check_margin_inside_retention(self) -> "Settings":
+        # A margin as long as the retention leaves out every spend, and the
+        # check would then read a whole history as covered without checking it.
+        retention_hours = self.CH_RETENTION_DAYS_IO * _HOURS_PER_DAY
+        if retention_hours and self.SPEND_EDGES_CHECK_TTL_MARGIN_HOURS >= retention_hours:
+            raise ValueError(
+                "SPEND_EDGES_CHECK_TTL_MARGIN_HOURS must be shorter than "
+                f"CH_RETENTION_DAYS_IO ({retention_hours} hours)"
+            )
+        return self
+
+    # Attempts at the start-up coverage check, one ANALYSIS_ENGINE_INTERVAL_SECONDS
+    # apart, before the lanes start without it. A ClickHouse restart passes
+    # within one interval; a failure on every attempt (a pass over the memory
+    # limit) needs SPEND_EDGES_CHECK_CHUNKS_PER_PASS lowered, and must not hold
+    # every detection until then.
+    SPEND_EDGES_CHECK_ATTEMPTS: int = Field(default=3, ge=1)
     # Baseline lookup cache (0 disables). Baselines change once per daily
     # recompute but were point-SELECTed per feature per scored tx: the
     # engine's dominant N+1. insert_baselines() clears the cache; the 1 h
@@ -614,12 +651,27 @@ class Settings(BaseSettings):
     # curation, not chain state).
     ROLLBACK_CLEANUP_ENABLED: bool = True
     # Second rollback purge pass for tx_class_scores. The first purge can
-    # race an in-flight engine batch (run_once holds its fetched rows for
-    # seconds and inserts scores at the end), leaving a stale score row that
-    # the unanalyzed anti-join treats as "already scored" forever. 60 s is
-    # comfortably longer than one batch's wall time; deleting a fresh score
+    # race an in-flight engine batch, leaving a stale score row that the
+    # unanalyzed anti-join treats as "already scored" forever. The engine
+    # stores no score of a copy gone by its check just before the insert
+    # (engine._still_stored), so the race left is an insert that checked before
+    # the purge and lands after it: at most one connect and one send/receive
+    # timeout later (130 s at the defaults), which the validator below holds
+    # the delay above. 180 s leaves a margin over that; deleting a fresh score
     # of a re-confirmed tx is recall-safe (the engine simply re-scores it).
-    ROLLBACK_SCORE_REPURGE_DELAY_SECONDS: int = 60
+    ROLLBACK_SCORE_REPURGE_DELAY_SECONDS: int = 180
+
+    @model_validator(mode="after")
+    def _repurge_after_any_score_insert(self) -> "Settings":
+        bound = (
+            self.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS + self.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+        )
+        if self.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS <= bound:
+            raise ValueError(
+                f"ROLLBACK_SCORE_REPURGE_DELAY_SECONDS must be more than {bound:.0f} "
+                "(one score insert at the configured ClickHouse timeouts)"
+            )
+        return self
 
     # Maximum byte-length of the raw_data JSON stored per transaction.
     # 0 = no limit (store the full payload; ZSTD codec keeps it cheap).

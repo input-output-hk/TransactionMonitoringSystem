@@ -75,6 +75,10 @@ _SCORE_COLS = (
     "analyzed_at",
 )
 _SCORE_SELECT = ", ".join(_SCORE_COLS)
+# Written, never returned: scored_at only orders a transaction's rows for the
+# latest-score readers that run without FINAL (see engine._next_score_stamp).
+_SCORE_INSERT_COLS = (*_SCORE_COLS, "scored_at")
+_SCORE_INSERT = ", ".join(_SCORE_INSERT_COLS)
 
 # Suppress admin-archived (network, tx_hash) pairs. ClickHouse 26+ rejects FINAL
 # on a table inside a JOIN, so this is a scalar-subquery anti-join. All score
@@ -119,7 +123,7 @@ def insert_class_scores(results: list[dict[str, Any]]):
     _client().execute(
         f"""
         INSERT INTO tx_class_scores (
-            {_SCORE_SELECT}
+            {_SCORE_INSERT}
         ) VALUES
         """,
         [
@@ -151,6 +155,9 @@ def insert_class_scores(results: list[dict[str, Any]]):
                 r.get("config_hash", ""),
                 r.get("code_version", ""),
                 r["analyzed_at"],
+                # A row built by hand orders by its analyzed_at, as the column
+                # default orders the rows stored before scored_at existed.
+                r.get("scored_at", r["analyzed_at"]),
             )
             for r in results
         ],
@@ -197,7 +204,9 @@ def get_class_scores_by_hashes(
     touches nearly every granule; FINAL also merges every column of all of
     them. On mainnet (500 hashes, 3.2M score rows) that was 6.1 CPU-s and
     1.1 GiB per call, 1.9 CPU-s and 0.7 GiB this way, and the dashboard
-    issues it on every poll of several endpoints.
+    issues it on every poll of several endpoints. Ordered by scored_at, not
+    analyzed_at: rows of one transaction can share an analyzed_at second, and
+    across unmerged parts the order between them is arbitrary.
     """
     if not tx_hashes:
         return []
@@ -207,7 +216,7 @@ def get_class_scores_by_hashes(
         SELECT {_SCORE_SELECT}
         FROM tx_class_scores
         WHERE network = %(network)s AND tx_hash IN %(hashes)s{archive_clause}
-        ORDER BY analyzed_at DESC
+        ORDER BY scored_at DESC
         LIMIT 1 BY tx_hash
         """,
         {"network": network, "hashes": tx_hashes},
@@ -222,16 +231,16 @@ def get_score_bands_by_hashes(network: str, tx_hashes: list[str]) -> dict[str, t
     without the evidence get_class_scores_by_hashes carries: on mainnet 0.5
     CPU-s and 0.2 GiB per 500 hashes against its 1.9 CPU-s and 0.7 GiB. Same
     archive anti-join, so an archived false positive stays out of the counts.
-    One argMax over the pair: analyzed_at has whole seconds, so two scores of
-    a transaction can tie, and separate argMaxes could then take the band of
-    one and the score of the other. Unaliased: an alias named after a source
-    column would shadow it in an aggregate (Code 184 on 26.x).
+    One argMax over the pair, keyed on scored_at as get_class_scores_by_hashes
+    orders (analyzed_at has whole seconds, so two scores of a transaction can
+    tie on it). Unaliased: an alias named after a source column would shadow it
+    in an aggregate (Code 184 on 26.x).
     """
     if not tx_hashes:
         return {}
     rows = _client().execute(
         f"""
-        SELECT tx_hash, argMax((risk_band, max_score), analyzed_at)
+        SELECT tx_hash, argMax((risk_band, max_score), scored_at)
         FROM tx_class_scores
         WHERE network = %(network)s AND tx_hash IN %(hashes)s AND {_ARCHIVE_ANTI_JOIN}
         GROUP BY tx_hash
@@ -1185,7 +1194,7 @@ def hydrate_transactions(
         SELECT tx_hash, network, fee, input_count, output_count,
                total_output_value, metadata, addresses, raw_data,
                raw_data_truncated, script_valid, slot, block_height,
-               timestamp, ingestion_timestamp
+               block_hash, timestamp, ingestion_timestamp
         FROM transactions
         WHERE network = %(network)s
           AND tx_hash IN %(hashes)s
@@ -1209,6 +1218,7 @@ def hydrate_transactions(
         "script_valid",
         "slot",
         "block_height",
+        "block_hash",
         "timestamp",
         "ingestion_timestamp",
     )
@@ -1216,6 +1226,29 @@ def hydrate_transactions(
     # gone since the pick (a rollback purge) is simply absent.
     by_hash = {row[0]: dict(zip(keys, row)) for row in rows}
     return [by_hash[h] for h in hashes if h in by_hash]
+
+
+def stored_copies(network: str, hashes: list[str]) -> set[tuple[str, str | None, datetime]]:
+    """Every stored copy of ``hashes``, as (tx_hash, block_hash, ingestion_timestamp).
+
+    What the engine checks a batch against before storing its scores: a copy
+    hydrated before a rollback purged it is no longer here, and its block hash
+    and stamp tell it apart from the copy a re-confirmation ingested since, even
+    in the same second (a slot battle). Projections off, as for the purge read:
+    p_by_time_v2 can still serve a purged copy until its part merges.
+    """
+    if not hashes:
+        return set()
+    rows = _client().execute(
+        """
+        SELECT tx_hash, block_hash, ingestion_timestamp
+        FROM transactions
+        WHERE network = %(network)s AND tx_hash IN %(hashes)s
+        SETTINGS optimize_use_projections = 0
+        """,
+        {"network": network, "hashes": hashes},
+    )
+    return {(tx_hash, block_hash, stamp) for tx_hash, block_hash, stamp in rows}
 
 
 def earliest_ingestion(network: str) -> datetime | None:

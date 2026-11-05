@@ -126,7 +126,7 @@ def _score_transaction(
     """
     tx_hash = row["tx_hash"]
     network = row["network"]
-    now = datetime.now(UTC)
+    now = _next_score_stamp()
 
     # Both metadata and raw_data are pre-parsed in run_once()
     metadata = row.get("metadata")
@@ -239,6 +239,7 @@ def _score_transaction(
         "config_hash": config_hash(),
         "code_version": settings.CODE_VERSION,
         "analyzed_at": now,
+        "scored_at": now,
         # Transient keys (popped by _handle_incomplete_scoring before insert):
         # which scorers raised and which enrichments failed for this tx, so an
         # incompletely-scored tx is deferred/retried instead of silently kept.
@@ -263,6 +264,27 @@ _raw_fallback_attempts: dict[tuple, tuple[int, float]] = {}
 # lane's range for that moment: the claim keeps it from being scored twice.
 _in_flight: set[tuple[str, str]] = set()
 _in_flight_lock = threading.Lock()
+
+# The latest-score readers order a transaction's rows by scored_at, since
+# analyzed_at keeps whole seconds: a circular re-score stored within a second
+# of the score it raises would otherwise tie with it, and either could read as
+# the latest until their parts merge. The lanes score on different threads.
+_SCORE_STAMP_STEP = timedelta(microseconds=1)  # scored_at's resolution: DateTime64(6)
+_last_score_stamp: datetime | None = None
+_score_stamp_lock = threading.Lock()
+
+
+def _next_score_stamp() -> datetime:
+    """Now, or one step past the last stamp: strictly increasing within the
+    process, so a re-score always orders after what it replaces, even across a
+    clock stepped back."""
+    global _last_score_stamp
+    with _score_stamp_lock:
+        stamp = datetime.now(UTC)
+        if _last_score_stamp is not None and stamp <= _last_score_stamp:
+            stamp = _last_score_stamp + _SCORE_STAMP_STEP
+        _last_score_stamp = stamp
+        return stamp
 
 
 def _claim(network: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -640,6 +662,37 @@ def _rescore_later_passes(
             return
 
 
+def _still_stored(
+    network: str, rows: list[dict[str, Any]], results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The results whose transaction copy is still stored, read just before the insert.
+
+    A rollback can purge the copy a batch is scoring, and a re-confirmation
+    ingest the transaction again in another block. A score of the purged copy
+    would stand for the new one (another slot, other neighbours: a sandwich
+    found or missed in a block that is gone), and no lane would score the new
+    one, since the transaction reads as scored. Dropped, it stays unscored, and
+    its current copy, stamped when it was ingested again, is picked like any new
+    transaction. Only a purge landing between this read and the insert can still
+    slip past, and the delayed repurge (ROLLBACK_SCORE_REPURGE_DELAY_SECONDS)
+    comes after any such insert has ended.
+    """
+    copy_of = {
+        row["tx_hash"]: (row["tx_hash"], row.get("block_hash"), row.get("ingestion_timestamp"))
+        for row in rows
+    }
+    stored = clickhouse.stored_copies(network, [r["tx_hash"] for r in results])
+    kept = [r for r in results if copy_of.get(r["tx_hash"]) in stored]
+    if len(kept) < len(results):
+        logger.warning(
+            "Analysis Engine [%s]: %d scored tx(s) were rolled back or ingested again "
+            "while their batch ran; left unscored, for their current copy to be scored",
+            network,
+            len(results) - len(kept),
+        )
+    return kept
+
+
 def _score_claimed(
     network: str,
     rows: list[dict[str, Any]],
@@ -718,6 +771,10 @@ def _score_claimed(
             lane,
             len(results),
         )
+        return []
+
+    results = _still_stored(network, rows, results)
+    if not results:
         return []
 
     clickhouse.insert_class_scores(results)

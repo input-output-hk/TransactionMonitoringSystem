@@ -132,9 +132,6 @@ class TestSpendEdgesBackfill:
                 await postgres.save_spend_edges_backfill(LIVE_NETWORK, 9, True)
                 await postgres.save_spend_edges_backfill(LIVE_NETWORK, 9, False)
                 assert await postgres.get_spend_edges_backfill(LIVE_NETWORK) == (9, True)
-                # Only a history found gone sends it back to the start.
-                await postgres.reset_spend_edges_backfill(LIVE_NETWORK)
-                assert await postgres.get_spend_edges_backfill(LIVE_NETWORK) == (0, False)
             finally:
                 await _clear()
 

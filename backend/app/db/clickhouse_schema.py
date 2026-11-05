@@ -301,6 +301,7 @@ SCHEMA_DDL: dict[str, str] = {
             config_hash      LowCardinality(String) DEFAULT '',
             code_version     LowCardinality(String) DEFAULT '',
             analyzed_at      DateTime,
+            scored_at        DateTime64(6, 'UTC') DEFAULT analyzed_at,
 """
     + _CIRCULAR_HISTORY_DDL
     + """            INDEX idx_risk_band  risk_band TYPE bloom_filter GRANULARITY 1,
@@ -857,6 +858,14 @@ def _create_detection_tables(client: Client) -> None:
     client.execute(
         "ALTER TABLE tx_class_scores "
         "ADD COLUMN IF NOT EXISTS code_version LowCardinality(String) DEFAULT ''"
+    )
+    # The order of a transaction's rows for the readers that skip FINAL (see
+    # engine._next_score_stamp). analyzed_at cannot gain the precision itself:
+    # 26.1 refuses to retype the engine's version column (Code 524). Metadata
+    # only: a part that predates the column reads it as its analyzed_at.
+    client.execute(
+        "ALTER TABLE tx_class_scores "
+        "ADD COLUMN IF NOT EXISTS scored_at DateTime64(6, 'UTC') DEFAULT analyzed_at"
     )
     _add_circular_history_columns(client)
 

@@ -6,12 +6,14 @@ read per frontier address (see graph._HOP_QUERY). Two writers fill it: the block
 writer, for every block it inserts (rows_for), and a one-time chunked backfill
 of the history ingested before the table existed (ensure_backfilled), which the
 scoring lanes wait on so that no transaction is scored against a partial graph.
+Every start also checks the stored history for chunks whose edges have gone
+since (missing_chunks) and fills those again before the lanes score.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.config import settings
@@ -154,34 +156,134 @@ def backfill_chunk(network: str, chunk: int) -> None:
     clickhouse._get_client().execute(_BACKFILL_CHUNK, {"network": network, "lo": lo, "hi": hi})
 
 
-# A spend stored before `before`, and an edge stored before it. The progress
-# row lives in Postgres and the edges in ClickHouse, so a spend_edges table
-# dropped, truncated or restored from a backup older than the fill leaves the
-# row reading "completed" over a graph without its history. Every spend stored
-# before the process started has its edges by then (the writer makes them in
-# the same attempt, the fill made the rest), and the edges expire with the
-# spends (both under CH_RETENTION_DAYS_IO), so the first without the second is
-# such a loss. The bound keeps out the edges this process writes meanwhile.
-_SPEND_BEFORE = f"""
-    SELECT 1 FROM transaction_inputs
-    WHERE network = %(network)s AND ingestion_timestamp < %(before)s
+# The spends stored before `before` that the fill would give edges and that
+# have none, by chunk. The progress row lives in Postgres and the edges in
+# ClickHouse, which are restored, dropped and repaired apart, so the row can
+# read "completed", or resume at a later chunk, over a table with any chunk
+# missing: a ClickHouse snapshot taken partway through the fill, a backup taken
+# during it (scripts/backup.sh does not export spend_edges), a broken part
+# detached after an unclean shutdown (the table is ordered by address, so one
+# part holds edges of every chunk). Every spend stored before the process
+# started has its edges by then: the writer makes them in the same attempt,
+# the fill made the rest.
+#
+# Per transaction, never a count per chunk: the block writer adds edges from
+# the moment this process starts, and they would mask missing old ones. The
+# spend side takes _BACKFILL_CHUNK's joins (a slotted copy, a paid output), so
+# a dropped mempool transaction or one paying only a collateral return is
+# never a gap. The edge side has no time bound: a transaction seen in the
+# mempool before `before` and confirmed after it has its edges stamped after.
+# Spends near their retention are left out (SPEND_EDGES_CHECK_TTL_MARGIN_HOURS).
+# Projections off as in _BACKFILL_CHUNK: p_by_time_v2 can still serve a copy a
+# rollback purge deleted (see clickhouse.delete_score_rows), a gap that no
+# refill could close.
+_MISSING_EDGES = f"""
+    SELECT DISTINCT substring(tx_hash, 1, {_HEX_DIGITS_PER_CHUNK})
+    FROM transaction_inputs
+    WHERE network = %(network)s AND tx_hash >= %(lo)s AND tx_hash < %(hi)s
       AND {_SPEND_INPUT_CONDITIONS}
-    LIMIT 1
+      AND ingestion_timestamp < %(before)s AND ingestion_timestamp >= %(expiring_before)s
+      AND tx_hash IN (
+          SELECT tx_hash FROM transactions
+          WHERE network = %(network)s AND tx_hash >= %(lo)s AND tx_hash < %(hi)s
+            AND isNotNull(slot)
+      )
+      AND tx_hash IN (
+          SELECT tx_hash FROM transaction_outputs
+          WHERE network = %(network)s AND tx_hash >= %(lo)s AND tx_hash < %(hi)s
+            AND {_PAID_OUTPUT_CONDITIONS}
+      )
+      AND tx_hash NOT IN (
+          SELECT tx_hash FROM spend_edges
+          WHERE network = %(network)s AND tx_hash >= %(lo)s AND tx_hash < %(hi)s
+      )
+    SETTINGS optimize_use_projections = 0
 """
-_EDGE_BEFORE = """
-    SELECT 1 FROM spend_edges
-    WHERE network = %(network)s AND ingestion_timestamp < %(before)s
-    LIMIT 1
-"""
+# DateTime's own minimum: with no retention set, no spend is left out.
+_NO_EXPIRY = datetime.fromtimestamp(0, UTC)
 
 
-def history_lost(network: str, before: datetime) -> bool:
-    """Whether spends stored before `before` have lost every edge (blocking)."""
+def missing_chunks(network: str, before: datetime) -> list[int]:
+    """The chunks with a spend stored before `before` but no edges for it (blocking).
+
+    Runs on the backlog executor, one query per SPEND_EDGES_CHECK_CHUNKS_PER_PASS
+    chunks, so that no pass holds more of the history in memory than that.
+    """
     from app.db import clickhouse
 
     client = clickhouse._get_client()
-    params = {"network": network, "before": before}
-    return bool(client.execute(_SPEND_BEFORE, params)) and not client.execute(_EDGE_BEFORE, params)
+    expiring_before = _NO_EXPIRY
+    if settings.CH_RETENTION_DAYS_IO > 0:
+        expiring_before = (
+            datetime.now(UTC)
+            - timedelta(days=settings.CH_RETENTION_DAYS_IO)
+            + timedelta(hours=settings.SPEND_EDGES_CHECK_TTL_MARGIN_HOURS)
+        )
+    per_pass = settings.SPEND_EDGES_CHECK_CHUNKS_PER_PASS
+    missing: list[int] = []
+    for first in range(0, BACKFILL_CHUNKS, per_pass):
+        lo, _ = _chunk_bounds(first)
+        _, hi = _chunk_bounds(min(first + per_pass, BACKFILL_CHUNKS) - 1)
+        rows = client.execute(
+            _MISSING_EDGES,
+            {
+                "network": network,
+                "lo": lo,
+                "hi": hi,
+                "before": before,
+                "expiring_before": expiring_before,
+            },
+        )
+        missing.extend(int(prefix, 16) for (prefix,) in rows)
+    return sorted(missing)
+
+
+async def _refill_missing(
+    network: str,
+    before: datetime,
+    should_stop: Callable[[], bool],
+    on_progress: Callable[[int], None] | None,
+) -> int | None:
+    """Fill again the chunks missing_chunks finds, then check once more.
+
+    Returns how many are still missing, or None when stopped first. A gap the
+    refill does not close is logged and scoring starts anyway: holding it until
+    the graph is whole would stop all detection, which misses more than the gap.
+    """
+    from app.db import clickhouse
+
+    loop = asyncio.get_running_loop()
+    missing = await loop.run_in_executor(
+        clickhouse._ch_backlog_executor, missing_chunks, network, before
+    )
+    if on_progress is not None:
+        on_progress(BACKFILL_CHUNKS - len(missing))
+    if not missing:
+        return 0
+    logger.error(
+        "spend_edges: chunks %s have spends stored before this start without their edges "
+        "(ClickHouse restored apart from Postgres, or parts lost); filling them again "
+        "before scoring starts",
+        missing,
+    )
+    for refilled, chunk in enumerate(missing, 1):
+        if should_stop():
+            return None
+        await loop.run_in_executor(clickhouse._ch_backlog_executor, backfill_chunk, network, chunk)
+        if on_progress is not None:
+            on_progress(BACKFILL_CHUNKS - len(missing) + refilled)
+    still_missing = await loop.run_in_executor(
+        clickhouse._ch_backlog_executor, missing_chunks, network, before
+    )
+    if still_missing:
+        logger.error(
+            "spend_edges: chunks %s still have spends without their edges after a refill; "
+            "scoring starts anyway, and cycles through them can be missed",
+            still_missing,
+        )
+    else:
+        logger.info("spend_edges: missing chunks filled again")
+    return len(still_missing)
 
 
 async def ensure_backfilled(
@@ -189,19 +291,26 @@ async def ensure_backfilled(
     should_stop: Callable[[], bool],
     history_before: datetime | None = None,
     on_progress: Callable[[int], None] | None = None,
-) -> None:
+) -> int | None:
     """Fill the history once, resuming where a restart left it; return when complete.
 
     Runs on the backlog lane's executor, whose queries are thread-capped and
     which has nothing else to do until this returns. A failed chunk is retried
     every ANALYSIS_ENGINE_INTERVAL_SECONDS: the lanes must not score before the
     graph is whole, so there is nothing to give up to. on_progress gets the
-    count of filled chunks after each one, so a fill that stops advancing shows
-    as a stall (analysis.scoring_status).
+    count of chunks known filled after each one, so a fill or refill that stops
+    advancing shows as a stall (analysis.scoring_status).
 
-    history_before is when this process started: a fill recorded as complete
-    is run again if the edges stored before it are gone (see history_lost).
-    None skips that check.
+    history_before is when this process started. A fill recorded as complete,
+    and one that has just completed (it may have resumed over a ClickHouse
+    restored apart from its progress row), is checked against the spends stored
+    before it, and the chunks found missing are filled again (missing_chunks).
+    Returns how many chunks are still missing after that, or None when the
+    check did not run: history_before None, a stop first, or a check that failed
+    SPEND_EDGES_CHECK_ATTEMPTS times. The fill is retried for as long as it
+    takes, since the history it writes is not there at all until it ends; the
+    check is not, since the history it checks is complete as far as its record
+    goes, and a check failing every time would otherwise hold both lanes for good.
     """
     from app.db import clickhouse, postgres
 
@@ -209,38 +318,24 @@ async def ensure_backfilled(
     while True:
         try:
             next_chunk, completed = await postgres.get_spend_edges_backfill(network)
-            if (
-                completed
-                and history_before is not None
-                and await loop.run_in_executor(
-                    clickhouse._ch_backlog_executor, history_lost, network, history_before
-                )
-            ):
-                logger.error(
-                    "spend_edges: the filled history is gone (table dropped, truncated "
-                    "or restored without it); filling it again before scoring starts"
-                )
-                await postgres.reset_spend_edges_backfill(network)
-                next_chunk, completed = 0, False
-            if completed:
-                return
-            if next_chunk == 0:
-                logger.info(
-                    "spend_edges: filling the history in %d chunks before scoring starts",
-                    BACKFILL_CHUNKS,
-                )
-            for chunk in range(next_chunk, BACKFILL_CHUNKS):
-                if should_stop():
-                    return
-                await loop.run_in_executor(
-                    clickhouse._ch_backlog_executor, backfill_chunk, network, chunk
-                )
-                done = chunk + 1 == BACKFILL_CHUNKS
-                await postgres.save_spend_edges_backfill(network, chunk + 1, done)
-                if on_progress is not None:
-                    on_progress(chunk + 1)
-            logger.info("spend_edges: history filled")
-            return
+            if not completed:
+                if next_chunk == 0:
+                    logger.info(
+                        "spend_edges: filling the history in %d chunks before scoring starts",
+                        BACKFILL_CHUNKS,
+                    )
+                for chunk in range(next_chunk, BACKFILL_CHUNKS):
+                    if should_stop():
+                        return None
+                    await loop.run_in_executor(
+                        clickhouse._ch_backlog_executor, backfill_chunk, network, chunk
+                    )
+                    done = chunk + 1 == BACKFILL_CHUNKS
+                    await postgres.save_spend_edges_backfill(network, chunk + 1, done)
+                    if on_progress is not None:
+                        on_progress(chunk + 1)
+                logger.info("spend_edges: history filled")
+            break
         except Exception as e:
             logger.error(
                 "spend_edges backfill failed, retrying in %ss: %s",
@@ -248,3 +343,26 @@ async def ensure_backfilled(
                 e,
             )
             await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
+    if history_before is None:
+        return None
+    attempts = settings.SPEND_EDGES_CHECK_ATTEMPTS
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _refill_missing(network, history_before, should_stop, on_progress)
+        except Exception as e:
+            if attempt == attempts:
+                logger.error(
+                    "spend_edges: the coverage check failed %d times; scoring starts "
+                    "without it, and cycles through a chunk it would have refilled can be "
+                    "missed: %s",
+                    attempts,
+                    e,
+                )
+                return None
+            logger.error(
+                "spend_edges: the coverage check failed, retrying in %ss: %s",
+                settings.ANALYSIS_ENGINE_INTERVAL_SECONDS,
+                e,
+            )
+            await asyncio.sleep(settings.ANALYSIS_ENGINE_INTERVAL_SECONDS)
+    return None

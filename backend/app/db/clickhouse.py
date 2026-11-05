@@ -511,7 +511,9 @@ def delete_score_rows(network: str, hashes: list[str]) -> None:
 
     Closes the purge/score-writer race: an engine batch holding rolled-back
     rows when the purge ran inserts its scores AFTER the first DELETE, and
-    the stale row then blocks re-scoring forever via the anti-join.
+    the stale row then blocks re-scoring forever via the anti-join. The engine
+    stores no score of a copy gone before its insert (engine._still_stored), so
+    such a row comes only from an insert already under way when the purge ran.
 
     A rolled-back transaction that has since re-confirmed is scored again only
     if a lane still reaches it. One stamped within reach loses every score row,
@@ -1013,4 +1015,5 @@ from app.db.clickhouse_scores import (  # noqa: E402, F401  (re-exported API)
     insert_class_scores,
     pick_unanalyzed,
     query_multiple_sat_extraction_percentiles,
+    stored_copies,
 )

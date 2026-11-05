@@ -200,6 +200,8 @@ class TestBacklogSettleValidation:
             CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=Settings().CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
             * 2,
             ANALYSIS_BACKLOG_SETTLE_SECONDS=Settings().ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+            ROLLBACK_SCORE_REPURGE_DELAY_SECONDS=Settings().ROLLBACK_SCORE_REPURGE_DELAY_SECONDS
+            * 2,
         )
         assert slower._insert_visibility_seconds() > base
 
@@ -314,3 +316,47 @@ class TestDocsGating:
         assert not (auth._dev_mode or settings.TMS_API_DOCS_ENABLED)
         monkeypatch.setattr(settings, "TMS_API_DOCS_ENABLED", True)
         assert auth._dev_mode or settings.TMS_API_DOCS_ENABLED
+
+
+class TestRollbackRepurgeDelayValidation:
+    """The delayed repurge must come after any score insert that checked its
+    copies before the purge (engine._still_stored): one connect and one
+    send/receive timeout at most."""
+
+    def _bound(self, s: Settings) -> float:
+        return s.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS + s.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+
+    def test_the_default_clears_the_bound(self):
+        default = Settings()
+        assert default.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS > self._bound(default)
+
+    def test_a_delay_inside_one_score_insert_is_rejected(self):
+        with pytest.raises(ValidationError, match="ROLLBACK_SCORE_REPURGE_DELAY_SECONDS"):
+            Settings(ROLLBACK_SCORE_REPURGE_DELAY_SECONDS=int(self._bound(Settings())))
+
+    def test_the_bound_follows_the_timeouts(self):
+        default = Settings()
+        with pytest.raises(ValidationError, match="ROLLBACK_SCORE_REPURGE_DELAY_SECONDS"):
+            Settings(
+                CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=default.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS,
+                ANALYSIS_BACKLOG_SETTLE_SECONDS=default.ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+            )
+
+
+class TestSpendEdgesCheckMarginValidation:
+    """A TTL margin as long as the IO retention would leave every spend out of
+    the coverage check, which would then pass without checking anything."""
+
+    def test_a_margin_as_long_as_the_retention_is_rejected(self):
+        margin_days = Settings().SPEND_EDGES_CHECK_TTL_MARGIN_HOURS // config_mod._HOURS_PER_DAY
+        with pytest.raises(ValidationError, match="SPEND_EDGES_CHECK_TTL_MARGIN_HOURS"):
+            Settings(CH_RETENTION_DAYS_IO=margin_days)
+
+    def test_a_margin_inside_the_retention_is_accepted(self):
+        margin_days = Settings().SPEND_EDGES_CHECK_TTL_MARGIN_HOURS // config_mod._HOURS_PER_DAY
+        assert (
+            Settings(CH_RETENTION_DAYS_IO=margin_days + 1).CH_RETENTION_DAYS_IO == margin_days + 1
+        )
+
+    def test_no_retention_needs_no_margin_check(self):
+        assert Settings(CH_RETENTION_DAYS_IO=0).CH_RETENTION_DAYS_IO == 0

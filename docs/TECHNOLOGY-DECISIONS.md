@@ -223,7 +223,7 @@ A *fact* is something that happened on the Cardano blockchain and cannot change:
 | `transaction_inputs` | One row per input, never updated. Queried for graph analytics and address tracing. |
 | `transaction_outputs` | Same. Queried for address lookups and value analytics. |
 | `address_transactions` | Populated by materialized view. `ReplacingMergeTree ORDER BY (network, address, slot, tx_hash)` gives O(log n) address lookup with no application code. |
-| `tx_class_scores` | Analysis output. `ReplacingMergeTree(analyzed_at)` handles re-scoring: the engine inserts a new row and the engine's dedup key retains the latest version at merge time. |
+| `tx_class_scores` | Analysis output. `ReplacingMergeTree(analyzed_at)` handles re-scoring: the engine inserts a new row and the engine's dedup key retains the latest version at merge time. The lookups that read without `FINAL` take a transaction's latest row by `scored_at`, a microsecond stamp that strictly increases within the process, because two scores can share an `analyzed_at` second. |
 
 **PostgreSQL: mutable state**
 

@@ -512,6 +512,18 @@ class TestScoringStatus:
         state = self._state(live_polled_at=NOW, checkpoint=NOW - timedelta(days=25))
         assert state == "behind"
 
+    def test_behind_while_spend_edges_chunks_stay_missing(self):
+        # The refill left a chunk without its edges: every cycle through it is
+        # scored against a partial graph, so this is not "ok".
+        state = self._state(live_polled_at=NOW, checkpoint=_SETTLED, edges_missing_chunks=2)
+        assert state == "behind"
+        assert analysis.scoring_status()["spend_edges_missing_chunks"] == 2
+
+    def test_ok_once_the_spend_edges_check_finds_nothing_missing(self):
+        assert analysis.scoring_status()["spend_edges_missing_chunks"] is None, "not run yet"
+        state = self._state(live_polled_at=NOW, checkpoint=_SETTLED, edges_missing_chunks=0)
+        assert state == "ok"
+
     def test_with_the_backlog_lane_off_it_is_never_ok(self, monkeypatch):
         # Nothing would then score, or know of, what the live lane misses.
         monkeypatch.setattr(settings, "ANALYSIS_BACKLOG_ENABLED", False)
@@ -656,6 +668,7 @@ class TestSpendEdgesGate:
             calls.append({"history_before": history_before})
             on_progress(1)
             await filled.wait()
+            return 1
 
         live = AsyncMock(return_value=0)
         tick = AsyncMock()
@@ -675,12 +688,16 @@ class TestSpendEdgesGate:
             status = analysis.scoring_status()
             assert status["state"] == "starting"
             assert status["spend_edges_filled_chunks"] == 1
-            # The loss check reaches back only to before this start's ingestion.
+            # The coverage check reaches back only to before this start's ingestion.
             assert calls[0]["history_before"] is not None
+            assert status["spend_edges_missing_chunks"] is None
             filled.set()
             for _ in range(_GATE_YIELDS):
                 await asyncio.sleep(0)
+            # A gap the refill left does not hold scoring: it reads "behind".
             assert live.called and tick.called
-            assert analysis.scoring_status()["spend_edges_filling"] is False
+            status = analysis.scoring_status()
+            assert status["spend_edges_filling"] is False
+            assert status["spend_edges_missing_chunks"] == 1
         finally:
             analysis.stop()

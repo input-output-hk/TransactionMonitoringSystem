@@ -1291,15 +1291,6 @@ async def save_spend_edges_backfill(network: str, next_chunk: int, completed: bo
         )
 
 
-async def reset_spend_edges_backfill(network: str) -> None:
-    """Forget the backfill's progress, so the next fill starts from the first chunk.
-
-    Only for a history found gone (spend_edges.history_lost): progress
-    otherwise never moves backwards (save_spend_edges_backfill)."""
-    async with get_connection() as conn:
-        await conn.execute("DELETE FROM spend_edges_backfill WHERE network = $1", network)
-
-
 # --- Pending score repurges (durable rollback second pass) ---
 
 

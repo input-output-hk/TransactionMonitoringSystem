@@ -3,13 +3,17 @@
 import asyncio
 import functools
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+from app.analysis import engine
 from app.analysis.engine import (
     _CLASS_NAMES,
     _analysis_defer_attempts,
     _build_scorers,
     _handle_incomplete_scoring,
+    _next_score_stamp,
     _score_transaction,
 )
 from app.analysis.normalise import score_to_band
@@ -30,6 +34,10 @@ class _FixedScorer:
         return ScorerResult(score=self._score)
 
 
+_BLOCK_HASH = "ab" * 32
+_INGESTED = datetime(2025, 1, 1, 0, 0, 5)
+
+
 def _make_row(tx_hash="tx01", metadata=None, raw_data=None):
     return {
         "tx_hash": tx_hash,
@@ -43,8 +51,16 @@ def _make_row(tx_hash="tx01", metadata=None, raw_data=None):
         "raw_data": raw_data or "{}",
         "slot": 50000,
         "block_height": 1000,
+        "block_hash": _BLOCK_HASH,
         "timestamp": "2025-01-01T00:00:00Z",
+        # Naive, as the ClickHouse driver returns a DateTime column.
+        "ingestion_timestamp": _INGESTED,
     }
+
+
+def _copy(row):
+    """The stored copy a row was hydrated from, as clickhouse.stored_copies names it."""
+    return (row["tx_hash"], row["block_hash"], row["ingestion_timestamp"])
 
 
 class TestScoreTransaction:
@@ -97,8 +113,48 @@ class TestScoreTransaction:
             "sub_scores",
             "analysis_version",
             "analyzed_at",
+            "scored_at",
         ):
             assert field in result
+
+
+# Enough concurrent stamps for two lanes' threads to collide on one clock
+# reading if the stamp were not serialised.
+_STAMP_THREADS = 8
+_STAMPS = 2000
+
+
+class _SteppedBackClock(datetime):
+    """A clock reading a year in the past, as after an NTP step back."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2025, 1, 1, tzinfo=UTC)
+
+
+class TestScoreStamp:
+    """scored_at orders a transaction's score rows for the readers that skip
+    FINAL, where analyzed_at's whole seconds can tie."""
+
+    def test_scored_at_is_the_analyzed_at_instant(self):
+        result = _score_transaction(_make_row(), _build_scorers())
+        assert result["scored_at"] == result["analyzed_at"]
+
+    def test_a_later_score_orders_after_an_earlier_one(self):
+        first = _score_transaction(_make_row(), _build_scorers())
+        second = _score_transaction(_make_row(), _build_scorers())
+        assert second["scored_at"] > first["scored_at"]
+
+    def test_stamps_keep_increasing_when_the_clock_steps_back(self, monkeypatch):
+        before = _next_score_stamp()
+        monkeypatch.setattr(engine, "datetime", _SteppedBackClock)
+        stepped = [_next_score_stamp() for _ in range(3)]
+        assert before < stepped[0] < stepped[1] < stepped[2]
+
+    def test_concurrent_stamps_are_distinct(self):
+        with ThreadPoolExecutor(max_workers=_STAMP_THREADS) as pool:
+            stamps = list(pool.map(lambda _: _next_score_stamp(), range(_STAMPS)))
+        assert len(set(stamps)) == len(stamps)
 
 
 class TestCorroboration:
@@ -249,8 +305,6 @@ class TestIncompleteScoring:
         assert "_enrichment_failed" not in kept[0]
 
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
 import app.analysis.engine as _engine_mod
@@ -395,6 +449,7 @@ class TestLaneMarkers:
             patch("app.analysis.engine.clickhouse") as mock_ch,
             patch("app.analysis.engine.notifications") as mock_notify,
         ):
+            mock_ch.stored_copies.return_value = {_copy(_make_row())}
             _engine_mod._score_claimed("preprod", [_make_row()], lane, history_complete)
         (results,) = mock_ch.insert_class_scores.call_args.args
         # The alert hook sees exactly what was persisted.
@@ -415,6 +470,79 @@ class TestLaneMarkers:
 
     def test_a_live_score_with_the_history_complete_carries_no_marker(self):
         assert "_meta" not in self._scored("live")["evidence"]
+
+
+class TestStillStored:
+    """A score is stored only while the copy it was computed from is: a rollback
+    purge or a re-confirmation in another block can replace it mid-batch."""
+
+    def _stored(self, rows, copies, scorers=()):
+        with (
+            patch.multiple(
+                "app.analysis.engine",
+                _enrich_inputs_with_resolved_addresses=lambda rows, network: None,
+                _enrich_collision_features=lambda rows, network: None,
+                _enrich_cycle_features=lambda rows, network: None,
+                _enrich_sandwich_features=lambda rows, network: None,
+                _build_scorers=lambda: list(scorers),
+            ),
+            patch("app.analysis.engine.clickhouse") as mock_ch,
+            patch("app.analysis.engine.notifications") as mock_notify,
+        ):
+            mock_ch.stored_copies.return_value = set(copies)
+            stored = _engine_mod._score_claimed("preprod", rows, "live", True)
+        if stored:
+            (inserted,) = mock_ch.insert_class_scores.call_args.args
+            assert mock_notify.on_new_scores.call_args.args[0] is inserted
+        else:
+            mock_ch.insert_class_scores.assert_not_called()
+            mock_notify.on_new_scores.assert_not_called()
+        return stored, mock_ch
+
+    def test_a_copy_still_stored_is_scored(self):
+        row = _make_row()
+        stored, mock_ch = self._stored([row], [_copy(row)])
+        assert [r["tx_hash"] for r in stored] == ["tx01"]
+        assert mock_ch.stored_copies.call_args.args == ("preprod", ["tx01"])
+
+    def test_a_purged_copy_is_not_stored_or_alerted(self):
+        kept, purged = _make_row("tx01"), _make_row("tx02")
+        stored, _ = self._stored([kept, purged], [_copy(kept)])
+        assert [r["tx_hash"] for r in stored] == ["tx01"]
+
+    def test_a_copy_replaced_by_another_block_in_the_same_second_is_not_stored(self):
+        """A slot battle: the re-confirmed copy can carry the same stamp, and
+        only its block tells it apart."""
+        row = _make_row()
+        other_block = (row["tx_hash"], "cd" * 32, row["ingestion_timestamp"])
+        stored, _ = self._stored([row], [other_block])
+        assert stored == []
+
+    def test_a_copy_beside_a_newer_one_of_the_same_block_is_scored(self):
+        """A replayed block stores the transaction again; until the parts merge
+        the copy picked is still there, and its score is still its own."""
+        row = _make_row()
+        newer = (
+            row["tx_hash"],
+            row["block_hash"],
+            row["ingestion_timestamp"] + timedelta(seconds=1),
+        )
+        stored, _ = self._stored([row], [_copy(row), newer])
+        assert [r["tx_hash"] for r in stored] == ["tx01"]
+
+    def test_an_attack_on_a_replaced_copy_still_fires_on_its_current_copy(self):
+        """Recall: dropping the purged copy's score leaves the transaction
+        unscored, and the next poll scores its current copy at full strength."""
+        attack = [_FixedScorer("sandwich", 90.0)]
+        purged = _make_row()
+        stored, _ = self._stored([purged], [], attack)
+        assert stored == []
+
+        current = _make_row() | {"block_hash": "cd" * 32, "slot": purged["slot"] + 1}
+        stored, _ = self._stored([current], [_copy(current)], attack)
+        (result,) = stored
+        assert result["sandwich"] == 90.0
+        assert result["risk_band"] == score_to_band(90.0) == "Critical"
 
 
 class _EvidenceScorer:

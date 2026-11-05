@@ -4,12 +4,16 @@ The block writer builds edges in Python from the transactions it inserts; the
 one-time backfill builds them in SQL from the rows already stored. A history
 filled differently from what live ingestion writes would score old and new
 transactions against different graphs, so the two must agree row for row,
-replays and rollbacks included. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
+replays and rollbacks included. The coverage check run at every start must
+find exactly the chunks whose stored spends lost their edges, and refilling a
+chunk that still has them must change no read. Requires TMS_LIVE_DB_TESTS=1
+(see conftest).
 """
 
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from app.analysis import dex, graph
 from app.db import spend_edges
 from app.models.transaction import NormalizedTransaction, TransactionInput, TransactionOutput
 
@@ -134,25 +138,139 @@ class TestBackfill:
         assert {edge[2][:hex_digits] for edge in _edges(ch, network)} == {txs[0].tx_hash[:2]}
 
 
-class TestHistoryLost:
-    """A fill recorded as complete in Postgres is run again only when the
-    edges of the spends stored before the process started are gone."""
+def _in_chunk(tx: NormalizedTransaction, chunk: int) -> NormalizedTransaction:
+    """The transaction with its hash moved into the given backfill chunk."""
+    prefix, _ = spend_edges._chunk_bounds(chunk)
+    return tx.model_copy(update={"tx_hash": prefix + tx.tx_hash[len(prefix) :]})
 
-    def test_only_spends_without_any_edge_read_as_lost(self, ch):
+
+def _drop_chunk_edges(ch, network, chunk) -> None:
+    """What a restore or a lost part leaves: one chunk of the history without edges."""
+    prefix, _ = spend_edges._chunk_bounds(chunk)
+    ch._get_client().execute(
+        "DELETE FROM spend_edges WHERE network = %(network)s AND startsWith(tx_hash, %(prefix)s)",
+        {"network": network, "prefix": prefix},
+    )
+
+
+def _addresses(run) -> tuple[str, str, str]:
+    a, b, c = (f"addr_test1qq{leg}_{run}" for leg in "abc")
+    return a, b, c
+
+
+# Two chunks far apart, so the 16-chunk passes check them in different queries.
+_CHUNK_A, _CHUNK_B = 0x13, 0xA7
+
+
+class TestMissingChunks:
+    """The coverage check finds exactly the chunks whose stored spends lost
+    their edges, and nothing the fill itself would leave without edges."""
+
+    def test_only_the_chunk_whose_edges_are_gone_is_reported(self, ch):
         network = _network()
-        before_plant = datetime.now(UTC) - timedelta(minutes=1)
-        after_plant = datetime.now(UTC) + timedelta(minutes=1)
-        assert not spend_edges.history_lost(network, after_plant), "no history, nothing lost"
+        a, b, c = _addresses(uuid.uuid4().hex[:8])
+        txs = [
+            _in_chunk(_tx(network, [_in(a)], [_out(b, 5)]), _CHUNK_A),
+            _in_chunk(_tx(network, [_in(b)], [_out(c, 7)]), _CHUNK_B),
+        ]
+        ch.insert_transactions_batch(txs)
+        before = datetime.now(UTC) + timedelta(minutes=1)
+        assert spend_edges.missing_chunks(network, before) == [], "the writer made them"
 
-        txs = _plant(ch, network)
-        assert not spend_edges.history_lost(network, after_plant)
-
-        ch._get_client().execute(
-            "DELETE FROM spend_edges WHERE network = %(network)s", {"network": network}
-        )
-        assert spend_edges.history_lost(network, after_plant)
+        _drop_chunk_edges(ch, network, _CHUNK_B)
+        assert spend_edges.missing_chunks(network, before) == [_CHUNK_B]
         # Spends stored after the bound are this process's own, not history.
-        assert not spend_edges.history_lost(network, before_plant)
+        assert spend_edges.missing_chunks(network, before - timedelta(minutes=10)) == []
 
-        _refill(ch, network, txs)
-        assert not spend_edges.history_lost(network, after_plant)
+        spend_edges.backfill_chunk(network, _CHUNK_B)
+        assert spend_edges.missing_chunks(network, before) == []
+
+    def test_spends_the_fill_gives_no_edges_are_never_gaps(self, ch):
+        network = _network()
+        a, b, _ = _addresses(uuid.uuid4().hex[:8])
+        before = datetime.now(UTC)
+        seen_in_mempool = before - timedelta(minutes=1)
+        mempool_only = _in_chunk(
+            _tx(network, [_in(a)], [_out(b, 5)], slot=None), _CHUNK_A
+        ).model_copy(update={"ingestion_timestamp": seen_in_mempool})
+        # Pays only a collateral return, so it pays nothing a hop follows.
+        collateral_only = _in_chunk(
+            _tx(network, [_in(a)], [_out(b, 5, is_collateral=True)]), _CHUNK_A
+        ).model_copy(update={"ingestion_timestamp": seen_in_mempool})
+        # Stored before the bound, its edges stamped after it: a transaction
+        # seen in the mempool before the start and confirmed after it.
+        confirmed = _in_chunk(_tx(network, [_in(a)], [_out(b, 5)]), _CHUNK_B).model_copy(
+            update={"ingestion_timestamp": seen_in_mempool}
+        )
+        ch.insert_transactions_batch([mempool_only, collateral_only, confirmed])
+        _drop_chunk_edges(ch, network, _CHUNK_B)
+        late = confirmed.model_copy(update={"ingestion_timestamp": before + timedelta(minutes=1)})
+        spend_edges.insert_rows(ch._get_client(), spend_edges.rows_for([late], before))
+
+        assert spend_edges.missing_chunks(network, before) == []
+
+        # Not vacuous: the confirmed one is checked, and found once its edges go.
+        _drop_chunk_edges(ch, network, _CHUNK_B)
+        assert spend_edges.missing_chunks(network, before) == [_CHUNK_B]
+
+    def test_spends_near_their_retention_are_left_out(self, ch, monkeypatch):
+        from app.config import settings
+
+        network = _network()
+        a, b, _ = _addresses(uuid.uuid4().hex[:8])
+        retention_days = 30
+        now = datetime.now(UTC)
+        expiring = (
+            now
+            - timedelta(days=retention_days)
+            + timedelta(hours=settings.SPEND_EDGES_CHECK_TTL_MARGIN_HOURS / 2)
+        )
+        tx = _in_chunk(_tx(network, [_in(a)], [_out(b, 5)]), _CHUNK_A).model_copy(
+            update={"ingestion_timestamp": expiring}
+        )
+        ch.insert_transactions_batch([tx])
+        _drop_chunk_edges(ch, network, _CHUNK_A)
+        monkeypatch.setattr(settings, "CH_RETENTION_DAYS_IO", 0)
+        assert spend_edges.missing_chunks(network, now) == [_CHUNK_A], "no retention set"
+
+        monkeypatch.setattr(settings, "CH_RETENTION_DAYS_IO", retention_days)
+        assert spend_edges.missing_chunks(network, now) == []
+
+    def test_a_duplicate_refill_changes_no_read(self, ch):
+        """The refill rewrites chunks that may still hold edges: the hop query
+        and the sandwich history count must read them once."""
+        network = _network()
+        run = uuid.uuid4().hex[:8]
+        a, b, c = _addresses(run)
+        script = f"{dex._network_script_prefixes(network)[0]}pool{run}"
+        txs = [
+            _in_chunk(_tx(network, [_in(a), _in(b)], [_out(b, 5), _out(c, 7)]), _CHUNK_A),
+            _in_chunk(_tx(network, [_in(a)], [_out(script, 9), _out(script, 9)]), _CHUNK_A),
+            _in_chunk(_tx(network, [_in(a)], [_out(script, 4)], slot=_SLOT + 1), _CHUNK_B),
+        ]
+        ch.insert_transactions_batch(txs)
+        client = ch._get_client()
+        hop_params = {
+            "addresses": [a, b],
+            "network": network,
+            "min_slot": _SLOT,
+            "max_slot": _SLOT + graph._MAX_AGE_SLOTS,
+            "origin_tx": uuid.uuid4().hex * 2,
+            "hop_row_limit": graph._BFS_HOP_ROW_LIMIT,
+        }
+        after_slot = _SLOT + graph._MAX_AGE_SLOTS
+
+        def reads():
+            return (
+                client.execute(graph._HOP_QUERY, hop_params),
+                dex._count_attacker_history(client, a, network, after_slot),
+            )
+
+        written = reads()
+        assert written[0] and written[1] == 2, "the plant reaches both reads"
+
+        for _ in range(2):
+            spend_edges.backfill_chunk(network, _CHUNK_A)
+            spend_edges.backfill_chunk(network, _CHUNK_B)
+
+        assert reads() == written

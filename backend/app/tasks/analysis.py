@@ -57,6 +57,9 @@ class _ScoringState:
     # finishes its first since this start.
     edges_filled_chunks: int | None = None
     edges_progress_at: datetime | None = None
+    # Chunks the history check still found without their edges after filling
+    # them again (spend_edges.ensure_backfilled); None until it has run.
+    edges_missing_chunks: int | None = None
 
 
 _scoring = _ScoringState()
@@ -271,10 +274,11 @@ async def _fill_spend_edges(
     network: str, should_stop: Callable[[], bool], started_at: datetime
 ) -> None:
     """Fill the spend_edges history, then let the lanes score."""
-    await spend_edges.ensure_backfilled(
+    missing = await spend_edges.ensure_backfilled(
         network, should_stop, history_before=started_at, on_progress=_edges_progressed
     )
     if not should_stop():
+        _scoring.edges_missing_chunks = missing
         _scoring.edges_filling = False
         # The stall clock starts when the lane can first poll, not while it waits.
         _scoring.live_started_at = datetime.now(UTC)
@@ -577,10 +581,12 @@ def scoring_status() -> dict[str, Any]:
     finishes its first poll after it, "stalled" when it has not finished one
     (or, since it started, its first) for the tolerance past its interval, or
     the fill has not finished a chunk for as long, "behind" when transactions
-    older than the live window may be unscored (see _history_incomplete) or rows behind the checkpoint
-    near their retention (see _retention_at_risk), "unguarded" when all is
-    well but the backlog lane is off (so nothing would score, or know of, a
-    transaction the live lane misses), and "ok" otherwise.
+    older than the live window may be unscored (see _history_incomplete), rows
+    behind the checkpoint near their retention (see _retention_at_risk), or
+    chunks of the spend_edges history still miss their edges after the refill
+    (spend_edges_missing_chunks), "unguarded" when all is well but the backlog
+    lane is off (so nothing would score, or know of, a transaction the live lane
+    misses), and "ok" otherwise.
     """
     now = datetime.now(UTC)
     stall_after = timedelta(
@@ -601,7 +607,9 @@ def scoring_status() -> dict[str, Any]:
         state = "stalled"
     elif _scoring.live_polled_at is None:
         state = "starting"
-    elif retention_at_risk or _history_incomplete(now):
+    elif retention_at_risk or _history_incomplete(now) or _scoring.edges_missing_chunks:
+        # A chunk the refill left without edges scores every cycle through it
+        # against a partial graph for as long as this process runs.
         state = "behind"
     elif not settings.ANALYSIS_BACKLOG_ENABLED:
         state = "unguarded"
@@ -618,6 +626,7 @@ def scoring_status() -> dict[str, Any]:
         "spend_edges_filling": _scoring.edges_filling,
         "spend_edges_filled_chunks": _scoring.edges_filled_chunks,
         "spend_edges_chunks": spend_edges.BACKFILL_CHUNKS,
+        "spend_edges_missing_chunks": _scoring.edges_missing_chunks,
     }
 
 
@@ -662,6 +671,7 @@ def start():
     _scoring.edges_filling = True
     _scoring.edges_filled_chunks = None
     _scoring.edges_progress_at = None
+    _scoring.edges_missing_chunks = None
     # Ingestion starts after this (main._start_leader_duties), so every edge
     # stored before now came from an earlier process or from the fill.
     _edges_task = asyncio.create_task(

@@ -7,6 +7,7 @@ actually parses on the server. Rows are written under the LIVE_NETWORK
 namespace with UUID hashes. Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import contextlib
 import json
 import time
 import uuid
@@ -382,6 +383,99 @@ class TestScoreReadPath:
 
         bands = scores.get_score_bands_by_hashes(LIVE_NETWORK, [tx_hash])
         assert bands[tx_hash] in {("Critical", _TEST_SCORE), ("Moderate", 40.0)}
+
+
+@contextlib.contextmanager
+def _scratch_database(ch):
+    """A client on a database of its own, dropped afterwards: for tests that
+    stop merges or rebuild a table, which must not touch the shared one."""
+    from clickhouse_driver import Client
+
+    from app.config import settings
+
+    db = f"livedb_scratch_{uuid.uuid4().hex[:12]}"
+    admin = ch._get_client()
+    admin.execute(f"CREATE DATABASE {db}")
+    try:
+        yield Client(
+            host=settings.CLICKHOUSE_HOST,
+            port=settings.CLICKHOUSE_PORT,
+            user=settings.CLICKHOUSE_USER,
+            password=settings.CLICKHOUSE_PASSWORD,
+            database=db,
+        )
+    finally:
+        admin.execute(f"DROP DATABASE IF EXISTS {db} SYNC")
+
+
+class TestScoreStamp:
+    """scored_at orders a transaction's score rows for the latest-score readers
+    that skip FINAL; analyzed_at, the merge version, keeps whole seconds."""
+
+    def test_an_existing_table_gains_it_as_its_analyzed_at(self, ch):
+        with _scratch_database(ch) as client:
+            client.execute(
+                clickhouse_schema.SCHEMA_DDL["tx_class_scores"].format(table="tx_class_scores")
+            )
+            client.execute("ALTER TABLE tx_class_scores DROP COLUMN scored_at")
+            analyzed_at = _naive_utc_now().replace(microsecond=0)
+            client.execute(
+                "INSERT INTO tx_class_scores (tx_hash, network, max_score, max_class, risk_band, "
+                "sub_scores, analysis_version, analyzed_at) VALUES",
+                [
+                    (
+                        uuid.uuid4().hex * 2,
+                        LIVE_NETWORK,
+                        _TEST_SCORE,
+                        "token_dust",
+                        "Critical",
+                        "{}",
+                        "live-db-test",
+                        analyzed_at,
+                    )
+                ],
+            )
+
+            clickhouse_schema._create_detection_tables(client)
+
+            (scored_at,) = client.execute("SELECT scored_at FROM tx_class_scores")[0]
+            assert scored_at.replace(tzinfo=None) == analyzed_at
+
+    def test_the_latest_score_is_the_last_stamped_in_either_insert_order(self, ch, monkeypatch):
+        """Two scores of a transaction in one analyzed_at second, left in two
+        unmerged parts: both lookups take the later scored_at, whichever part
+        holds it."""
+        from datetime import timedelta
+
+        with _scratch_database(ch) as client:
+            clickhouse_schema._create_detection_tables(client)
+            client.execute("SYSTEM STOP MERGES tx_class_scores")
+            monkeypatch.setattr(scores, "_client", lambda: client)
+            second = _naive_utc_now().replace(microsecond=0)
+            in_order, reversed_order = uuid.uuid4().hex * 2, uuid.uuid4().hex * 2
+            for tx_hash in (in_order, reversed_order):
+                earlier = _score_row(tx_hash) | {"analyzed_at": second, "scored_at": second}
+                later = _score_row(tx_hash) | {
+                    "analyzed_at": second,
+                    "scored_at": second + timedelta(milliseconds=500),
+                    "max_score": 40.0,
+                    "risk_band": "Moderate",
+                    "token_dust": 40.0,
+                }
+                parts = [earlier, later] if tx_hash == in_order else [later, earlier]
+                for part in parts:
+                    scores.insert_class_scores([part])
+
+            hashes = [in_order, reversed_order]
+            rows = scores.get_class_scores_by_hashes(LIVE_NETWORK, hashes)
+            assert {r["tx_hash"]: (r["risk_band"], r["max_score"]) for r in rows} == {
+                in_order: ("Moderate", 40.0),
+                reversed_order: ("Moderate", 40.0),
+            }
+            assert scores.get_score_bands_by_hashes(LIVE_NETWORK, hashes) == {
+                in_order: ("Moderate", 40.0),
+                reversed_order: ("Moderate", 40.0),
+            }
 
 
 class TestContractGrouping:
