@@ -4,17 +4,24 @@ Reads unanalyzed transactions from ClickHouse, runs each enabled scorer's
 gate/score pipeline, and writes a 9-element score vector per transaction to
 the tx_class_scores table.
 
-The public interface (run_once / run_once_async) is called by tasks/analysis.py.
+Two lanes poll for work. The live lane (run_once) scores the newest
+transactions of a short window of ingestion time; the backlog lane
+(run_backlog_once) scores, oldest first, whatever left that window unscored.
+Both are driven by tasks/analysis.py, each on its own executor thread.
 """
 
 import asyncio
+import functools
 import json
 import logging
+import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from app import notifications
+from app.analysis import graph as graph_mod
 from app.analysis.contract_identity import contract_address_of
 from app.analysis.enrichment import (
     enrich_collision_features as _enrich_collision_features,
@@ -50,6 +57,7 @@ from app.analysis.scorers.sandwich import SandwichScorer
 from app.analysis.scorers.token_dust import TokenDustScorer
 from app.config import settings
 from app.db import clickhouse, raw_store
+from app.utils.datetime_utils import to_aware_utc
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +126,7 @@ def _score_transaction(
     """
     tx_hash = row["tx_hash"]
     network = row["network"]
-    now = datetime.now(UTC)
+    now = _next_score_stamp()
 
     # Both metadata and raw_data are pre-parsed in run_once()
     metadata = row.get("metadata")
@@ -231,6 +239,7 @@ def _score_transaction(
         "config_hash": config_hash(),
         "code_version": settings.CODE_VERSION,
         "analyzed_at": now,
+        "scored_at": now,
         # Transient keys (popped by _handle_incomplete_scoring before insert):
         # which scorers raised and which enrichments failed for this tx, so an
         # incompletely-scored tx is deferred/retried instead of silently kept.
@@ -249,64 +258,46 @@ def _score_transaction(
 # a restart resets the counters, which merely delays degraded scoring.
 _raw_fallback_attempts: dict[tuple, tuple[int, float]] = {}
 
-# Watermark cursor for the unanalyzed poll: network -> the highest
-# ingestion_timestamp scored, minus UNANALYZED_OVERLAP_SECONDS. Bounds all
-# three sides of the poll query so its cost tracks the backlog, not the
-# total table size. In-process only: a restart starts with a full rescan.
-_unanalyzed_watermark: dict[str, datetime] = {}
-# network -> time.monotonic() of the last since=None full rescan.
-_last_full_rescan: dict[str, float] = {}
+# Transactions a lane has polled and not finished, as (network, tx_hash). The
+# lanes run on different threads, and a transaction that ages out of the live
+# window while the live lane is scoring it sits, unscored, in the backlog
+# lane's range for that moment: the claim keeps it from being scored twice.
+_in_flight: set[tuple[str, str]] = set()
+_in_flight_lock = threading.Lock()
+
+# The latest-score readers order a transaction's rows by scored_at, since
+# analyzed_at keeps whole seconds: a circular re-score stored within a second
+# of the score it raises would otherwise tie with it, and either could read as
+# the latest until their parts merge. The lanes score on different threads.
+_SCORE_STAMP_STEP = timedelta(microseconds=1)  # scored_at's resolution: DateTime64(6)
+_last_score_stamp: datetime | None = None
+_score_stamp_lock = threading.Lock()
 
 
-def _poll_since(network: str) -> tuple[datetime | None, bool]:
-    """The ``(since, is_full_rescan)`` bounds for this poll.
-
-    A full rescan (since=None) runs on the first poll after startup and
-    then every UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS. It is the
-    never-skip guarantee: deferred raw-data txs, input-visibility-deferred
-    txs, and anything that slipped past the watermark are picked up within
-    one rescan interval.
-
-    Pure: the rescan clock is armed by run_once only AFTER the rescan
-    batch succeeds. Arming it here meant a rescan that crashed mid-batch
-    (poll error, score-insert failure) was not retried for a whole
-    interval, stretching the never-skip guarantee to ~2 intervals.
-    """
-    now_mono = time.monotonic()
-    last = _last_full_rescan.get(network)
-    if last is None or now_mono - last >= settings.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS:
-        # Bound the rescan lookback so its anti-join cost tracks the window,
-        # not the whole keep-forever table (see the config knob). 0 = legacy
-        # unbounded (since=None). Slipped txs are always recent, so the window
-        # is the never-skip net in practice.
-        window = settings.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS
-        if window > 0:
-            return datetime.now(UTC) - timedelta(seconds=window), True
-        return None, True
-    return _unanalyzed_watermark.get(network), False
+def _next_score_stamp() -> datetime:
+    """Now, or one step past the last stamp: strictly increasing within the
+    process, so a re-score always orders after what it replaces, even across a
+    clock stepped back."""
+    global _last_score_stamp
+    with _score_stamp_lock:
+        stamp = datetime.now(UTC)
+        if _last_score_stamp is not None and stamp <= _last_score_stamp:
+            stamp = _last_score_stamp + _SCORE_STAMP_STEP
+        _last_score_stamp = stamp
+        return stamp
 
 
-def _advance_watermark(network: str, rows: list[dict[str, Any]]) -> None:
-    """Advance the poll watermark to the newest fetched row, minus overlap.
+def _claim(network: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Take the rows no other lane is scoring. The caller must _release them."""
+    with _in_flight_lock:
+        mine = [r for r in rows if (network, r["tx_hash"]) not in _in_flight]
+        _in_flight.update((network, r["tx_hash"]) for r in mine)
+    return mine
 
-    Called only AFTER the batch's score rows are persisted, so a failed
-    insert never advances the cursor past unscored work. The overlap absorbs
-    same-second ordering skew and the tx-row-before-inputs-row insert gap.
-    """
-    newest = max(
-        (
-            r["ingestion_timestamp"]
-            for r in rows
-            if isinstance(r.get("ingestion_timestamp"), datetime)
-        ),
-        default=None,
-    )
-    if newest is None:
-        return
-    candidate = newest - timedelta(seconds=settings.UNANALYZED_OVERLAP_SECONDS)
-    current = _unanalyzed_watermark.get(network)
-    if current is None or candidate > current:
-        _unanalyzed_watermark[network] = candidate
+
+def _release(network: str, rows: list[dict[str, Any]]) -> None:
+    with _in_flight_lock:
+        _in_flight.difference_update((network, r["tx_hash"]) for r in rows)
 
 
 def _resolve_raw_data(
@@ -417,7 +408,7 @@ def _handle_incomplete_scoring(
     permanent recall hole. Instead:
 
       1. Defer the tx (drop it from this batch, no score row written) so the
-         next poll / periodic full rescan retries it, up to
+         next poll of its lane retries it, up to
          ANALYSIS_DEFER_MAX_ATTEMPTS, paced by ANALYSIS_DEFER_RETRY_SECONDS.
       2. After the budget, keep the tx but attach an evidence ``_meta`` marker
          (``scorer_failed`` / ``enrichment_unavailable``) so a deterministic
@@ -484,59 +475,253 @@ def _handle_incomplete_scoring(
     return kept
 
 
-def run_once(network: str) -> int:
-    """Score one batch of unanalyzed transactions.  Returns the count scored."""
+class BacklogBatch(NamedTuple):
+    """What scoring one backlog batch did."""
+
+    # Picked transactions still there to score (a rollback purge can remove
+    # one between the pick and the batch).
+    found: int
+    # How many of those now have a score. Fewer means the rest wait on a retry
+    # or on the live lane, so picking their slice again at once gains nothing.
+    scored: int
+
+
+def run_once(
+    network: str,
+    history_complete: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    """Live lane: score the newest unscored transactions of the live window.
+
+    Returns how many the poll returned, which the drain loop compares with the
+    batch size. ``history_complete`` is False while the backlog lane still
+    holds older unscored transactions: features read from earlier scores
+    (circular recurrence and recycling) may then be missing some, and each
+    score written meanwhile says so (``_meta.history_incomplete``).
+
+    The poll passes over transactions waiting out a deferral's pacing: re-polled
+    they would defer again uncounted, and being the newest unscored they would
+    be all a poll returned, so the drain would never reach older ones.
+    """
     if not settings.ANALYSIS_ENABLED:
         return 0
+    since = datetime.now(UTC) - timedelta(seconds=settings.ANALYSIS_LIVE_WINDOW_SECONDS)
+    fetched = clickhouse.get_unanalyzed_transactions(
+        network,
+        settings.ANALYSIS_ENGINE_BATCH_SIZE,
+        since=since,
+        newest_first=True,
+        exclude=_paced(network),
+    )
+    _score_batch(network, fetched, "live", history_complete, should_stop)
+    return len(fetched)
 
-    since, full_rescan = _poll_since(network)
+
+def _paced(network: str) -> set[str]:
+    """Deferred transactions of ``network`` whose next counted attempt is not due yet."""
+    now_mono = time.monotonic()
+    paced = set()
+    for attempts, retry_seconds in (
+        (_raw_fallback_attempts, settings.RAW_FALLBACK_RETRY_SECONDS),
+        (_analysis_defer_attempts, settings.ANALYSIS_DEFER_RETRY_SECONDS),
+    ):
+        # list(): the other lane's thread may add an entry meanwhile.
+        for (net, tx_hash), (_, last) in list(attempts.items()):
+            if net == network and now_mono - last < retry_seconds:
+                paced.add(tx_hash)
+    return paced
+
+
+def pick_backlog(network: str, since: datetime, until: datetime) -> list[tuple[str, datetime]]:
+    """Backlog lane: (tx_hash, ingestion stamp) of the oldest unscored in [since, until).
+
+    Up to ANALYSIS_BACKLOG_PICK_SIZE, scored afterwards a batch at a time
+    (run_backlog_once): a pick reaching merged parts has a fixed cost (see
+    clickhouse_scores.pick_unanalyzed), which one pick per batch would pay
+    tens of thousands of times over a large backlog.
+    """
+    picked = clickhouse.pick_unanalyzed(
+        network, settings.ANALYSIS_BACKLOG_PICK_SIZE, since=since, until=until
+    )
+    return [(tx_hash, to_aware_utc(ingested)) for tx_hash, ingested in picked]
+
+
+def run_backlog_once(
+    network: str,
+    hashes: list[str],
+    since: datetime,
+    until: datetime,
+    should_stop: Callable[[], bool] | None = None,
+) -> BacklogBatch:
+    """Backlog lane: score picked transactions, ingested in [since, until).
+
+    Every score it writes is late by construction (the transaction left the
+    live window unscored), and its alert says so.
+    """
+    if not settings.ANALYSIS_ENABLED:
+        return BacklogBatch(0, 0)
+    rows = clickhouse.hydrate_transactions(network, hashes, since=since, until=until)
+    return BacklogBatch(len(rows), _score_batch(network, rows, "backlog", True, should_stop))
+
+
+def _score_batch(
+    network: str,
+    fetched: list[dict[str, Any]],
+    lane: str,
+    history_complete: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    """Score and persist one polled batch, minus what the other lane holds.
+
+    Returns how many score rows it wrote. Once ``should_stop`` reads True (its
+    lane was stopped while the batch ran) it stores nothing: see _score_claimed.
+    """
+    rows = _claim(network, fetched)
     try:
-        fetched = clickhouse.get_unanalyzed_transactions(
+        stored = _score_claimed(network, rows, lane, history_complete, should_stop=should_stop)
+    finally:
+        _release(network, rows)
+    _rescore_later_passes(network, stored, lane, history_complete, should_stop)
+    return len(stored)
+
+
+def _raises_circular(before: dict[str, graph_mod.StoredCycle], result: dict[str, Any]) -> bool:
+    """Whether a re-score is kept: circular up, and the headline score not down.
+
+    Scored again late, a pass's forward search can take in its successors'
+    legs and read lower (graph.py, hop amounts), so a re-score that would
+    lower the stored score is dropped and the stored score stands.
+    """
+    stored = before[result["tx_hash"]]
+    return result.get("circular", -1) > stored.circular and result["max_score"] >= stored.max_score
+
+
+def _rescore_later_passes(
+    network: str,
+    stored: list[dict[str, Any]],
+    lane: str,
+    history_complete: bool,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """Re-score the origin's later passes that were stored before these.
+
+    A cycle's recycling and recurrence axes read its origin's earlier cycles
+    from the stored scores, but neither lane stores in chain order: the live
+    lane works newest first and the backlog lane stores what the live lane
+    left after newer passes. Without this a later pass stored first would
+    keep its lower score for good. A kept re-score is stored like any score
+    (and alerts if its band rose), so the passes after it are looked up in
+    turn; each round can only raise scores, so the cascade ends. The number
+    re-scored is capped by ANALYSIS_HISTORY_RESCORE_MAX_TXS.
+    """
+    budget = settings.ANALYSIS_HISTORY_RESCORE_MAX_TXS
+    while stored and budget > 0:
+        sources = [
+            (r["tx_hash"], r.get("circular", -1), r["evidence"]["circular"])
+            for r in stored
+            if isinstance(r.get("evidence", {}).get("circular"), dict)
+        ]
+        if not sources:
+            return
+        try:
+            later = graph_mod.stored_later_cycles(network, sources)
+            if not later:
+                return
+            # Chain order, so that a cascade reaches each pass after the ones before it.
+            targets = sorted(later, key=lambda h: later[h].first_slot)
+            if len(targets) > budget:
+                logger.error(
+                    "Circular history re-score [%s]: %d later passes, re-scoring the first %d; "
+                    "the rest keep their stored score (ANALYSIS_HISTORY_RESCORE_MAX_TXS)",
+                    network,
+                    len(targets),
+                    budget,
+                )
+                targets = targets[:budget]
+            budget -= len(targets)
+            rows = _claim(network, clickhouse.hydrate_transactions(network, targets, since=None))
+            try:
+                stored = _score_claimed(
+                    network,
+                    rows,
+                    lane,
+                    history_complete,
+                    keep=functools.partial(_raises_circular, later),
+                    should_stop=should_stop,
+                )
+            finally:
+                _release(network, rows)
+        except Exception:
+            # The batch that triggered it is stored; only the raised scores are
+            # lost, so this must not fail the batch.
+            logger.error(
+                "Circular history re-score failed for %s; the later passes keep their stored score",
+                network,
+                exc_info=True,
+            )
+            return
+
+
+def _still_stored(
+    network: str, rows: list[dict[str, Any]], results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The results whose transaction copy is still stored, read just before the insert.
+
+    A rollback can purge the copy a batch is scoring, and a re-confirmation
+    ingest the transaction again in another block. A score of the purged copy
+    would stand for the new one (another slot, other neighbours: a sandwich
+    found or missed in a block that is gone), and no lane would score the new
+    one, since the transaction reads as scored. Dropped, it stays unscored, and
+    its current copy, stamped when it was ingested again, is picked like any new
+    transaction. Only a purge landing between this read and the insert can still
+    slip past, and the delayed repurge (ROLLBACK_SCORE_REPURGE_DELAY_SECONDS)
+    comes after any such insert has ended.
+    """
+    copy_of = {
+        row["tx_hash"]: (row["tx_hash"], row.get("block_hash"), row.get("ingestion_timestamp"))
+        for row in rows
+    }
+    stored = clickhouse.stored_copies(network, [r["tx_hash"] for r in results])
+    kept = [r for r in results if copy_of.get(r["tx_hash"]) in stored]
+    if len(kept) < len(results):
+        logger.warning(
+            "Analysis Engine [%s]: %d scored tx(s) were rolled back or ingested again "
+            "while their batch ran; left unscored, for their current copy to be scored",
             network,
-            settings.ANALYSIS_ENGINE_BATCH_SIZE,
-            since=since,
+            len(results) - len(kept),
         )
-    except Exception:
-        # A failing full rescan must not block the cheap watermark path. Arm
-        # the rescan clock (so it retries after one interval, not every tick)
-        # and fall back to a watermark poll THIS tick, so steady-state scoring
-        # of new txs continues instead of a total, log-only outage. If there is
-        # no watermark yet (first poll) there is nothing to fall back to.
-        watermark = _unanalyzed_watermark.get(network)
-        if not full_rescan or watermark is None:
-            raise
-        logger.error(
-            "Full rescan poll failed for %s; arming backoff and falling back "
-            "to watermark poll this tick",
-            network,
-            exc_info=True,
-        )
-        _last_full_rescan[network] = time.monotonic()
-        full_rescan = False
-        fetched = clickhouse.get_unanalyzed_transactions(
-            network,
-            settings.ANALYSIS_ENGINE_BATCH_SIZE,
-            since=watermark,
-        )
-    if not fetched:
-        if full_rescan:
-            # An empty fetch IS a successful rescan: nothing was skipped.
-            _last_full_rescan[network] = time.monotonic()
-        return 0
-    rows = fetched
+    return kept
+
+
+def _score_claimed(
+    network: str,
+    rows: list[dict[str, Any]],
+    lane: str,
+    history_complete: bool,
+    keep: Callable[[dict[str, Any]], bool] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Score, persist and alert ``rows``; returns the results it stored.
+
+    ``keep``, when given, drops results before they are stored (a re-score
+    that would not raise the stored one). Nothing is stored once
+    ``should_stop`` reads True: a batch that outlives its lane's stop at
+    shutdown may have run its enrichments after the event loop stopped, and
+    its alerts could not be sent. Left unscored, its rows are picked again
+    after the restart (the checkpoint has not passed them).
+    """
+    if not rows:
+        return []
 
     scorers = _build_scorers()
 
     # Parse raw_data (with raw-store recovery / deferral) and metadata so
-    # scorers receive dicts, not strings.
+    # scorers receive dicts, not strings. A deferred row stays unscored, so
+    # its lane polls it again: the live lane while it is in the window, then
+    # the backlog lane, whose checkpoint cannot pass it until it is scored.
     rows = _resolve_raw_data(rows, network)
     if not rows:
-        if full_rescan:
-            # Every row deferred is still a SUCCESSFUL rescan (the poll ran;
-            # deferral is deliberate, paced bookkeeping) — re-running the
-            # full scan every drain tick would hammer the warehouse.
-            _last_full_rescan[network] = time.monotonic()
-        return 0
+        return []
     for row in rows:
         md = row.get("metadata")
         if isinstance(md, str) and md not in ("", "{}"):
@@ -559,37 +744,43 @@ def run_once(network: str) -> int:
     # Enrich sandwich features for structural sandwich detection
     _enrich_sandwich_features(rows, network)
 
+    late = lane == "backlog"
     results = []
     for row in rows:
         result = _score_transaction(row, scorers)
+        # Read by the alert payload only; insert_class_scores ignores them.
+        result["tx_timestamp"] = row.get("timestamp")
+        result["late_detection"] = late
+        if not history_complete:
+            result["evidence"].setdefault("_meta", {})["history_incomplete"] = True
         results.append(result)
 
     # Defer txs whose scoring was incomplete (a scorer raised, or an enrichment
     # failed) so they are retried instead of persisted with a silent -1; after
     # the retry budget they are kept with a visible degradation marker.
     results = _handle_incomplete_scoring(results, network)
+    if keep is not None:
+        results = [r for r in results if keep(r)]
     if not results:
-        # Every row deferred (e.g. a batch-wide enrichment outage). Advance the
-        # watermark over the fetched rows (the full rescan recovers deferred
-        # ones, same as raw-data deferrals) and treat a full rescan as done.
-        _advance_watermark(network, fetched)
-        if full_rescan:
-            _last_full_rescan[network] = time.monotonic()
-        return len(fetched)
+        return []
+    if should_stop is not None and should_stop():
+        logger.info(
+            "Analysis Engine [%s] %s lane stopped: %d scored txs left unstored, picked "
+            "again after the restart",
+            network,
+            lane,
+            len(results),
+        )
+        return []
+
+    results = _still_stored(network, rows, results)
+    if not results:
+        return []
 
     clickhouse.insert_class_scores(results)
     # Emit immediate alerts for the just-persisted scores
     # Fire-and-forget onto the main loop; never blocks this scoring thread.
     notifications.on_new_scores(results, network)
-    # Only after the score rows are durably written: a failed insert raises
-    # above and the cursor stays put, so the batch is re-polled. Advanced
-    # over ALL fetched rows (including raw-data-deferred ones, which the
-    # periodic full rescan recovers).
-    _advance_watermark(network, fetched)
-    if full_rescan:
-        # Armed only now: a rescan that crashed above re-runs on the next
-        # poll instead of waiting out a full interval (never-skip guarantee).
-        _last_full_rescan[network] = time.monotonic()
 
     # Log summary
     critical = sum(1 for r in results if r["risk_band"] == "Critical")
@@ -602,19 +793,57 @@ def run_once(network: str) -> int:
 
     class_summary = ", ".join(f"{k}={v}" for k, v in scored_classes.items()) or "none"
     logger.info(
-        f"Analysis Engine [{network}]: scored {len(results)} txs "
+        f"Analysis Engine [{network}] {lane} lane: scored {len(results)} txs "
         f"(Critical={critical}, High={high}) classes: {class_summary}"
     )
-    # Return the FETCHED count, not the scored count: raw-data deferrals can
-    # shrink the scored set, and the drain loop keys "queue still has work"
-    # off whether the poll filled the batch.
-    return len(fetched)
+    return results
 
 
-async def run_once_async(network: str) -> int:
-    """Non-blocking wrapper: runs run_once on the dedicated ClickHouse executor."""
+async def run_once_async(
+    network: str,
+    history_complete: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    """Non-blocking wrapper: runs run_once on the live lane's own executor."""
     loop = asyncio.get_running_loop()
     # Collision enrichment runs on a worker thread and bridges async postgres
     # calls back onto this loop (see app.analysis.enrichment).
     set_main_loop(loop)
-    return await loop.run_in_executor(clickhouse._ch_executor, run_once, network)
+    return await loop.run_in_executor(
+        clickhouse._ch_live_executor, run_once, network, history_complete, should_stop
+    )
+
+
+async def pick_backlog_async(
+    network: str, since: datetime, until: datetime
+) -> list[tuple[str, datetime]]:
+    """Non-blocking wrapper: runs pick_backlog on the backlog executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        clickhouse._ch_backlog_executor, pick_backlog, network, since, until
+    )
+
+
+async def run_backlog_once_async(
+    network: str,
+    hashes: list[str],
+    since: datetime,
+    until: datetime,
+    should_stop: Callable[[], bool] | None = None,
+) -> BacklogBatch:
+    """Non-blocking wrapper: runs run_backlog_once on the backlog executor.
+
+    Sets the main loop too: without it collision enrichment is skipped, not
+    failed, and front_running would score the backlog as no-signal.
+    """
+    loop = asyncio.get_running_loop()
+    set_main_loop(loop)
+    return await loop.run_in_executor(
+        clickhouse._ch_backlog_executor,
+        run_backlog_once,
+        network,
+        hashes,
+        since,
+        until,
+        should_stop,
+    )

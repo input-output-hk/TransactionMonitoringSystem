@@ -1,12 +1,19 @@
 """Unit tests for the analysis engine orchestrator."""
 
+import asyncio
+import functools
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+from app.analysis import engine
 from app.analysis.engine import (
     _CLASS_NAMES,
     _analysis_defer_attempts,
     _build_scorers,
     _handle_incomplete_scoring,
+    _next_score_stamp,
     _score_transaction,
 )
 from app.analysis.normalise import score_to_band
@@ -27,6 +34,10 @@ class _FixedScorer:
         return ScorerResult(score=self._score)
 
 
+_BLOCK_HASH = "ab" * 32
+_INGESTED = datetime(2025, 1, 1, 0, 0, 5)
+
+
 def _make_row(tx_hash="tx01", metadata=None, raw_data=None):
     return {
         "tx_hash": tx_hash,
@@ -40,8 +51,16 @@ def _make_row(tx_hash="tx01", metadata=None, raw_data=None):
         "raw_data": raw_data or "{}",
         "slot": 50000,
         "block_height": 1000,
+        "block_hash": _BLOCK_HASH,
         "timestamp": "2025-01-01T00:00:00Z",
+        # Naive, as the ClickHouse driver returns a DateTime column.
+        "ingestion_timestamp": _INGESTED,
     }
+
+
+def _copy(row):
+    """The stored copy a row was hydrated from, as clickhouse.stored_copies names it."""
+    return (row["tx_hash"], row["block_hash"], row["ingestion_timestamp"])
 
 
 class TestScoreTransaction:
@@ -94,8 +113,48 @@ class TestScoreTransaction:
             "sub_scores",
             "analysis_version",
             "analyzed_at",
+            "scored_at",
         ):
             assert field in result
+
+
+# Enough concurrent stamps for two lanes' threads to collide on one clock
+# reading if the stamp were not serialised.
+_STAMP_THREADS = 8
+_STAMPS = 2000
+
+
+class _SteppedBackClock(datetime):
+    """A clock reading a year in the past, as after an NTP step back."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2025, 1, 1, tzinfo=UTC)
+
+
+class TestScoreStamp:
+    """scored_at orders a transaction's score rows for the readers that skip
+    FINAL, where analyzed_at's whole seconds can tie."""
+
+    def test_scored_at_is_the_analyzed_at_instant(self):
+        result = _score_transaction(_make_row(), _build_scorers())
+        assert result["scored_at"] == result["analyzed_at"]
+
+    def test_a_later_score_orders_after_an_earlier_one(self):
+        first = _score_transaction(_make_row(), _build_scorers())
+        second = _score_transaction(_make_row(), _build_scorers())
+        assert second["scored_at"] > first["scored_at"]
+
+    def test_stamps_keep_increasing_when_the_clock_steps_back(self, monkeypatch):
+        before = _next_score_stamp()
+        monkeypatch.setattr(engine, "datetime", _SteppedBackClock)
+        stepped = [_next_score_stamp() for _ in range(3)]
+        assert before < stepped[0] < stepped[1] < stepped[2]
+
+    def test_concurrent_stamps_are_distinct(self):
+        with ThreadPoolExecutor(max_workers=_STAMP_THREADS) as pool:
+            stamps = list(pool.map(lambda _: _next_score_stamp(), range(_STAMPS)))
+        assert len(set(stamps)) == len(stamps)
 
 
 class TestCorroboration:
@@ -246,68 +305,244 @@ class TestIncompleteScoring:
         assert "_enrichment_failed" not in kept[0]
 
 
-from datetime import UTC, datetime
+import pytest
 
 import app.analysis.engine as _engine_mod
+from app.config import settings
+
+# Test values for the lane knobs, set on the patched settings below.
+_LIVE_WINDOW_SECONDS = 600
+_LIVE_BATCH = 100
+_BACKLOG_PICK = 2000
+_RANGE_START = datetime(2026, 3, 2, tzinfo=UTC)
+_RANGE_END = _RANGE_START + timedelta(days=1)
+# Upper bound on any wait for a worker thread; the live batch must start within
+# half of it, while the shared workers are still held.
+_WAIT_SECONDS = 5
 
 
-class TestRescanBoundAndFallback:
-    """The periodic full rescan must be cost-bounded and must never block the
-    cheap watermark path when it fails (which would halt all scoring)."""
+class TestLanes:
+    """The live lane polls the newest of its window, the backlog lane the
+    oldest of the range it is handed: a backlog of any size cannot sit in
+    front of a fresh transaction."""
 
-    def setup_method(self):
-        _engine_mod._last_full_rescan.clear()
-        _engine_mod._unanalyzed_watermark.clear()
+    @patch("app.analysis.engine.clickhouse")
+    @patch("app.analysis.engine.settings")
+    def test_live_lane_polls_its_window_newest_first(self, ms, mock_ch):
+        ms.ANALYSIS_ENABLED = True
+        ms.ANALYSIS_ENGINE_BATCH_SIZE = _LIVE_BATCH
+        ms.ANALYSIS_LIVE_WINDOW_SECONDS = _LIVE_WINDOW_SECONDS
+        mock_ch.get_unanalyzed_transactions.return_value = []
+        window = timedelta(seconds=_LIVE_WINDOW_SECONDS)
+        before = datetime.now(UTC)
+        assert _engine_mod.run_once("preprod") == 0
+        args, kwargs = mock_ch.get_unanalyzed_transactions.call_args
+        assert args == ("preprod", _LIVE_BATCH)
+        assert kwargs["newest_first"] is True
+        assert "until" not in kwargs
+        assert before - window <= kwargs["since"] <= datetime.now(UTC) - window
+
+    async def test_live_lane_runs_beside_busy_role_workers(self, monkeypatch):
+        """Its own worker: with every shared worker held (API reads, block
+        inserts), a live batch still starts at once."""
+        import threading
+
+        from app.db import clickhouse
+
+        held = threading.Event()
+        workers = clickhouse._ch_executor._max_workers
+        blockers = [
+            clickhouse._ch_executor.submit(held.wait, _WAIT_SECONDS) for _ in range(workers)
+        ]
+        ran_on: list[str] = []
+
+        def fake_run_once(network, history_complete=True, should_stop=None):
+            ran_on.append(threading.current_thread().name)
+            return 0
+
+        monkeypatch.setattr(_engine_mod, "run_once", fake_run_once)
+        try:
+            await asyncio.wait_for(_engine_mod.run_once_async("preprod"), _WAIT_SECONDS / 2)
+        finally:
+            held.set()
+            for b in blockers:
+                b.result(_WAIT_SECONDS)
+        assert ran_on and ran_on[0].startswith("clickhouse-live"), ran_on
+
+    @patch("app.analysis.engine.clickhouse")
+    @patch("app.analysis.engine.settings")
+    def test_backlog_lane_picks_its_range_oldest_first(self, ms, mock_ch):
+        ms.ANALYSIS_BACKLOG_PICK_SIZE = _BACKLOG_PICK
+        # Naive, as ClickHouse hands them back.
+        stamp = datetime(2026, 3, 2, 9, 0, 0)
+        mock_ch.pick_unanalyzed.return_value = [("a", stamp)]
+        picked = _engine_mod.pick_backlog("preprod", _RANGE_START, _RANGE_END)
+        assert picked == [("a", stamp.replace(tzinfo=UTC))]
+        args, kwargs = mock_ch.pick_unanalyzed.call_args
+        assert args == ("preprod", _BACKLOG_PICK)
+        assert kwargs == {"since": _RANGE_START, "until": _RANGE_END}
+
+    @patch("app.analysis.engine._score_batch", return_value=1)
+    @patch("app.analysis.engine.clickhouse")
+    @patch("app.analysis.engine.settings")
+    def test_a_backlog_batch_reports_what_it_scored(self, ms, mock_ch, _scored):
+        ms.ANALYSIS_ENABLED = True
+        mock_ch.hydrate_transactions.return_value = [{"tx_hash": "a"}, {"tx_hash": "b"}]
+        batch = _engine_mod.run_backlog_once("preprod", ["a", "b"], _RANGE_START, _RANGE_END)
+        # One deferred: the lane knows not to pick the slice again at once.
+        assert batch == (2, 1)
+        args, kwargs = mock_ch.hydrate_transactions.call_args
+        assert args == ("preprod", ["a", "b"])
+        assert kwargs == {"since": _RANGE_START, "until": _RANGE_END}
+
+    @patch("app.analysis.engine.clickhouse")
+    @patch("app.analysis.engine.settings")
+    def test_neither_lane_scores_while_analysis_is_off(self, ms, mock_ch):
+        ms.ANALYSIS_ENABLED = False
+        assert _engine_mod.run_once("preprod") == 0
+        assert _engine_mod.run_backlog_once("preprod", ["a"], _RANGE_START, _RANGE_END) == (0, 0)
+        mock_ch.get_unanalyzed_transactions.assert_not_called()
+        mock_ch.hydrate_transactions.assert_not_called()
+
+
+class TestInFlightClaims:
+    """A transaction is scored by one lane at a time."""
 
     def teardown_method(self):
-        _engine_mod._last_full_rescan.clear()
-        _engine_mod._unanalyzed_watermark.clear()
+        _engine_mod._in_flight.clear()
 
-    @patch("app.analysis.engine.settings")
-    def test_poll_since_bounds_rescan_window(self, ms):
-        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
-        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 604800  # 7 days
-        since, full = _engine_mod._poll_since("preprod")
-        assert full is True
-        assert since is not None  # bounded lookback, not the whole table
-        assert isinstance(since, datetime)
+    def test_what_one_lane_holds_the_other_does_not_take(self):
+        live = _engine_mod._claim("preprod", [{"tx_hash": "a"}, {"tx_hash": "b"}])
+        backlog = _engine_mod._claim("preprod", [{"tx_hash": "b"}, {"tx_hash": "c"}])
+        assert [r["tx_hash"] for r in live] == ["a", "b"]
+        assert [r["tx_hash"] for r in backlog] == ["c"]
 
-    @patch("app.analysis.engine.settings")
-    def test_poll_since_unbounded_when_window_zero(self, ms):
-        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
-        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0  # legacy unbounded
-        since, full = _engine_mod._poll_since("preprod")
-        assert full is True
-        assert since is None
+    def test_a_release_frees_the_claim(self):
+        _engine_mod._release("preprod", _engine_mod._claim("preprod", [{"tx_hash": "a"}]))
+        assert _engine_mod._claim("preprod", [{"tx_hash": "a"}]) == [{"tx_hash": "a"}]
 
-    @patch("app.analysis.engine.clickhouse")
-    @patch("app.analysis.engine.settings")
-    def test_rescan_failure_falls_back_to_watermark(self, ms, mock_ch):
-        ms.ANALYSIS_ENABLED = True
-        ms.ANALYSIS_ENGINE_BATCH_SIZE = 100
-        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
-        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0  # since=None rescan
-        wm = datetime(2025, 1, 1, tzinfo=UTC)
-        _engine_mod._unanalyzed_watermark["preprod"] = wm
-        mock_ch.get_unanalyzed_transactions.side_effect = [RuntimeError("CH OOM"), []]
-        result = _engine_mod.run_once("preprod")
-        assert result == 0
-        assert mock_ch.get_unanalyzed_transactions.call_count == 2
-        assert mock_ch.get_unanalyzed_transactions.call_args_list[1].kwargs["since"] == wm
-        assert "preprod" in _engine_mod._last_full_rescan
+    def test_claims_are_per_network(self):
+        _engine_mod._claim("preprod", [{"tx_hash": "a"}])
+        assert _engine_mod._claim("preview", [{"tx_hash": "a"}]) == [{"tx_hash": "a"}]
 
-    @patch("app.analysis.engine.clickhouse")
-    @patch("app.analysis.engine.settings")
-    def test_rescan_failure_reraises_without_watermark(self, ms, mock_ch):
-        ms.ANALYSIS_ENABLED = True
-        ms.ANALYSIS_ENGINE_BATCH_SIZE = 100
-        ms.UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS = 600
-        ms.UNANALYZED_FULL_RESCAN_WINDOW_SECONDS = 0
-        mock_ch.get_unanalyzed_transactions.side_effect = RuntimeError("CH OOM")
-        import pytest as _pytest
+    @patch("app.analysis.engine._score_claimed", side_effect=RuntimeError("insert failed"))
+    def test_a_failed_batch_releases_its_claims(self, _failing):
+        # Otherwise the transactions would never be polled again in this process.
+        with pytest.raises(RuntimeError):
+            _engine_mod._score_batch("preprod", [{"tx_hash": "a"}], "live")
+        assert not _engine_mod._in_flight
 
-        with _pytest.raises(RuntimeError):
-            _engine_mod.run_once("preprod")
+
+class TestLaneMarkers:
+    """What a score says about the lane that wrote it."""
+
+    def _scored(self, lane, history_complete=True):
+        with (
+            patch.multiple(
+                "app.analysis.engine",
+                _enrich_inputs_with_resolved_addresses=lambda rows, network: None,
+                _enrich_collision_features=lambda rows, network: None,
+                _enrich_cycle_features=lambda rows, network: None,
+                _enrich_sandwich_features=lambda rows, network: None,
+                _build_scorers=lambda: [],
+            ),
+            patch("app.analysis.engine.clickhouse") as mock_ch,
+            patch("app.analysis.engine.notifications") as mock_notify,
+        ):
+            mock_ch.stored_copies.return_value = {_copy(_make_row())}
+            _engine_mod._score_claimed("preprod", [_make_row()], lane, history_complete)
+        (results,) = mock_ch.insert_class_scores.call_args.args
+        # The alert hook sees exactly what was persisted.
+        assert mock_notify.on_new_scores.call_args.args[0] is results
+        return results[0]
+
+    def test_a_backlog_score_is_a_late_detection_with_its_tx_time(self):
+        result = self._scored("backlog")
+        assert result["late_detection"] is True
+        assert result["tx_timestamp"] == _make_row()["timestamp"]
+
+    def test_a_live_score_is_not_late(self):
+        assert self._scored("live")["late_detection"] is False
+
+    def test_a_live_score_ahead_of_the_backlog_says_its_history_is_incomplete(self):
+        result = self._scored("live", history_complete=False)
+        assert result["evidence"]["_meta"]["history_incomplete"] is True
+
+    def test_a_live_score_with_the_history_complete_carries_no_marker(self):
+        assert "_meta" not in self._scored("live")["evidence"]
+
+
+class TestStillStored:
+    """A score is stored only while the copy it was computed from is: a rollback
+    purge or a re-confirmation in another block can replace it mid-batch."""
+
+    def _stored(self, rows, copies, scorers=()):
+        with (
+            patch.multiple(
+                "app.analysis.engine",
+                _enrich_inputs_with_resolved_addresses=lambda rows, network: None,
+                _enrich_collision_features=lambda rows, network: None,
+                _enrich_cycle_features=lambda rows, network: None,
+                _enrich_sandwich_features=lambda rows, network: None,
+                _build_scorers=lambda: list(scorers),
+            ),
+            patch("app.analysis.engine.clickhouse") as mock_ch,
+            patch("app.analysis.engine.notifications") as mock_notify,
+        ):
+            mock_ch.stored_copies.return_value = set(copies)
+            stored = _engine_mod._score_claimed("preprod", rows, "live", True)
+        if stored:
+            (inserted,) = mock_ch.insert_class_scores.call_args.args
+            assert mock_notify.on_new_scores.call_args.args[0] is inserted
+        else:
+            mock_ch.insert_class_scores.assert_not_called()
+            mock_notify.on_new_scores.assert_not_called()
+        return stored, mock_ch
+
+    def test_a_copy_still_stored_is_scored(self):
+        row = _make_row()
+        stored, mock_ch = self._stored([row], [_copy(row)])
+        assert [r["tx_hash"] for r in stored] == ["tx01"]
+        assert mock_ch.stored_copies.call_args.args == ("preprod", ["tx01"])
+
+    def test_a_purged_copy_is_not_stored_or_alerted(self):
+        kept, purged = _make_row("tx01"), _make_row("tx02")
+        stored, _ = self._stored([kept, purged], [_copy(kept)])
+        assert [r["tx_hash"] for r in stored] == ["tx01"]
+
+    def test_a_copy_replaced_by_another_block_in_the_same_second_is_not_stored(self):
+        """A slot battle: the re-confirmed copy can carry the same stamp, and
+        only its block tells it apart."""
+        row = _make_row()
+        other_block = (row["tx_hash"], "cd" * 32, row["ingestion_timestamp"])
+        stored, _ = self._stored([row], [other_block])
+        assert stored == []
+
+    def test_a_copy_beside_a_newer_one_of_the_same_block_is_scored(self):
+        """A replayed block stores the transaction again; until the parts merge
+        the copy picked is still there, and its score is still its own."""
+        row = _make_row()
+        newer = (
+            row["tx_hash"],
+            row["block_hash"],
+            row["ingestion_timestamp"] + timedelta(seconds=1),
+        )
+        stored, _ = self._stored([row], [_copy(row), newer])
+        assert [r["tx_hash"] for r in stored] == ["tx01"]
+
+    def test_an_attack_on_a_replaced_copy_still_fires_on_its_current_copy(self):
+        """Recall: dropping the purged copy's score leaves the transaction
+        unscored, and the next poll scores its current copy at full strength."""
+        attack = [_FixedScorer("sandwich", 90.0)]
+        purged = _make_row()
+        stored, _ = self._stored([purged], [], attack)
+        assert stored == []
+
+        current = _make_row() | {"block_hash": "cd" * 32, "slot": purged["slot"] + 1}
+        stored, _ = self._stored([current], [_copy(current)], attack)
+        (result,) = stored
+        assert result["sandwich"] == 90.0
+        assert result["risk_band"] == score_to_band(90.0) == "Critical"
 
 
 class _EvidenceScorer:
@@ -415,3 +650,164 @@ class TestCycleEnrichment:
         row = self._enrich(lambda tx_hash, network: cycle)
         assert row["cycle"] is cycle
         assert "_enrichment_failed" not in row
+
+
+class TestHistoryRescore:
+    """A ring's later passes stored before an earlier one are scored again.
+
+    The lookup and the real re-score run against ClickHouse in the live tier
+    (test_graph_cycle_live.TestLaterPassesStoredFirst); these pin what the
+    engine does with the lookup's answer.
+    """
+
+    _CYCLE = {"first_slot": 1, "intermediaries": ["addr_b"], "origin_keys": ["addr_o"]}
+
+    def _stored(self, tx_hash, circular=50.0):
+        return {"tx_hash": tx_hash, "circular": circular, "evidence": {"circular": self._CYCLE}}
+
+    def _later(self, *hashes):
+        # Stored circular 10, headline 10, in chain order of the arguments.
+        return {
+            h: _engine_mod.graph_mod.StoredCycle(first_slot=i, circular=10.0, max_score=10.0)
+            for i, h in enumerate(hashes)
+        }
+
+    def _run(self, stored, lookups, rescored, cap=None):
+        calls = []
+
+        def score_claimed(network, rows, lane, history_complete, keep=None, should_stop=None):
+            calls.append([r["tx_hash"] for r in rows])
+            return rescored.pop(0) if rescored else []
+
+        with (
+            patch.object(_engine_mod.graph_mod, "stored_later_cycles", side_effect=lookups) as look,
+            patch.object(
+                _engine_mod.clickhouse,
+                "hydrate_transactions",
+                side_effect=lambda network, hashes, since: [{"tx_hash": h} for h in hashes],
+            ),
+            patch.object(_engine_mod, "_score_claimed", side_effect=score_claimed),
+            patch.object(
+                _engine_mod.settings,
+                "ANALYSIS_HISTORY_RESCORE_MAX_TXS",
+                cap if cap is not None else _engine_mod.settings.ANALYSIS_HISTORY_RESCORE_MAX_TXS,
+            ),
+        ):
+            _engine_mod._rescore_later_passes("preprod", stored, "live", True)
+        return look, calls
+
+    def test_only_a_rescore_that_raises_circular_and_keeps_the_headline_is_kept(self):
+        before = self._later("b")
+        keep = functools.partial(_engine_mod._raises_circular, before)
+        assert keep({"tx_hash": "b", "circular": 30.0, "max_score": 30.0})
+        assert not keep({"tx_hash": "b", "circular": 10.0, "max_score": 30.0}), "not raised"
+        # Scored late, another class can read lower: never trade a detection.
+        assert not keep({"tx_hash": "b", "circular": 30.0, "max_score": 5.0})
+
+    def test_the_later_passes_are_rescored_in_chain_order(self):
+        later = self._later("b", "c")
+        _, calls = self._run([self._stored("a")], [later, {}], [])
+        assert calls == [["b", "c"]]
+
+    def test_a_kept_rescore_looks_up_the_passes_after_it(self):
+        look, calls = self._run(
+            [self._stored("a")],
+            [self._later("b"), self._later("c"), {}],
+            [[self._stored("b")], []],
+        )
+        assert calls == [["b"], ["c"]]
+        assert [c.args[1][0][0] for c in look.call_args_list] == ["a", "b"]
+
+    def test_the_cap_keeps_the_earliest_and_says_so(self, caplog):
+        _, calls = self._run([self._stored("a")], [self._later("b", "c", "d")], [], cap=2)
+        assert calls == [["b", "c"]]
+        assert "keep their stored score" in caplog.text
+
+    def test_a_failed_lookup_does_not_fail_the_batch(self, caplog):
+        self._run([self._stored("a")], RuntimeError("CH down"), [])
+        assert "re-score failed" in caplog.text
+
+    def test_a_batch_without_cycles_looks_nothing_up(self):
+        look, calls = self._run([{"tx_hash": "a", "evidence": {}}], [{}], [])
+        assert not look.called and calls == []
+
+    def test_off_at_zero(self):
+        look, _ = self._run([self._stored("a")], [self._later("b")], [], cap=0)
+        assert not look.called
+
+
+class TestLaneStop:
+    """A batch that outlives its lane's stop at shutdown stores nothing: its
+    enrichments may have run after the event loop stopped, and its alerts
+    could not be sent. Unstored, its rows are picked again after the restart."""
+
+    def test_a_stopped_lanes_batch_stores_and_alerts_nothing(self):
+        with (
+            patch.multiple(
+                "app.analysis.engine",
+                _enrich_inputs_with_resolved_addresses=lambda rows, network: None,
+                _enrich_collision_features=lambda rows, network: None,
+                _enrich_cycle_features=lambda rows, network: None,
+                _enrich_sandwich_features=lambda rows, network: None,
+                _build_scorers=lambda: [],
+            ),
+            patch("app.analysis.engine.clickhouse") as mock_ch,
+            patch("app.analysis.engine.notifications") as mock_notify,
+        ):
+            stored = _engine_mod._score_claimed(
+                "preprod", [_make_row()], "backlog", True, should_stop=lambda: True
+            )
+        assert stored == []
+        mock_ch.insert_class_scores.assert_not_called()
+        mock_notify.on_new_scores.assert_not_called()
+
+
+class TestPacedRowsLeaveTheLivePoll:
+    """A deferred transaction re-polled inside its pacing window defers again
+    uncounted; as the newest unscored it would be all the poll returned, so the
+    drain would never reach the older rows of the window."""
+
+    def teardown_method(self):
+        _engine_mod._analysis_defer_attempts.clear()
+        _engine_mod._raw_fallback_attempts.clear()
+
+    @patch("app.analysis.engine._score_batch", return_value=0)
+    @patch("app.analysis.engine.clickhouse")
+    def test_the_poll_passes_over_what_waits_out_its_pacing(self, mock_ch, _scored):
+        now = time.monotonic()
+        overdue = now - max(settings.ANALYSIS_DEFER_RETRY_SECONDS, 1) - 1
+        _engine_mod._analysis_defer_attempts[("preprod", "paced")] = (1, now)
+        _engine_mod._analysis_defer_attempts[("preprod", "due")] = (1, overdue)
+        _engine_mod._analysis_defer_attempts[("preview", "other")] = (1, now)
+        _engine_mod._raw_fallback_attempts[("preprod", "raw")] = (1, now)
+        mock_ch.get_unanalyzed_transactions.return_value = []
+        with patch.object(settings, "ANALYSIS_ENABLED", True):
+            _engine_mod.run_once("preprod")
+        _, kwargs = mock_ch.get_unanalyzed_transactions.call_args
+        assert kwargs["exclude"] == {"paced", "raw"}
+
+
+class TestCollisionEnrichmentLoop:
+    """front_running reads mempool collisions through the main event loop."""
+
+    def test_a_stopped_loop_is_a_failure_not_a_skip(self, monkeypatch):
+        # A batch outliving shutdown: skipped, the tx would be stored with
+        # front_running as no-signal and never picked again.
+        from app.analysis import enrichment
+
+        loop = asyncio.new_event_loop()
+        loop.close()
+        monkeypatch.setattr(settings, "SCORER_FRONT_RUNNING_ENABLED", True)
+        monkeypatch.setattr(enrichment, "_main_loop", loop)
+        row = _make_row()
+        enrichment.enrich_collision_features([row], "preprod")
+        assert row[enrichment._ENRICHMENT_FAILED_KEY] == ["collision"]
+
+    def test_no_loop_at_all_is_still_a_skip(self, monkeypatch):
+        from app.analysis import enrichment
+
+        monkeypatch.setattr(settings, "SCORER_FRONT_RUNNING_ENABLED", True)
+        monkeypatch.setattr(enrichment, "_main_loop", None)
+        row = _make_row()
+        enrichment.enrich_collision_features([row], "preprod")
+        assert enrichment._ENRICHMENT_FAILED_KEY not in row

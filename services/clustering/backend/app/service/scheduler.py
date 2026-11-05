@@ -84,6 +84,11 @@ def feed_tick(*, manager: JobManager, repo_factory: RepoFactory, settings: Setti
     # interval is evaluated against a single consistent "now".
     now = int(time.time())
     try:
+        # A job left non-terminal by a run that could not record its end would
+        # keep its contract "busy", and so unscored, forever: put it back on the
+        # worker first. It stays busy for this tick, now with a real run behind.
+        with manager.enqueue_lock:
+            manager.reap_orphans(repo)
         busy = {j["target"] for j in repo.nonterminal_jobs()}
         cap = settings.feed_max_contracts_per_tick
         # Page through the WHOLE registry (list_contracts now paginates with a

@@ -25,6 +25,9 @@ _SLOT_WINDOW = int(_get_cfg("sandwich")["window_slots"])
 # Cap on neighbour rows fetched around a victim tx. Bounds the per-tx query
 # cost; a busier window than this is batcher traffic, not a 3-leg sandwich.
 _NEIGHBOR_LIMIT = int(_get_cfg("sandwich")["neighbor_limit"])
+# Cap on the attacker-history count (see sandwich.recurrence_count_cap): past
+# the recurrence anchor's p99 the count changes no score.
+_HISTORY_COUNT_CAP = int(_get_cfg("sandwich")["recurrence_count_cap"])
 
 # Single source of truth for script-address prefixes: features.py owns the
 # CIP-19 enumeration so the detector and the scorers cannot drift.
@@ -53,35 +56,41 @@ def _count_attacker_history(
     network: str,
     current_slot: int,
 ) -> int:
-    """Count how many prior txs from this address cluster appeared as the
-    front leg of a potential sandwich (2+ txs at the same script address
-    within a slot window, before the current slot)."""
+    """Count, up to _HISTORY_COUNT_CAP, the earlier transactions in which this
+    address spent and paid a script address (the attacker's recurrence).
+
+    Read from spend_edges, whose primary key leads with (network, address,
+    slot): one range read that stops at the cap. The join of
+    transaction_inputs and transaction_outputs it replaces built every script
+    output of the chain in memory, 1.4 to 2.2 GB per call on mainnet whatever
+    the wallet, enough to push concurrent queries over ClickHouse's limit.
+    spend_edges keeps the same input and output conditions, but has every
+    spending input rather than only the first: the count is never below the
+    first-input one, so the sub-score can only rise (recall first).
+    """
     prefixes = _network_script_prefixes(network)
-    like_clause = " OR ".join(f"o.address LIKE %(script_prefix_{i})s" for i in range(len(prefixes)))
+    like_clause = " OR ".join(
+        f"to_address LIKE %(script_prefix_{i})s" for i in range(len(prefixes))
+    )
     params: dict[str, Any] = {
         "network": network,
         "addr": attacker_addr,
         "slot": current_slot,
+        "cap": _HISTORY_COUNT_CAP,
     }
     for i, prefix in enumerate(prefixes):
         params[f"script_prefix_{i}"] = f"{prefix}%"
     rows = client.execute(
         f"""
-        SELECT count(DISTINCT i.tx_hash)
-        FROM transaction_inputs i
-        JOIN transaction_outputs o ON i.tx_hash = o.tx_hash AND i.network = o.network
-        WHERE i.network = %(network)s
-          AND i.address = %(addr)s
-          AND i.input_index = 0
-          AND i.is_collateral = 0
-          AND i.is_reference = 0
-          AND i.is_unspent_attempt = 0
-          AND o.is_collateral = 0
-          AND ({like_clause})
-          AND i.tx_hash IN (
-              SELECT tx_hash FROM transactions
-              WHERE network = %(network)s AND slot < %(slot)s
-          )
+        SELECT count() FROM (
+            SELECT DISTINCT tx_hash
+            FROM spend_edges
+            WHERE network = %(network)s
+              AND address = %(addr)s
+              AND slot < %(slot)s
+              AND ({like_clause})
+            LIMIT %(cap)s
+        )
         """,
         params,
     )

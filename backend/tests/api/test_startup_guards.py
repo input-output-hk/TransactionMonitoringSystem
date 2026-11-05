@@ -8,6 +8,7 @@ that family (review finding: shipping '*' as a production default).
 import pytest
 from pydantic import ValidationError
 
+from app import config as config_mod
 from app.config import _ADDRESS_INDEX_CHECK_MIN_INTERVAL_SECONDS, Settings, settings
 from app.main import _validate_startup_settings
 
@@ -182,6 +183,66 @@ class TestAnalysisBatchesValidation:
         )
 
 
+class TestBacklogSettleValidation:
+    """A settle margin shorter than one block-insert retry cycle lets the
+    scoring checkpoint pass a stamp whose row is still on its way: that row
+    then lands behind it and is never scored."""
+
+    def test_a_settle_inside_the_insert_retry_cycle_is_rejected(self):
+        floor = Settings()._insert_visibility_seconds()
+        with pytest.raises(ValidationError, match="ANALYSIS_BACKLOG_SETTLE_SECONDS"):
+            Settings(ANALYSIS_BACKLOG_SETTLE_SECONDS=int(floor) - 1)
+
+    def test_the_floor_follows_the_insert_timeouts(self):
+        # A longer send/receive timeout lengthens every attempt.
+        base = Settings()._insert_visibility_seconds()
+        slower = Settings(
+            CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=Settings().CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+            * 2,
+            ANALYSIS_BACKLOG_SETTLE_SECONDS=Settings().ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+            ROLLBACK_SCORE_REPURGE_DELAY_SECONDS=Settings().ROLLBACK_SCORE_REPURGE_DELAY_SECONDS
+            * 2,
+        )
+        assert slower._insert_visibility_seconds() > base
+
+    def test_the_default_clears_the_floor(self):
+        default = Settings()
+        assert default.ANALYSIS_BACKLOG_SETTLE_SECONDS >= default._insert_visibility_seconds()
+
+    def test_every_statement_of_an_attempt_counts(self):
+        # The transactions row is written last, so it waits on every statement
+        # before it, each with its own send/receive budget.
+        default = Settings()
+        longer = Settings(
+            CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=default.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+            + 1,
+            ANALYSIS_BACKLOG_SETTLE_SECONDS=default.ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+        )
+        statements = (
+            config_mod._PRE_INSERT_STATEMENTS
+            + default.CLICKHOUSE_INSERT_MAX_RETRIES * config_mod._BLOCK_INSERT_STATEMENTS
+        )
+        grown = longer._insert_visibility_seconds() - default._insert_visibility_seconds()
+        assert grown == pytest.approx(statements)
+
+
+class TestBatchSizeBounds:
+    """A batch's hashes are bound into query text, which ClickHouse rejects
+    past max_query_size: every poll would then fail."""
+
+    @pytest.mark.parametrize(
+        "knob",
+        [
+            "ANALYSIS_ENGINE_BATCH_SIZE",
+            "ANALYSIS_BACKLOG_BATCH_SIZE",
+            "ANALYSIS_HISTORY_RESCORE_MAX_TXS",
+        ],
+    )
+    def test_a_batch_past_the_query_size_bound_is_rejected(self, knob):
+        with pytest.raises(ValidationError, match=knob):
+            Settings(**{knob: config_mod._MAX_HASHES_PER_QUERY + 1})
+
+
 class TestCycleFanoutValidation:
     """le: the frontier is bound into the hop query twice, and a query text past
     ClickHouse's max_query_size fails every hop whose frontier reaches it."""
@@ -255,3 +316,47 @@ class TestDocsGating:
         assert not (auth._dev_mode or settings.TMS_API_DOCS_ENABLED)
         monkeypatch.setattr(settings, "TMS_API_DOCS_ENABLED", True)
         assert auth._dev_mode or settings.TMS_API_DOCS_ENABLED
+
+
+class TestRollbackRepurgeDelayValidation:
+    """The delayed repurge must come after any score insert that checked its
+    copies before the purge (engine._still_stored): one connect and one
+    send/receive timeout at most."""
+
+    def _bound(self, s: Settings) -> float:
+        return s.CLICKHOUSE_CONNECT_TIMEOUT_SECONDS + s.CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+
+    def test_the_default_clears_the_bound(self):
+        default = Settings()
+        assert default.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS > self._bound(default)
+
+    def test_a_delay_inside_one_score_insert_is_rejected(self):
+        with pytest.raises(ValidationError, match="ROLLBACK_SCORE_REPURGE_DELAY_SECONDS"):
+            Settings(ROLLBACK_SCORE_REPURGE_DELAY_SECONDS=int(self._bound(Settings())))
+
+    def test_the_bound_follows_the_timeouts(self):
+        default = Settings()
+        with pytest.raises(ValidationError, match="ROLLBACK_SCORE_REPURGE_DELAY_SECONDS"):
+            Settings(
+                CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS=default.ROLLBACK_SCORE_REPURGE_DELAY_SECONDS,
+                ANALYSIS_BACKLOG_SETTLE_SECONDS=default.ANALYSIS_BACKLOG_SETTLE_SECONDS * 2,
+            )
+
+
+class TestSpendEdgesCheckMarginValidation:
+    """A TTL margin as long as the IO retention would leave every spend out of
+    the coverage check, which would then pass without checking anything."""
+
+    def test_a_margin_as_long_as_the_retention_is_rejected(self):
+        margin_days = Settings().SPEND_EDGES_CHECK_TTL_MARGIN_HOURS // config_mod._HOURS_PER_DAY
+        with pytest.raises(ValidationError, match="SPEND_EDGES_CHECK_TTL_MARGIN_HOURS"):
+            Settings(CH_RETENTION_DAYS_IO=margin_days)
+
+    def test_a_margin_inside_the_retention_is_accepted(self):
+        margin_days = Settings().SPEND_EDGES_CHECK_TTL_MARGIN_HOURS // config_mod._HOURS_PER_DAY
+        assert (
+            Settings(CH_RETENTION_DAYS_IO=margin_days + 1).CH_RETENTION_DAYS_IO == margin_days + 1
+        )
+
+    def test_no_retention_needs_no_margin_check(self):
+        assert Settings(CH_RETENTION_DAYS_IO=0).CH_RETENTION_DAYS_IO == 0

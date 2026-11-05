@@ -1,8 +1,9 @@
 """Transfer graph cycle detection for the Circular scorer.
 
 Performs a bounded BFS forward from a transaction's sender addresses to detect
-value cycles (ADA returning to the origin within max_hops).  Queries
-address_transactions, transaction_inputs and transaction_outputs in ClickHouse.
+value cycles (ADA returning to the origin within max_hops). Each hop reads
+spend_edges; the origin and the closing leg read transaction_inputs and
+transaction_outputs in ClickHouse.
 """
 
 import bisect
@@ -68,37 +69,33 @@ _SAME_SLOT_DELTA_SLOTS = 1
 # spanning more than circular.cycle.max_age_slots are almost always incidental
 # reuses of an address, not deliberate layering.
 #
-# Shape matters as much as the filters here. Filtering transaction_inputs by
-# address cannot narrow it: the table is ordered by tx_hash, and its address
-# bloom index passes about 2.5% of granules per address as false positives, so
-# a frontier of a few dozen addresses passes most of them and the filter read
-# the whole table on every hop, growing with every day of history.
-# address_transactions is ordered by (network, address, slot), so the frontier's
-# transactions inside the window are a primary-key range read at any history
-# size. That set is a superset (it also holds transactions that only PAY these
-# addresses), so it is a prefilter and nothing more: each candidate is still
-# confirmed as a spend against transaction_inputs and windowed on
-# transactions.slot, with the conditions this query always used (except that an
-# empty frontier address never matches, since the index leaves empty addresses
-# out), both read by tx_hash through their primary keys. What remains scales
-# with the transactions the frontier made inside the window, not with the
-# history: small for ordinary addresses, while a hub in the frontier still
-# costs every transaction it made in the window. Replayed on 60 real mainnet
-# hops interleaved on one snapshot: all 60 results byte-identical on merged
-# data, CPU 49.7 -> 14.5 seconds. When retuning, compare
-# OSCPUVirtualTimeMicroseconds and memory_usage across interleaved replays, not
-# read_rows alone: #107's shape read more rows and cost less.
+# Shape matters as much as the filters here. The hop reads spend_edges, one row
+# per (address spent from, spending transaction, address paid) with what was
+# paid there, ordered by (network, address, slot): the frontier's spends inside
+# the window are a primary-key range read per frontier address, and the row
+# already holds what the hop returns. What it costs scales with the spends the
+# frontier made inside the window, not with the history: small for ordinary
+# addresses, while a hub in the frontier still costs every spend it made in the
+# window.
 #
-# The prefilter is exactly as complete as address_transactions, which
-# address_transactions_mv fills from transactions.addresses. That list holds
-# every regular input address because input enrichment runs before the insert
-# (input_enrichment._flow_addresses, pinned by test_input_enrichment.py).
-# Measured on mainnet on 2026-09-22: all 2,556,830 spend pairs this query can
-# match were present at their slot, and address_index_gaps keeps checking it
-# (see app.tasks.housekeeping). Retention (CH_RETENTION_DAYS_IO) and the
-# rollback purge treat the table like transaction_inputs. Outputs are joined
-# only once the candidates are known, which is what keeps peak memory near 31MB
-# (#107; p95 36.5MB with the prefilter).
+# It replaced a prefilter on address_transactions (by address and slot) whose
+# candidates were confirmed as spends on transaction_inputs, windowed on
+# transactions and joined to transaction_outputs, each by tx_hash IN. Those
+# three tables are ordered by tx_hash, so a frontier with a few thousand
+# candidates touched nearly every granule of all three: harmless live, where
+# the window holds the ~36 s since the origin, but a whole-table read of about
+# 35M rows per hop once scoring ran a day late, which turned a backlog into a
+# spiral (2026-10). The edges carry the conditions that query applied, so the
+# rows are the same (scripts/compare_hop_queries.py replays both): spends only,
+# since a transaction that merely pays a frontier address does not move value
+# on from it; regular inputs and outputs (see app.db.spend_edges); a slot,
+# since slotless mempool copies were never in a window; and no empty spender,
+# which the address_transactions prefilter left out too.
+#
+# The edges are exactly as complete as the block writer and the one-time
+# backfill made them: address_index_gaps checks the recent window (see
+# app.tasks.housekeeping), and the rollback purge and retention
+# (CH_RETENTION_DAYS_IO) treat the table like transaction_inputs.
 #
 # The ORDER BY carries a full tiebreaker (tx_hash, address) rather than slot
 # alone. Slot ties are common (many spends land in one block), so ordering by
@@ -113,59 +110,27 @@ _SAME_SLOT_DELTA_SLOTS = 1
 # origin set. No row order could have done this: dust to a second origin
 # address, sorted ahead by address, would still stand in for the repayment.
 #
-# A row is what one transaction paid one address, the sum of its outputs there,
-# and the inner DISTINCT drops the duplicate rows a replayed block leaves until
-# a merge, so each output counts once. Rows DISTINCT on (tx_hash, address,
-# amount) merged equal outputs, so a leg paid as equal outputs to one address
-# read as one of them: an uneven ring for the price of an extra output. A row
-# per output instead spends circular.cycle.bfs_hop_row_limit on each one, and
-# equal outputs to one address are routine (UTxO splits, script seeding, min-ADA
-# token outputs; ~300 in one testnet transaction), so a batch landing ahead of a
-# ring's leg pushed the leg out of the hop. Summed, a hop has no more rows than
-# under either, and every output counts.
-#
-# Built from its two narrowing reads so the live tests can EXPLAIN each of them
-# (a plan of the whole query shows neither: ClickHouse builds IN sets before
-# planning the main query).
-_HOP_PREFILTER = """
-    SELECT tx_hash
-    FROM address_transactions
+# A row is what one transaction paid one address, the sum of its outputs there.
+# A spend from several frontier addresses has an edge from each, and a replayed
+# block leaves duplicate edges until a merge: the GROUP BY makes each one row,
+# and any(paid) is right because every copy holds the same sum. Rows DISTINCT on
+# (tx_hash, address, amount) merged equal outputs, so a leg paid as equal
+# outputs to one address read as one of them: an uneven ring for the price of an
+# extra output. A row per output instead spends circular.cycle.bfs_hop_row_limit
+# on each one, and equal outputs to one address are routine (UTxO splits, script
+# seeding, min-ADA token outputs; ~300 in one testnet transaction), so a batch
+# landing ahead of a ring's leg pushed the leg out of the hop. Summed, a hop has
+# no more rows than under either, and every output counts.
+_HOP_QUERY = """
+    SELECT tx_hash, to_address, any(paid), slot
+    FROM spend_edges
     WHERE network = %(network)s
       AND address IN %(addresses)s
       AND slot >= %(min_slot)s
       AND slot <= %(max_slot)s
-"""
-_HOP_SPENDS = f"""
-    SELECT tx_hash
-    FROM transaction_inputs
-    WHERE network = %(network)s
-      AND address IN %(addresses)s
-      AND is_collateral = 0
-      AND is_reference = 0
-      AND is_unspent_attempt = 0
       AND tx_hash != %(origin_tx)s
-      AND tx_hash IN ({_HOP_PREFILTER})
-"""
-_HOP_QUERY = f"""
-    WITH cand AS (
-        SELECT DISTINCT tx_hash, slot
-        FROM transactions
-        WHERE network = %(network)s
-          AND slot >= %(min_slot)s
-          AND slot <= %(max_slot)s
-          AND tx_hash IN ({_HOP_SPENDS})
-    )
-    SELECT c.tx_hash, to2.address, sum(to2.amount) AS paid, c.slot
-    FROM cand c
-    JOIN (
-        SELECT DISTINCT tx_hash, output_index, address, amount
-        FROM transaction_outputs
-        WHERE network = %(network)s
-          AND is_collateral = 0
-          AND tx_hash IN (SELECT tx_hash FROM cand)
-    ) to2 ON c.tx_hash = to2.tx_hash
-    GROUP BY c.tx_hash, c.slot, to2.address
-    ORDER BY c.slot ASC, c.tx_hash ASC, to2.address ASC
+    GROUP BY tx_hash, slot, to_address
+    ORDER BY slot ASC, tx_hash ASC, to_address ASC
     LIMIT %(hop_row_limit)s
 """
 
@@ -175,20 +140,21 @@ _HOP_QUERY = f"""
 # absorbs a host clock running behind the chain's slot clock.
 _INGESTION_CLOCK_MARGIN_SECONDS = 300
 
-# Spends in the recent window whose (address, slot, tx_hash) row is missing from
-# address_transactions: legs _HOP_QUERY's prefilter cannot see. Spends are read
-# as _HOP_QUERY confirms them; slotless transactions are left out, since no hop
-# window holds them, and so are inputs whose address was never resolved, which
-# no hop can follow either: those are counted apart.
+# Spends in the recent window with no (address, slot, tx_hash) edge in
+# spend_edges: legs _HOP_QUERY cannot see. Spends are read as the edges are
+# made (app.db.spend_edges), of transactions paying at least one regular output,
+# since one paying none has no edge to miss; slotless transactions are left out,
+# since no hop window holds them, and so are inputs whose address was never
+# resolved, which no hop can follow either: those are counted apart.
 #
 # recent takes each transaction's latest version. A time-range read of
 # transactions is served by its p_by_time_v2 projection, which keeps rows a
 # rollback purge deleted until their part merges, so after a fork switch the
-# re-confirmed transaction also shows at its orphaned slot, whose index row is
+# re-confirmed transaction also shows at its orphaned slot, whose edges are
 # gone: counted, that is a false gap on every spend of the switch.
 #
 # The IN sets hold every transaction of the window, thousands on mainnet, which
-# touch nearly every granule of the two history-sized tables, so their keys
+# touch nearly every granule of the history-sized tables, so their keys
 # prune little. The ingestion_timestamp bound lets PREWHERE skip the granules
 # of parts older than the window instead.
 _ADDRESS_INDEX_GAPS_QUERY = """
@@ -212,7 +178,7 @@ _ADDRESS_INDEX_GAPS_QUERY = """
             ti.address != '' AS resolved,
             (ti.address, assumeNotNull(r.tx_slot), ti.tx_hash) IN (
                 SELECT address, slot, tx_hash
-                FROM address_transactions
+                FROM spend_edges
                 WHERE network = %(network)s
                   AND ingestion_timestamp >= now() - toIntervalSecond(%(horizon_seconds)s)
                   AND tx_hash IN (SELECT tx_hash FROM recent)
@@ -225,6 +191,14 @@ _ADDRESS_INDEX_GAPS_QUERY = """
           AND ti.is_collateral = 0
           AND ti.is_reference = 0
           AND ti.is_unspent_attempt = 0
+          AND ti.tx_hash IN (
+              SELECT tx_hash
+              FROM transaction_outputs
+              WHERE network = %(network)s
+                AND ingestion_timestamp >= now() - toIntervalSecond(%(horizon_seconds)s)
+                AND tx_hash IN (SELECT tx_hash FROM recent)
+                AND is_collateral = 0
+          )
     )
 """
 
@@ -232,21 +206,21 @@ _ADDRESS_INDEX_GAPS_QUERY = """
 class AddressIndexCheck(NamedTuple):
     """One address_index_gaps pass over a window of recent spends."""
 
-    # Resolved spends the index lacks: cycle legs the BFS cannot see.
+    # Resolved spends spend_edges lacks: cycle legs the BFS cannot see.
     missing: int
     # Resolved spends looked at; 0 means the window held nothing to check.
     checked: int
     # Inputs whose address was never resolved: invisible to the BFS as well,
-    # but a failure of input enrichment, not of the index.
+    # but a failure of input enrichment, not of the edges.
     unresolved: int
 
 
 def address_index_gaps(network: str, window_seconds: int) -> AddressIndexCheck:
     """How many spends of the last window_seconds the circular BFS cannot see.
 
-    The hop query finds a spend only through its row in address_transactions,
-    so a spend missing there is a cycle leg the BFS skips without an error.
-    The index is complete by construction (see _HOP_QUERY); this checks it.
+    The hop query finds a spend only through its edges in spend_edges, so a
+    spend missing there is a cycle leg the BFS skips without an error. The
+    edges are complete by construction (see _HOP_QUERY); this checks it.
     """
     client = clickhouse._get_client()
     rows = client.execute(
@@ -763,6 +737,77 @@ def _prior_origin_cycles(
     )
     # circular >= 0 is the schema convention for "scored"; -1 is no finding.
     return [(float(score), list(intermediaries)) for score, intermediaries in rows]
+
+
+class StoredCycle(NamedTuple):
+    """A stored cycle whose history read would now find a cycle stored after it."""
+
+    first_slot: int
+    circular: float
+    max_score: float
+
+
+def stored_later_cycles(
+    network: str, sources: list[tuple[str, int, dict[str, Any]]]
+) -> dict[str, StoredCycle]:
+    """Stored cycles that count one of ``sources`` among their origin's earlier ones.
+
+    ``sources`` are (tx_hash, circular score, circular evidence) of just-stored
+    transactions. A cycle stored before an earlier pass of its origin missed
+    that pass for good: the scoring lanes do not store cycles in chain order.
+    Returned are those whose _prior_origin_cycles read would now include a
+    source: one of its origin keys, a first slot from the source's up to the
+    window after it, and a path through at least one of the source's
+    intermediaries, without which neither the recycling share nor the
+    recurrence count can move. Same table read, under the same settings, as
+    _prior_origin_cycles.
+    """
+    picked = []
+    for tx_hash, score, ev in sources:
+        hops = ev.get("hops") or []
+        intermediaries = ev.get("intermediaries") or [
+            h.get("address", "") for h in hops[1:-1] if isinstance(h, dict)
+        ]
+        origins = ev.get("origin_keys") or [ev.get("origin_cluster") or ""]
+        origins = [o for o in origins if o]
+        # The read's own predicate for a cycle that counts as history.
+        if origins and (score >= 0 or intermediaries):
+            path = {_address_key(a) for a in intermediaries if a}
+            picked.append((tx_hash, int(ev.get("first_slot") or 0), set(origins), path))
+    if not picked:
+        return {}
+    rows = clickhouse._get_client().execute(
+        """
+        SELECT tx_hash, circular, max_score, circular_origins,
+               circular_intermediaries, circular_first_slot
+        FROM tx_class_scores FINAL
+        WHERE network = %(network)s
+          AND hasAny(circular_origins, %(origins)s)
+          AND (circular >= 0 OR notEmpty(circular_intermediaries))
+          AND circular_first_slot >= %(min_slot)s
+          AND circular_first_slot <= %(max_slot)s
+        SETTINGS use_skip_indexes_if_final = 0
+        """,
+        {
+            "network": network,
+            "origins": sorted(set().union(*(o for _, _, o, _ in picked))),
+            "min_slot": min(first for _, first, _, _ in picked),
+            "max_slot": max(first for _, first, _, _ in picked) + _RECURRENCE_WINDOW_SLOTS,
+        },
+    )
+    later: dict[str, StoredCycle] = {}
+    for tx_hash, circular, max_score, origins, intermediaries, first_slot in rows:
+        path = {_address_key(a) for a in intermediaries}
+        for src_hash, src_first, src_origins, src_path in picked:
+            if (
+                tx_hash != src_hash
+                and src_first <= first_slot <= src_first + _RECURRENCE_WINDOW_SLOTS
+                and src_origins.intersection(origins)
+                and src_path & path
+            ):
+                later[tx_hash] = StoredCycle(int(first_slot), float(circular), float(max_score))
+                break
+    return later
 
 
 def _representatives(hops: list[dict[str, Any]]) -> list[str]:

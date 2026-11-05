@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveModules, type HealthDetail } from "./health";
+import { deriveModules, type HealthDetail, type ScoringHealth } from "./health";
 
 function healthFixture(overrides: Partial<HealthDetail> = {}): HealthDetail {
 	return {
@@ -45,7 +45,7 @@ describe("deriveModules", () => {
 				clustering: { state: "ok", last_activity_at: "2026-01-01T00:00:00Z" },
 			}),
 		);
-		expect(modules).toContainEqual({ name: "Clustering", online: true });
+		expect(modules).toContainEqual({ name: "Clustering", status: "online" });
 	});
 
 	it.each(["stale", "absent", "error"])(
@@ -57,7 +57,7 @@ describe("deriveModules", () => {
 					clustering: { state, last_activity_at: null },
 				}),
 			);
-			expect(modules).toContainEqual({ name: "Clustering", online: false });
+			expect(modules).toContainEqual({ name: "Clustering", status: "offline" });
 		},
 	);
 
@@ -72,8 +72,10 @@ describe("deriveModules", () => {
 			"Mempool Monitor",
 			"Breakers",
 		]);
-		expect(modules.find((m) => m.name === "Chain Sync")?.online).toBe(false);
-		expect(modules.find((m) => m.name === "Breakers")?.online).toBe(false);
+		expect(modules.find((m) => m.name === "Chain Sync")?.status).toBe(
+			"offline",
+		);
+		expect(modules.find((m) => m.name === "Breakers")?.status).toBe("offline");
 	});
 
 	it("shows Clustering offline when enabled but the payload is missing", () => {
@@ -81,6 +83,60 @@ describe("deriveModules", () => {
 		// not reach the sidecar at all; that must read as offline, not as
 		// "row silently missing".
 		const modules = deriveModules(healthFixture({ clustering_enabled: true }));
-		expect(modules).toContainEqual({ name: "Clustering", online: false });
+		expect(modules).toContainEqual({ name: "Clustering", status: "offline" });
+	});
+
+	function scoringFixture(state: string): ScoringHealth {
+		return {
+			state,
+			live_window_seconds: 600,
+			live_polled_at: "2026-11-02T12:00:00Z",
+			backlog_enabled: true,
+			checkpoint: "2026-11-02T10:50:00Z",
+			oldest_unscored_at: null,
+		};
+	}
+
+	it("shows Scoring online when the lanes are caught up", () => {
+		const modules = deriveModules(
+			healthFixture({ scoring: scoringFixture("ok") }),
+		);
+		expect(modules).toContainEqual({ name: "Scoring", status: "online" });
+	});
+
+	it.each(["behind", "starting", "unguarded"])(
+		"shows Scoring amber, not red, when %s: live transactions are still scored",
+		(state) => {
+			// Ingestion at the tip says nothing about scoring: this is the row
+			// that turns the overall dot amber when transactions go unscored.
+			const modules = deriveModules(
+				healthFixture({ scoring: scoringFixture(state) }),
+			);
+			expect(modules).toContainEqual({ name: "Scoring", status: "warning" });
+			expect(modules.find((m) => m.name === "Chain Sync")?.status).toBe(
+				"online",
+			);
+		},
+	);
+
+	it.each(["stalled", "disabled", "a-state-this-build-does-not-know"])(
+		"shows Scoring red when %s: nothing is being scored",
+		(state) => {
+			const modules = deriveModules(
+				healthFixture({ scoring: scoringFixture(state) }),
+			);
+			expect(modules).toContainEqual({ name: "Scoring", status: "offline" });
+		},
+	);
+
+	it("shows Scoring red when unscored rows are about to expire, even while behind", () => {
+		const scoring = { ...scoringFixture("behind"), retention_at_risk: true };
+		const modules = deriveModules(healthFixture({ scoring }));
+		expect(modules).toContainEqual({ name: "Scoring", status: "offline" });
+	});
+
+	it("omits the Scoring row on an instance that does not score", () => {
+		const names = deriveModules(healthFixture()).map((m) => m.name);
+		expect(names).not.toContain("Scoring");
 	});
 });

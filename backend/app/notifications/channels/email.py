@@ -23,19 +23,30 @@ logger = logging.getLogger(__name__)
 def _render_immediate(payload) -> tuple[str, str]:
     """(subject, plain-text body) for an immediate alert."""
     band = payload.risk_band
-    subject = f"[TMS {band}] {payload.attack_class}: {payload.risk_score:.0f}/100"
+    late = ", late detection" if payload.late_detection else ""
+    subject = f"[TMS {band}{late}] {payload.attack_class}: {payload.risk_score:.0f}/100"
     if payload.contributing_features:
         feats = "\n".join(f"    - {k}: {v:.2f}" for k, v in payload.contributing_features.items())
     else:
         feats = "    (none)"
+    late_note = (
+        "  Raised late: the transaction was scored after it left the live scoring "
+        "window, so compare its time with the detection time.\n\n"
+        if payload.late_detection
+        else ""
+    )
+    # Scorer alerts carry it; contract_anomaly verdicts do not.
+    tx_time = f"  Tx time     : {payload.tx_timestamp}\n" if payload.tx_timestamp else ""
     body = (
         f"A {band}-band {payload.attack_class} alert was detected on "
         f"{payload.network}.\n\n"
+        f"{late_note}"
         f"  Risk score  : {payload.risk_score:.2f} / 100  ({band})\n"
         f"  Attack class: {payload.attack_class}\n"
         f"  Transaction : {payload.tx_hash}\n"
         f"  Network     : {payload.network}\n"
         f"  Baseline    : {payload.baseline_source}\n"
+        f"{tx_time}"
         f"  Detected at : {payload.timestamp}\n\n"
         f"  Top contributing features:\n{feats}\n\n"
         f"  View in dashboard: {payload.dashboard_url}\n\n"

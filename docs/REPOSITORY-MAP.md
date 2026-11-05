@@ -110,15 +110,15 @@ levels let an escalation to a higher band through immediately, so neither can
 cost a detection. See
 [ALERTING.md](ALERTING.md#per-group-one-alert-per-script-per-window).
 
-This is the one subsystem that does not sit under a single prefix. It is 39
-files and 7,094 lines across the seven locations below.
+This is the one subsystem that does not sit under a single prefix. It is 40
+files and 7,177 lines across the seven locations below.
 
 | Location | Files | Lines | Contents |
 |---|---|---|---|
-| `backend/app/notifications/` | 13 | 2,353 | Config schema and validator, dispatcher, trigger routing, payloads, report builder, channel registry, alert grouping, `channels/email.py`, `channels/webhook.py` |
+| `backend/app/notifications/` | 13 | 2,373 | Config schema and validator, dispatcher, trigger routing, payloads, report builder, channel registry, alert grouping, `channels/email.py`, `channels/webhook.py` |
 | `backend/app/tasks/notifications.py` | 1 | 368 | Periodic-report scheduler, the `contract_anomaly` poller, and the failed-delivery retry sweep |
 | `backend/app/api/notifications_config.py` | 1 | 116 | `GET`/`PUT /api/v1/notifications/config`, admin-gated |
-| `backend/tests/notifications/` + `backend/tests/api/test_notifications_config.py` | 11 | 1,915 | 124 tests |
+| `backend/tests/notifications/` + `backend/tests/api/test_notifications_config.py` | 12 | 1,978 | 129 tests |
 | `backend/scripts/webhook_testing/` | 6 | 568 | Three-tier delivery test harness and a reference receiver |
 | `backend/tests/live_db/test_alert_grouping_pg.py` + `test_failed_notifications_pg.py` | 2 | 386 | Live-Postgres tests for the group-dedup ledger's band-escalation and window-expiry guards, and the dead-letter backoff, escalation and retention SQL |
 | `frontend/src` (5 files) | 5 | 1,388 | `NotificationsSettingsPage.tsx` (851), its test, the API client, and the pre-save config linter |
@@ -150,7 +150,7 @@ These belong to no single subsystem.
 
 ## Test inventory
 
-2,258 automated tests across seven tiers. The recall gate is a subset of the
+2,440 automated tests across seven tiers. The recall gate is a subset of the
 backend suite rather than a tier of its own, so it is listed but not added into
 the total. A CI step re-collects every tier on each run and fails the build if these
 figures drift, so a stale count here is a build failure rather than something a
@@ -158,12 +158,12 @@ reader has to catch.
 
 | Tier | Location | Tests |
 |---|---|---|
-| Backend hermetic | `backend/tests/` | 1,497 |
-| Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 666 |
-| Backend live-DB | `backend/tests/live_db/` | 74 |
-| Clustering sidecar | `services/clustering/backend/tests/` | 497 |
+| Backend hermetic | `backend/tests/` | 1,638 |
+| Recall gate (subset of the above, run first and alone in CI) | `backend/tests/analysis/` | 748 |
+| Backend live-DB | `backend/tests/live_db/` | 101 |
+| Clustering sidecar | `services/clustering/backend/tests/` | 502 |
 | Sidecar live-DB | `services/clustering/backend/tests/live_db/` | 8 |
-| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 168 |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | 177 |
 | Performance | `backend/tests/perf/` | 3 |
 | End-to-end (full stack) | `frontend/e2e/` | 11 |
 
@@ -186,7 +186,7 @@ git ls-files backend/app | grep '\.py$' | xargs wc -l | tail -1
 git ls-files frontend/src | grep -E '\.tsx?$' | xargs wc -l | tail -1
 
 # The alerting tree, which spans seven locations. All seven must be listed or
-# the total falls short of the 39 files / 7,094 lines quoted above; the
+# the total falls short of the 40 files / 7,177 lines quoted above; the
 # live-Postgres grouping test is the one easily missed.
 git ls-files \
   backend/app/notifications backend/app/tasks/notifications.py \

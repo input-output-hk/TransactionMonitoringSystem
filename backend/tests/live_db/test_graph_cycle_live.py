@@ -14,6 +14,7 @@ test asserts through ``CircularScorer.gate`` for that reason.
 Requires TMS_LIVE_DB_TESTS=1 (see conftest).
 """
 
+import json
 import math
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -68,8 +69,8 @@ def _tx(tx_hash, slot, from_addrs, outputs):
     """One leg of a cycle: spends from `from_addrs`, pays `outputs` [(addr, amount)].
 
     `addresses` lists the spent-from addresses as well as the paid ones, as
-    input enrichment does before every production insert. The hop query finds
-    spends through address_transactions, which is built from this list.
+    input enrichment does before every production insert. The block writer
+    makes the spend_edges the hop query reads from the inputs and outputs.
     """
     total = sum(amount for _, amount in outputs)
     return NormalizedTransaction(
@@ -238,14 +239,14 @@ class TestForwardBfsFindsAPlantedCycle:
     def test_a_payment_into_the_frontier_is_not_a_spend_from_it(self, ch):
         """Only a transaction SPENDING from a frontier address extends the BFS.
 
-        The hop query prefilters through address_transactions, which lists
-        every transaction touching an address, including ones that only pay
-        it. Here an unrelated wallet pays B and the origin in one transaction,
+        address_transactions lists every transaction touching an address,
+        including ones that only pay it, and the hop query once prefiltered
+        through it. Here an unrelated wallet pays B and the origin in one transaction,
         landing after the origin leg and before B's real spend. Taken as B's
         spend, it would close a 2-leg "cycle" first; the BFS stops at the first
         origin-paying row and the gate discards 2-leg cycles, so the real 3-leg
-        cycle would go unreported. Confirming each candidate against
-        transaction_inputs is what keeps it out.
+        cycle would go unreported. spend_edges holds spends only, which is
+        what keeps it out.
         """
 
         def payer_into_b(origins, addr_b):
@@ -464,10 +465,10 @@ def _primary_key_columns(plan_lines):
 
 
 class TestHopQueryPlan:
-    """The hop query's cost must not grow with the history: the address index is
-    read by address and slot, and the spends by tx_hash, never scanned."""
+    """The hop query's cost must not grow with the history: spend_edges is read
+    by address and slot, never scanned, and no hash-ordered table is read."""
 
-    def test_the_index_and_the_spends_are_read_by_primary_key(self, ch):
+    def test_the_edges_are_read_by_address_and_slot(self, ch):
         params = {
             "addresses": [f"addr_test1qqplan_{uuid.uuid4().hex[:12]}"],
             "network": LIVE_NETWORK,
@@ -481,25 +482,20 @@ class TestHopQueryPlan:
             plan = ch._get_client().execute("EXPLAIN indexes = 1 " + sql, params)
             return _primary_key_columns([row[0] for row in plan])
 
-        assert graph._HOP_SPENDS in graph._HOP_QUERY
-        assert graph._HOP_PREFILTER in graph._HOP_SPENDS
-        assert {"address", "slot"} <= keys(graph._HOP_PREFILTER)["address_transactions"]
-        assert "tx_hash" in keys(graph._HOP_SPENDS)["transaction_inputs"]
+        read = keys(graph._HOP_QUERY)
+        assert set(read) == {"spend_edges"}
+        assert {"address", "slot"} <= read["spend_edges"]
 
 
 class TestAddressIndexGaps:
-    """graph.address_index_gaps counts the recent spends the hop query's
-    prefilter cannot see. Each test plants on a network of its own, so no other
+    """graph.address_index_gaps counts the recent spends the hop query cannot
+    see in spend_edges. Each test plants on a network of its own, so no other
     plant in the database counts."""
 
-    def _spend(self, network, left_out_of_index=False, slotless=False, unresolved=False):
+    def _spend(self, network, slotless=False, unresolved=False):
         spender, payee = (f"addr_test1qqg{leg}_{uuid.uuid4().hex[:12]}" for leg in "sp")
         spend = _tx(uuid.uuid4().hex * 2, _ORIGIN_SLOT, [spender], [(payee, _LEG_1)])
         update: dict = {"network": network}
-        if left_out_of_index:
-            # Stored without its input address, as a broken enrichment path
-            # would: address_transactions never learns that the spender spent.
-            update["addresses"] = [payee]
         if slotless:
             update["slot"] = None
         if unresolved:
@@ -511,6 +507,13 @@ class TestAddressIndexGaps:
     def _network(self):
         return f"{LIVE_NETWORK}-addrindex-{uuid.uuid4().hex[:8]}"
 
+    def _drop_edges(self, ch, network, tx_hash):
+        # As a block whose edges never landed would leave it.
+        ch._get_client().execute(
+            "DELETE FROM spend_edges WHERE network = %(network)s AND tx_hash = %(tx)s",
+            {"network": network, "tx": tx_hash},
+        )
+
     def _check(self, network):
         return graph.address_index_gaps(network, settings.ADDRESS_INDEX_CHECK_WINDOW_SECONDS)
 
@@ -520,11 +523,11 @@ class TestAddressIndexGaps:
 
         assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=1, unresolved=0)
 
-    def test_a_spend_left_out_of_the_index_is_counted(self, ch):
+    def test_a_spend_without_its_edges_is_counted(self, ch):
         network = self._network()
-        ch.insert_transactions_batch(
-            [self._spend(network), self._spend(network, left_out_of_index=True)]
-        )
+        missing = self._spend(network)
+        ch.insert_transactions_batch([self._spend(network), missing])
+        self._drop_edges(ch, network, missing.tx_hash)
 
         assert self._check(network) == graph.AddressIndexCheck(missing=1, checked=2, unresolved=0)
 
@@ -532,20 +535,17 @@ class TestAddressIndexGaps:
         """Only a transaction's latest version counts.
 
         After a fork switch the rollback purge deletes the transaction and its
-        index rows, and the re-confirmed transaction is indexed at its new
-        slot; but a time-range read of transactions goes through the
+        edges, and the re-confirmed transaction gets edges at its new slot;
+        but a time-range read of transactions goes through the
         p_by_time_v2 projection, which serves the deleted version until its
         part merges. Planted here as two unmerged versions with the old slot's
-        index rows gone: read at the old slot, every spend of the switch was a
+        edges gone: read at the old slot, every spend of the switch was a
         false gap.
         """
         network = self._network()
         spend = self._spend(network)
         ch.insert_transactions_batch([spend])
-        ch._get_client().execute(
-            "DELETE FROM address_transactions WHERE network = %(network)s AND tx_hash = %(tx)s",
-            {"network": network, "tx": spend.tx_hash},
-        )
+        self._drop_edges(ch, network, spend.tx_hash)
         reconfirmed = spend.model_copy(
             update={
                 "slot": spend.slot + _LEG_SLOT_GAP,
@@ -559,15 +559,15 @@ class TestAddressIndexGaps:
 
     def test_a_slotless_spend_is_not_checked(self, ch):
         """No hop window holds a transaction without a slot, so the BFS never
-        misses its spends by the index: it cannot see them at all."""
+        misses its spends by the edges: it cannot see them at all."""
         network = self._network()
-        ch.insert_transactions_batch([self._spend(network, left_out_of_index=True, slotless=True)])
+        ch.insert_transactions_batch([self._spend(network, slotless=True)])
 
         assert self._check(network) == graph.AddressIndexCheck(missing=0, checked=0, unresolved=0)
 
     def test_an_unresolved_input_is_counted_apart(self, ch):
         """An input without an address is a failure of input enrichment, which
-        the index cannot fix: reported on its own, not as a missing spend."""
+        the edges cannot fix: reported on its own, not as a missing spend."""
         network = self._network()
         ch.insert_transactions_batch([self._spend(network), self._spend(network, unresolved=True)])
 
@@ -799,3 +799,70 @@ class TestCycleHistoryFromStoredScores:
 
         assert cycle["cycle_length"] == 4
         assert cycle["intermediaries"] == [b, c, d]
+
+
+class TestLaterPassesStoredFirst:
+    """Neither scoring lane stores a ring's passes in chain order, so a later
+    pass can be stored before an earlier one and miss it in its history read.
+    Once the earlier pass is stored, the engine finds the later ones and scores
+    them again (engine._rescore_later_passes)."""
+
+    def test_the_lookup_finds_exactly_the_passes_whose_read_now_includes_it(self, ch):
+        ring = _ring()
+        origins, addr_b, addr_c = ring
+        window = graph._RECURRENCE_WINDOW_SLOTS
+        later_slot = _ORIGIN_SLOT + _WINDOW_EDGE_SLOTS
+        same_ring = [addr_b, addr_c]
+        other_ring = [f"addr_test1qq_other_{uuid.uuid4().hex[:8]}"]
+        stranger = [f"addr_test1qq_stranger_{uuid.uuid4().hex[:8]}"]
+        cases = {
+            "later": (later_slot, same_ring, origins),
+            "same slot": (_ORIGIN_SLOT, same_ring, origins),
+            # Not found: past the window, before the pass, another origin, no
+            # shared intermediary (neither history axis could move).
+            "past the window": (_ORIGIN_SLOT + window + _WINDOW_EDGE_SLOTS, same_ring, origins),
+            "earlier": (_ORIGIN_SLOT - _WINDOW_EDGE_SLOTS, same_ring, origins),
+            "another origin": (later_slot, same_ring, stranger),
+            "another ring": (later_slot, other_ring, origins),
+        }
+        hashes = {name: uuid.uuid4().hex * 2 for name in cases}
+        for name, (first_slot, path, origin_keys) in cases.items():
+            _store_score(ch, hashes[name], _BELOW_HIGH, _prior(first_slot, path, origin_keys))
+        source = uuid.uuid4().hex * 2
+        evidence = _prior(_ORIGIN_SLOT, same_ring, origins)
+
+        later = graph.stored_later_cycles(LIVE_NETWORK, [(source, _BELOW_HIGH, evidence)])
+
+        assert set(later) == {hashes["later"], hashes["same slot"]}
+        assert later[hashes["later"]] == graph.StoredCycle(later_slot, _BELOW_HIGH, _BELOW_HIGH)
+
+    def test_a_later_pass_stored_first_is_raised_once_the_earlier_one_is_stored(self, ch):
+        from app.analysis import engine
+
+        ring = _ring()
+        later_tx, _ = _plant(
+            ch,
+            lambda o: [(o[0], _LEG_3)],
+            ring=ring,
+            origin_slot=_ORIGIN_SLOT + _REPLAY_OFFSET_SLOTS,
+        )
+        later_cycle, later_result = _score_and_store(ch, later_tx)
+        assert later_cycle["prior_cycles_in_window"] == 0, "stored before its earlier pass"
+        first_tx, _ = _plant(ch, lambda o: [(o[0], _LEG_3)], ring=ring)
+        _, first_result = _score_and_store(ch, first_tx)
+        stored_first = {
+            "tx_hash": first_tx,
+            "circular": first_result.score,
+            "evidence": {"circular": first_result.evidence},
+        }
+
+        engine._rescore_later_passes(LIVE_NETWORK, [stored_first], "backlog", True)
+
+        rows = ch._execute_query(
+            "SELECT circular, evidence FROM tx_class_scores FINAL "
+            "WHERE network = %(network)s AND tx_hash = %(tx)s",
+            {"network": LIVE_NETWORK, "tx": later_tx},
+        )
+        (circular, evidence), *_ = rows
+        assert json.loads(evidence)["circular"]["prior_cycles_in_window"] == 1
+        assert circular > later_result.score

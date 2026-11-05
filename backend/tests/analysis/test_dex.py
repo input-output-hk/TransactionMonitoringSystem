@@ -43,7 +43,8 @@ class FakeClient:
             return [(SCRIPT_POOL,), (VICTIM,)]
         if "SELECT DISTINCT o.tx_hash" in q:
             return self._neighbors
-        if "count(DISTINCT i.tx_hash)" in q:
+        if "FROM spend_edges" in q:
+            self.history_params = params
             return [(self._history,)]
         if "SELECT tx_hash, address FROM transaction_inputs" in q:
             return list(self._first_inputs.items())
@@ -87,6 +88,22 @@ def test_wallet_attacker_profit_computed(_patch_client):
     assert sw["profit_b"] == 2_000_000.0
     assert sw["attacker_sandwich_count"] == 2
     assert sw["slot_span"] == 2
+
+
+def test_the_attacker_history_is_capped_and_bounded_by_the_victim_slot(_patch_client):
+    # Past the recurrence anchor's p99 the count changes no score, and a busy
+    # wallet's whole history was the cost; only earlier spends count.
+    client = FakeClient(
+        first_inputs={"victim": VICTIM, "legA": WALLET_ATTACKER, "legB": WALLET_ATTACKER},
+        attacker_out=5_000_000,
+        attacker_in=3_000_000,
+        history=2,
+    )
+    _patch_client["client"] = client
+    dex.detect_sandwich_pattern("victim", "preprod", 100)
+    assert client.history_params["cap"] == dex._HISTORY_COUNT_CAP
+    assert client.history_params["addr"] == WALLET_ATTACKER
+    assert client.history_params["slot"] == 100
 
 
 def test_wallet_attacker_negative_profit_still_reported(_patch_client):

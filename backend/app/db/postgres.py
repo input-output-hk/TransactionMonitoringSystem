@@ -229,6 +229,32 @@ async def execute_schema():
             )
         """)
 
+        # Scoring checkpoint: every transaction ingested before complete_through
+        # has a score row. Advanced only by the engine's backlog lane, and only
+        # past ingestion time a poll found fully scored, so it is the record of
+        # the never-skip guarantee and survives restarts (the in-process cursor
+        # it replaced did not, and restarted with a full rescan).
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scoring_checkpoint (
+                network           TEXT PRIMARY KEY,
+                complete_through  TIMESTAMPTZ NOT NULL,
+                updated_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Progress of the one-time spend_edges history backfill
+        # (app.db.spend_edges): chunks below next_chunk are filled, and the
+        # scoring lanes wait for completed_at. Kept here, beside the scoring
+        # checkpoint it protects, so a restart resumes rather than refills.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS spend_edges_backfill (
+                network       TEXT PRIMARY KEY,
+                next_chunk    INTEGER NOT NULL,
+                completed_at  TIMESTAMPTZ,
+                updated_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Quarantined blocks — the checkpoint advanced past a block the decoder
         # could not read, so its transactions were never scored. This is a
         # RECALL GAP and the only durable record that it exists: without the
@@ -1182,6 +1208,87 @@ async def get_sync_point(network: str) -> dict[str, Any] | None:
         if row:
             return {"slot": row["slot"], "id": row["block_id"]}
         return None
+
+
+# --- Scoring checkpoint ---
+
+
+async def save_scoring_checkpoint(network: str, complete_through: datetime) -> None:
+    """Record that every transaction ingested before complete_through is scored.
+
+    Never moves backwards: GREATEST keeps the stored value if a stale writer
+    (a lane from before a leader hand-back) saves an older one.
+    """
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO scoring_checkpoint (network, complete_through, updated_at)
+            VALUES ($1, $2, CURRENT_TIMESTAMP)
+            ON CONFLICT (network) DO UPDATE SET
+                complete_through = GREATEST(scoring_checkpoint.complete_through, $2),
+                updated_at       = CURRENT_TIMESTAMP
+        """,
+            network,
+            complete_through,
+        )
+
+
+async def rewind_scoring_checkpoint(network: str, complete_through: datetime) -> None:
+    """Move the network's scoring checkpoint back to complete_through if it is later.
+
+    The one way back past save_scoring_checkpoint's GREATEST, for a checkpoint
+    found ahead of the clock. Lowering it is always safe: the backlog lane only
+    checks again what it had already found scored.
+    """
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            UPDATE scoring_checkpoint
+            SET complete_through = LEAST(complete_through, $2),
+                updated_at       = CURRENT_TIMESTAMP
+            WHERE network = $1
+        """,
+            network,
+            complete_through,
+        )
+
+
+async def get_scoring_checkpoint(network: str) -> datetime | None:
+    """Return the network's scoring checkpoint, or None before the first one."""
+    async with get_connection() as conn:
+        return await conn.fetchval(
+            "SELECT complete_through FROM scoring_checkpoint WHERE network = $1", network
+        )
+
+
+async def get_spend_edges_backfill(network: str) -> tuple[int, bool]:
+    """(next chunk to fill, whether the backfill completed) for the network."""
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT next_chunk, completed_at FROM spend_edges_backfill WHERE network = $1",
+            network,
+        )
+    if row is None:
+        return 0, False
+    return int(row["next_chunk"]), row["completed_at"] is not None
+
+
+async def save_spend_edges_backfill(network: str, next_chunk: int, completed: bool) -> None:
+    """Record backfill progress. Never moves backwards, and stays completed once it is."""
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO spend_edges_backfill (network, next_chunk, completed_at, updated_at)
+            VALUES ($1, $2, CASE WHEN $3 THEN CURRENT_TIMESTAMP END, CURRENT_TIMESTAMP)
+            ON CONFLICT (network) DO UPDATE SET
+                next_chunk   = GREATEST(spend_edges_backfill.next_chunk, $2),
+                completed_at = COALESCE(spend_edges_backfill.completed_at, EXCLUDED.completed_at),
+                updated_at   = CURRENT_TIMESTAMP
+        """,
+            network,
+            next_chunk,
+            completed,
+        )
 
 
 # --- Pending score repurges (durable rollback second pass) ---

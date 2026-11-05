@@ -7,12 +7,20 @@ import { downloadText, importTxHash, shortHash } from "./helpers";
  * rows come back out.
  */
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** An archived_at the given number of days before now. The Archive opens on a
+ *  trailing date range, so a fixed date would age out of it and fail later. */
+function daysAgo(days: number): string {
+	return new Date(Date.now() - days * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 test("import a CSV of external attack data, then export the archive", async ({ page }) => {
 	const [h0, h1] = [importTxHash(0), importTxHash(1)];
 	const csv = [
 		"network,tx_hash,note,archived_by,archived_at,source",
-		`preprod,${h0},False positive: e2e import,e2e@example.com,2026-09-01T12:00:00Z,local`,
-		`preprod,${h1},Authorized test,e2e@example.com,2026-09-02T12:00:00Z,local`,
+		`preprod,${h0},False positive: e2e import,e2e@example.com,${daysAgo(2)},local`,
+		`preprod,${h1},Authorized test,e2e@example.com,${daysAgo(1)},local`,
 		"", // trailing newline
 	].join("\n");
 

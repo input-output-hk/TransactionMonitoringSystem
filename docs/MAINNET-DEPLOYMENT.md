@@ -613,6 +613,10 @@ second on mainnet, so `sync_lag_seconds` reads directly as how far behind the no
 reported tip you are. Read it together with Ogmios's own `networkSynchronization`,
 because the lag is measured against the node, not against the chain.
 
+Ingestion at the tip does not mean transactions are scored: check `scoring` too. It
+reads `behind` on the first start, while the backlog lane checks the history ingested so
+far, and should settle at `ok`; see the RUNBOOK's "`scoring` reports behind or stalled".
+
 ### Create the first admin
 
 A fresh install has no users, and the dashboard's user management needs an existing
@@ -649,11 +653,10 @@ SELECT count() AS ingested,
 FROM tms_analytics.transactions
 WHERE network = 'mainnet';
 
--- Rows are being scored. This mirrors the shape of the LEFT ANTI JOIN the analysis
--- engine polls on (backend/app/db/clickhouse_scores.py, get_unanalyzed_transactions);
--- the engine's own version additionally bounds both sides by its watermark and
--- defers a tx until its transaction_inputs rows are visible, so this query is the
--- slightly more pessimistic of the two.
+-- Rows are being scored. This mirrors the predicate the analysis engine picks on
+-- (backend/app/db/clickhouse_scores.py, pick_unanalyzed); the engine's own picks are
+-- bounded by ingestion time and defer a tx until its transaction_inputs rows are
+-- visible, so this query is the slightly more pessimistic of the two.
 SELECT count() AS unscored
 FROM tms_analytics.transactions t
 LEFT ANTI JOIN (
@@ -752,7 +755,7 @@ means keep forever. This is verified in `backend/app/config.py`:
 | Variable | Default | What it prunes |
 |---|---|---|
 | `CH_RETENTION_DAYS_TRANSACTIONS` | `0` | ClickHouse `transactions` |
-| `CH_RETENTION_DAYS_IO` | `0` | `transaction_inputs`, `transaction_outputs`, `address_transactions` |
+| `CH_RETENTION_DAYS_IO` | `0` | `transaction_inputs`, `transaction_outputs`, `address_transactions`, `spend_edges` |
 | `CH_RETENTION_DAYS_FEATURES` | `0` | `utxo_features`, `tx_script_features` |
 | `LIFECYCLE_RETENTION_DAYS` | `0` | Terminal (`DROPPED`, `ROLLED_BACK`) Postgres lifecycle rows only |
 | `MEMPOOL_COLLISION_RETENTION_DAYS` | `0` | Mempool collision bookkeeping |
@@ -791,15 +794,18 @@ degrades exactly the enrichment the cross-transaction scorers depend on.
 `AUDIT_LOG_RETENTION_DAYS` costs no recall but costs accountability: these rows record
 who suppressed which alert. Prefer archiving the table to shortening the window.
 
-`UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` is not a retention knob but belongs in the same
-conversation. It bounds the periodic full rescan, which is the never-skip guarantee: the
-incremental poll only looks back `UNANALYZED_OVERLAP_SECONDS` (120 s), so anything
-unscored and older than the rescan window is never picked up again. If ingestion ever
-outlives scoring, through a crash loop, a disabled engine, or a multi-day node resync,
-every row unscored past that window is permanently unscored, which is a missed
-detection. It defaults to `0`, meaning unbounded. Bound it only after measuring the
-rescan's cost on your own deployment, and then pick a window that comfortably exceeds
-the longest plausible scoring outage.
+Scoring has no retention knob of its own, and needs none for recall. If ingestion ever
+outlives scoring, through a crash loop, a disabled engine, a multi-day node resync or a
+flood of transactions, nothing unscored is lost: the engine's backlog lane scores it
+afterwards, oldest first, and its Postgres `scoring_checkpoint` moves only past
+ingestion time it found fully scored. What such an episode costs is time, reported as
+`scoring` `behind` in `/health/detail` until the backlog lane has caught up. Retention is
+the exception. A transactions row deleted by `CH_RETENTION_DAYS_TRANSACTIONS` before it
+is scored is never scored; one whose inputs `CH_RETENTION_DAYS_IO` deleted first is
+still scored, without them. Keep both well above any plausible outage. Once the
+checkpoint is older than `ANALYSIS_RETENTION_WARNING_SHARE` of the shorter of the two,
+`scoring` reports `behind` with `retention_at_risk: true` and the log says so: raise the
+retention or speed up the drain before the rows go.
 
 ### The raw store: what it actually costs
 

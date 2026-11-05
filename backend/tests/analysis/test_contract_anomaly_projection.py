@@ -791,12 +791,13 @@ def test_stats_reclassifies_flagged_tx_to_effective_band(client, monkeypatch):
     async def _flagged(_net, *a, **k):
         return {"lowtx": [_row("malicious")]}
 
-    async def _by_hashes(_net, _hashes, *a, **k):
-        return [_full_score_row("lowtx", 45.0)]  # stored Moderate
+    async def _bands(_net, _hashes):
+        row = _full_score_row("lowtx", 45.0)  # stored Moderate
+        return {row["tx_hash"]: (row["risk_band"], row["max_score"])}
 
     monkeypatch.setattr(clickhouse, "get_class_scores_stats_async", _stats)
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
-    monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+    monkeypatch.setattr(clickhouse, "get_score_bands_by_hashes_async", _bands)
     r = client.get("/api/v1/analysis/stats?network=preprod")
     assert r.status_code == 200
     body = r.json()
@@ -824,15 +825,16 @@ def test_timeseries_adds_contract_anomaly_only_alerts(client, monkeypatch):
     async def _flagged(_net, *a, **k):
         return {"catx": [_row("malicious")]}  # -> Critical (alert)
 
-    async def _by_hashes(_net, _hashes, *a, **k):
-        return [_full_score_row("catx", 30.0)]  # stored Moderate (not an alert)
+    async def _bands(_net, _hashes):
+        row = _full_score_row("catx", 30.0)  # stored Moderate (not an alert)
+        return {row["tx_hash"]: (row["risk_band"], row["max_score"])}
 
     async def _dates(_net, _hashes, _days):
         return {"catx": "2026-06-22"}
 
     monkeypatch.setattr(clickhouse, "get_alert_timeseries_async", _ts)
     monkeypatch.setattr(clustering_queries, "flagged_for_network_async", _flagged)
-    monkeypatch.setattr(clickhouse, "get_class_scores_by_hashes_async", _by_hashes)
+    monkeypatch.setattr(clickhouse, "get_score_bands_by_hashes_async", _bands)
     monkeypatch.setattr(clickhouse, "get_tx_block_dates_async", _dates)
     r = client.get("/api/v1/analysis/stats/timeseries?network=preprod&days=14")
     assert r.status_code == 200

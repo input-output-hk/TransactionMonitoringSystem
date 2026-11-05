@@ -224,6 +224,17 @@ class Settings(BaseSettings):
     feed_refit_min_interval_seconds: int = Field(
         default=3600, ge=0, alias="FEED_REFIT_MIN_INTERVAL_SECONDS"
     )
+    # Recording a failed job is retried: a job left non-terminal is "running"
+    # to every busy guard, so its contract is never scored again until it is
+    # settled. The usual cause is the same transient ClickHouse error (a total
+    # memory limit hit on mainnet 2026-11-01) that failed the job, which clears
+    # within seconds. If every attempt fails, the feed re-enqueues the orphaned
+    # job on its next tick (JobManager.reap_orphans), so these bound the wait,
+    # not the outcome.
+    job_failed_write_attempts: int = Field(default=3, ge=1, alias="JOB_FAILED_WRITE_ATTEMPTS")
+    job_failed_write_retry_seconds: float = Field(
+        default=5.0, ge=0, alias="JOB_FAILED_WRITE_RETRY_SECONDS"
+    )
 
     # Optional secondary HISTORY source (host_ch deployments only). The host
     # syncs tip-forward, so a watched contract's pre-deployment history never

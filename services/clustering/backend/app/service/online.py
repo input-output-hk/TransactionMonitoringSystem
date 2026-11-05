@@ -306,6 +306,6 @@ async def update_contract(
         if job_id is not None:
             try:
                 repo.update_job(job_id, status="failed", error=_safe_error(exc)[:_MAX_ERROR_DETAIL])
-            except Exception:  # pragma: no cover
-                pass
+            except Exception:  # pragma: no cover - the JobManager backstop retries it
+                logger.exception("failed to persist failed-job status for %s", job_id)
         raise

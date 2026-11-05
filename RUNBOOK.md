@@ -513,10 +513,10 @@ Variables are layered across files:
 | `GROUPED_ALERTS_MAX_CONTRACTS` | `5000` | Cap on the contracts fetched for the contract-grouped alerts view. That list paginates in Python (a winning clustering verdict can move a transaction between groups, which SQL LIMIT/OFFSET cannot express), so the fetch is bounded. Hitting the cap is logged at WARNING and means some contracts are absent from the grouped view; raise it rather than leaving it truncated |
 | `DATUM_DECODE_MAX_NODES` | `20000` | Node budget for decoding one Plutus datum into the tree shown on the transaction detail view. A datum is attacker-controlled data and the depth cap alone bounds only depth, so a flat list of a million entries would still build a million response nodes. Exceeding it marks the result truncated rather than serving a partial tree as if it were complete |
 | `RAW_FALLBACK_RETRY_SECONDS` | `30` | Wall-clock spacing between counted raw-store fallback attempts |
-| `ROLLBACK_SCORE_REPURGE_DELAY_SECONDS` | `60` | Delay before the second `tx_class_scores` rollback purge pass |
+| `ROLLBACK_SCORE_REPURGE_DELAY_SECONDS` | `180` | Delay before the second `tx_class_scores` rollback purge pass. Must exceed `CLICKHOUSE_CONNECT_TIMEOUT_SECONDS` plus `CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS` (startup refuses otherwise): the pass has to land after any score insert that checked its transaction copies before the purge. |
 | `ANALYSIS_ENGINE_ENABLED` | `true` | Run background risk scoring |
 | `ANALYSIS_ENGINE_INTERVAL_SECONDS` | `30` | How often the engine polls for unscored transactions |
-| `ANALYSIS_ENGINE_BATCH_SIZE` | `100` | Transactions scored per run |
+| `ANALYSIS_ENGINE_BATCH_SIZE` | `100` | Transactions scored per run, at most `1000`: a batch's hashes are bound into query text, which ClickHouse rejects past `max_query_size` |
 | `LEADER_LOCK_ENABLED` | `true` | Gate ingestion + analysis behind a Postgres advisory lock; see "Running more than one instance" below |
 | `LEADER_LOCK_KEY` | `8737367427` | Advisory lock key; leave unchanged unless it collides with another lock class |
 | `LEADER_LOCK_RETRY_SECONDS` | `15` | How often a standby instance retries to become leader |
@@ -524,8 +524,8 @@ Variables are layered across files:
 | `CYCLE_DETECTION_ENABLED` | `true` | Enable transfer graph cycle detection |
 | `CYCLE_MAX_HOPS` | `6` | Maximum BFS depth for cycle detection |
 | `CIRCULAR_HISTORY_MATERIALIZE` | `true` | Rewrite the circular history columns into existing parts at boot; see [Circular history columns](#circular-history-columns) |
-| `CYCLE_MAX_FANOUT` | `50` | Maximum addresses tracked per BFS hop (at most 500: the frontier is bound into the hop query twice, and ClickHouse rejects a query text past `max_query_size`) |
-| `ADDRESS_INDEX_CHECK_INTERVAL_SECONDS` | `900` | How often housekeeping checks that `address_transactions` lists every recent spend (see "`address_index` reports gaps"); `0` turns it off, otherwise at least `300` |
+| `CYCLE_MAX_FANOUT` | `50` | Maximum addresses tracked per BFS hop (at most 500: the frontier is bound into the hop query as text, and ClickHouse rejects a query text past `max_query_size`) |
+| `ADDRESS_INDEX_CHECK_INTERVAL_SECONDS` | `900` | How often housekeeping checks that `spend_edges` holds every recent spend (see "`address_index` reports gaps"); `0` turns it off, otherwise at least `300` |
 | `ADDRESS_INDEX_CHECK_WINDOW_SECONDS` | `3600` | Block time each address-index check covers (at most `86400`: the check's reads grow with it) |
 | `ADDRESS_INDEX_CHECK_MAX_THREADS` | `2` | ClickHouse `max_threads` for the address-index check, so it cannot take every core from scoring |
 | `SANDWICH_SIMPLIFIED_ENABLED` | `true` | Enable structural sandwich pattern detection |
@@ -556,7 +556,7 @@ retention sweep runs on the housekeeping tick.
 | Variable | Default | Description |
 |---|---|---|
 | `CH_RETENTION_DAYS_TRANSACTIONS` | `0` | Prune ClickHouse `transactions` rows older than N days |
-| `CH_RETENTION_DAYS_IO` | `0` | Prune `transaction_inputs` / `transaction_outputs` / `address_transactions` older than N days |
+| `CH_RETENTION_DAYS_IO` | `0` | Prune `transaction_inputs` / `transaction_outputs` / `address_transactions` / `spend_edges` older than N days |
 | `CH_RETENTION_DAYS_FEATURES` | `0` | Prune the analysis feature tables older than N days |
 | `LIFECYCLE_RETENTION_DAYS` | `0` | Prune `DROPPED` / `ROLLED_BACK` Postgres lifecycle rows older than N days. `CONFIRMED` rows are never pruned: they are the canonical lifecycle record |
 | `MEMPOOL_COLLISION_RETENTION_DAYS` | `0` | Prune mempool-collision bookkeeping older than N days |
@@ -621,26 +621,50 @@ analysis is deferred and retried.
 | `ANALYSIS_DEFER_RETRY_SECONDS` | `30` | Spacing between deferred-scoring attempts |
 | `ROLLBACK_CLEANUP_ENABLED` | `true` | On a chain rollback, delete ClickHouse rows for transactions past the rollback point, so orphaned-fork data cannot feed scorers or API reads. `archived_alerts` is exempt: it is admin curation, not chain state |
 
-**Analysis engine internals.** Tuning knobs for the scoring loop; the
-defaults suit preprod. `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` bounds the
-periodic full rescan to a recent window, which caps its anti-join cost as
-history accumulates (`0` = rescan all history). Treat it as a recall
-trade-off, not a routine mainnet setting: the full rescan is the never-skip
-guarantee, and the incremental query only looks back
-`UNANALYZED_OVERLAP_SECONDS`, so anything still unscored past the window is
-never picked up. If ingestion outlives scoring (engine disabled, crash-loop,
-multi-day resync) that gap is a permanent detection miss. Bound it only once
-the rescan's cost is measured on the deployment, and then pick a window that
-comfortably exceeds the longest plausible scoring outage.
+**Analysis engine internals.** Scoring runs in two lanes. The live lane
+scores the newest transactions ingested in the last
+`ANALYSIS_LIVE_WINDOW_SECONDS`, so no backlog, however large, delays a fresh
+transaction. The backlog lane scores, oldest first, whatever left that window
+unscored (an outage, a restart, or more transactions than the live lane could
+score at once), on its own thread, with every ClickHouse query capped at
+`ANALYSIS_BACKLOG_MAX_THREADS`; its alerts carry `late_detection: true`. It is
+the never-skip guarantee: the Postgres `scoring_checkpoint` row records the
+ingestion time before which every transaction has a score, and it moves only
+past ingestion time a pick found fully scored. On a deployment without a
+checkpoint (a new install, or the first start of this version) the lane first
+checks everything ever ingested, a slice at a time, then settles behind the
+live window. While that walk is further back than `ANALYSIS_BACKLOG_RECENT_SECONDS`,
+the lane gives the region just behind the live window its turn first, at the
+start of every tick and then every `ANALYSIS_ENGINE_INTERVAL_SECONDS` between
+batches, oldest first and without moving the checkpoint: a transaction that has
+just left the live window is scored ahead of the older history, not after it.
+To drain a recent outage before older history (for example the first start of
+this version over a backlog), set it to reach back over the outage for the
+drain, then back to its default. The drain rate itself is bounded by what a
+late score costs (every late transaction reads the circular search's full
+forward horizon), so a large backlog takes a long time to clear whatever the
+lane's order; watch `checkpoint` and the per-batch log lines. Both lanes report
+under `scoring` in `/health/detail` (see "`scoring` reports behind or stalled").
 
 | Variable | Default | Description |
 |---|---|---|
 | `ANALYSIS_MAX_REF_TXS` | `2000` | Cap on reference txs pulled per enrichment fetch |
-| `ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK` | `20` | Batches drained per engine tick before yielding |
-| `ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS` | `0.5` | Pause between drained batches |
-| `UNANALYZED_OVERLAP_SECONDS` | `120` | Look-back overlap on the incremental unscored-tx query |
-| `UNANALYZED_FULL_RESCAN_INTERVAL_SECONDS` | `600` | How often the safety-net full rescan runs |
-| `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS` | `0` | Bound the full rescan to the last N seconds; `0` = all history. Narrowing it trades recall for query cost (see the warning above) |
+| `ANALYSIS_ENGINE_MAX_BATCHES_PER_TICK` | `20` | Live-lane batches drained per engine tick before yielding to the tick's other duties. When the cap stops a drain whose last poll was still full, the next tick starts after the drain pause instead of a full interval; what is still left ages into the backlog lane |
+| `ANALYSIS_ENGINE_DRAIN_SLEEP_SECONDS` | `0.5` | Pause between drained live batches |
+| `ANALYSIS_LIVE_WINDOW_SECONDS` | `600` | Ingestion time the live lane covers, newest first |
+| `ANALYSIS_BACKLOG_ENABLED` | `true` | Run the backlog lane. Off, nothing scores what the live lane missed; scoring then reads `unguarded`, never `ok` |
+| `ANALYSIS_BACKLOG_SLICE_SECONDS` | `3600` | Ingestion time one backlog pick covers; bounds the pick's memory |
+| `ANALYSIS_BACKLOG_PICK_SIZE` | `2000` | Transactions one backlog pick returns before they are scored in batches |
+| `ANALYSIS_BACKLOG_BATCH_SIZE` | `20` | Transactions the backlog lane scores per batch, at most `1000` (as `ANALYSIS_ENGINE_BATCH_SIZE`) |
+| `ANALYSIS_BACKLOG_RECENT_SECONDS` | `86400` | Ingestion time just behind the live window that the backlog lane scores ahead of its oldest-first walk while the walk is further back; never moves the checkpoint. Reach it back over a recent outage to drain that first. `0` leaves everything to the walk |
+| `ANALYSIS_BACKLOG_SETTLE_SECONDS` | `7200` | How far the checkpoint trails the live window, so a row still on its way to ClickHouse cannot land behind it; the walk still scores up to the live window. Startup rejects a value shorter than the longest a block's transactions row can take to become visible after its stamp: one read, then every statement of every insert attempt at the configured ClickHouse timeouts, about 4,400 s at the defaults |
+| `ANALYSIS_BACKLOG_MAX_THREADS` | `2` | ClickHouse `max_threads` for every backlog query: the most CPU a drain of any size can take. It does not bound the bytes the lane reads |
+| `ANALYSIS_SCORING_LAG_TOLERANCE_SECONDS` | `600` | Slack before `/health/detail` reports scoring `behind` or `stalled` |
+| `ANALYSIS_RETENTION_WARNING_SHARE` | `0.5` | Share of the shortest row retention (`CH_RETENTION_DAYS_TRANSACTIONS`, `CH_RETENTION_DAYS_IO`) the checkpoint may lag before `/health/detail` reports `retention_at_risk` and `behind`: rows still unscored behind it would expire before the backlog lane reaches them. Ignored while no retention is set |
+| `SPEND_EDGES_CHECK_CHUNKS_PER_PASS` | `16` | Chunks of the `spend_edges` history (256 in all) that one query of the start-up coverage check reads (see "Post-upgrade backfills"). The check holds a pass's spends and edges in memory: over the whole history it exceeded ClickHouse's memory limit (3.38 GiB), while 16 chunks peaked at 168 MiB on about a quarter of mainnet's edges. Lower it if the check fails with `MEMORY_LIMIT_EXCEEDED` |
+| `SPEND_EDGES_CHECK_TTL_MARGIN_HOURS` | `24` | With `CH_RETENTION_DAYS_IO` set, the coverage check leaves out spends this close to their expiry: TTL merges run per table, so near the boundary an edge can expire before its input, which is no gap. Must be shorter than the retention (startup refuses otherwise). Ignored while no retention is set |
+| `SPEND_EDGES_CHECK_ATTEMPTS` | `3` | Attempts at the start-up coverage check, one `ANALYSIS_ENGINE_INTERVAL_SECONDS` apart. After the last failure the lanes start without it and the log shows `spend_edges: the coverage check failed`; `spend_edges_missing_chunks` stays null. A failure on every attempt usually means a pass is over ClickHouse's memory limit: lower `SPEND_EDGES_CHECK_CHUNKS_PER_PASS` |
+| `ANALYSIS_HISTORY_RESCORE_MAX_TXS` | `100` | Later passes of a ring that one stored batch, and its cascade, may score again: the lanes do not store cycles in chain order, and a pass stored before an earlier one misses it in its recycling and recurrence axes. A re-score is kept only if it raises `circular` without lowering `max_score`; passes past the cap are logged and keep their score. `0` turns it off; at most `1000` (as `ANALYSIS_ENGINE_BATCH_SIZE`) |
 
 **Baselines.** Per-entity percentile baselines and the token registry.
 
@@ -663,9 +687,9 @@ timeouts for high-volume mainnet ingestion.
 | `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE` | `2` / `10` | asyncpg pool bounds |
 | `POSTGRES_POOL_MAX_IDLE_SECONDS` | `300` | Idle connection reaping |
 | `POSTGRES_STATEMENT_TIMEOUT_SECONDS` | `30` | Per-statement timeout |
-| `CLICKHOUSE_CONNECT_TIMEOUT_SECONDS` | `10` | ClickHouse connect timeout |
-| `CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS` | `120` | ClickHouse socket send/receive timeout |
-| `CLICKHOUSE_INSERT_MAX_RETRIES` | `5` | Batched-insert retries on transient failure |
+| `CLICKHOUSE_CONNECT_TIMEOUT_SECONDS` | `10` | ClickHouse connect timeout. Raising it raises the floor of `ANALYSIS_BACKLOG_SETTLE_SECONDS`, and startup refuses a settle below it |
+| `CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS` | `120` | ClickHouse socket send/receive timeout. Raising it raises the floor of `ANALYSIS_BACKLOG_SETTLE_SECONDS`, and startup refuses a settle below it |
+| `CLICKHOUSE_INSERT_MAX_RETRIES` | `5` | Batched-insert retries on transient failure. Raising it raises the floor of `ANALYSIS_BACKLOG_SETTLE_SECONDS`, and startup refuses a settle below it |
 | `CLICKHOUSE_INSERT_RETRY_BASE_DELAY_SECONDS` / `_MAX_DELAY_SECONDS` | `1` / `30` | Insert-retry exponential backoff bounds |
 
 **Ogmios and pipeline health.** The `PIPELINE_BLOCK_AGE_*` thresholds back
@@ -770,7 +794,7 @@ table; these are the rest.
 
 ### Running more than one instance
 
-The app is built to run as a single instance: the Ogmios chain-sync checkpoint and the analysis engine's poll watermark are both in-process state that assumes exactly one writer. A second live process advancing the same state would double-insert transactions and race the checkpoint update.
+The app is built to run as a single instance: the Ogmios chain-sync checkpoint and the analysis engine's scoring checkpoint each assume exactly one writer. A second live process advancing the same state would double-insert transactions and race the checkpoint updates.
 
 Ingestion, analysis, housekeeping, and the notification schedulers (periodic report, contract-anomaly poller) are gated behind a Postgres session-level advisory lock (`LEADER_LOCK_ENABLED`, on by default) so this is safe to get wrong: only the instance that holds the lock runs them; any other instance still serves the read-only API, dashboard, and WebSocket feed, and retries every `LEADER_LOCK_RETRY_SECONDS` to take over (for example after the leader is redeployed or crashes). There is no need to manually pick a leader or coordinate a rolling restart; whichever instance acquires the lock first wins, and a standby is promoted automatically once it frees up.
 
@@ -810,9 +834,13 @@ The webhook channel POSTs each notification as JSON. The body is the payload rec
   "network": "preprod",
   "contributing_features": {"unique_assetclass_count": 0.97, "value_cbor_bytes": 0.88},
   "baseline_source": "per_script",
-  "dashboard_url": "https://<your-dashboard>/attacks/3f2a..."
+  "dashboard_url": "https://<your-dashboard>/attacks/3f2a...",
+  "tx_timestamp": "2026-07-14T09:14:41Z",
+  "late_detection": false
 }
 ```
+
+`tx_timestamp` is the transaction's block time (`""` when not known), so a receiver can tell how long after the fact an alert was raised. `late_detection` is `true` for an alert raised by the backlog lane, after the transaction left the live scoring window unscored: a real finding, raised late (its email subject reads `[TMS <band>, late detection]`). Fields may be added to a payload type in a later release, so a receiver should ignore fields it does not know rather than reject the request: a 4xx is treated as permanent.
 
 A `periodic_report` (scheduled digest) carries `report_window` (`{"from", "to"}` ISO timestamps), a `summary` block (`total_transactions_scored`, `alerts_by_band`, `alerts_by_class`, `false_positives_archived`), a `top_alerts` list, and `dashboard_url`.
 
@@ -880,6 +908,27 @@ curl -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail
 
 Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempool`. If `OPEN`, the circuit breaker tripped after repeated failures. It will attempt a probe after a 2-minute cooldown automatically; no manual action needed unless the underlying connectivity problem persists.
 
+### `scoring` reports behind or stalled
+
+Ingestion at the tip says nothing about scoring. `/health/detail` reports the two scoring lanes on the leader, and the dashboard's Scoring row is green only in `ok`:
+
+```bash
+curl -s -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail | grep -o '"scoring":{[^}]*}'
+```
+
+| `state` | Meaning |
+|---|---|
+| `ok` | Everything ingested before the live window is scored, and the live lane is polling. |
+| `behind` | A transaction has waited past the live window by more than the tolerance (`oldest_unscored_at`), or the checkpoint has not yet checked the history (`checkpoint` far in the past, as on the first start of this version), or `retention_at_risk` is true: the checkpoint lags far enough that unscored rows behind it may expire first (see `ANALYSIS_RETENTION_WARNING_SHARE`). The backlog lane is draining it; its alerts arrive marked `late_detection`. It also reads `behind` while `spend_edges_missing_chunks` is above 0: the start-up coverage check found chunks of the `spend_edges` history without their edges and a refill did not restore them, so cycles through those transactions can be missed until it is fixed (see "Post-upgrade backfills"). |
+| `stalled` | The live lane has not finished a poll for the tolerance past its interval, or, since it started, its first one: look for `Analysis Engine error` in the logs, usually ClickHouse. On a first boot that bootstraps the baselines it also reads `stalled` until the bootstrap ends, since nothing scores meanwhile. It also reads `stalled` while `spend_edges_filling` is true and the fill or the refill of missing chunks has not finished a chunk for as long (`spend_edges_filled_chunks` stuck): look for `spend_edges backfill failed` in the logs. |
+| `starting` | The live lane started within the tolerance and has not finished its first poll, or the `spend_edges` history is still being filled (`spend_edges_filling`, with `spend_edges_filled_chunks` of `spend_edges_chunks` done) and its last chunk finished within the tolerance. |
+| `unguarded` | All is well, but `ANALYSIS_BACKLOG_ENABLED` is off: a transaction the live lane does not score within its window is never scored, and nothing reports it. |
+| `disabled` | `ANALYSIS_ENABLED` is off: nothing is scored. |
+
+`checkpoint` is the ingestion time before which every transaction has a score; `oldest_unscored_at` is the oldest one the backlog lane last found waiting. While a large backlog drains, `checkpoint` can legitimately stay on one dense hour for many hours: progress shows as `oldest_unscored_at` moving forward and as the lane's per-batch `backlog lane: scored` log lines. Only when those stop too is the lane stuck on one slice: the log names the cause (`Backlog lane:` or `Analysis Engine backlog lane error`). A transaction scored late is a real finding; it is raised, not dropped.
+
+A `checkpoint` ahead of the settle margin (a backward step of the host clock, a leader whose clock differs from the previous one's, or a raised `ANALYSIS_BACKLOG_SETTLE_SECONDS`) is rewound to the margin at the next backlog tick, with a `checkpoint ... is ahead of its settle margin` warning.
+
 ### `address_index` reports gaps
 
 `/health/detail` carries the last address-index check while cycle detection is on:
@@ -888,55 +937,28 @@ Check the `ogmios` field for `circuit_breaker_chain` and `circuit_breaker_mempoo
 curl -s -H "X-API-Key: $TMS_API_KEY" http://localhost:8000/health/detail | grep -o '"address_index":{[^}]*}'
 ```
 
-The check counts, over the spends of the last `window_seconds` of block time, how many are missing from `address_transactions` (`missing_spends`) out of how many it looked at (`checked_spends`). The circular detector finds a cycle's legs only through that table, so a missing spend is a leg invisible to it: a recall gap, not a cosmetic one. The states:
+The check counts, over the spends of the last `window_seconds` of block time, how many have no edge in `spend_edges` (`missing_spends`) out of how many it looked at (`checked_spends`). The circular detector finds a cycle's legs only through that table, so a missing spend is a leg invisible to it: a recall gap, not a cosmetic one. The states:
 
 | `state` | Meaning |
 |---|---|
-| `ok` | Every checked spend is indexed. |
+| `ok` | Every checked spend has its edges. |
 | `gaps` | `missing_spends` are not; the log says the same at WARNING. Repair below. |
 | `idle` | The window held nothing to check: ingestion has stalled, or is catching up on blocks older than the window, which the check never covers. Look at chain sync, not the index. |
 | `error` | The check itself failed, usually ClickHouse being unreachable. |
 | `disabled` | `ADDRESS_INDEX_CHECK_INTERVAL_SECONDS` is `0`. |
+| `filling` | The `spend_edges` history fill of this start is still running, so spends stored before the upgrade have no edges yet and a count would report them as gaps. The first housekeeping tick after the fill runs the check. If it stays here, see `scoring.spend_edges_filling` ("Post-upgrade backfills"). |
 | `unchecked` | This process has not run a check yet. Housekeeping is a leader duty, so a standby always reads this. |
 
-`unresolved_inputs` counts inputs whose spent output was never found, so they carry no address. The detector cannot follow those either, but that is a failure of input enrichment, which no repair of the index fixes; the check does not count them as missing.
+`unresolved_inputs` counts inputs whose spent output was never found, so they carry no address. The detector cannot follow those either, but that is a failure of input enrichment, which no refill of the edges fixes; the check does not count them as missing.
 
 Each transaction is read at its latest version, so a fork switch (a transaction rolled back and re-confirmed at another slot) does not read as a gap, and transactions without a slot are left out, since no hop window holds them.
 
-The table is filled from `transactions.addresses` at insert, so a gap means a transaction was stored without its input addresses, or the materialized view failed; find why, starting with input enrichment. The startup backfill cannot close that kind of gap, since it reads the same list. Add the rows from `transaction_inputs` instead, over the window the check covers (widen `window` if the gap is older; duplicate rows collapse on merge, so running it twice is safe):
+The edges are written by the block writer in the same attempt as the block's inputs and outputs, and a failed write fails the block, so a gap means rows were removed or never filled: a `spend_edges` table altered by hand, or a history backfill that did not complete (see "Post-upgrade backfills"). Every backfill chunk can be run again; duplicate rows collapse on merge, so running it twice is safe, and it reads only `transaction_inputs`, `transaction_outputs` and `transactions`, never the edges themselves:
 
 ```bash
-# Credentials and database resolve inside the container, as for the shell above.
-docker exec -i tms-clickhouse sh -c \
-  'exec clickhouse-client --user "${CLICKHOUSE_USER:-default}" --database "${CLICKHOUSE_DB:-tms_analytics}" --param_network=mainnet --param_window=3600' \
-  < repair.sql
-```
-
-```sql
--- repair.sql
-INSERT INTO address_transactions (network, address, slot, tx_hash, timestamp, ingestion_timestamp)
-SELECT ti.network, ti.address, t.tx_slot, ti.tx_hash, t.tx_time, t.tx_ingested
-FROM transaction_inputs AS ti
-INNER JOIN (
-    SELECT
-        tx_hash,
-        argMax(assumeNotNull(slot), ingestion_timestamp) AS tx_slot,
-        argMax(timestamp, ingestion_timestamp) AS tx_time,
-        max(ingestion_timestamp) AS tx_ingested
-    FROM transactions
-    WHERE network = {network:String}
-      AND timestamp >= now() - toIntervalSecond({window:UInt32})
-      AND isNotNull(slot)
-    GROUP BY tx_hash
-) AS t ON ti.tx_hash = t.tx_hash
-WHERE ti.network = {network:String}
-  -- Rows are ingested after their block; the extra 300 s absorbs clock skew,
-  -- and the bound keeps the read to recent parts instead of the whole table.
-  AND ti.ingestion_timestamp >= now() - toIntervalSecond({window:UInt32} + 300)
-  AND ti.is_collateral = 0
-  AND ti.is_reference = 0
-  AND ti.is_unspent_attempt = 0
-  AND ti.address != ''
+# In the container (WORKDIR is already /app/backend). Takes minutes on mainnet,
+# thread-capped; ingestion and scoring keep running.
+docker compose exec app python scripts/compare_hop_queries.py --fill
 ```
 
 Transactions scored while the gap was open were searched without those legs, and the repair does not search them again.
@@ -998,12 +1020,31 @@ Run `./scripts/backup.sh [output-dir]` with the databases up. It produces:
 
 The raw store (Data Lake) is write-once files; back it up incrementally with rsync or restic against the `raw_store_data` volume (host runs: `RAW_STORE_PATH`). Schedule the script via cron on the host; daily is appropriate at preprod volume.
 
-Restore:
+Restore PostgreSQL and ClickHouse from the same backup run, never one alone. A
+ClickHouse restored under a newer PostgreSQL leaves holes no process fills: the
+sync checkpoint is already past the blocks the older ClickHouse lacks, so chain
+sync never replays them. `spend_edges` is not exported; the app fills it again
+from the restored inputs and outputs on its first start (see "Post-upgrade
+backfills").
 
-1. Start empty databases (`docker compose up -d`), let the app create schemas once, then stop the app.
-2. PostgreSQL: `gunzip -c postgres.sql.gz | docker exec -i tms-postgres psql -U $POSTGRES_USER $POSTGRES_DB`
-3. ClickHouse, per table: `gunzip -c clickhouse/<t>.native.gz | docker exec -i tms-clickhouse clickhouse-client --query "INSERT INTO tms_analytics.<t> FORMAT Native"`
-4. Restore the raw-store files into the volume, then start the app. The sync checkpoint in the Postgres dump makes ingestion resume from the backed-up slot; any gap replays from the chain.
+Restore, in this order. The app must neither score nor ingest before ClickHouse
+holds the restored rows. Scoring would save a scoring checkpoint at the first
+ingestion time it sees, and every restored transaction still unscored at backup
+time would then sit behind that checkpoint, never to be scored. Ingestion would
+resolve each block's inputs against an empty `transaction_outputs` and store
+them without addresses, and those rows, stamped later, would replace the
+restored ones.
+
+1. Start the databases alone, empty: `docker compose up -d postgres clickhouse`.
+2. PostgreSQL, into the empty database (the dump creates its own tables), stopping at the first error: `gunzip -c postgres.sql.gz | docker exec -i tms-postgres psql -v ON_ERROR_STOP=1 -U $POSTGRES_USER $POSTGRES_DB`. An error means the database was not empty; drop and recreate it rather than continuing, since a row the app wrote first (a sync or scoring checkpoint) would survive the load.
+3. Create the ClickHouse schema with nothing running: in the network's env file set `ANALYSIS_ENGINE_ENABLED=false` and point `OGMIOS_WS_URL` at a port nothing listens on (`ws://127.0.0.1:9`), start the app, wait for `Databases initialized` in its log, then stop it.
+4. ClickHouse, per table: `gunzip -c clickhouse/<t>.native.gz | docker exec -i tms-clickhouse clickhouse-client --query "INSERT INTO tms_analytics.<t> FORMAT Native"`
+5. Restore the raw-store files into the volume, put both settings back and start the app. Ingestion resumes from the backed-up slot (the sync checkpoint in the dump) and any gap replays from the chain; scoring resumes from the dump's scoring checkpoint, and a dump without one (from before the two-lane engine) gets a full first pass.
+
+After a partial ClickHouse restore, or a manual deletion of score rows, delete the
+network's `scoring_checkpoint` row before the app next starts
+(`DELETE FROM scoring_checkpoint WHERE network = '<network>'`): the checkpoint
+says every transaction before it is scored, and nothing re-checks behind it.
 
 ## Upgrading the application
 
@@ -1066,6 +1107,24 @@ projection-changing upgrade and expect list queries to fall back to the base
 table while it runs. The first boot of a release that adds the circular history
 columns runs another part-rewriting mutation, on `tx_class_scores`: see
 [Circular history columns](#circular-history-columns) before that upgrade.
+
+A rollback across the two-lane scoring release needs one setting in place
+first. The versions before it keep their poll cursor in memory, so they restart
+with a full rescan, bounded only by `UNANALYZED_FULL_RESCAN_WINDOW_SECONDS`
+(default `0`, unbounded). Unbounded, that rescan reads the payload of every
+unscored transaction; behind a large backlog it fails on ClickHouse's memory
+limit on every tick and the rolled-back engine scores nothing at all. Keep
+`UNANALYZED_FULL_RESCAN_WINDOW_SECONDS=1800` set in `.env` (the two-lane release
+ignores it, so it is safe to leave there) and check it before any rollback. The
+rolled-back engine then scores from about the last half hour on and never looks
+further back; nothing is lost, because the two-lane release keeps its
+`scoring_checkpoint` in Postgres and its backlog lane scores the gap after a
+roll-forward. If the reason for rolling back is the backlog lane's load, prefer
+the levers that keep the release: `ANALYSIS_BACKLOG_MAX_THREADS=1`, or
+`ANALYSIS_BACKLOG_RECENT_SECONDS=0`, or as a last resort
+`ANALYSIS_BACKLOG_ENABLED=false`, which stops it until it is turned back on (its
+checkpoint keeps its place, but nothing scores what the live lane misses
+meanwhile, and `scoring` still reads `ok`).
 
 ### Circular history columns
 
@@ -1132,6 +1191,8 @@ named 'app'`).
 | Release adds | Script | Symptom if skipped |
 |---|---|---|
 | `tx_class_scores.contract_address` | `scripts.oneoff.backfill_contract_address` | The contract-grouped risk-alerts table shows no group for any transaction scored before the upgrade: every one of them renders as an ungrouped row instead |
+
+One table is backfilled by the app itself. The release that adds `spend_edges`, the circular detector's transfer graph, fills it from the stored history on its first start, before either scoring lane scores anything: a cycle scored against a partial graph would miss its legs for good. Meanwhile `/health/detail` reports `scoring.state` `starting` with `spend_edges_filling: true`, and the log shows `spend_edges: filling the history` and then `spend_edges: history filled`. Ingestion and the API run as usual. Progress is kept per chunk in the Postgres table `spend_edges_backfill`, so a restart resumes rather than starts over. That row is only a resume hint: Postgres and ClickHouse are restored and repaired apart, so it can read complete, or resume at a later chunk, over a `spend_edges` with chunks missing (a ClickHouse snapshot taken during the fill, a backup taken during it, a broken part detached after an unclean shutdown). So every start, and every fill as it completes, runs a coverage check before scoring: each spending transaction stored before the start that the fill would give edges must have at least one, read per transaction and `SPEND_EDGES_CHECK_CHUNKS_PER_PASS` chunks per query. The chunks it finds without edges are logged at ERROR (`spend_edges: chunks [...] have spends stored before this start without their edges`), filled again and checked once more; `scoring.spend_edges_missing_chunks` reports how many are still missing (`0` when whole, `null` before the check ran). If any remain, the log says `still have spends without their edges after a refill` and scoring starts anyway, reading `behind`, since holding it would stop all detection: find what removes the rows (see "`address_index` reports gaps") and restart to check again. On mainnet the fill takes minutes. A chunk failing on every retry holds scoring, and `scoring.state` turns `stalled` once no chunk has finished for the tolerance.
 
 ```bash
 # In the container (WORKDIR is already /app/backend):
